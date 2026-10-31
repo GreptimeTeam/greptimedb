@@ -38,7 +38,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
-use datafusion::arrow::array::{Array, Float64Array, ListArray, StructArray};
+use datafusion::arrow::array::{Array, Float64Array, ListArray, StructArray, UInt32Array};
+use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::common::config::ConfigOptions;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
@@ -54,6 +55,7 @@ use datatypes::series::Label;
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
+use datatypes::series::raw::RawTimestamps;
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use futures::TryStreamExt;
@@ -519,6 +521,236 @@ fn node(child: Arc<dyn ExecutionPlan>, outputs: usize) -> Arc<SeriesRepartitionE
     Arc::new(SeriesRepartitionExec::try_new(child, outputs).expect("the node is built"))
 }
 
+/// The raw schema of these tests: one float field.
+fn raw_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: "value".into(),
+        }]),
+        eval_grid: None,
+    })
+}
+
+/// One chunk of primary key `key`, carrying `metric`'s labels, over `times`/`values`.
+fn raw_chunk(
+    key: &str,
+    metric: Option<SeriesLabels>,
+    times: &[i64],
+    values: Vec<Option<f64>>,
+    last: bool,
+) -> RawSeriesChunk {
+    let schema = raw_schema();
+    let fields = vec![Samples::from_float(Float64Array::from(values))];
+    RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from_slice_ref(key.as_bytes()),
+        metric,
+        RawTimestamps::try_new(ScalarBuffer::from(times.to_vec())).expect("ascending timestamps"),
+        SeriesFields::try_from_vec(fields).expect("one sample per timestamp per field"),
+        last,
+    )
+    .expect("a legal raw chunk")
+}
+
+/// `{__name__="m", host="<host>"}`.
+fn raw_metric(host: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
+        Some(Arc::from("m")),
+        vec![Label {
+            name: Arc::from("host"),
+            value: Arc::from(host),
+        }],
+    )
+    .expect("legal labels")
+}
+
+/// One raw partition: its chunks, and an optional gate that keeps the stream open afterwards.
+#[derive(Clone)]
+struct RawPartition {
+    chunks: Vec<RawSeriesChunk>,
+    gate: Option<Arc<Switch>>,
+    gate_chunks: bool,
+}
+
+struct RawScript {
+    chunks: std::vec::IntoIter<RawSeriesChunk>,
+    schema: Arc<SeriesSchema>,
+    binding: store_api::region_engine::RawLabelSource,
+    ordering: SeriesOrdering,
+    gate: Option<Arc<Switch>>,
+    gate_chunks: bool,
+}
+
+impl Stream for RawScript {
+    type Item = Result<RawSeriesChunk, BoxedError>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.gate_chunks
+            && let Some(gate) = &self.gate
+            && !gate.is_open()
+        {
+            gate.wait(cx);
+            return Poll::Pending;
+        }
+        if let Some(chunk) = self.chunks.next() {
+            return Poll::Ready(Some(Ok(chunk)));
+        }
+        if let Some(gate) = &self.gate
+            && !gate.is_open()
+        {
+            gate.wait(cx);
+            return Poll::Pending;
+        }
+        Poll::Ready(None)
+    }
+}
+
+impl RawSeriesStream for RawScript {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        &self.schema
+    }
+    fn label_source(&self) -> &store_api::region_engine::RawLabelSource {
+        &self.binding
+    }
+    fn ordering(&self) -> SeriesOrdering {
+        self.ordering
+    }
+}
+
+/// A child whose partitions hand over raw chunks, one partition per list.
+struct RawScripted {
+    partitions: Vec<RawPartition>,
+    series_schema: Arc<SeriesSchema>,
+    ordering: SeriesOrdering,
+    properties: Arc<PlanProperties>,
+}
+
+impl RawScripted {
+    fn plan(partitions: Vec<RawPartition>) -> Arc<dyn ExecutionPlan> {
+        Self::plan_with_ordering(partitions, SeriesOrdering::Contiguous)
+    }
+
+    /// The child over `partitions` declaring `ordering` for its keys.
+    fn plan_with_ordering(
+        partitions: Vec<RawPartition>,
+        ordering: SeriesOrdering,
+    ) -> Arc<dyn ExecutionPlan> {
+        let series_schema = raw_schema();
+        let frame = common_query::series_frame::raw_series_frame_schema_with_ordering(
+            &series_schema,
+            &store_api::region_engine::RawLabelSource::Explicit,
+            ordering,
+        )
+        .expect("a raw schema declares an explicit-label frame");
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(frame),
+            Partitioning::UnknownPartitioning(partitions.len()),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Arc::new(Self {
+            partitions,
+            series_schema,
+            ordering,
+            properties,
+        })
+    }
+}
+
+impl fmt::Debug for RawScripted {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawScripted")
+            .field("partitions", &self.partitions.len())
+            .finish()
+    }
+}
+
+impl DisplayAs for RawScripted {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        write!(f, "RawScripted: partitions={}", self.partitions.len())
+    }
+}
+
+impl ExecutionPlan for RawScripted {
+    fn name(&self) -> &str {
+        "RawScripted"
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        Vec::new()
+    }
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        assert!(children.is_empty(), "a raw scripted child has no children");
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        let spec = self.partitions.get(partition).cloned().ok_or_else(|| {
+            DataFusionError::Execution(format!("raw child has no partition {partition}"))
+        })?;
+        pack_raw_series(Box::pin(RawScript {
+            chunks: spec.chunks.into_iter(),
+            schema: Arc::clone(&self.series_schema),
+            binding: store_api::region_engine::RawLabelSource::Explicit,
+            // The packed batches have to declare what this child's own plan declares: the
+            // sequence validator and the receiver both read the ordering off the frame, so a
+            // stream that reported a different one would be validated under the wrong contract.
+            ordering: self.ordering,
+            gate: spec.gate,
+            gate_chunks: spec.gate_chunks,
+        }))
+    }
+}
+
+/// The raw owner over `child` routing by an explicit policy.
+fn raw_node_with_routing(
+    child: Arc<dyn ExecutionPlan>,
+    outputs: usize,
+    routing: SeriesRouting,
+) -> DataFusionResult<SeriesRepartitionExec> {
+    SeriesRepartitionExec::try_new_with_routing(child, outputs, routing)
+}
+
+/// The raw owner over `child` grouping by complete stored primary key.
+fn raw_node(child: Arc<dyn ExecutionPlan>, outputs: usize) -> Arc<SeriesRepartitionExec> {
+    Arc::new(
+        SeriesRepartitionExec::try_new_with_routing(child, outputs, SeriesRouting::RawPrimaryKey)
+            .expect("the raw owner is built"),
+    )
+}
+
+/// Every chunk of `plan`'s one output, decoded, plus the error it ended with if any.
+async fn drain_raw(
+    plan: &Arc<SeriesRepartitionExec>,
+    context: &Arc<TaskContext>,
+) -> (Vec<RawSeriesChunk>, Option<BoxedError>) {
+    let frames = plan
+        .execute(0, Arc::clone(context))
+        .expect("partition 0 exists");
+    let mut decoded = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+    let mut chunks = Vec::new();
+    while let Some(next) = decoded.next().await {
+        match next {
+            Ok(chunk) => chunks.push(chunk),
+            Err(error) => return (chunks, Some(error)),
+        }
+    }
+    (chunks, None)
+}
+
 /// Every output partition of `plan`, decoded, and the error it ended with if it ended with one.
 ///
 /// All partitions are read at once, as in normal execution. Draining them concurrently makes this
@@ -545,6 +777,14 @@ async fn drain(
 }
 
 /// The output partition of `plan` at `partition`, as the frame stream a consumer reads.
+/// The evaluated view of one owner publication, for tests that drive the internal stream.
+fn evaluated(output: ReadyOutput) -> (Series, bool) {
+    match output {
+        ReadyOutput::Evaluated(series) => (series, true),
+        ReadyOutput::Raw(_) => panic!("an evaluated output carried a raw chunk"),
+    }
+}
+
 fn output(
     plan: &Arc<dyn ExecutionPlan>,
     partition: usize,
@@ -1957,6 +2197,7 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
         Arc::clone(&schema()),
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
+        SeriesOrdering::Contiguous,
     );
     wait_until("both identities and EOF are queued", || {
         producer_stopped(&shared)
@@ -1967,8 +2208,9 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
         .await
         .expect("first ready identity")
         .expect("first identity succeeds");
-    assert_eq!(first_metric, first.0.metric);
-    assert!(first.1);
+    let (first_series, first_closed) = evaluated(first);
+    assert_eq!(first_metric, first_series.metric);
+    assert!(first_closed);
     assert!(
         stream.output.is_empty(),
         "no eagerly merged second result is buffered"
@@ -1978,11 +2220,12 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
         .await
         .expect("second ready identity")
         .expect("second identity succeeds");
-    assert_eq!(second_metric, second.0.metric);
-    assert!(second.1);
+    let (second_series, second_closed) = evaluated(second);
+    assert_eq!(second_metric, second_series.metric);
+    assert!(second_closed);
     assert!(stream.groups.is_empty());
-    drop(first);
-    drop(second);
+    drop(first_series);
+    drop(second_series);
     assert!(
         futures::future::poll_fn(|cx| Pin::new(&mut stream).poll_next(cx))
             .await
@@ -3877,7 +4120,7 @@ async fn a_task_attached_after_the_failure_is_aborted_and_not_counted() {
     );
 
     let task = tokio::spawn(route_partition(
-        Box::pin(futures::stream::pending()),
+        RoutedInput::Evaluated(Box::pin(futures::stream::pending())),
         1,
         Routing::new(1),
         Vec::new(),
@@ -3959,12 +4202,12 @@ async fn a_recorded_failure_reaches_every_output_once() {
         .flat_map(|(zero, one)| [zero, one].map(|metric| Step::chunk(chunk(metric, 0, 1, true))))
         .collect::<Vec<_>>();
     steps.push(Step::ErrorSaying(MESSAGE));
+    // The producer is gated so it cannot reach its error before this test owns both queues. A
+    // failure drains every queue nobody has claimed yet, so a producer that ran first would release
+    // the very charges this test reads, and the retention assertion below could never hold.
+    let switch = Arc::new(Switch::default());
     let plan = node(
-        Fragile::plan(
-            vec![Behaviour::OneAtATime(steps)],
-            Arc::new(Switch::default()),
-        )
-        .plan,
+        Fragile::plan(vec![Behaviour::Gated(steps)], Arc::clone(&switch)).plan,
         2,
     );
     let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
@@ -3976,26 +4219,34 @@ async fn a_recorded_failure_reaches_every_output_once() {
     let mut streams = Vec::new();
     for partition in 0..2 {
         let (receiver, lease) = SharedExecution::claim(&shared, partition).expect("output claim");
-        streams.push(Box::pin(RepartitionStream::new(
-            receiver,
-            lease,
-            Arc::clone(&schema()),
-            &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
-            2,
-        )) as SendableEvaluatedSeriesStream);
+        streams.push(Box::pin(EvaluatedOutputStream {
+            inner: Some(Box::pin(RepartitionStream::new(
+                receiver,
+                lease,
+                Arc::clone(&schema()),
+                &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+                2,
+                SeriesOrdering::Contiguous,
+            ))),
+        }) as SendableEvaluatedSeriesStream);
     }
     let execution = shared;
 
+    // Both queues are claimed, so the gates below are the only thing between the queued prefix and
+    // the failure: what is retained now is retained until this test drains it.
+    assert!(
+        !switch.is_open(),
+        "the producer is held before its error, so nothing drained the queues yet"
+    );
+    wait_until("queued output chains retain memory before drain", || {
+        pool.reserved() > 0
+    })
+    .await;
+    switch.open();
     wait_until(
         "the read records its failure while no output is drained",
         || matches!(execution.ending(), Ending::Failed(_)),
     )
-    .await;
-    // The producer records the failure before its queued chains are all visible, so wait for the
-    // retention this assertion is about instead of reading the pool once.
-    wait_until("queued output chains retain memory before drain", || {
-        pool.reserved() > 0
-    })
     .await;
     let outputs = tokio::time::timeout(
         Duration::from_secs(10),
@@ -4303,13 +4554,16 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
             let (receiver, lease) =
                 SharedExecution::claim(&shared, partition).expect("output claim");
             let frames = pack_evaluated_series(
-                Box::pin(RepartitionStream::new(
-                    receiver,
-                    lease,
-                    Arc::clone(&schema()),
-                    &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
-                    2,
-                )),
+                Box::pin(EvaluatedOutputStream {
+                    inner: Some(Box::pin(RepartitionStream::new(
+                        receiver,
+                        lease,
+                        Arc::clone(&schema()),
+                        &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+                        2,
+                        SeriesOrdering::Contiguous,
+                    ))),
+                }),
                 Arc::clone(&series_schema),
             )
             .expect("output frame builds");
@@ -4326,7 +4580,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
         Poll::Pending
     });
     let peer = route_partition(
-        Box::pin(peer_stream),
+        RoutedInput::Evaluated(Box::pin(peer_stream)),
         1,
         Routing::new(2),
         senders.clone(),
@@ -4351,7 +4605,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
         reported: false,
     };
     let unpolled = route_partition(
-        Box::pin(futures::stream::pending()),
+        RoutedInput::Evaluated(Box::pin(futures::stream::pending())),
         0,
         Routing::new(2),
         senders.clone(),
@@ -4410,13 +4664,16 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
     for partition in 0..2 {
         let (receiver, lease) = SharedExecution::claim(&shared, partition).expect("output claim");
         let frames = pack_evaluated_series(
-            Box::pin(RepartitionStream::new(
-                receiver,
-                lease,
-                Arc::clone(&schema()),
-                &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
-                2,
-            )),
+            Box::pin(EvaluatedOutputStream {
+                inner: Some(Box::pin(RepartitionStream::new(
+                    receiver,
+                    lease,
+                    Arc::clone(&schema()),
+                    &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+                    2,
+                    SeriesOrdering::Contiguous,
+                ))),
+            }),
             Arc::clone(&schema()),
         )
         .expect("output frame builds");
@@ -4424,7 +4681,7 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
     }
     inputs.failed(1, &Arc::new(DataFusionError::Execution(FIRST.to_string())));
     let unpolled = route_partition(
-        Box::pin(futures::stream::pending()),
+        RoutedInput::Evaluated(Box::pin(futures::stream::pending())),
         0,
         Routing::new(2),
         senders.clone(),
@@ -4491,7 +4748,7 @@ async fn ready_chain_yields_after_a_charged_prefix_and_drop_releases_it() {
     let (sender, receiver) = mpsc::unbounded_channel();
     let routing = Routing::new(1);
     let senders = [sender];
-    let mut read = Box::pin(read_chains(
+    let mut read = Box::pin(read_evaluated_chains(
         &mut source,
         0,
         &routing,
@@ -4567,15 +4824,18 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
         ending: Arc::clone(&ending),
     });
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
-    let mut output: SendableEvaluatedSeriesStream = Box::pin(RepartitionStream::new(
-        receiver,
-        lease,
-        Arc::clone(&schema()),
-        &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
-        1,
-    ));
+    let mut output: SendableEvaluatedSeriesStream = Box::pin(EvaluatedOutputStream {
+        inner: Some(Box::pin(RepartitionStream::new(
+            receiver,
+            lease,
+            Arc::clone(&schema()),
+            &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+            1,
+            SeriesOrdering::Contiguous,
+        ))),
+    });
     let future = route_partition(
-        source,
+        RoutedInput::Evaluated(source),
         0,
         Routing::new(1),
         vec![sender],
@@ -4893,7 +5153,8 @@ async fn discarded_open_chain_eof_is_still_an_error() {
         Box::pin(futures::stream::iter(vec![Ok((series, false))]));
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
     let reservation = MemoryConsumer::new("discarded-open-eof-test").register(&pool);
-    let result = read_chains(&mut input, 0, &Routing::new(1), &[sender], &reservation).await;
+    let result =
+        read_evaluated_chains(&mut input, 0, &Routing::new(1), &[sender], &reservation).await;
     assert!(
         matches!(result, Stop::Failed(_)),
         "open discarded chain EOF is not clean"
@@ -5162,6 +5423,7 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         Arc::clone(&schema()),
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
+        SeriesOrdering::Contiguous,
     );
     wait_until("internal producer finishes", || producer_stopped(&shared)).await;
     // Queue, EOF, and identity-group metadata are charged alongside the retained chunks; the
@@ -5181,10 +5443,11 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         .await
         .unwrap()
         .unwrap();
-    assert!(merged.1, "the logical owner closes once after global EOF");
+    let (merged_series, closed) = evaluated(merged);
+    assert!(closed, "the logical owner closes once after global EOF");
     assert_eq!(
         4,
-        merged.0.time.len(),
+        merged_series.time.len(),
         "both slices retain their two positions in the merged logical owner"
     );
     assert!(
@@ -5197,7 +5460,7 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
             .is_none(),
         "the logical owner has one stable end"
     );
-    drop(merged);
+    drop(merged_series);
     drop(stream);
     assert_eq!(
         0,
@@ -5457,6 +5720,7 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         Arc::clone(&schema()),
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
+        SeriesOrdering::Contiguous,
     );
     wait_until("histogram producer queues the whole chain", || {
         producer_stopped(&shared)
@@ -5483,12 +5747,9 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         chunks.len(),
         "one owner series spans all physical slices"
     );
-    assert!(chunks[0].1, "the complete owner closes once");
-    assert_eq!(
-        256,
-        chunks[0].0.time.len(),
-        "all histogram rows survive merge"
-    );
+    let (series, closed) = evaluated(chunks.remove(0));
+    assert!(closed, "the complete owner closes once");
+    assert_eq!(256, series.time.len(), "all histogram rows survive merge");
     assert!(matches!(shared.ending(), Ending::Finished));
     assert!(
         pool.reserved() >= base_bytes + independent_slice_lower_bound,
@@ -5762,4 +6023,752 @@ async fn a_chain_that_outgrows_the_pool_ends_every_output_and_releases_it() {
         pool.reserved() == 0
     })
     .await;
+}
+
+#[tokio::test]
+async fn dropping_a_raw_open_chain_cancels_and_releases_its_reservation() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![RawPartition {
+        chunks: vec![
+            raw_chunk("k", Some(raw_metric("a")), &[1], vec![Some(1.0)], false),
+            raw_chunk("k", Some(raw_metric("a")), &[2], vec![Some(2.0)], false),
+        ],
+        gate: Some(Arc::clone(&switch)),
+        // The switch stays closed while this partial chunk is delivered and charged; the producer
+        // then parks at EOF until the destination is dropped.
+        gate_chunks: false,
+    }]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let frames = plan.execute(0, Arc::clone(&context)).unwrap();
+    let stream = unpack_raw_series(frames, Some(raw_schema())).unwrap();
+    wait_until("raw open chain is reserved", || pool.reserved() > 0).await;
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !producer_stopped(&execution(&plan)) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the raw stream cancels the open-chain read");
+    assert_eq!(0, pool.reserved());
+}
+
+#[tokio::test]
+async fn dropping_a_raw_destination_releases_its_partial_chain() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![RawPartition {
+        chunks: vec![raw_chunk(
+            "k",
+            Some(raw_metric("a")),
+            &[1],
+            vec![Some(1.0)],
+            false,
+        )],
+        gate: Some(Arc::clone(&switch)),
+        // The switch stays closed while this partial chunk is delivered and charged; the producer
+        // then parks at EOF until the destination is dropped.
+        gate_chunks: false,
+    }]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let frames = plan.execute(0, Arc::clone(&context)).unwrap();
+    let stream = unpack_raw_series(frames, Some(raw_schema())).unwrap();
+    wait_until("raw partial chain is reserved", || pool.reserved() > 0).await;
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !producer_stopped(&execution(&plan)) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the destination stops its raw producer");
+    assert_eq!(0, pool.reserved());
+}
+
+#[tokio::test]
+async fn raw_chain_pool_refusal_releases_partial_reservation() {
+    let first = raw_chunk("k", Some(raw_metric("a")), &[1], vec![Some(1.0)], false);
+    let second = raw_chunk("k", Some(raw_metric("a")), &[2], vec![Some(2.0)], false);
+    // Measure what the first chunk reserves in this exact path, then leave no room for a second.
+    let probe_pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let probe_switch = Arc::new(Switch::default());
+    let probe_plan = raw_node(
+        RawScripted::plan(vec![RawPartition {
+            chunks: vec![first.clone()],
+            gate: Some(Arc::clone(&probe_switch)),
+            gate_chunks: false,
+        }]),
+        1,
+    );
+    let probe_context = task_context(&probe_pool);
+    let probe_frames = probe_plan.execute(0, Arc::clone(&probe_context)).unwrap();
+    let probe_stream = unpack_raw_series(probe_frames, Some(raw_schema())).unwrap();
+    wait_until("probe raw chunk is reserved", || probe_pool.reserved() > 0).await;
+    let budget = probe_pool.reserved();
+    drop(probe_stream);
+    probe_switch.open();
+    let pool = Arc::new(GreedyMemoryPool::new(budget));
+    let child = RawScripted::plan(vec![RawPartition {
+        chunks: vec![first, second],
+        gate: None,
+        gate_chunks: false,
+    }]);
+    let plan = raw_node(child, 1);
+    let context = task_context(&pool);
+    let (_, error) = tokio::time::timeout(Duration::from_secs(10), drain_raw(&plan, &context))
+        .await
+        .expect("raw pool refusal terminates the execution");
+    assert!(
+        error.is_some(),
+        "second chunk must be refused after first reservation"
+    );
+    assert_eq!(0, pool.reserved());
+}
+
+#[tokio::test]
+async fn raw_matching_routing_groups_by_match_key() {
+    use crate::vector_match::MatchingLabels;
+
+    let with_zone = |zone: &str| {
+        SeriesLabels::try_new(
+            Some(Arc::from("m")),
+            vec![
+                Label {
+                    name: Arc::from("host"),
+                    value: Arc::from("h"),
+                },
+                Label {
+                    name: Arc::from("zone"),
+                    value: Arc::from(zone),
+                },
+            ],
+        )
+        .expect("legal labels")
+    };
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "ka",
+                Some(with_zone("a")),
+                &[1],
+                vec![Some(1.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "kb",
+                Some(with_zone("b")),
+                &[1],
+                vec![Some(2.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+    ]);
+    let plan = Arc::new(
+        raw_node_with_routing(
+            child,
+            3,
+            SeriesRouting::Matching(MatchingLabels::On(vec![Arc::from("host")])),
+        )
+        .expect("raw matching routing is accepted"),
+    );
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let matching = Routing::with_policy(
+        3,
+        SeriesRouting::Matching(MatchingLabels::On(vec![Arc::from("host")])),
+    );
+    let primary = Routing::with_policy(3, SeriesRouting::RawPrimaryKey);
+    let expected_owner = matching.output_labels(&with_zone("a"));
+    // Both match keys have host=h, while the primary keys ka/kb route separately. Comparing
+    // to the positive match-key owner therefore fails if this accidentally routes by primary key.
+    assert_eq!(expected_owner, matching.output_labels(&with_zone("b")));
+    assert_ne!(expected_owner, primary.output_key(b"ka"));
+    assert_ne!(expected_owner, primary.output_key(b"kb"));
+    let mut owner = None;
+    let mut identities = std::collections::HashSet::new();
+    for output in 0..plan.outputs() {
+        let frames = plan
+            .execute(output, Arc::clone(&context))
+            .expect("output exists");
+        let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("frame decodes");
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("matching-routed raw stream succeeds");
+            identities.insert(chunk.primary_key.as_slice().to_vec());
+            if !chunk.is_last {
+                continue;
+            }
+            if [b"ka".to_vec(), b"kb".to_vec()].contains(&chunk.primary_key.as_slice().to_vec()) {
+                assert_eq!(
+                    output, expected_owner,
+                    "identity must use its match-key owner"
+                );
+                assert!(
+                    owner
+                        .replace(output)
+                        .is_none_or(|previous| previous == output),
+                    "both match-key identities share an output partition"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        identities,
+        [b"ka".to_vec(), b"kb".to_vec()].into_iter().collect()
+    );
+    assert!(
+        owner.is_some(),
+        "both identities were published by their common owner"
+    );
+}
+
+#[test]
+fn raw_canonical_labels_routing_is_refused() {
+    let child = RawScripted::plan(vec![RawPartition {
+        chunks: vec![],
+        gate: None,
+        gate_chunks: false,
+    }]);
+    let error = raw_node_with_routing(child, 1, SeriesRouting::CanonicalLabels)
+        .expect_err("raw canonical labels routing must remain unsupported");
+    assert!(error.to_string().contains("cannot use CanonicalLabels"));
+}
+
+#[tokio::test]
+async fn raw_identity_publishes_once_every_input_contributed() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("a")),
+                &[1, 3],
+                vec![Some(1.0), Some(3.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("a")),
+                &[2, 4],
+                vec![Some(2.0), Some(4.0)],
+                true,
+            )],
+            gate: Some(Arc::clone(&switch)),
+            gate_chunks: false,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let frames = plan.execute(0, context).expect("partition 0 exists");
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+    let mut chunks = Vec::new();
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("published while EOF gate remains closed")
+    {
+        chunks.push(item.expect("raw merge succeeds"));
+        if chunks.last().is_some_and(|chunk| chunk.is_last) {
+            break;
+        }
+    }
+    let timestamps: Vec<i64> = chunks
+        .iter()
+        .flat_map(|chunk| chunk.time.as_buffer().iter().copied())
+        .collect();
+    assert_eq!(timestamps, [1, 2, 3, 4]);
+    assert!(chunks.last().is_some_and(|chunk| chunk.is_last));
+    switch.open();
+}
+
+#[tokio::test]
+async fn raw_identity_waits_for_an_input_that_has_not_contributed() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("a")),
+                &[1, 3],
+                vec![Some(1.0), Some(3.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("a")),
+                &[2, 4],
+                vec![Some(2.0), Some(4.0)],
+                true,
+            )],
+            gate: Some(Arc::clone(&switch)),
+            gate_chunks: true,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let frames = plan.execute(0, context).expect("partition 0 exists");
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), stream.next())
+            .await
+            .is_err()
+    );
+    switch.open();
+    let chunks: Vec<_> = stream.try_collect().await.expect("raw merge succeeds");
+    let timestamps: Vec<i64> = chunks
+        .iter()
+        .flat_map(|chunk| chunk.time.as_buffer().iter().copied())
+        .collect();
+    assert_eq!(timestamps, [1, 2, 3, 4]);
+    assert!(chunks.last().is_some_and(|chunk| chunk.is_last));
+}
+
+/// Chunks decoded from one frame batch share its Arrow buffers, so charging each chunk the whole
+/// allocation would charge the batch's timestamps once per chunk.
+///
+/// A second input that stays open and contributes nothing holds every group unpublished, which is
+/// what keeps the charges of the first input's chunks alive to be measured.
+#[tokio::test]
+async fn raw_chunks_of_one_batch_are_charged_their_own_slice() {
+    const SERIES: usize = 64;
+    const ROWS: usize = 64;
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: (0..SERIES)
+                .map(|series| {
+                    let times: Vec<i64> = (0..ROWS as i64)
+                        .map(|row| series as i64 * 1000 + row)
+                        .collect();
+                    let values: Vec<Option<f64>> = (0..ROWS).map(|row| Some(row as f64)).collect();
+                    raw_chunk(
+                        &format!("k{series}"),
+                        Some(raw_metric("a")),
+                        &times,
+                        values,
+                        true,
+                    )
+                })
+                .collect(),
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: Vec::new(),
+            gate: Some(Arc::clone(&switch)),
+            gate_chunks: false,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let context = task_context(&pool);
+    let mut frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition 0 exists");
+    // Everything the first input has is delivered; the second input has contributed nothing, so no
+    // group is publishable and every chunk charge of the first input is still held.
+    //
+    // Wait for the first charge before sampling: under load the input task may not have run yet,
+    // and a fixed number of idle ticks would then measure nothing.
+    wait_until("the first chunk is charged", || pool.reserved() > 0).await;
+    // Keep the largest charge seen while the rest of the partition is routed, so a charge that
+    // grows per chunk is measured rather than missed.
+    let mut peak = 0usize;
+    let mut idle = 0usize;
+    while idle < 100 {
+        let state = futures::future::poll_fn(|cx| Poll::Ready(frames.as_mut().poll_next(cx))).await;
+        peak = peak.max(pool.reserved());
+        match state {
+            Poll::Ready(Some(Ok(_))) => idle = 0,
+            Poll::Ready(Some(Err(error))) => panic!("the raw read failed: {error}"),
+            Poll::Ready(None) => panic!("the read ended before the gated input was opened"),
+            Poll::Pending => idle += 1,
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    switch.open();
+    drop(frames);
+    // The timestamps of every chunk in the batch come from one buffer of at most SERIES * ROWS
+    // values. Charging that buffer per chunk would retain about SERIES times its size.
+    let batch_timestamps = SERIES * ROWS * std::mem::size_of::<i64>();
+    assert!(
+        peak < SERIES * batch_timestamps / 2,
+        "peak {peak} must stay well below the {SERIES}x over-charge of {batch_timestamps} bytes"
+    );
+}
+
+/// A histogram field is an index array naming rows of a shared table. A query over few distinct
+/// histograms holds mostly indices, and those are charged alongside the table rather than instead
+/// of it.
+#[tokio::test]
+async fn raw_histogram_index_arrays_are_charged() {
+    const ROWS: usize = 4096;
+    let side = BucketSideView {
+        span_offsets: &[],
+        span_lengths: &[],
+        buckets: &[],
+    };
+    let mut builder = HistogramBatchBuilder::new();
+    builder
+        .push(HistogramView {
+            schema: 1,
+            zero_threshold: 0.5,
+            sum: 1.0,
+            count: 1.0,
+            zero_count: 0.0,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: &[],
+            positive: side,
+            negative: side,
+        })
+        .expect("one histogram row");
+    // Every position names the same row, so the table stays small while the index array grows with
+    // the number of samples.
+    let samples = Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(0u32); ROWS]),
+        builder.finish().expect("the table is built"),
+    )
+    .expect("one row is referenced by every position");
+    let chunk = RawSeriesChunk::try_new(
+        &raw_schema(),
+        Buffer::from_slice_ref(b"k"),
+        Some(raw_metric("a")),
+        RawTimestamps::try_new(ScalarBuffer::from((0..ROWS as i64).collect::<Vec<_>>()))
+            .expect("ascending timestamps"),
+        SeriesFields::try_from_vec(vec![samples]).expect("one sample per timestamp"),
+        true,
+    )
+    .expect("one series' samples are a legal raw chunk");
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![chunk],
+            gate: None,
+            gate_chunks: false,
+        },
+        // An input that has contributed nothing keeps the group unpublished, which is what holds
+        // the first input's charges alive to be measured.
+        RawPartition {
+            chunks: Vec::new(),
+            gate: Some(Arc::clone(&switch)),
+            gate_chunks: false,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition 0 exists");
+    // The chunk is charged as the input task routes it, which happens without this stream being
+    // polled; wait for the charge instead of sampling it for a fixed number of ticks.
+    wait_until("the routed chunk is charged", || pool.reserved() > 0).await;
+    let peak = pool.reserved();
+    switch.open();
+    drop(frames);
+    let timestamps = ROWS * std::mem::size_of::<i64>();
+    let indices = ROWS * std::mem::size_of::<u32>();
+    assert!(
+        peak >= timestamps + indices,
+        "peak {peak} must cover the {timestamps} timestamp bytes and the {indices} index bytes"
+    );
+}
+
+/// A key-then-time frame promises its keys arrive in order, so an identity whose inputs have all
+/// contributed is published without waiting for any of them to end.
+#[tokio::test]
+async fn an_ordered_frame_publishes_a_key_its_inputs_have_passed() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan_with_ordering(
+        vec![
+            RawPartition {
+                chunks: vec![
+                    raw_chunk("a", Some(raw_metric("a")), &[1], vec![Some(1.0)], true),
+                    raw_chunk("b", Some(raw_metric("b")), &[1], vec![Some(2.0)], true),
+                ],
+                gate: None,
+                gate_chunks: false,
+            },
+            // Contributes `a` and then stays open: `a` is complete, and nothing has been seen past
+            // `b`, so `b` waits.
+            RawPartition {
+                chunks: vec![raw_chunk(
+                    "a",
+                    Some(raw_metric("a")),
+                    &[3],
+                    vec![Some(3.0)],
+                    true,
+                )],
+                gate: Some(Arc::clone(&switch)),
+                gate_chunks: false,
+            },
+        ],
+        SeriesOrdering::KeyThenTime,
+    );
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition exists");
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("frame decodes");
+    // A frame may split one identity's rows across chunks, so read until `a` closes.
+    let mut rows = std::collections::BTreeMap::<Vec<u8>, Vec<i64>>::new();
+    let mut closed = std::collections::HashSet::new();
+    while !closed.contains(b"a".as_slice()) {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("`a` publishes without EOF")
+            .expect("`a` arrives")
+            .expect("valid frame");
+        rows.entry(chunk.primary_key.to_vec())
+            .or_default()
+            .extend(chunk.time.as_buffer().iter().copied());
+        if chunk.is_last {
+            closed.insert(chunk.primary_key.to_vec());
+        }
+    }
+    assert_eq!(
+        vec![1, 3],
+        rows[b"a".as_slice()],
+        "both inputs' samples are merged and `a` closed without any input ending"
+    );
+    assert!(
+        !rows.contains_key(b"b".as_slice()),
+        "`b` waits: no input has been seen past it and none has ended"
+    );
+    switch.open();
+    while stream.next().await.is_some() {}
+}
+
+/// A watermark lets `a` publish after another input has passed it, without that input ending.
+#[tokio::test]
+async fn an_ordered_watermark_lets_an_identity_publish_without_input_eof() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan_with_ordering(
+        vec![
+            RawPartition {
+                chunks: vec![raw_chunk(
+                    "a",
+                    Some(raw_metric("a")),
+                    &[1],
+                    vec![Some(1.0)],
+                    true,
+                )],
+                gate: None,
+                gate_chunks: false,
+            },
+            // Delivers `b`, which proves this input passed `a`, then stays open so neither input
+            // ends before `a` is published.
+            RawPartition {
+                chunks: vec![raw_chunk(
+                    "b",
+                    Some(raw_metric("b")),
+                    &[2],
+                    vec![Some(2.0)],
+                    true,
+                )],
+                gate: Some(Arc::clone(&switch)),
+                gate_chunks: false,
+            },
+        ],
+        SeriesOrdering::KeyThenTime,
+    );
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition exists");
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("frame decodes");
+    let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("`a` publishes although no input ended")
+        .expect("`a` arrives")
+        .expect("valid frame");
+    assert_eq!(b"a", first.primary_key.as_slice());
+    switch.open();
+    while stream.next().await.is_some() {}
+}
+
+/// Without a watermark from the silent input, `a` is not safe to publish until that input ends.
+#[tokio::test]
+async fn an_ordered_identity_waits_for_an_input_that_has_not_passed_the_key() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan_with_ordering(
+        vec![
+            RawPartition {
+                chunks: vec![raw_chunk(
+                    "a",
+                    Some(raw_metric("a")),
+                    &[1],
+                    vec![Some(1.0)],
+                    true,
+                )],
+                gate: None,
+                gate_chunks: false,
+            },
+            RawPartition {
+                chunks: Vec::new(),
+                gate: Some(Arc::clone(&switch)),
+                gate_chunks: true,
+            },
+        ],
+        SeriesOrdering::KeyThenTime,
+    );
+    let plan = raw_node(child, 1);
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition exists");
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("frame decodes");
+    // The bounded wait itself is the assertion: a publication here would mean the silent input
+    // was incorrectly treated as having passed `a` (or ended).
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .is_err(),
+        "`a` stays held while another input is silent and open"
+    );
+    switch.open();
+    let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the opened input lets the output proceed")
+        .expect("`a` publishes")
+        .expect("valid frame");
+    assert_eq!(b"a", chunk.primary_key.as_slice());
+    assert!(chunk.is_last);
+}
+
+#[tokio::test]
+async fn raw_identity_groups_by_primary_key_not_labels() {
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k1",
+                Some(raw_metric("a")),
+                &[1],
+                vec![Some(1.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k2",
+                Some(raw_metric("a")),
+                &[2],
+                vec![Some(2.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let (chunks, error) = drain_raw(&plan, &context).await;
+    assert!(
+        error.is_none(),
+        "different keys with identical labels merge independently"
+    );
+    let keys: std::collections::HashSet<Vec<u8>> = chunks
+        .iter()
+        .map(|chunk| chunk.primary_key.as_slice().to_vec())
+        .collect();
+    assert_eq!(chunks.len(), 2, "one chunk is emitted per primary key");
+    assert_eq!(keys, [b"k1".to_vec(), b"k2".to_vec()].into_iter().collect());
+}
+
+#[tokio::test]
+async fn raw_pieces_of_one_key_must_agree_on_labels() {
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("a")),
+                &[1],
+                vec![Some(1.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("b")),
+                &[2],
+                vec![Some(2.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let (_, error) = drain_raw(&plan, &context).await;
+    let error = error.expect("label disagreement is surfaced");
+    assert!(
+        error
+            .to_string()
+            .contains("disagree on their explicit labels")
+    );
+}
+
+#[tokio::test]
+async fn a_raw_merge_conflict_fails_the_execution() {
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("a")),
+                &[1],
+                vec![Some(1.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("a")),
+                &[1],
+                vec![Some(2.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let (_, error) = drain_raw(&plan, &context).await;
+    let error = error.expect("conflicting duplicate samples fail the execution");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate raw timestamp has conflicting samples")
+    );
 }
