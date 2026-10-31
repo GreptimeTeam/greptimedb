@@ -74,5 +74,10 @@ jobs:
           - coverage
           - Sqlness Test (Flat format)
           - Compatibility Test (recent releases)
+          - GitHub Script Tests (Rust CI)
+          - GitHub Script Tests (Integration CI)
+          - Check for conflict
+          - Check Unused Dependencies
+          - Build GreptimeDB binaries (ubuntu-latest)
     steps:
       - run: 'echo "No action required"'
