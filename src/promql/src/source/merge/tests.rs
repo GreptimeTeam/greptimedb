@@ -246,32 +246,10 @@ fn histogram_duplicates_compare_every_float_property() {
     );
 }
 
-/// One histogram whose every non-float property is a parameter, so a test can change exactly one.
-fn histogram_with(
-    reset_hint: CounterResetHint,
-    start_timestamp: Option<i64>,
-    custom_values: &[f64],
-) -> Samples {
+/// Builds a histogram with configurable comparison properties for duplicate-conflict tests.
+fn histogram_with(view: datatypes::series::histogram::HistogramView<'_>) -> Samples {
     let mut builder = HistogramBatchBuilder::new();
-    let side = BucketSideView {
-        span_offsets: &[],
-        span_lengths: &[],
-        buckets: &[],
-    };
-    let index = builder
-        .push(datatypes::series::histogram::HistogramView {
-            schema: 1,
-            zero_threshold: 0.5,
-            sum: 2.0,
-            count: 1.0,
-            zero_count: 0.0,
-            reset_hint,
-            start_timestamp,
-            custom_values,
-            positive: side,
-            negative: side,
-        })
-        .unwrap();
+    let index = builder.push(view).unwrap();
     Samples::try_from_histogram(
         UInt32Array::from(vec![Some(index)]),
         builder.finish().unwrap(),
@@ -279,15 +257,12 @@ fn histogram_with(
     .unwrap()
 }
 
-/// Two histograms are duplicates only when every property matches, not only the float ones.
+/// Two histograms are duplicates only when every property matches.
 ///
-/// Each case changes exactly one non-float property between two otherwise equal samples: the merge
-/// must report a conflict, because dropping such a sample as a duplicate would lose data.
-///
-/// The bucket side is not covered here: a legal sample has to satisfy `span_lengths` summing to the
-/// bucket count and a cursor that stays in range, so a sample differing in exactly one bucket field
-/// is a different shape rather than a different value. Its comparison is exercised by the
-/// histogram round-trip tests instead.
+/// Bucket values are independently free within a valid layout and are compared directly. The
+/// span/cursor layout cannot be varied independently of bucket count: each layout must have
+/// nonnegative lengths summing to the bucket count and a valid cursor. The cases below vary each
+/// offset and length while preserving valid layouts and equal bucket counts.
 #[test]
 fn histogram_duplicates_compare_every_property() {
     let schema = schema(1);
@@ -298,24 +273,295 @@ fn histogram_duplicates_compare_every_property() {
         fields: SeriesFields::one(sample),
         is_last: false,
     };
-    let baseline = || histogram_with(CounterResetHint::Unknown, None, &[]);
-    // The identical pair merges, which is what makes each difference below meaningful.
+    let positive = BucketSideView {
+        span_offsets: &[0],
+        span_lengths: &[2],
+        buckets: &[1.0, 2.0],
+    };
+    let negative = BucketSideView {
+        span_offsets: &[0],
+        span_lengths: &[2],
+        buckets: &[3.0, 4.0],
+    };
+    let build = |schema,
+                 count,
+                 zero_count,
+                 sum,
+                 zero_threshold,
+                 positive,
+                 negative,
+                 reset_hint,
+                 start_timestamp,
+                 custom_values| {
+        histogram_with(datatypes::series::histogram::HistogramView {
+            schema,
+            count,
+            zero_count,
+            sum,
+            zero_threshold,
+            positive,
+            negative,
+            reset_hint,
+            start_timestamp,
+            custom_values,
+        })
+    };
+    let baseline = || {
+        build(
+            1,
+            1.0,
+            0.0,
+            2.0,
+            0.5,
+            positive,
+            negative,
+            CounterResetHint::Unknown,
+            None,
+            &[],
+        )
+    };
     assert!(
         merge_raw_identity(&schema, &[make(baseline()), make(baseline())]).is_ok(),
         "identical histograms are duplicates"
     );
+
+    let positive_buckets_changed = BucketSideView {
+        buckets: &[1.0, 2.5],
+        ..positive
+    };
+    let negative_buckets_changed = BucketSideView {
+        buckets: &[3.0, 4.5],
+        ..negative
+    };
+    let positive_offsets_changed = BucketSideView {
+        span_offsets: &[1],
+        ..positive
+    };
+    let negative_offsets_changed = BucketSideView {
+        span_offsets: &[1],
+        ..negative
+    };
+    // Same total bucket count (2), different split into spans, and valid nonnegative offsets.
+    let positive_lengths_changed = BucketSideView {
+        span_offsets: &[0, 0],
+        span_lengths: &[1, 1],
+        buckets: &[1.0, 2.0],
+    };
+    let negative_lengths_changed = BucketSideView {
+        span_offsets: &[0, 0],
+        span_lengths: &[1, 1],
+        buckets: &[3.0, 4.0],
+    };
     let cases: Vec<(&str, Samples)> = vec![
         (
-            "reset hint",
-            histogram_with(CounterResetHint::CounterReset, None, &[]),
+            "schema (1 vs 2)",
+            build(
+                2,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive,
+                negative,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
         ),
         (
-            "start timestamp",
-            histogram_with(CounterResetHint::Unknown, Some(7), &[]),
+            "count (1.0 vs 2.0)",
+            build(
+                1,
+                2.0,
+                0.0,
+                2.0,
+                0.5,
+                positive,
+                negative,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
         ),
         (
-            "custom values",
-            histogram_with(CounterResetHint::Unknown, None, &[1.5]),
+            "zero_count (0.0 vs 1.0)",
+            build(
+                1,
+                1.0,
+                1.0,
+                2.0,
+                0.5,
+                positive,
+                negative,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "sum (2.0 vs 3.0)",
+            build(
+                1,
+                1.0,
+                0.0,
+                3.0,
+                0.5,
+                positive,
+                negative,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "zero_threshold (0.5 vs -0.0)",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                -0.0,
+                positive,
+                negative,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "positive bucket value (2.0 vs 2.5)",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive_buckets_changed,
+                negative,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "negative bucket value (4.0 vs 4.5)",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive,
+                negative_buckets_changed,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "positive span offset ([0] vs [1])",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive_offsets_changed,
+                negative,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "negative span offset ([0] vs [1])",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive,
+                negative_offsets_changed,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "positive span lengths ([2] vs [1, 1])",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive_lengths_changed,
+                negative,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "negative span lengths ([2] vs [1, 1])",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive,
+                negative_lengths_changed,
+                CounterResetHint::Unknown,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "reset hint (Unknown vs CounterReset)",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive,
+                negative,
+                CounterResetHint::CounterReset,
+                None,
+                &[],
+            ),
+        ),
+        (
+            "start timestamp (None vs Some(7))",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive,
+                negative,
+                CounterResetHint::Unknown,
+                Some(7),
+                &[],
+            ),
+        ),
+        (
+            "custom values ([] vs [1.5])",
+            build(
+                1,
+                1.0,
+                0.0,
+                2.0,
+                0.5,
+                positive,
+                negative,
+                CounterResetHint::Unknown,
+                None,
+                &[1.5],
+            ),
         ),
     ];
     for (what, changed) in cases {

@@ -576,6 +576,7 @@ struct RawScript {
     chunks: std::vec::IntoIter<RawSeriesChunk>,
     schema: Arc<SeriesSchema>,
     binding: store_api::region_engine::RawLabelSource,
+    ordering: SeriesOrdering,
     gate: Option<Arc<Switch>>,
     gate_chunks: bool,
 }
@@ -611,7 +612,7 @@ impl RawSeriesStream for RawScript {
         &self.binding
     }
     fn ordering(&self) -> SeriesOrdering {
-        SeriesOrdering::Contiguous
+        self.ordering
     }
 }
 
@@ -619,6 +620,7 @@ impl RawSeriesStream for RawScript {
 struct RawScripted {
     partitions: Vec<RawPartition>,
     series_schema: Arc<SeriesSchema>,
+    ordering: SeriesOrdering,
     properties: Arc<PlanProperties>,
 }
 
@@ -648,6 +650,7 @@ impl RawScripted {
         Arc::new(Self {
             partitions,
             series_schema,
+            ordering,
             properties,
         })
     }
@@ -702,6 +705,10 @@ impl ExecutionPlan for RawScripted {
             chunks: spec.chunks.into_iter(),
             schema: Arc::clone(&self.series_schema),
             binding: store_api::region_engine::RawLabelSource::Explicit,
+            // The packed batches have to declare what this child's own plan declares: the
+            // sequence validator and the receiver both read the ordering off the frame, so a
+            // stream that reported a different one would be validated under the wrong contract.
+            ordering: self.ordering,
             gate: spec.gate,
             gate_chunks: spec.gate_chunks,
         }))
@@ -6019,6 +6026,109 @@ async fn a_chain_that_outgrows_the_pool_ends_every_output_and_releases_it() {
 }
 
 #[tokio::test]
+async fn dropping_a_raw_open_chain_cancels_and_releases_its_reservation() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![RawPartition {
+        chunks: vec![
+            raw_chunk("k", Some(raw_metric("a")), &[1], vec![Some(1.0)], false),
+            raw_chunk("k", Some(raw_metric("a")), &[2], vec![Some(2.0)], false),
+        ],
+        gate: Some(Arc::clone(&switch)),
+        // The switch stays closed while this partial chunk is delivered and charged; the producer
+        // then parks at EOF until the destination is dropped.
+        gate_chunks: false,
+    }]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let frames = plan.execute(0, Arc::clone(&context)).unwrap();
+    let stream = unpack_raw_series(frames, Some(raw_schema())).unwrap();
+    wait_until("raw open chain is reserved", || pool.reserved() > 0).await;
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !producer_stopped(&execution(&plan)) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the raw stream cancels the open-chain read");
+    assert_eq!(0, pool.reserved());
+}
+
+#[tokio::test]
+async fn dropping_a_raw_destination_releases_its_partial_chain() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![RawPartition {
+        chunks: vec![raw_chunk(
+            "k",
+            Some(raw_metric("a")),
+            &[1],
+            vec![Some(1.0)],
+            false,
+        )],
+        gate: Some(Arc::clone(&switch)),
+        // The switch stays closed while this partial chunk is delivered and charged; the producer
+        // then parks at EOF until the destination is dropped.
+        gate_chunks: false,
+    }]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let frames = plan.execute(0, Arc::clone(&context)).unwrap();
+    let stream = unpack_raw_series(frames, Some(raw_schema())).unwrap();
+    wait_until("raw partial chain is reserved", || pool.reserved() > 0).await;
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !producer_stopped(&execution(&plan)) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the destination stops its raw producer");
+    assert_eq!(0, pool.reserved());
+}
+
+#[tokio::test]
+async fn raw_chain_pool_refusal_releases_partial_reservation() {
+    let first = raw_chunk("k", Some(raw_metric("a")), &[1], vec![Some(1.0)], false);
+    let second = raw_chunk("k", Some(raw_metric("a")), &[2], vec![Some(2.0)], false);
+    // Measure what the first chunk reserves in this exact path, then leave no room for a second.
+    let probe_pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let probe_switch = Arc::new(Switch::default());
+    let probe_plan = raw_node(
+        RawScripted::plan(vec![RawPartition {
+            chunks: vec![first.clone()],
+            gate: Some(Arc::clone(&probe_switch)),
+            gate_chunks: false,
+        }]),
+        1,
+    );
+    let probe_context = task_context(&probe_pool);
+    let probe_frames = probe_plan.execute(0, Arc::clone(&probe_context)).unwrap();
+    let probe_stream = unpack_raw_series(probe_frames, Some(raw_schema())).unwrap();
+    wait_until("probe raw chunk is reserved", || probe_pool.reserved() > 0).await;
+    let budget = probe_pool.reserved();
+    drop(probe_stream);
+    probe_switch.open();
+    let pool = Arc::new(GreedyMemoryPool::new(budget));
+    let child = RawScripted::plan(vec![RawPartition {
+        chunks: vec![first, second],
+        gate: None,
+        gate_chunks: false,
+    }]);
+    let plan = raw_node(child, 1);
+    let context = task_context(&pool);
+    let (_, error) = tokio::time::timeout(Duration::from_secs(10), drain_raw(&plan, &context))
+        .await
+        .expect("raw pool refusal terminates the execution");
+    assert!(
+        error.is_some(),
+        "second chunk must be refused after first reservation"
+    );
+    assert_eq!(0, pool.reserved());
+}
+
+#[tokio::test]
 async fn raw_matching_routing_groups_by_match_key() {
     use crate::vector_match::MatchingLabels;
 
@@ -6071,6 +6181,17 @@ async fn raw_matching_routing_groups_by_match_key() {
         .expect("raw matching routing is accepted"),
     );
     let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let matching = Routing::with_policy(
+        3,
+        SeriesRouting::Matching(MatchingLabels::On(vec![Arc::from("host")])),
+    );
+    let primary = Routing::with_policy(3, SeriesRouting::RawPrimaryKey);
+    let expected_owner = matching.output_labels(&with_zone("a"));
+    // Both match keys have host=h, while the primary keys ka/kb route separately. Comparing
+    // to the positive match-key owner therefore fails if this accidentally routes by primary key.
+    assert_eq!(expected_owner, matching.output_labels(&with_zone("b")));
+    assert_ne!(expected_owner, primary.output_key(b"ka"));
+    assert_ne!(expected_owner, primary.output_key(b"kb"));
     let mut owner = None;
     let mut identities = std::collections::HashSet::new();
     for output in 0..plan.outputs() {
@@ -6085,6 +6206,10 @@ async fn raw_matching_routing_groups_by_match_key() {
                 continue;
             }
             if [b"ka".to_vec(), b"kb".to_vec()].contains(&chunk.primary_key.as_slice().to_vec()) {
+                assert_eq!(
+                    output, expected_owner,
+                    "identity must use its match-key owner"
+                );
                 assert!(
                     owner
                         .replace(output)
@@ -6431,10 +6556,9 @@ async fn an_ordered_frame_publishes_a_key_its_inputs_have_passed() {
     while stream.next().await.is_some() {}
 }
 
-/// A key below one this owner has already seen from the same input cannot arrive again, so an
-/// identity waiting on it publishes without that input ending.
+/// A watermark lets `a` publish after another input has passed it, without that input ending.
 #[tokio::test]
-async fn an_ordered_frame_waits_for_an_input_that_has_not_passed_the_key() {
+async fn an_ordered_watermark_lets_an_identity_publish_without_input_eof() {
     let switch = Arc::new(Switch::default());
     let child = RawScripted::plan_with_ordering(
         vec![
@@ -6480,6 +6604,55 @@ async fn an_ordered_frame_waits_for_an_input_that_has_not_passed_the_key() {
     assert_eq!(b"a", first.primary_key.as_slice());
     switch.open();
     while stream.next().await.is_some() {}
+}
+
+/// Without a watermark from the silent input, `a` is not safe to publish until that input ends.
+#[tokio::test]
+async fn an_ordered_identity_waits_for_an_input_that_has_not_passed_the_key() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan_with_ordering(
+        vec![
+            RawPartition {
+                chunks: vec![raw_chunk(
+                    "a",
+                    Some(raw_metric("a")),
+                    &[1],
+                    vec![Some(1.0)],
+                    true,
+                )],
+                gate: None,
+                gate_chunks: false,
+            },
+            RawPartition {
+                chunks: Vec::new(),
+                gate: Some(Arc::clone(&switch)),
+                gate_chunks: true,
+            },
+        ],
+        SeriesOrdering::KeyThenTime,
+    );
+    let plan = raw_node(child, 1);
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition exists");
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("frame decodes");
+    // The bounded wait itself is the assertion: a publication here would mean the silent input
+    // was incorrectly treated as having passed `a` (or ended).
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .is_err(),
+        "`a` stays held while another input is silent and open"
+    );
+    switch.open();
+    let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("the opened input lets the output proceed")
+        .expect("`a` publishes")
+        .expect("valid frame");
+    assert_eq!(b"a", chunk.primary_key.as_slice());
+    assert!(chunk.is_last);
 }
 
 #[tokio::test]
