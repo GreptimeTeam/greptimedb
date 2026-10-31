@@ -731,12 +731,13 @@ impl RawScripted {
     fn plan_keyed(partitions: Vec<RawPartition>) -> Arc<dyn ExecutionPlan> {
         let series_schema = raw_schema();
         let decode = host_decode();
-        let frame = datatypes::series::frame::series_frame_schema(
+        let frame = common_query::series_frame::frame_schema_with(
             &series_schema,
             FrameLabelMode::Key,
             Some(&decode),
+            SeriesOrdering::KeyThenTime,
         )
-        .expect("a key schema declares a key frame");
+        .expect("a key schema declares a key frame and its ordering");
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(frame),
             Partitioning::UnknownPartitioning(partitions.len()),
@@ -890,8 +891,8 @@ async fn matching_routes_a_key_labelled_input_by_its_decoded_labels() {
         },
         RawPartition {
             chunks: vec![
-                keyed_raw_chunk("b", &[1], vec![Some(2.0)], true),
                 keyed_raw_chunk("a", &[2], vec![Some(3.0)], true),
+                keyed_raw_chunk("b", &[1], vec![Some(2.0)], true),
             ],
             gate: None,
             gate_chunks: false,
