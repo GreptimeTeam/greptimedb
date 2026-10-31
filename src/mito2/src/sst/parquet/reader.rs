@@ -2029,9 +2029,9 @@ impl RowGroupReaderBuilder {
             self.file_path.clone(),
             self.object_store.clone(),
             self.cache_strategy.clone(),
-            row_group_idx,
             fetch_metrics.cloned(),
         )
+        .with_file_size(self.file_handle.meta_ref().file_size)
         .with_memory_tracker(self.memory_tracker.clone());
 
         build_sst_parquet_record_batch_stream(
@@ -3227,7 +3227,6 @@ mod tests {
             file_path.clone(),
             object_store,
             CacheStrategy::Disabled,
-            0,
             None,
         );
         let mut stream = build_sst_parquet_record_batch_stream(

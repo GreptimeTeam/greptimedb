@@ -706,22 +706,21 @@ mod tests {
             ranges
         };
 
-        // Cache 4 row groups.
+        // Every byte block touched by the four row groups is retained. Blocks
+        // are shared across row groups, while file identity remains isolated.
+        let pages = cache.parquet_page_cache().unwrap();
         for i in 0..4 {
-            let lookup = cache
-                .get_page_ranges(handle.file_id().file_id(), i, &get_ranges(i))
-                .unwrap();
-            assert!(lookup.is_fully_cached());
+            for range in get_ranges(i) {
+                for page in range.start / crate::cache::parquet_page::PAGE_SIZE
+                    ..=(range.end - 1) / crate::cache::parquet_page::PAGE_SIZE
+                {
+                    assert!(pages.contains(handle.file_id(), page).await);
+                }
+            }
         }
-        let missing_range = 0..10;
-        let lookup = cache
-            .get_page_ranges(
-                handle.file_id().file_id(),
-                5,
-                std::slice::from_ref(&missing_range),
-            )
-            .unwrap();
-        assert_eq!(vec![0..10], lookup.missing_ranges);
+        let other =
+            crate::sst::file::RegionFileId::new(handle.file_id().region_id(), FileId::random());
+        assert!(!pages.contains(other, 0).await);
     }
 
     #[tokio::test]

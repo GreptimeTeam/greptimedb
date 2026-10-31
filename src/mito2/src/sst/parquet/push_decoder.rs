@@ -14,9 +14,16 @@
 
 //! Push decoder stream implementation for SST parquet files.
 
+use std::io;
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use bytes::{Bytes, BytesMut};
+use async_trait::async_trait;
+use common_base::range_read::{Metadata, RangeReader};
+use tokio::sync::OnceCell;
+
+use bytes::Bytes;
 use common_recordbatch::QueryMemoryTracker;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
@@ -26,11 +33,13 @@ use parquet::DecodeResult;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, RowSelection};
 use parquet::arrow::push_decoder::ParquetPushDecoderBuilder;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 
+use crate::cache::CacheStrategy;
 use crate::cache::file_cache::{FileType, IndexKey};
-use crate::cache::{CacheStrategy, PageRangePart};
-use crate::error::{OpenDalSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
+use crate::error::{
+    Error, LoadParquetPageSnafu, OpenDalSnafu, ReadParquetSnafu, Result, UnexpectedSnafu,
+};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::RegionFileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
@@ -50,8 +59,9 @@ pub struct SstParquetRangeFetcher {
     object_store: ObjectStore,
     /// Cache strategy for reading pages.
     cache_strategy: CacheStrategy,
-    /// Row group index for cache key.
-    row_group_idx: usize,
+    /// Immutable SST size, resolved once when no manifest hint is available.
+    file_size: OnceCell<u64>,
+    file_size_hint: u64,
     /// Optional metrics for tracking fetch operations.
     fetch_metrics: Option<ParquetFetchMetrics>,
     /// Shared quota for decoding this fetcher's row group.
@@ -65,7 +75,6 @@ impl SstParquetRangeFetcher {
         file_path: String,
         object_store: ObjectStore,
         cache_strategy: CacheStrategy,
-        row_group_idx: usize,
         fetch_metrics: Option<ParquetFetchMetrics>,
     ) -> Self {
         Self {
@@ -73,7 +82,8 @@ impl SstParquetRangeFetcher {
             file_path,
             object_store,
             cache_strategy,
-            row_group_idx,
+            file_size: OnceCell::new(),
+            file_size_hint: 0,
             fetch_metrics,
             memory_tracker: None,
         }
@@ -85,240 +95,213 @@ impl SstParquetRangeFetcher {
         self
     }
 
-    /// Fetches byte ranges from page cache, write cache, or object store.
-    async fn fetch_bytes_with_cache(&self, ranges: Vec<Range<u64>>) -> Result<Vec<Bytes>> {
-        let fetch_start = self
-            .fetch_metrics
-            .as_ref()
-            .map(|_| std::time::Instant::now());
+    /// Supplies the immutable SST size from its manifest entry.
+    pub(crate) fn with_file_size(mut self, size: u64) -> Self {
+        self.file_size_hint = size;
+        self
+    }
+
+    async fn resolve_file_size(&self, ranges: &[Range<u64>]) -> Result<u64> {
+        self.file_size
+            .get_or_try_init(|| async {
+                if self.file_size_hint != 0 {
+                    return Ok(self.file_size_hint);
+                }
+                if let Some(cache) = self.cache_strategy.parquet_page_cache()
+                    && let Some(size) = cache.known_file_size(self.region_file_id, ranges).await
+                {
+                    return Ok(size);
+                }
+                if let Some(cache) = self.cache_strategy.write_cache() {
+                    let key = IndexKey::new(
+                        self.region_file_id.region_id(),
+                        self.region_file_id.file_id(),
+                        FileType::Parquet,
+                    );
+                    if let Some(entry) = cache.file_cache().get(key).await {
+                        return Ok(u64::from(entry.file_size));
+                    }
+                }
+                Ok(self
+                    .object_store
+                    .stat(&self.file_path)
+                    .await
+                    .context(OpenDalSnafu)?
+                    .content_length())
+            })
+            .await
+            .copied()
+    }
+
+    /// Fetches decoder ranges through fixed-size pages and the existing local/remote hierarchy.
+    async fn fetch_bytes_with_cache(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let start = self.fetch_metrics.as_ref().map(|_| Instant::now());
         let _timer = READ_STAGE_FETCH_PAGES.start_timer();
-
-        let mut page_lookup = self.cache_strategy.get_page_ranges(
-            self.region_file_id.file_id(),
-            self.row_group_idx,
-            &ranges,
-        );
-        if let Some(lookup) = &page_lookup
-            && lookup.cached_bytes > 0
-            && let Some(metrics) = &self.fetch_metrics
-        {
-            let mut metrics_data = metrics.data.lock().unwrap();
-            metrics_data.page_cache_hit += 1;
-            metrics_data.pages_to_fetch_mem += lookup.cached_range_count;
-            metrics_data.page_size_to_fetch_mem += lookup.cached_bytes;
-            metrics_data.page_size_needed += lookup.cached_bytes;
-        }
-
-        // Fast path: all requested ranges can be assembled from cached fragments.
-        if page_lookup
-            .as_ref()
-            .map(|lookup| lookup.is_fully_cached())
-            .unwrap_or(false)
-        {
-            let lookup = page_lookup.take().unwrap();
-            if let Some(metrics) = &self.fetch_metrics
-                && let Some(start) = fetch_start
-            {
-                metrics.data.lock().unwrap().total_fetch_elapsed += start.elapsed();
+        ensure!(
+            ranges.iter().all(|r| r.start <= r.end),
+            UnexpectedSnafu {
+                reason: "Reversed Parquet byte range"
             }
-            return assemble_ranges(&ranges, lookup.cached_parts, &[]);
+        );
+        if ranges.iter().all(Range::is_empty) {
+            return Ok(vec![Bytes::new(); ranges.len()]);
         }
+        let reader = ParquetRangeReader {
+            fetcher: self,
+            local: self.fetch_metrics.as_ref().map(|_| Mutex::default()),
+            remote: self.fetch_metrics.as_ref().map(|_| Mutex::default()),
+        };
+        let output = if let Some(cache) = self.cache_strategy.parquet_page_cache() {
+            let size = self.resolve_file_size(ranges).await?;
+            let (output, stats) = cache
+                .fetch(self.region_file_id, size, ranges, &reader)
+                .await
+                .map_err(|error| {
+                    if let Some(source) = crate::cache::find_shared_page_source::<Error>(&error) {
+                        LoadParquetPageSnafu.into_error(source)
+                    } else {
+                        ReadParquetSnafu {
+                            path: &self.file_path,
+                        }
+                        .into_error(parquet::errors::ParquetError::External(Box::new(error)))
+                    }
+                })?;
+            if let Some(metrics) = &self.fetch_metrics {
+                let mut data = metrics.data.lock().unwrap();
+                data.page_cache_hit += usize::from(stats.cached_bytes > 0);
+                data.pages_to_fetch_mem += stats.cached_fragments;
+                data.page_size_to_fetch_mem += stats.cached_bytes;
+            }
+            output
+        } else {
+            reader.read_ranges(ranges).await?
+        };
+        if let (Some(metrics), Some(local), Some(remote), Some(start)) =
+            (&self.fetch_metrics, &reader.local, &reader.remote, start)
+        {
+            let mut data = metrics.data.lock().unwrap();
+            let local = local.lock().unwrap();
+            let remote = remote.lock().unwrap();
+            data.write_cache_hit += usize::from(local.ranges != 0);
+            data.cache_miss += usize::from(remote.ranges != 0);
+            data.pages_to_fetch_write_cache += local.ranges;
+            data.page_size_to_fetch_write_cache += local.bytes;
+            data.write_cache_fetch_elapsed += local.elapsed();
+            data.pages_to_fetch_store += remote.ranges;
+            data.page_size_to_fetch_store += remote.bytes;
+            data.store_fetch_elapsed += remote.elapsed();
+            data.page_size_needed += output.iter().map(|b| b.len() as u64).sum::<u64>();
+            data.total_fetch_elapsed += start.elapsed();
+        }
+        Ok(output)
+    }
+}
 
-        let missing_ranges = page_lookup
-            .as_ref()
-            .map(|lookup| lookup.missing_ranges.clone())
-            .unwrap_or_else(|| ranges.clone());
+/// Aggregates one fetch's physical reads without turning request hit counters
+/// into per-I/O counters. Elapsed time spans concurrent reads rather than summing them.
+#[derive(Default)]
+struct StorageReadMetrics {
+    ranges: usize,
+    bytes: u64,
+    interval: Option<(Instant, Instant)>,
+}
 
-        // Calculate total range size for metrics.
-        let (_, unaligned_size) = compute_total_range_size(&missing_ranges);
+impl StorageReadMetrics {
+    fn record(&mut self, ranges: usize, bytes: u64, start: Instant) {
+        self.ranges += ranges;
+        self.bytes += bytes;
+        let end = Instant::now();
+        self.interval = Some(match self.interval {
+            Some((first, last)) => (first.min(start), last.max(end)),
+            None => (start, end),
+        });
+    }
 
-        // Check write cache.
+    fn elapsed(&self) -> std::time::Duration {
+        self.interval
+            .map(|(start, end)| end - start)
+            .unwrap_or_default()
+    }
+}
+
+/// Reads one immutable SST through the local write cache or object store.
+/// Both cached and uncached reads use the existing range merging.
+struct ParquetRangeReader<'a> {
+    fetcher: &'a SstParquetRangeFetcher,
+    local: Option<Mutex<StorageReadMetrics>>,
+    remote: Option<Mutex<StorageReadMetrics>>,
+}
+
+impl ParquetRangeReader<'_> {
+    async fn read_ranges(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let fetcher = self.fetcher;
         let key = IndexKey::new(
-            self.region_file_id.region_id(),
-            self.region_file_id.file_id(),
+            fetcher.region_file_id.region_id(),
+            fetcher.region_file_id.file_id(),
             FileType::Parquet,
         );
-        let fetch_write_cache_start = self
-            .fetch_metrics
-            .as_ref()
-            .map(|_| std::time::Instant::now());
-        let write_cache_result = match self.cache_strategy.write_cache() {
-            Some(cache) => cache.file_cache().read_ranges(key, &missing_ranges).await,
-            None => None,
+        let bytes = if fetcher.fetch_metrics.is_none() {
+            0
+        } else {
+            compute_total_range_size(ranges).1
         };
-
-        let fetched_pages = match write_cache_result {
-            Some(data) => {
-                if let Some(metrics) = &self.fetch_metrics {
-                    let elapsed = fetch_write_cache_start
-                        .map(|start| start.elapsed())
-                        .unwrap_or_default();
-                    let range_size_needed: u64 =
-                        missing_ranges.iter().map(|r| r.end - r.start).sum();
-                    let mut metrics_data = metrics.data.lock().unwrap();
-                    metrics_data.write_cache_fetch_elapsed += elapsed;
-                    metrics_data.write_cache_hit += 1;
-                    metrics_data.pages_to_fetch_write_cache += missing_ranges.len();
-                    metrics_data.page_size_to_fetch_write_cache += unaligned_size;
-                    metrics_data.page_size_needed += range_size_needed;
-                }
-                data
+        let start = self.local.as_ref().map(|_| Instant::now());
+        if let Some(cache) = fetcher.cache_strategy.write_cache()
+            && let Some(data) = cache.file_cache().read_ranges(key, ranges).await
+        {
+            if let (Some(metrics), Some(start)) = (&self.local, start) {
+                metrics.lock().unwrap().record(ranges.len(), bytes, start);
             }
-            None => {
-                // Fetch data from object store.
-                let _timer = READ_STAGE_ELAPSED
-                    .with_label_values(&["cache_miss_read"])
-                    .start_timer();
-
-                let start = self
-                    .fetch_metrics
-                    .as_ref()
-                    .map(|_| std::time::Instant::now());
-                let data =
-                    fetch_byte_ranges(&self.file_path, self.object_store.clone(), &missing_ranges)
-                        .await
-                        .context(OpenDalSnafu)?;
-
-                if let Some(metrics) = &self.fetch_metrics {
-                    let elapsed = start.map(|start| start.elapsed()).unwrap_or_default();
-                    let range_size_needed: u64 =
-                        missing_ranges.iter().map(|r| r.end - r.start).sum();
-                    let mut metrics_data = metrics.data.lock().unwrap();
-                    metrics_data.store_fetch_elapsed += elapsed;
-                    metrics_data.cache_miss += 1;
-                    metrics_data.pages_to_fetch_store += missing_ranges.len();
-                    metrics_data.page_size_to_fetch_store += unaligned_size;
-                    metrics_data.page_size_needed += range_size_needed;
-                }
-                data
-            }
-        };
-        ensure!(
-            fetched_pages.len() == missing_ranges.len(),
-            UnexpectedSnafu {
-                reason: format!(
-                    "Invalid parquet range fetch: {} missing ranges but {} fetched byte ranges",
-                    missing_ranges.len(),
-                    fetched_pages.len()
-                ),
-            }
-        );
-
-        self.cache_strategy.put_page_ranges(
-            self.region_file_id.file_id(),
-            self.row_group_idx,
-            &missing_ranges,
-            &fetched_pages,
-        );
-
-        if let (Some(metrics), Some(start)) = (&self.fetch_metrics, fetch_start) {
-            metrics.data.lock().unwrap().total_fetch_elapsed += start.elapsed();
+            return Ok(data);
         }
-
-        if let Some(lookup) = page_lookup {
-            let fetched_parts = missing_ranges
-                .into_iter()
-                .zip(fetched_pages)
-                .map(|(range, bytes)| PageRangePart { range, bytes })
-                .collect::<Vec<_>>();
-            return assemble_ranges(&ranges, lookup.cached_parts, &fetched_parts);
+        let _timer = READ_STAGE_ELAPSED
+            .with_label_values(&["cache_miss_read"])
+            .start_timer();
+        let start = self.remote.as_ref().map(|_| Instant::now());
+        let data = fetch_byte_ranges(&fetcher.file_path, fetcher.object_store.clone(), ranges)
+            .await
+            .context(OpenDalSnafu)?;
+        if let (Some(metrics), Some(start)) = (&self.remote, start) {
+            metrics.lock().unwrap().record(ranges.len(), bytes, start);
         }
-
-        Ok(fetched_pages)
+        Ok(data)
     }
 }
 
-fn assemble_ranges(
-    ranges: &[Range<u64>],
-    cached_parts: Vec<Vec<PageRangePart>>,
-    fetched_parts: &[PageRangePart],
-) -> Result<Vec<Bytes>> {
-    ensure!(
-        ranges.len() == cached_parts.len(),
-        UnexpectedSnafu {
-            reason: format!(
-                "Invalid parquet range assembly: {} requested ranges but {} cached part groups",
-                ranges.len(),
-                cached_parts.len()
-            ),
-        }
-    );
+#[async_trait]
+impl RangeReader for ParquetRangeReader<'_> {
+    async fn metadata(&self) -> io::Result<Metadata> {
+        self.fetcher
+            .resolve_file_size(&[])
+            .await
+            .map(|content_length| Metadata { content_length })
+            .map_err(|error| io::Error::other(Arc::new(error)))
+    }
 
-    ranges
-        .iter()
-        .zip(cached_parts)
-        .map(|(range, mut parts)| {
-            parts.extend(
-                fetched_parts
-                    .iter()
-                    .filter_map(|part| overlapping_part(range, part)),
-            );
-            assemble_range(range, parts)
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+        self.read_ranges(ranges)
+            .await
+            .map_err(|error| io::Error::other(Arc::new(error)))
+    }
+
+    async fn read(&self, range: Range<u64>) -> io::Result<Bytes> {
+        let mut data = self
+            .read_ranges(std::slice::from_ref(&range))
+            .await
+            .map_err(|error| io::Error::other(Arc::new(error)))?;
+        if data.len() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid Parquet read response count",
+            ));
+        }
+        data.pop().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Missing Parquet read response",
+            )
         })
-        .collect()
-}
-
-fn overlapping_part(range: &Range<u64>, part: &PageRangePart) -> Option<PageRangePart> {
-    let start = range.start.max(part.range.start);
-    let end = range.end.min(part.range.end);
-    if start >= end {
-        return None;
     }
-
-    let slice_start = (start - part.range.start) as usize;
-    let slice_end = (end - part.range.start) as usize;
-    Some(PageRangePart {
-        range: start..end,
-        bytes: part.bytes.slice(slice_start..slice_end),
-    })
-}
-
-fn assemble_range(range: &Range<u64>, mut parts: Vec<PageRangePart>) -> Result<Bytes> {
-    if range.start >= range.end {
-        return Ok(Bytes::new());
-    }
-
-    parts.sort_unstable_by_key(|part| part.range.start);
-    if parts.len() == 1 && parts[0].range == *range {
-        return Ok(parts.pop().unwrap().bytes);
-    }
-
-    let mut cursor = range.start;
-    let mut output = BytesMut::with_capacity((range.end - range.start) as usize);
-    for part in parts {
-        ensure!(
-            part.range.start <= cursor,
-            UnexpectedSnafu {
-                reason: format!(
-                    "Missing cached parquet bytes for range {}..{}, next part starts at {}",
-                    range.start, range.end, part.range.start
-                ),
-            }
-        );
-        if part.range.end <= cursor {
-            continue;
-        }
-
-        let slice_start = (cursor - part.range.start) as usize;
-        let slice_end = (part.range.end.min(range.end) - part.range.start) as usize;
-        output.extend_from_slice(&part.bytes.slice(slice_start..slice_end));
-        cursor = part.range.end.min(range.end);
-        if cursor >= range.end {
-            break;
-        }
-    }
-
-    ensure!(
-        cursor == range.end,
-        UnexpectedSnafu {
-            reason: format!(
-                "Missing cached parquet bytes for range {}..{}, assembled through {}",
-                range.start, range.end, cursor
-            ),
-        }
-    );
-
-    Ok(output.freeze())
 }
 
 /// Builds a parquet record batch stream driven directly by [ParquetPushDecoderBuilder].
@@ -372,7 +355,7 @@ pub fn build_sst_parquet_record_batch_stream(
         loop {
             match decoder.try_decode().context(ReadParquetSnafu { path: &file_path })? {
                 DecodeResult::NeedsData(ranges) => {
-                    let data = fetcher.fetch_bytes_with_cache(ranges.clone()).await?;
+                    let data = fetcher.fetch_bytes_with_cache(&ranges).await?;
                     decoder.push_ranges(ranges, data)
                         .context(ReadParquetSnafu { path: &file_path })?;
                 }
@@ -461,7 +444,6 @@ mod tests {
                 } else {
                     CacheStrategy::Disabled
                 },
-                row_group_idx,
                 None,
             )
             .with_memory_tracker(Some(tracker.clone()));
@@ -520,51 +502,353 @@ mod tests {
         assert!(skipped.next().await.is_none());
         assert_eq!(0, tracker.current());
     }
+    #[tokio::test]
+    async fn test_page_fetch_partial_hits_preserve_request_metrics() {
+        use crate::cache::CacheManager;
+        use crate::cache::parquet_page::PAGE_SIZE;
+        use object_store::services::Memory;
+        use std::sync::Arc;
+        use store_api::storage::{FileId, RegionId};
 
-    #[test]
-    fn test_assemble_range_from_cached_subrange_and_fetched_tail() {
-        let cached_parts = vec![vec![PageRangePart {
-            range: 400..500,
-            bytes: Bytes::from(vec![1; 100]),
-        }]];
-        let fetched_parts = vec![PageRangePart {
-            range: 500..600,
-            bytes: Bytes::from(vec![2; 100]),
-        }];
-
-        let requested = 400..600;
-        let output = assemble_ranges(
-            std::slice::from_ref(&requested),
-            cached_parts,
-            &fetched_parts,
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let size = PAGE_SIZE * 2 + 10;
+        store
+            .write(
+                "bytes.parquet",
+                (0..size).map(|n| n as u8).collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+        let manager = Arc::new(CacheManager::builder().page_cache_size(1024 * 1024).build());
+        let id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+        let metrics = ParquetFetchMetrics::default();
+        let fetcher = SstParquetRangeFetcher::new(
+            id,
+            "bytes.parquet".into(),
+            store.clone(),
+            CacheStrategy::EnableAll(manager),
+            Some(metrics.clone()),
         )
-        .unwrap();
-        assert_eq!(1, output.len());
-        assert_eq!(vec![1; 100].as_slice(), &output[0][..100]);
-        assert_eq!(vec![2; 100].as_slice(), &output[0][100..]);
+        .with_file_size(size);
+        assert_eq!(
+            fetcher.fetch_bytes_with_cache(&[1..5, 1..1]).await.unwrap()[0],
+            Bytes::from_static(&[1, 2, 3, 4])
+        );
+        assert_eq!(
+            fetcher.fetch_bytes_with_cache(&[3..7, 1..1]).await.unwrap()[0],
+            Bytes::from_static(&[3, 4, 5, 6])
+        );
+        assert_eq!(
+            fetcher
+                .fetch_bytes_with_cache(&[PAGE_SIZE - 2..PAGE_SIZE + 2, 1..1])
+                .await
+                .unwrap()[0],
+            Bytes::from_static(&[254, 255, 0, 1])
+        );
+        {
+            let data = metrics.data.lock().unwrap();
+            assert_eq!(data.page_cache_hit, 2);
+            assert_eq!(data.cache_miss, 2);
+            assert_eq!(data.write_cache_hit, 0);
+            assert_eq!(data.page_size_needed, 12);
+            assert_eq!(data.page_size_to_fetch_mem, 6);
+            assert_eq!(data.page_size_to_fetch_store, PAGE_SIZE * 2);
+        }
+        // Completed pages serve another fetch without contacting the deleted backing object.
+        store.delete("bytes.parquet").await.unwrap();
+        let result = fetcher
+            .fetch_bytes_with_cache(&[PAGE_SIZE + 1..PAGE_SIZE + 3, size..size])
+            .await
+            .unwrap();
+        assert_eq!(&result[0][..], &[1, 2]);
+        assert!(result[1].is_empty());
+        let disabled = SstParquetRangeFetcher::new(
+            id,
+            "bytes.parquet".into(),
+            store,
+            CacheStrategy::Disabled,
+            None,
+        );
+        assert!(
+            disabled
+                .fetch_bytes_with_cache(&[1..5, 1..1])
+                .await
+                .is_err()
+        );
     }
 
-    #[test]
-    fn test_assemble_range_returns_single_covering_part_without_copy() {
-        let bytes = Bytes::from_static(b"abcdef");
-        let cached_parts = vec![vec![PageRangePart {
-            range: 10..16,
-            bytes: bytes.clone(),
-        }]];
+    #[tokio::test]
+    async fn test_page_cache_coalesces_storage_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let requested = 10..16;
-        let output = assemble_ranges(std::slice::from_ref(&requested), cached_parts, &[]).unwrap();
-        assert_eq!(bytes, output[0]);
+        use object_store::layers::mock;
+        use object_store::services::Memory;
+        use store_api::storage::{FileId, RegionId};
+
+        use crate::cache::CacheManager;
+        use crate::cache::parquet_page::PAGE_SIZE;
+
+        struct CountingReader {
+            inner: mock::oio::Reader,
+            reads: Arc<AtomicUsize>,
+        }
+
+        impl mock::oio::Read for CountingReader {
+            async fn open(
+                &self,
+                range: mock::BytesRange,
+            ) -> object_store::Result<(mock::RpRead, Box<dyn mock::oio::ReadStreamDyn>)>
+            {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                self.inner.open(range).await
+            }
+
+            async fn read(
+                &self,
+                range: mock::BytesRange,
+            ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                self.inner.read(range).await
+            }
+        }
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let layer = mock::MockLayerBuilder::default()
+            .reader_factory(Arc::new({
+                let reads = reads.clone();
+                move |_, _, inner| {
+                    Box::new(CountingReader {
+                        inner,
+                        reads: reads.clone(),
+                    })
+                }
+            }))
+            .build()
+            .unwrap();
+        let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let bytes = Bytes::from(
+            (0..PAGE_SIZE * 128 + 13)
+                .map(|n| (n * 31 + n / PAGE_SIZE) as u8)
+                .collect::<Vec<_>>(),
+        );
+        store.write("bytes.parquet", bytes.clone()).await.unwrap();
+        let manager = Arc::new(
+            CacheManager::builder()
+                .page_cache_size(16 * 1024 * 1024)
+                .build(),
+        );
+        let fetcher = SstParquetRangeFetcher::new(
+            RegionFileId::new(RegionId::new(1, 1), FileId::random()),
+            "bytes.parquet".into(),
+            store,
+            CacheStrategy::EnableAll(manager),
+            None,
+        )
+        .with_file_size(bytes.len() as u64);
+
+        // A cold request spanning 65 adjacent cache pages opens one storage read.
+        let contiguous = 3..PAGE_SIZE * 65 - 3;
+        for _ in 0..2 {
+            assert_eq!(
+                fetcher
+                    .fetch_bytes_with_cache(std::slice::from_ref(&contiguous))
+                    .await
+                    .unwrap(),
+                vec![bytes.slice(contiguous.start as usize..contiguous.end as usize)]
+            );
+            assert_eq!(reads.load(Ordering::Relaxed), 1);
+        }
+
+        // Two distant cold pages stay separate; cached and duplicate ranges keep
+        // their requested order without adding storage reads.
+        let scattered = [
+            PAGE_SIZE * 120 + 3..PAGE_SIZE * 120 + 17,
+            PAGE_SIZE * 80 + 7..PAGE_SIZE * 80 + 11,
+            1..5,
+            PAGE_SIZE * 120 + 4..PAGE_SIZE * 120 + 8,
+        ];
+        let expected: Vec<_> = scattered
+            .iter()
+            .map(|range| bytes.slice(range.start as usize..range.end as usize))
+            .collect();
+        for _ in 0..2 {
+            assert_eq!(
+                fetcher.fetch_bytes_with_cache(&scattered).await.unwrap(),
+                expected
+            );
+            assert_eq!(reads.load(Ordering::Relaxed), 3);
+        }
     }
 
-    #[test]
-    fn test_assemble_range_clamps_overlapping_part_to_requested_end() {
-        let parts = vec![PageRangePart {
-            range: 0..10,
-            bytes: Bytes::from_static(b"0123456789"),
-        }];
+    #[tokio::test]
+    async fn test_page_cache_preserves_storage_error_semantics() {
+        use std::sync::atomic::{AtomicBool, Ordering};
 
-        let output = assemble_range(&(2..5), parts).unwrap();
-        assert_eq!(Bytes::from_static(b"234"), output);
+        use common_error::ext::ErrorExt;
+        use object_store::layers::mock;
+        use object_store::services::Memory;
+        use store_api::storage::{FileId, RegionId};
+
+        use crate::cache::CacheManager;
+
+        struct FailingReader {
+            inner: mock::oio::Reader,
+            fail: Arc<AtomicBool>,
+            kind: object_store::ErrorKind,
+            temporary: bool,
+        }
+
+        impl FailingReader {
+            fn error(&self) -> object_store::Error {
+                let error = object_store::Error::new(self.kind, "page read failed");
+                if self.temporary {
+                    error.set_temporary()
+                } else {
+                    error
+                }
+            }
+        }
+
+        impl mock::oio::Read for FailingReader {
+            async fn open(
+                &self,
+                range: mock::BytesRange,
+            ) -> object_store::Result<(mock::RpRead, Box<dyn mock::oio::ReadStreamDyn>)>
+            {
+                if self.fail.load(Ordering::Relaxed) {
+                    return Err(self.error());
+                }
+                self.inner.open(range).await
+            }
+
+            async fn read(
+                &self,
+                range: mock::BytesRange,
+            ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
+                if self.fail.load(Ordering::Relaxed) {
+                    return Err(self.error());
+                }
+                self.inner.read(range).await
+            }
+        }
+
+        for (kind, temporary) in [
+            (object_store::ErrorKind::PermissionDenied, false),
+            (object_store::ErrorKind::NotFound, false),
+            (object_store::ErrorKind::Unexpected, true),
+        ] {
+            let mut baseline = None;
+            for cache_enabled in [false, true] {
+                let fail = Arc::new(AtomicBool::new(true));
+                let layer = mock::MockLayerBuilder::default()
+                    .reader_factory(Arc::new({
+                        let fail = fail.clone();
+                        move |_, _, inner| {
+                            Box::new(FailingReader {
+                                inner,
+                                fail: fail.clone(),
+                                kind,
+                                temporary,
+                            })
+                        }
+                    }))
+                    .build()
+                    .unwrap();
+                let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+                store.write("bytes.parquet", vec![7; 100]).await.unwrap();
+                let strategy = if cache_enabled {
+                    CacheStrategy::EnableAll(Arc::new(
+                        CacheManager::builder().page_cache_size(1024 * 1024).build(),
+                    ))
+                } else {
+                    CacheStrategy::Disabled
+                };
+                let fetcher = SstParquetRangeFetcher::new(
+                    RegionFileId::new(RegionId::new(1, 1), FileId::random()),
+                    "bytes.parquet".into(),
+                    store,
+                    strategy,
+                    None,
+                )
+                .with_file_size(100);
+                let range = 0..4;
+                let ranges = std::slice::from_ref(&range);
+                let error = fetcher.fetch_bytes_with_cache(ranges).await.unwrap_err();
+                let semantics = (
+                    error.status_code(),
+                    error.retry_hint(),
+                    error.is_object_not_found(),
+                );
+                if cache_enabled {
+                    assert!(matches!(error, Error::LoadParquetPage { .. }));
+                    assert_eq!(Some(semantics), baseline);
+                } else {
+                    assert!(matches!(error, Error::OpenDal { .. }));
+                    baseline = Some(semantics);
+                }
+                // Failed shared loads must not poison the cache.
+                fail.store(false, Ordering::Relaxed);
+                assert_eq!(
+                    fetcher.fetch_bytes_with_cache(ranges).await.unwrap(),
+                    vec![Bytes::from_static(&[7; 4])]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cached_and_disabled_fetch_return_identical_ranges() {
+        use crate::cache::CacheManager;
+        use crate::cache::parquet_page::PAGE_SIZE;
+        use object_store::services::Memory;
+        use std::sync::Arc;
+        use store_api::storage::{FileId, RegionId};
+
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let size = PAGE_SIZE + 10;
+        store
+            .write(
+                "bytes.parquet",
+                (0..size).map(|n| n as u8).collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+        let id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+        let manager = Arc::new(CacheManager::builder().page_cache_size(1024 * 1024).build());
+        let cached = SstParquetRangeFetcher::new(
+            id,
+            "bytes.parquet".into(),
+            store.clone(),
+            CacheStrategy::EnableAll(manager.clone()),
+            None,
+        );
+        let disabled = SstParquetRangeFetcher::new(
+            id,
+            "bytes.parquet".into(),
+            store.clone(),
+            CacheStrategy::Disabled,
+            None,
+        );
+        let compact = SstParquetRangeFetcher::new(
+            id,
+            "bytes.parquet".into(),
+            store,
+            CacheStrategy::Compaction(manager),
+            None,
+        );
+        let ranges = vec![size - 3..size, 1..6, PAGE_SIZE - 2..PAGE_SIZE + 3, 4..8];
+        let expected = disabled.fetch_bytes_with_cache(&ranges).await.unwrap();
+        assert_eq!(
+            cached.fetch_bytes_with_cache(&ranges).await.unwrap(),
+            expected
+        );
+        assert_eq!(
+            cached.fetch_bytes_with_cache(&ranges).await.unwrap(),
+            expected
+        );
+        assert_eq!(
+            compact.fetch_bytes_with_cache(&ranges).await.unwrap(),
+            expected
+        );
     }
 }
