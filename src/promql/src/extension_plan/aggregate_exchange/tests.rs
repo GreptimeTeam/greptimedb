@@ -122,16 +122,30 @@ fn expected(
     aggregator.finish_partial()
 }
 
+/// The points of `group`, each with its states.
+fn points(group: &PartialGroup) -> Vec<(usize, Vec<Option<AccumulatorState>>)> {
+    let width = group.states.len() / group.points.len();
+    group
+        .points
+        .iter()
+        .copied()
+        .zip(group.states.chunks_exact(width).map(<[_]>::to_vec))
+        .collect()
+}
+
 /// Every state of `partial` as one row, sorted so that two sides compare whatever their order.
 fn rows(partial: &PartialAggregate) -> Vec<(String, usize, usize, AccumulatorState)> {
     let mut rows: Vec<_> = partial
         .groups
         .iter()
         .flat_map(|group| {
-            group.points.iter().flat_map(|(at, states)| {
-                states.iter().enumerate().filter_map(|(field, state)| {
-                    state.map(|state| (format!("{:?}", group.metric), *at, field, state))
-                })
+            points(group).into_iter().flat_map(move |(at, states)| {
+                states
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(move |(field, state)| {
+                        state.map(|state| (format!("{:?}", group.metric), at, field, state))
+                    })
             })
         })
         .collect();
@@ -219,16 +233,20 @@ struct Row {
     state: Option<AccumulatorState>,
 }
 
+/// Each label column is keyed on its own, by value, as a concatenation that merges dictionaries
+/// leaves it, rather than by group as the encoder writes it.
 fn state_batch(tags: &[String], rows: &[Row]) -> RecordBatch {
-    let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(
-        rows.iter().map(|row| row.name).collect::<Vec<_>>(),
-    ))];
+    let mut columns: Vec<ArrayRef> = vec![Arc::new(
+        rows.iter()
+            .map(|row| row.name)
+            .collect::<DictionaryArray<UInt32Type>>(),
+    )];
     for (position, _) in ordinary_tags(tags).enumerate() {
-        columns.push(Arc::new(StringArray::from(
+        columns.push(Arc::new(
             rows.iter()
                 .map(|row| row.labels[position])
-                .collect::<Vec<_>>(),
-        )));
+                .collect::<DictionaryArray<UInt32Type>>(),
+        ));
     }
     columns.push(Arc::new(UInt64Array::from(
         rows.iter().map(|row| row.point).collect::<Vec<_>>(),
@@ -260,6 +278,7 @@ fn state_batch(tags: &[String], rows: &[Row]) -> RecordBatch {
 #[test]
 fn state_schema_is_the_private_layout() {
     let schema = state_schema(&["job".to_string(), "__name__".into(), "instance".into()]);
+    let label = DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
     let fields: Vec<(&str, DataType, bool)> = schema
         .fields()
         .iter()
@@ -274,9 +293,9 @@ fn state_schema_is_the_private_layout() {
     assert_eq!(
         fields,
         vec![
-            ("metric_name", DataType::Utf8, true),
-            ("tag_0", DataType::Utf8, true),
-            ("tag_1", DataType::Utf8, true),
+            ("metric_name", label.clone(), true),
+            ("tag_0", label.clone(), true),
+            ("tag_1", label, true),
             ("point", DataType::UInt64, false),
             ("field", DataType::UInt32, false),
             ("value", DataType::Float64, false),
@@ -388,7 +407,7 @@ fn roundtrip_keeps_the_name_and_absent_labels() {
     let mut points: Vec<usize> = decoded
         .groups
         .iter()
-        .flat_map(|group| group.points.iter().map(|(at, _)| *at))
+        .flat_map(|group| group.points.iter().copied())
         .collect();
     points.sort_unstable();
     assert_eq!(points, vec![0, 1]);
@@ -444,7 +463,7 @@ fn a_group_keeps_its_points_instead_of_opening_one_per_row() {
     assert_eq!(decoded.groups.len(), 2);
     assert_eq!(decoded.groups[0].metric.get("job"), Some("x"));
     assert_eq!(
-        decoded.groups[0].points,
+        points(&decoded.groups[0]),
         vec![
             (0, vec![Some(state(1.0))]),
             (1, vec![Some(state(2.0))]),
@@ -452,7 +471,10 @@ fn a_group_keeps_its_points_instead_of_opening_one_per_row() {
         ]
     );
     assert_eq!(decoded.groups[1].metric.get("job"), Some("y"));
-    assert_eq!(decoded.groups[1].points, vec![(0, vec![Some(state(4.0))])]);
+    assert_eq!(
+        points(&decoded.groups[1]),
+        vec![(0, vec![Some(state(4.0))])]
+    );
 }
 
 #[test]
@@ -488,7 +510,7 @@ fn decode_keeps_both_fields_of_one_point_in_one_group() {
     let decoded = decode(&batch, &schema, AggregateOp::Sum, &tags).unwrap();
     assert_eq!(decoded.groups.len(), 1);
     assert_eq!(
-        decoded.groups[0].points,
+        points(&decoded.groups[0]),
         vec![
             (0, vec![Some(state(1.0)), Some(state(2.0))]),
             (1, vec![Some(state(3.0)), None]),
@@ -537,6 +559,79 @@ fn a_batch_of_two_encoders_output_decodes_like_the_two_batches() {
             ]
         )
     );
+}
+
+#[test]
+fn state_crossing_an_ipc_stream_and_a_concatenation_merges_like_the_partials() {
+    // The native route runs the producer in process today. A remote region would send every
+    // partition's state through one Arrow IPC writer, and the Flight route concatenates small
+    // batches. The reader hands both partitions the `job` dictionary it did not resend, while
+    // `instance` differs between them; with one row per group the concatenation merges and
+    // deduplicates those two dictionaries, so its keys no longer match the encoder's.
+    use datatypes::arrow::ipc::reader::StreamReader;
+    use datatypes::arrow::ipc::writer::StreamWriter;
+
+    let schema = series_schema(&["a"], 1);
+    let tags = tags(&["job", "instance"]);
+    let series = |instance| metric(None, &[("job", "x"), ("instance", instance)]);
+    let partitions = [
+        vec![
+            chunk(&schema, series("one"), &[vec![Some(1.0)]]),
+            chunk(&schema, series("two"), &[vec![Some(3.0)]]),
+        ],
+        vec![
+            chunk(&schema, series("two"), &[vec![Some(10.0)]]),
+            chunk(&schema, series("one"), &[vec![Some(30.0)]]),
+        ],
+    ];
+    let pool = unbounded();
+    let op = bind(AggregateKind::Sum, &["job", "instance"]);
+    let mut written = Vec::new();
+    let mut writer = StreamWriter::try_new(&mut written, &state_schema(&tags)).unwrap();
+    let mut partials = Vec::new();
+    for chunks in &partitions {
+        let mut fold = fold(&op, &schema, &tags, &pool).unwrap();
+        for chunk in chunks {
+            fold.update(chunk.clone()).unwrap();
+        }
+        for batch in fold.finish().unwrap() {
+            writer.write(&batch).unwrap();
+        }
+        partials.push(expected(
+            AggregateOp::Sum,
+            &["job", "instance"],
+            &schema,
+            chunks,
+        ));
+    }
+    writer.finish().unwrap();
+    drop(writer);
+    let read: Vec<RecordBatch> = StreamReader::try_new(written.as_slice(), None)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let concatenated = concat_batches(read[0].schema_ref(), &read).unwrap();
+    let instance = concatenated
+        .column_by_name("tag_1")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<DictionaryArray<UInt32Type>>()
+        .unwrap();
+    assert_eq!(
+        2,
+        instance.values().len(),
+        "the concatenation merged `instance`"
+    );
+    let decoded = decode(&concatenated, &schema, AggregateOp::Sum, &tags).unwrap();
+    let together = merged(AggregateOp::Sum, &schema, vec![decoded]);
+    assert_eq!(
+        together
+            .iter()
+            .map(|(_, fields)| fields[0][0].1)
+            .collect::<Vec<_>>(),
+        vec![31.0, 13.0]
+    );
+    assert_eq!(together, merged(AggregateOp::Sum, &schema, partials));
 }
 
 #[test]
@@ -596,7 +691,7 @@ fn decoded_rows_keep_an_empty_label_beside_an_absent_one() {
     assert_eq!(group.metric.name(), None);
     assert_eq!(group.metric.get("job"), Some(""));
     assert_eq!(group.metric.get("instance"), None);
-    assert_eq!(group.points, vec![(1, vec![Some(state(4.0))])]);
+    assert_eq!(points(group), vec![(1, vec![Some(state(4.0))])]);
 }
 
 #[test]
@@ -673,13 +768,7 @@ fn a_point_is_assembled_from_its_fields() {
     // One group for the series, holding one state vector per point, rather than one group per
     // point or one per row.
     assert_eq!(decoded.groups.len(), 1);
-    assert!(
-        decoded.groups[0].points.len() == 64
-            && decoded.groups[0]
-                .points
-                .iter()
-                .all(|(_, states)| states.len() == 64)
-    );
+    assert!(decoded.groups[0].points.len() == 64 && decoded.groups[0].states.len() == 64 * 64);
     assert_eq!(rows(&decoded).len(), 64 * 64);
     assert_eq!(
         rows(&decoded),
@@ -997,14 +1086,8 @@ fn decode_admits_the_groups_it_keeps() {
             .groups
             .iter()
             .map(|group| {
-                group.points.capacity() * size_of::<(usize, Vec<Option<AccumulatorState>>)>()
-                    + group
-                        .points
-                        .iter()
-                        .map(|(_, states)| {
-                            states.capacity() * size_of::<Option<AccumulatorState>>()
-                        })
-                        .sum::<usize>()
+                group.points.capacity() * size_of::<usize>()
+                    + group.states.capacity() * size_of::<Option<AccumulatorState>>()
                     + group.metric.name().map_or(0, str::len)
                     + group
                         .metric

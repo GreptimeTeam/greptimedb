@@ -89,7 +89,11 @@ pub struct AccumulatorState {
 #[derive(Clone, Debug)]
 pub struct PartialGroup {
     pub metric: SeriesLabels,
-    pub points: Vec<(usize, Vec<Option<AccumulatorState>>)>,
+    /// Grid positions of the points.
+    pub points: Vec<usize>,
+    /// The states of every point back to back, one per field, so a point allocates nothing of its
+    /// own: `points.len() * width` long for an aggregate of `width` fields.
+    pub states: Vec<Option<AccumulatorState>>,
 }
 
 /// The state of one execution partition, with its groups in the order they first appeared.
@@ -117,7 +121,7 @@ impl FloatAggregator {
         for group in &self.groups {
             let points = seen_points(group, width);
             partial_bytes = partial_bytes
-                .saturating_add(points.saturating_mul(size_of::<Point>()))
+                .saturating_add(points.saturating_mul(size_of::<usize>()))
                 .saturating_add(
                     points
                         .saturating_mul(width)
@@ -132,20 +136,21 @@ impl FloatAggregator {
         let width = self.schema.fields.len();
         let mut groups: Vec<PartialGroup> = Vec::with_capacity(self.groups.len());
         for group in self.groups {
-            let mut points: Vec<Point> = Vec::with_capacity(seen_points(&group, width));
-            for (&block, states) in &group.blocks {
-                for (offset, point) in states.chunks_exact(width).enumerate() {
+            let seen = seen_points(&group, width);
+            let mut points = Vec::with_capacity(seen);
+            let mut states = Vec::with_capacity(seen * width);
+            for (&block, block_states) in &group.blocks {
+                for (offset, point) in block_states.chunks_exact(width).enumerate() {
                     if point.iter().any(|state| state.seen) {
-                        points.push((
-                            block * BLOCK_POINTS + offset,
-                            point.iter().map(|state| state.partial()).collect(),
-                        ));
+                        points.push(block * BLOCK_POINTS + offset);
+                        states.extend(point.iter().map(FloatState::partial));
                     }
                 }
             }
             groups.push(PartialGroup {
                 metric: group.metric,
                 points,
+                states,
             });
         }
         PartialAggregate {
@@ -154,9 +159,6 @@ impl FloatAggregator {
         }
     }
 }
-
-/// One point of a partial group: its grid position and one state per field.
-type Point = (usize, Vec<Option<AccumulatorState>>);
 
 /// The points of `group` that carry a state: the ones a partial of it holds.
 fn seen_points(group: &Group, width: usize) -> usize {
@@ -174,14 +176,13 @@ fn seen_points(group: &Group, width: usize) -> usize {
 /// were built with, so spare capacity is paid for rather than skipped.
 fn group_bytes(group: &PartialGroup) -> usize {
     metric_bytes(&group.metric)
-        .saturating_add(group.points.capacity().saturating_mul(size_of::<Point>()))
-        .saturating_add(group.points.iter().fold(0usize, |bytes, (_, states)| {
-            bytes.saturating_add(
-                states
-                    .capacity()
-                    .saturating_mul(size_of::<Option<AccumulatorState>>()),
-            )
-        }))
+        .saturating_add(group.points.capacity().saturating_mul(size_of::<usize>()))
+        .saturating_add(
+            group
+                .states
+                .capacity()
+                .saturating_mul(size_of::<Option<AccumulatorState>>()),
+        )
 }
 
 /// Bytes a group's label key holds: a pair per capacity slot, and the `__name__` entry, whose
@@ -277,12 +278,12 @@ impl FloatMerger {
             )));
         }
         for group in &partial.groups {
-            for (point, states) in &group.points {
-                if *point >= points || states.len() != width {
-                    return Err(DataFusionError::Execution(
-                        "aggregate state does not match the grid or fields of the merge".into(),
-                    ));
-                }
+            if group.states.len() != group.points.len().saturating_mul(width)
+                || group.points.iter().any(|point| *point >= points)
+            {
+                return Err(DataFusionError::Execution(
+                    "aggregate state does not match the grid or fields of the merge".into(),
+                ));
             }
         }
         let input_live = partial.groups.iter().fold(
@@ -308,7 +309,7 @@ impl FloatMerger {
                 Some(index) => index,
                 None => self.open_group(metric, key, live, &mut budget)?,
             };
-            self.merge_points(index, group.points, live, &mut budget)?;
+            self.merge_points(index, &group.points, &group.states, live, &mut budget)?;
         }
         Ok(())
     }
@@ -384,7 +385,8 @@ impl FloatMerger {
     fn merge_points(
         &mut self,
         index: usize,
-        points: Vec<Point>,
+        points: &[usize],
+        states: &[Option<AccumulatorState>],
         live: usize,
         budget: &mut impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
@@ -393,7 +395,8 @@ impl FloatMerger {
             .saturating_mul(width)
             .saturating_mul(size_of::<FloatState>());
         let blocks = &mut self.groups[index].blocks;
-        for (point, states) in points {
+        // A series has at least one field; `max` only keeps `chunks_exact(0)` from panicking.
+        for (&point, states) in points.iter().zip(states.chunks_exact(width.max(1))) {
             let block_index = point / BLOCK_POINTS;
             let entries = blocks.len();
             let block = match blocks.entry(block_index) {
@@ -417,7 +420,7 @@ impl FloatMerger {
             };
             let offset = (point % BLOCK_POINTS) * width;
             for (slot, state) in block[offset..offset + width].iter_mut().zip(states) {
-                if let Some(state) = state {
+                if let Some(state) = *state {
                     slot.merge(self.op, FloatState::from_partial(state));
                 }
             }
