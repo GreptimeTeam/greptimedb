@@ -328,6 +328,8 @@ impl ColumnarPreparedSource {
         let reservation =
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
         let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut key = Vec::new();
         for id in indexes {
             let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
                 index.store.clone(),
@@ -408,29 +410,23 @@ impl ColumnarPreparedSource {
                         table_id: table.value(row),
                         tsid: tsid.value(row),
                     };
-                    let mut values = HashMap::new();
-                    for (column_id, strings) in &tag_arrays {
-                        values.insert(
-                            *column_id,
-                            (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
-                        );
-                    }
                     // TODO(yingwen): Separate raw-series identity from label representation.
                     // The PoC formats assume (table_id, tsid) uniqueness; encode once at
                     // this adapter boundary until RawSeriesChunk no longer needs sparse keys.
-                    let mut key = Vec::new();
-                    let codec = SparsePrimaryKeyCodec::schemaless();
+                    key.clear();
                     codec
                         .encode_internal(id.table_id, id.tsid, &mut key)
                         .map_err(|e| invalid(e.to_string()))?;
                     codec
                         .encode_to_vec(
-                            tags.iter().map(|(id, _)| {
+                            tag_arrays.iter().map(|(column_id, strings)| {
                                 (
-                                    *id,
-                                    values[id]
-                                        .as_deref()
-                                        .map_or(ValueRef::Null, ValueRef::String),
+                                    *column_id,
+                                    if strings.is_null(row) {
+                                        ValueRef::Null
+                                    } else {
+                                        ValueRef::String(strings.value(row))
+                                    },
                                 )
                             }),
                             &mut key,
@@ -444,6 +440,17 @@ impl ColumnarPreparedSource {
                         }
                         continue;
                     }
+                    // Only a new candidate needs owned labels; a series repeats in the index of
+                    // every window it spans.
+                    let values: HashMap<_, _> = tag_arrays
+                        .iter()
+                        .map(|(column_id, strings)| {
+                            (
+                                *column_id,
+                                (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
+                            )
+                        })
+                        .collect();
                     let bytes = key.len()
                         + values.values().flatten().map(String::len).sum::<usize>()
                         + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
@@ -456,7 +463,7 @@ impl ColumnarPreparedSource {
                         id,
                         Candidate {
                             id,
-                            key: Buffer::from(key),
+                            key: Buffer::from_slice_ref(&key),
                             tags: values,
                         },
                     );
