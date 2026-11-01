@@ -1665,15 +1665,17 @@ impl BinaryRuntime {
             };
             match &self.kernel {
                 PairKernel::Binary(matching) => {
-                    // The next step replaces `None` with this node and field's evidence.
-                    let evidence_guard = None; // no lock taken yet
+                    let evidence = self.evidence.as_deref();
                     binary_vectors_with_reservation(
                         matching,
                         left_schema,
                         left,
                         right_schema,
                         right,
-                        evidence_guard,
+                        evidence.map(|evidence| crate::vector_match::NodeEvidence {
+                            node: self.slot(0).0,
+                            evidence,
+                        }),
                         &mut reserve,
                     )
                 }

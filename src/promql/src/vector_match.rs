@@ -207,13 +207,25 @@ pub fn binary_vectors(
 /// once per phase, and in the blocks a growing result buffer is reserved in. It is never asked per
 /// grid point or per row. A total `reserve` refuses ends the operation with that error, and what it
 /// admitted stays the caller's to release.
+#[derive(Clone, Copy)]
+pub(crate) struct NodeEvidence<'a> {
+    pub(crate) node: usize,
+    pub(crate) evidence: &'a DuplicateEvidence,
+}
+
+struct FieldEvidence<'a> {
+    node: usize,
+    field: usize,
+    evidence: &'a DuplicateEvidence,
+}
+
 pub(crate) fn binary_vectors_with_reservation(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
     lhs: &[Series],
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
-    evidence: Option<&DuplicateEvidence>,
+    evidence: Option<NodeEvidence<'_>>,
     reserve: &mut dyn FnMut(usize) -> Result<()>,
 ) -> Result<Vec<Series>> {
     let mut budget = Budget::new(reserve);
@@ -236,7 +248,7 @@ fn binary_vectors_inner(
     lhs: &[Series],
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
-    _evidence: Option<&DuplicateEvidence>,
+    evidence: Option<NodeEvidence<'_>>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Vec<Series>> {
     // The grid both operands are evaluated on, checked before anything is reserved for them.
@@ -254,13 +266,18 @@ fn binary_vectors_inner(
     for field in 0..width {
         let lhs = Operand::try_new(lhs_schema, lhs, field)?;
         let rhs = Operand::try_new(rhs_schema, rhs, field)?;
+        let field_evidence = evidence.map(|evidence| FieldEvidence {
+            node: evidence.node,
+            field,
+            evidence: evidence.evidence,
+        });
         let results = binary_field(
             matching,
             &grid,
             &lhs,
             &rhs,
             &mut errors,
-            _evidence,
+            field_evidence,
             budget.as_deref_mut(),
         )?;
         // The field's flags, tables and sort are destroyed with its frame, so its phase ends here:
@@ -717,7 +734,7 @@ fn binary_field(
     lhs: &Operand<'_>,
     rhs: &Operand<'_>,
     errors: &mut Vec<(usize, u8, String)>,
-    _evidence: Option<&DuplicateEvidence>,
+    evidence: Option<FieldEvidence<'_>>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Results> {
     let (many, one, include, one_is_left) = match &matching.cardinality {
@@ -754,10 +771,17 @@ fn binary_field(
     // Prometheus short-circuits a point where either side is empty, before any check; with a fill
     // value only a point where both are empty.
     let filling = fill.lhs.is_some() || fill.rhs.is_some();
-    let evaluated: Vec<bool> = lhs
-        .presence(points)
-        .into_iter()
-        .zip(rhs.presence(points))
+    let lhs_present = lhs.presence(points);
+    let rhs_present = rhs.presence(points);
+    if let Some(evidence) = &evidence {
+        evidence
+            .evidence
+            .publish(evidence.node, evidence.field, &lhs_present, &rhs_present)?;
+    }
+    let evaluated: Vec<bool> = lhs_present
+        .iter()
+        .copied()
+        .zip(rhs_present.iter().copied())
         .map(|(lhs, rhs)| if filling { lhs || rhs } else { lhs && rhs })
         .collect();
 
@@ -772,6 +796,17 @@ fn binary_field(
             one,
             members,
             |point| {
+                if let Some(evidence) = &evidence {
+                    let side = if one_is_left { "left" } else { "right" };
+                    evidence.evidence.record_candidate(
+                        evidence.node,
+                        evidence.field,
+                        point,
+                        0,
+                        key.clone(),
+                        duplicate_message(key, side, timestamp_at(point)),
+                    )?;
+                }
                 if evaluated[point] && duplicate_at.is_none_or(|first| point < first) {
                     duplicate_at = Some(point);
                 }
@@ -974,17 +1009,7 @@ fn binary_field(
     // matches, and only after the operator checks that result label sets are unique.
     if let Some((point, key)) = one_duplicate {
         let side = if one_is_left { "left" } else { "right" };
-        errors.push((
-            point,
-            0,
-            format!(
-                "found duplicate series for the match group {} on the {side} hand-side of the \
-                 operation at {} ms; many-to-many matching not allowed: matching labels must be \
-                 unique on one side",
-                render(key),
-                timestamp_at(point)
-            ),
-        ));
+        errors.push((point, 0, duplicate_message(key, side, timestamp_at(point))));
     }
     if let Some((point, group)) = implicit_many_to_one {
         let key = &group_keys[group];
@@ -1536,6 +1561,15 @@ fn same_grid(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Arc<EvalGrid>> {
             "vector operands must be evaluated on the same grid".into(),
         )),
     }
+}
+
+fn duplicate_message(key: &GroupKey, side: &str, timestamp: i64) -> String {
+    format!(
+        "found duplicate series for the match group {} on the {side} hand-side of the \
+         operation at {timestamp} ms; many-to-many matching not allowed: matching labels must be \
+         unique on one side",
+        render(key),
+    )
 }
 
 /// Label pairs identifying a match group or a result; empty values are absent, as in
