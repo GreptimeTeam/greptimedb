@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datatypes::series::histogram::{CounterResetHint, HistogramBatchBuilder, HistogramView};
 use datatypes::series::samples::{
     DenseSamplesRef, FieldSpec, RowCursor, SampleRef, Series, SeriesSchema,
@@ -1534,7 +1535,149 @@ fn same_grid(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Arc<EvalGrid>> {
 
 /// Label pairs identifying a match group or a result; empty values are absent, as in
 /// Prometheus.
-pub(crate) type GroupKey = Vec<(Arc<str>, Arc<str>)>;
+pub type GroupKey = Vec<(Arc<str>, Arc<str>)>;
+
+/// A per-node, per-field reduction of duplicate evidence across output partitions.
+pub struct DuplicateEvidence {
+    grid_len: usize,
+    slots: std::sync::Mutex<HashMap<(usize, usize), DuplicateSlot>>,
+    reservation: MemoryReservation,
+}
+
+#[derive(Default)]
+struct DuplicateSlot {
+    lhs_present: Vec<bool>,
+    rhs_present: Vec<bool>,
+    candidates: Vec<Option<DuplicateCandidate>>,
+}
+
+/// The best duplicate candidate retained for one grid point.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DuplicateCandidate {
+    pub point: usize,
+    pub rank: u8,
+    pub group: GroupKey,
+    pub message: String,
+}
+
+impl DuplicateEvidence {
+    /// Creates evidence storage sized to the evaluation grid for each output partition.
+    pub fn new(pool: &Arc<dyn MemoryPool>, partitions: usize) -> Self {
+        Self {
+            grid_len: partitions,
+            slots: std::sync::Mutex::new(HashMap::new()),
+            reservation: MemoryConsumer::new("DuplicateEvidence").register(pool),
+        }
+    }
+
+    /// ORs one partition's operand presence into the node/field slot.
+    pub fn publish(
+        &self,
+        node_index: usize,
+        field: usize,
+        lhs_present: &[bool],
+        rhs_present: &[bool],
+    ) -> Result<()> {
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.entry((node_index, field)).or_default();
+        let len = self.grid_len;
+        if len > slot.lhs_present.len() {
+            let additional = (len - slot.lhs_present.len())
+                .saturating_mul(2)
+                .saturating_mul(std::mem::size_of::<bool>());
+            self.reservation.try_grow(additional)?;
+            slot.lhs_present.resize(len, false);
+            slot.rhs_present.resize(len, false);
+        }
+        for (dst, src) in slot.lhs_present.iter_mut().zip(lhs_present) {
+            *dst |= *src;
+        }
+        for (dst, src) in slot.rhs_present.iter_mut().zip(rhs_present) {
+            *dst |= *src;
+        }
+        Ok(())
+    }
+
+    /// Retains the lowest-ranked candidate for this point, independent of current presence.
+    pub fn record_candidate(
+        &self,
+        node_index: usize,
+        field: usize,
+        point: usize,
+        rank: u8,
+        group: GroupKey,
+        message: String,
+    ) -> Result<()> {
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.entry((node_index, field)).or_default();
+        if point >= self.grid_len {
+            return Ok(());
+        }
+        if slot.candidates.len() != self.grid_len {
+            slot.candidates.resize_with(self.grid_len, || None);
+        }
+        let Some(existing) = slot.candidates.get(point).and_then(Option::as_ref) else {
+            let bytes = group
+                .iter()
+                .map(|(name, value)| name.len().saturating_add(value.len()))
+                .sum::<usize>()
+                .saturating_add(message.len());
+            self.reservation.try_grow(bytes)?;
+            if point < self.grid_len {
+                slot.candidates[point] = Some(DuplicateCandidate {
+                    point,
+                    rank,
+                    group,
+                    message,
+                });
+            }
+            return Ok(());
+        };
+        if rank < existing.rank {
+            let old_bytes = existing
+                .group
+                .iter()
+                .map(|(name, value)| name.len().saturating_add(value.len()))
+                .sum::<usize>()
+                .saturating_add(existing.message.len());
+            let new_bytes = group
+                .iter()
+                .map(|(name, value)| name.len().saturating_add(value.len()))
+                .sum::<usize>()
+                .saturating_add(message.len());
+            self.reservation.try_grow(new_bytes)?;
+            self.reservation.shrink(old_bytes);
+            slot.candidates[point] = Some(DuplicateCandidate {
+                point,
+                rank,
+                group,
+                message,
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns the earliest retained candidate whose merged presence satisfies the final gate.
+    pub fn settled(
+        &self,
+        node_index: usize,
+        field: usize,
+        filling: bool,
+    ) -> Option<DuplicateCandidate> {
+        let slots = self.slots.lock().unwrap();
+        let slot = slots.get(&(node_index, field))?;
+        slot.candidates
+            .iter()
+            .enumerate()
+            .find_map(|(point, candidate)| {
+                let lhs = slot.lhs_present.get(point).copied().unwrap_or(false);
+                let rhs = slot.rhs_present.get(point).copied().unwrap_or(false);
+                (if filling { lhs || rhs } else { lhs && rhs })
+                    .then(|| candidate.clone())
+                    .flatten()
+            })
+    }
+}
 
 pub(crate) fn group_key(metric: &SeriesLabels, labels: &MatchingLabels) -> GroupKey {
     let mut key: GroupKey = match labels {
