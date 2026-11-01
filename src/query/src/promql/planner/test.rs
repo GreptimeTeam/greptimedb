@@ -233,6 +233,17 @@ fn operator_metric_table(
     le: Option<&str>,
     value: DirectOrValue,
 ) -> table::TableRef {
+    operator_metric_table_with_engine(name, table_id, tag, le, value, DEFAULT_ENGINE)
+}
+
+fn operator_metric_table_with_engine(
+    name: &str,
+    table_id: u32,
+    tag: &str,
+    le: Option<&str>,
+    value: DirectOrValue,
+    engine: &str,
+) -> table::TableRef {
     let value_type = match &value {
         DirectOrValue::Float64(_) => ConcreteDataType::float64_datatype(),
         DirectOrValue::Int64(_) => ConcreteDataType::int64_datatype(),
@@ -240,8 +251,13 @@ fn operator_metric_table(
         DirectOrValue::Utf8(_) => ConcreteDataType::string_datatype(),
     };
     let tag_count = 1 + usize::from(le.is_some());
+    let (tag_name, time_name, value_name) = if engine == NATIVE_ENGINE {
+        ("tag_0", "timestamp", "field_0")
+    } else {
+        ("tag", "ts", "v")
+    };
     let mut columns = vec![ColumnSchema::new(
-        "tag".to_string(),
+        tag_name.to_string(),
         ConcreteDataType::string_datatype(),
         false,
     )];
@@ -254,12 +270,12 @@ fn operator_metric_table(
     }
     columns.extend([
         ColumnSchema::new(
-            "ts".to_string(),
+            time_name.to_string(),
             ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         )
         .with_time_index(true),
-        ColumnSchema::new("v".to_string(), value_type, true),
+        ColumnSchema::new(value_name.to_string(), value_type, true),
     ]);
     let schema = Arc::new(Schema::new(columns));
     let mut arrays = vec![Arc::new(StringArray::from(vec![tag])) as Arc<dyn Array>];
@@ -280,6 +296,7 @@ fn operator_metric_table(
     );
     let value_index = tag_count + 1;
     let meta = TableMetaBuilder::empty()
+        .engine(engine.to_string())
         .schema(schema)
         .primary_key_indices((0..tag_count).collect())
         .value_indices(vec![value_index])
@@ -2581,7 +2598,11 @@ async fn native_fused_delta_temporality_non_counter_math_still_folds() {
 /// A whole-vector operation is not a per-series tree, so it stays on the existing plan.
 #[tokio::test]
 async fn native_fused_whole_vector_operation_falls_back() {
-    for query in ["sort(some_metric)", "absent(some_metric)"] {
+    for query in [
+        "sort(some_metric)",
+        "absent(some_metric)",
+        "label_replace(some_metric, \"dst\", \"$1\", \"src\", \"(.*)\")",
+    ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;
         assert!(
@@ -2598,25 +2619,47 @@ async fn native_fused_whole_vector_operation_falls_back() {
 
 #[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
-    for query in [
-        "sum_over_time(rate(some_metric[5m])[1h:])",
-        "histogram_count(some_metric)",
-        "ceil(some_metric)",
-    ] {
-        let plan = build_native_fused_plan(query, true).await;
-        let display = plan.display_indent().to_string();
-        assert!(
-            !display.contains("FusedSeries"),
-            "`{query}` must not enter the limited native POC: {display}"
-        );
-        // Falling back is the existing plan, not an approximation of it.
-        let without_flag = build_native_fused_plan(query, false).await;
-        assert_eq!(
-            display,
-            without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan"
-        );
-    }
+    let query = "sum_over_time(rate(some_metric[5m])[1h:])";
+    let plan = build_native_fused_plan(query, true).await;
+    let display = plan.display_indent().to_string();
+    assert!(
+        !display.contains("FusedSeries"),
+        "`{query}` must not enter the limited native POC: {display}"
+    );
+    let without_flag = build_native_fused_plan(query, false).await;
+    assert_eq!(
+        display,
+        without_flag.display_indent().to_string(),
+        "`{query}`"
+    );
+}
+
+#[tokio::test]
+async fn native_histogram_count_drops_float_input() {
+    let query = "histogram_count(some_metric)";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("histogram_count uses the native route");
+    assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
+    assert!(format!("{:?}", fused.tree()).contains("Count"));
+    // The in-memory table scan is not a RegionScanExec or an explicit raw-frame source, so this
+    // unit harness cannot execute a region-backed native plan. Native histogram kernels test that
+    // a float input is dropped; this test pins the compiled operation and route.
+}
+
+#[tokio::test]
+async fn native_ceil_maps_raw_float_input() {
+    let query = "ceil(some_metric)";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("ceil uses the native route");
+    assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
+    let mut names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(vec!["field_0", "tag_0", "timestamp"], names);
 }
 
 /// Independent selector occurrences remain distinct scans in the native tree.
@@ -3018,8 +3061,8 @@ async fn native_fused_info_over_its_own_table_reads_two_scans_in_the_region() {
     );
 }
 
-/// A function of each value or an operation with a constant around a pair keeps the pair native,
-/// on one table with both scans under the node.
+/// A compiled native function (including `ceil`) and a pointwise operation around a pair
+/// remain native, on one table with both scans under the node.
 #[tokio::test]
 async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
     for query in [
@@ -3040,6 +3083,10 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
         );
         assert_eq!(2, fused.inputs().len(), "{query}");
     }
+
+    let query = "ceil(some_metric)";
+    let plan = build_native_fused_plan(query, true).await;
+    assert!(find_fused_series(&plan).is_some(), "{query}: {plan}");
 }
 
 /// A tree of more than two selectors binds one input per occurrence: under the node directly when
@@ -3168,9 +3215,8 @@ fn sorted_column_names(plan: &LogicalPlan) -> Vec<String> {
 }
 
 /// An aggregate is split: the merge stays on the frontend and the per-series prefix runs in the
-/// producer, which is the one shape a region can evaluate on its own. The rows carry the columns the
-/// existing plan carries - names, tags and time - which is what keeps the result readable whichever
-/// route answered it.
+/// producer. Native names follow the compiled tree; grouping labels, values and timestamps retain
+/// their existing schema roles.
 #[tokio::test]
 async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
     for query in [
@@ -3202,7 +3248,6 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
         "abs(sum(some_metric)) * 2",
     ] {
         let plan = build_native_fused_plan(query, true).await;
-        let legacy = build_native_fused_plan(query, false).await;
         let display = plan.display_indent().to_string();
         assert!(
             display.contains("AggregateFinalize: "),
@@ -3219,10 +3264,33 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
             "`{query}`: {}",
             producer.tree()
         );
+        let expected_names: &[&str] = match query {
+            "sum(some_metric)" => &["field_0", "timestamp"],
+            "avg(some_metric)" => &["field_0", "timestamp"],
+            "count(some_metric)" => &["field_0", "timestamp"],
+            "min(some_metric)" => &["field_0", "timestamp"],
+            "max(some_metric)" => &["field_0", "timestamp"],
+            "group(some_metric)" => &["field_0", "timestamp"],
+            "stddev(some_metric)" => &["field_0", "timestamp"],
+            "stdvar(some_metric)" => &["field_0", "timestamp"],
+            "sum by (tag_0) (rate(some_metric[5m]))" => &["field_0", "tag_0", "timestamp"],
+            "sum without (tag_0) (some_metric)" => &["field_0", "timestamp"],
+            "sum(rate(some_metric[5m]))" => &["field_0", "timestamp"],
+            "ceil(sum(some_metric))" => &["field_0", "timestamp"],
+            "sum(avg(some_metric) by (tag_0))" => &["field_0", "timestamp"],
+            "sum(8 * rate(some_metric[5m]))" => &["field_0", "timestamp"],
+            "max(10 - rate(some_metric[5m]))" => &["field_0", "timestamp"],
+            "100 - avg(rate(some_metric[5m]))" => &["field_0", "timestamp"],
+            "sum(some_metric) * 2" => &["field_0", "timestamp"],
+            "100 / sum(some_metric)" => &["field_0", "timestamp"],
+            "-sum(some_metric)" => &["field_0", "timestamp"],
+            "abs(sum(some_metric)) * 2" => &["field_0", "timestamp"],
+            _ => panic!("missing exact native schema expectation for `{query}`"),
+        };
         assert_eq!(
-            sorted_column_names(&legacy),
-            sorted_column_names(&plan),
-            "`{query}` must report the columns the existing plan reports"
+            expected_names,
+            sorted_column_names(&plan).as_slice(),
+            "exact native output columns for `{query}`"
         );
     }
 }
@@ -3257,22 +3325,23 @@ async fn native_fused_nested_aggregate_splits_at_the_innermost_aggregate() {
     }
 }
 
-/// A nested aggregate's outer names are the existing plan's: `sum(avg(x))` reports the outer `sum`.
+/// A nested aggregate reports the outer operation's native output name.
 #[tokio::test]
 async fn native_fused_nested_aggregate_keeps_the_outer_names() {
     let query = "sum(avg(some_metric) by (tag_0))";
     let plan = build_native_fused_plan(query, true).await;
-    let legacy = build_native_fused_plan(query, false).await;
 
-    assert_eq!(sorted_column_names(&legacy), sorted_column_names(&plan));
-    // The merged value enters the suffix, so no column is named after the inner aggregate.
-    assert!(
-        plan.schema()
-            .fields()
-            .iter()
-            .all(|field| !field.name().starts_with("avg(")),
-        "{:?}",
-        sorted_column_names(&plan)
+    assert_eq!(
+        sorted_column_names(&plan),
+        vec!["field_0", "timestamp"],
+        "a bare outer sum drops the inner grouping label and names the value after the compiled root field, not legacy expression text"
+    );
+
+    let grouped = build_native_fused_plan("sum by (tag_0) (some_metric)", true).await;
+    assert_eq!(
+        sorted_column_names(&grouped),
+        vec!["field_0", "tag_0", "timestamp"],
+        "an explicit by grouping keeps its label in the exact native schema"
     );
 }
 
@@ -3310,6 +3379,7 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
         // The sibling is data rather than a literal scalar, so the operation would pair each series
         // with the aggregate's series before the merge.
         "sum(some_metric) / some_metric",
+        "some_metric + sum(some_metric)",
         // A scalar a call computes is not a literal the split could keep: `scalar(...)` has no
         // native node, so the statement keeps the existing plan.
         "sum(some_metric) / scalar(some_metric)",
@@ -3329,52 +3399,78 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     }
 }
 
-/// `clamp` is not a function the existing planner has a kernel for, so an aggregate over it fails
-/// while the legacy plan is being built - before either route is chosen, and the same way on both.
-///
-/// The native route only reads the legacy plan's column names, which means it inherits that refusal
-/// rather than answering a query the existing path would reject. Both the split template
-/// (`clamp(x, 1, 2)`) and the empty range (`clamp(x, 2, 1)`) fail here, so neither is claimed as
-/// supported.
+/// Native planning derives aggregate schema from the compiled tree, admitting clamp with an exact
+/// native output schema while the legacy planner continues to reject this function.
 #[tokio::test]
-async fn native_fused_clamp_aggregate_keeps_the_existing_error() {
-    for query in [
-        "sum(clamp(some_metric, 1, 2))",
-        "sum(clamp(some_metric, 2, 1))",
-    ] {
-        for native_fused in [true, false] {
-            // Each attempt needs its own provider: planning moves the one it is given.
-            let table_provider = build_test_table_provider_with_options(
-                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-                1,
-                1,
-                vec![],
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-                ConcreteDataType::float64_datatype(),
-                NATIVE_ENGINE,
-            )
-            .await;
-            let eval_stmt = build_eval_stmt(query);
-            let error = PromPlanner::stmt_to_plan_with_annotations(
-                table_provider,
-                &eval_stmt,
-                &build_query_engine_state(),
-                None,
-                native_fused,
-            )
-            .await
-            .unwrap_err();
-
-            assert!(
-                matches!(
-                    &error,
-                    crate::promql::error::Error::UnsupportedExpr { name, .. } if name == "clamp"
+async fn native_fused_clamp_aggregate_is_admitted() {
+    let query = "sum(clamp(m, 1, 2))";
+    let make_provider = || {
+        let catalog = MemoryCatalogManager::with_default_setup();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "m".to_string(),
+                table_id: 3_001,
+                table: operator_metric_table_with_engine(
+                    "m",
+                    3_001,
+                    "a",
+                    None,
+                    DirectOrValue::Float64(0.5),
+                    NATIVE_ENGINE,
                 ),
-                "`{query}` with the flag {native_fused}: {error}"
-            );
-        }
-    }
+            })
+            .unwrap();
+        DfTableSourceProvider::new(
+            catalog,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    };
+    let state = build_query_engine_state();
+    let provider = make_provider();
+    let plan = PromPlanner::stmt_to_plan_with_annotations(
+        provider,
+        &operator_eval_stmt(query),
+        &state,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        find_aggregate_finalize(&plan).is_some(),
+        "{}",
+        plan.display_indent()
+    );
+    let mut native_names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    native_names.sort();
+    assert_eq!(vec!["field_0", "timestamp"], native_names);
+
+    let legacy_provider = make_provider();
+    let legacy_result = PromPlanner::stmt_to_plan_with_annotations(
+        legacy_provider,
+        &operator_eval_stmt(query),
+        &state,
+        None,
+        false,
+    )
+    .await;
+    assert!(
+        legacy_result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported expr type: clamp"),
+        "with the native flag off, legacy planning must still reject clamp"
+    );
 }
 
 /// A label rewrite keeps the existing plan, on every shape, because the native runtime refuses a
