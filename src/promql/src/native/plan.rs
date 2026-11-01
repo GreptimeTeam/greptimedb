@@ -30,7 +30,7 @@ use std::cell::Cell;
 use std::hash::Hash;
 use std::sync::Arc;
 
-const MAX_NATIVE_NODE_DEPTH: usize = 128;
+const MAX_NATIVE_NODE_DEPTH: usize = 64;
 thread_local! {
     static NATIVE_NODE_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -542,6 +542,7 @@ impl NativeTree {
     /// node after deciding that this combination is supported, so the error is
     /// [`DataFusionError::Internal`] and not a statement the client wrote wrong.
     pub fn try_new(root: NativeNode) -> Result<Self> {
+        ensure_native_node_depth(&root)?;
         root.validate()?;
         Ok(Self { root })
     }
@@ -549,6 +550,10 @@ impl NativeTree {
     /// The root node.
     pub fn root(&self) -> &NativeNode {
         &self.root
+    }
+
+    pub(crate) fn validate_depth(&self) -> Result<()> {
+        ensure_native_node_depth(&self.root)
     }
 }
 
@@ -581,6 +586,45 @@ impl<'de> serde::Deserialize<'de> for NativeTree {
         let wire = Wire::deserialize(deserializer)?;
         Self::try_new(wire.root).map_err(serde::de::Error::custom)
     }
+}
+
+fn ensure_native_node_depth(root: &NativeNode) -> Result<()> {
+    fn visit(node: &NativeNode, depth: usize) -> Result<()> {
+        if depth > MAX_NATIVE_NODE_DEPTH {
+            return Err(invalid(&format!(
+                "native tree nesting exceeds {MAX_NATIVE_NODE_DEPTH}"
+            )));
+        }
+        match &node.expr {
+            NativeExpr::VectorOf { input }
+            | NativeExpr::Instant { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. } => visit(input, depth + 1),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                visit(input, depth + 1)?;
+                for parameter in parameters {
+                    visit(parameter, depth + 1)?;
+                }
+                Ok(())
+            }
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                visit(left, depth + 1)?;
+                visit(right, depth + 1)
+            }
+            NativeExpr::Info { base, info, .. } => {
+                visit(base, depth + 1)?;
+                visit(info, depth + 1)
+            }
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => Ok(()),
+        }
+    }
+    visit(root, 1)
 }
 
 impl NativeNode {
@@ -1082,58 +1126,6 @@ fn invalid(reason: &str) -> DataFusionError {
 
 #[cfg(test)]
 mod tests;
-
-/// Encode a validated native tree in the versioned Postcard envelope.
-#[cfg(test)]
-pub(crate) fn encode_tree(tree: &NativeTree) -> Result<Vec<u8>, String> {
-    const MAGIC: &[u8; 4] = b"NPRQ";
-    const VERSION: u32 = 2;
-    const MAX_BYTES: usize = 1_048_576;
-    let payload = postcard::to_stdvec(tree).map_err(|e| e.to_string())?;
-    if payload.len() > MAX_BYTES {
-        return Err("oversized native tree payload".into());
-    }
-    let mut bytes = Vec::with_capacity(12 + payload.len());
-    bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(&VERSION.to_le_bytes());
-    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(&payload);
-    Ok(bytes)
-}
-
-/// Decode and validate a versioned native tree envelope.
-#[cfg(test)]
-pub(crate) fn decode_tree(bytes: &[u8]) -> Result<NativeTree, String> {
-    const MAGIC: &[u8; 4] = b"NPRQ";
-    const VERSION: u32 = 2;
-    const MAX_BYTES: usize = 1_048_576;
-    if bytes.len() < 12 {
-        return Err("truncated native tree envelope".into());
-    }
-    if &bytes[..4] != MAGIC {
-        return Err("invalid native tree magic".into());
-    }
-    let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    if version != VERSION {
-        return Err(format!("unknown native tree version {version}"));
-    }
-    let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    if len > MAX_BYTES {
-        return Err("oversized native tree payload".into());
-    }
-    if bytes.len() < 12 + len {
-        return Err("truncated native tree payload".into());
-    }
-    if bytes.len() != 12 + len {
-        return Err("trailing bytes after native tree payload".into());
-    }
-    let (tree, remainder) = postcard::take_from_bytes::<NativeTree>(&bytes[12..])
-        .map_err(|e| format!("invalid native tree payload: {e}"))?;
-    if !remainder.is_empty() {
-        return Err("trailing bytes after native tree payload".into());
-    }
-    Ok(tree)
-}
 
 impl PartialEq for BoundScalar {
     fn eq(&self, o: &Self) -> bool {

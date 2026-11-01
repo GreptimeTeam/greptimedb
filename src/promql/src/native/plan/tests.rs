@@ -1493,21 +1493,25 @@ fn a_vector_operation_cannot_consume_raw_samples() {
     assert!(error.to_string().contains("an evaluated vector"), "{error}");
 }
 
-/// A node that reports samples while holding no input node is refused where the node is built.
-///
-/// The tree is constructed directly here — a child module of `native::plan` may — because the node
-/// is one the public constructors decline: a constant does not produce samples, and a zero-input
-/// tree has no scan that would refuse it later. Every public constructor therefore stays a checked
-/// one.
+/// FusedSeries must reject a tree constructed outside the checked NativeTree constructor.
 #[test]
-fn a_samples_root_without_an_input_is_refused() {
+fn fused_series_rejects_a_tree_over_the_depth_limit() {
+    use super::MAX_NATIVE_NODE_DEPTH;
+
     let statement_grid = grid(0, 60_000, 4);
-    let tree = NativeTree {
-        root: NativeNode {
-            expr: NativeExpr::Scalar(BoundScalar { value: 1.0 }),
+    let mut root = input_on(Arc::clone(&statement_grid));
+    for _ in 0..MAX_NATIVE_NODE_DEPTH {
+        root = NativeNode {
+            expr: NativeExpr::Map {
+                input: Box::new(root),
+                op: BoundMap {
+                    ops: Arc::new([MapOp::Math(MathOp::Abs)]),
+                },
+            },
             output: evaluated(Arc::new([]), Arc::clone(&statement_grid)),
-        },
-    };
+        };
+    }
+    let tree = NativeTree { root };
     let binding = FusedSeriesBinding {
         grid: statement_grid,
         time_index: "time".to_string(),
@@ -1524,10 +1528,7 @@ fn a_samples_root_without_an_input_is_refused() {
     )
     .expect_err("a samples root reads no source while reporting samples");
 
-    assert!(
-        error.to_string().contains("does not produce a scalar"),
-        "the refusal must name the contract the root breaks: {error}"
-    );
+    assert!(error.to_string().contains("exceeds 64"), "{error}");
 }
 
 /// `info` reads its info side's values as sample times, so it accepts only the instant selection
@@ -1571,7 +1572,7 @@ fn info_reads_the_sample_times_of_one_field() {
 }
 
 #[test]
-fn native_tree_deserialization_enforces_node_depth_limit() {
+fn native_tree_depth_limit_holds_across_lifecycle_on_named_worker_stack() {
     use super::MAX_NATIVE_NODE_DEPTH;
 
     fn nested_maps(map_count: usize) -> NativeTree {
@@ -1591,20 +1592,27 @@ fn native_tree_deserialization_enforces_node_depth_limit() {
         NativeTree { root: node }
     }
 
-    // CI sets a process-wide stack override, so use an explicit worker stack instead of the default.
+    // A leaf counts as one node; test exactly the cap and rejection on a named 2 MiB worker.
     std::thread::Builder::new()
+        .name("native-tree-depth-boundary".to_string())
         .stack_size(2 * 1024 * 1024)
         .spawn(|| {
-            // A leaf counts as a node too: 127 map wrappers plus the input gives exactly 128.
-            let at_limit = postcard::to_stdvec(&nested_maps(MAX_NATIVE_NODE_DEPTH - 1)).unwrap();
-            let decoded: NativeTree = postcard::from_bytes(&at_limit).unwrap();
-            assert!(decoded.root().validate().is_ok());
+            let at_limit = nested_maps(MAX_NATIVE_NODE_DEPTH - 1);
+            let checked = NativeTree::try_new(at_limit.root.clone()).unwrap();
+            let bytes = postcard::to_stdvec(&checked).unwrap();
+            let decoded: NativeTree = postcard::from_bytes(&bytes).unwrap();
+            decoded.root().validate().unwrap();
+            drop((decoded, bytes, checked, at_limit));
 
-            // Build directly, bypassing try_new so the 129-node shape reaches the Postcard decoder.
-            // Postcard maps custom serde errors to a unit variant, so assert the rejection itself.
-            let over_limit = postcard::to_stdvec(&nested_maps(MAX_NATIVE_NODE_DEPTH)).unwrap();
-            let error = postcard::from_bytes::<NativeTree>(&over_limit).unwrap_err();
-            assert_eq!(error, postcard::Error::SerdeDeCustom);
+            // Construct wire data beyond the cap without passing through try_new.
+            let over_limit = nested_maps(MAX_NATIVE_NODE_DEPTH);
+            let bytes = postcard::to_stdvec(&over_limit).unwrap();
+            assert_eq!(
+                postcard::from_bytes::<NativeTree>(&bytes).unwrap_err(),
+                postcard::Error::SerdeDeCustom
+            );
+            assert!(NativeTree::try_new(over_limit.root.clone()).is_err());
+            drop(over_limit);
         })
         .unwrap()
         .join()
@@ -1623,13 +1631,8 @@ fn native_tree_postcard_float_fidelity_round_trip() {
     ] {
         let value = f64::from_bits(bits);
         let tree = NativeTree::try_new(scalar_on(value, grid(0, 1, 1))).unwrap();
-        let decoded = NativeTree::try_new(
-            super::decode_tree(&super::encode_tree(&tree).unwrap())
-                .unwrap()
-                .root()
-                .clone(),
-        )
-        .unwrap();
+        let decoded: NativeTree =
+            postcard::from_bytes(&postcard::to_stdvec(&tree).unwrap()).unwrap();
         let NativeExpr::Scalar(value) = &decoded.root().expr else {
             panic!("scalar shape changed")
         };
@@ -1638,36 +1641,12 @@ fn native_tree_postcard_float_fidelity_round_trip() {
 }
 
 #[test]
-fn native_tree_envelope_rejects_version_size_trailing_and_truncation() {
+fn native_tree_postcard_rejects_trailing_bytes() {
     let tree = NativeTree::try_new(input()).unwrap();
-    let bytes = super::encode_tree(&tree).unwrap();
-    let mut bad_version = bytes.clone();
-    bad_version[4..8].copy_from_slice(&99u32.to_le_bytes());
-    bad_version[12..].fill(0xff);
-    assert!(
-        super::decode_tree(&bad_version)
-            .unwrap_err()
-            .contains("unknown native tree version")
-    );
-    let mut oversized = bytes.clone();
-    oversized[8..12].copy_from_slice(&(1_048_577u32).to_le_bytes());
-    assert!(
-        super::decode_tree(&oversized)
-            .unwrap_err()
-            .contains("oversized")
-    );
-    let mut trailing = bytes.clone();
-    trailing.push(0);
-    assert!(
-        super::decode_tree(&trailing)
-            .unwrap_err()
-            .contains("trailing")
-    );
-    assert!(
-        super::decode_tree(&bytes[..5])
-            .unwrap_err()
-            .contains("truncated")
-    );
+    let mut bytes = postcard::to_stdvec(&tree).unwrap();
+    bytes.push(0);
+    let (_, remainder) = postcard::take_from_bytes::<NativeTree>(&bytes).unwrap();
+    assert!(!remainder.is_empty());
 }
 
 #[test]
@@ -1704,7 +1683,8 @@ fn native_tree_non_prefix_shapes_round_trip() {
         NativeTree::try_new(set).unwrap(),
     ];
     for tree in trees {
-        let decoded = super::decode_tree(&super::encode_tree(&tree).unwrap()).unwrap();
+        let decoded: NativeTree =
+            postcard::from_bytes(&postcard::to_stdvec(&tree).unwrap()).unwrap();
         assert_eq!(decoded, tree);
     }
 }

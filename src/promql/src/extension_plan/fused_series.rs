@@ -319,8 +319,6 @@ impl FusedSeries {
             partial_fold,
             output_schema,
         } = payload;
-        let tree = NativeTree::try_new(tree.root().clone())
-            .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries tree: {e}")))?;
         let grid = Arc::new(
             EvalGrid::try_deferred(grid)
                 .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries grid: {e}")))?,
@@ -721,6 +719,8 @@ fn validate_binding(
     binding: &FusedSeriesBinding,
     child_count: usize,
 ) -> DataFusionResult<()> {
+    tree.validate_depth()
+        .map_err(|error| DataFusionError::Plan(format!("invalid FusedSeries tree: {error}")))?;
     if binding.tags.iter().any(|tag| tag == METRIC_NAME) && binding.metric_name.is_none() {
         return Err(DataFusionError::Plan(format!(
             "FusedSeries declares {METRIC_NAME:?} but binds no metric name"

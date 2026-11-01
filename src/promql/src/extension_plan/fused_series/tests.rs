@@ -925,7 +925,7 @@ impl Drop for StagedStream {
 }
 
 #[test]
-fn fused_series_envelope_round_trip_and_rejects_unsupported_payloads() {
+fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() {
     let tree = rate_tree();
     let original_binding = binding(&tree);
     // A frame-output node is checked against the codec's own frame layout, so it is built with
@@ -1270,7 +1270,7 @@ fn partial_decode_rejects_format_schema_and_tag_order_mismatch() {
 }
 
 #[test]
-fn fused_series_envelope_round_trips_large_tag_lists() {
+fn fused_series_encoding_round_trips_large_tag_lists() {
     let tags: Vec<String> = (0..1025).map(|i| format!("t{i}")).collect();
     let node = envelope_node_with_tags(tags);
     let decoded = FusedSeries::deserialize(&node.serialize().unwrap()).unwrap();

@@ -265,14 +265,21 @@ impl UserDefinedLogicalNodeCore for AggregateFinalize {
                 "AggregateFinalize should have exactly one input".to_string(),
             ));
         }
-        // The aggregate, the binding and the suffix are this node's own, so a rewritten input changes
-        // where the state comes from and nothing about how it is merged.
+        let input = inputs.swap_remove(0);
+        let expected = state_schema(&self.binding.tags);
+        if input.schema().as_arrow() != expected.as_ref() {
+            return Err(DataFusionError::Plan(format!(
+                "AggregateFinalize input must export aggregate state with schema {expected:?}, got {:?}",
+                input.schema().as_arrow()
+            )));
+        }
+        // A rewritten input changes where the correctly-shaped state comes from, not how it merges.
         Ok(Self {
             promql: Arc::clone(&self.promql),
             op: self.op.clone(),
             binding: self.binding.clone(),
             suffix: Arc::clone(&self.suffix),
-            input: inputs.swap_remove(0),
+            input,
             output_schema: Arc::clone(&self.output_schema),
             series_schema: Arc::clone(&self.series_schema),
         })
