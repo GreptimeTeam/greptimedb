@@ -89,6 +89,10 @@ impl FunctionState {
                 Ok(Some("test_pid".to_string()))
             }
 
+            async fn drain_node(&self, _ctx: QueryContextRef, _datanode_id: u64) -> Result<String> {
+                Ok("test_pid".to_string())
+            }
+
             async fn reconcile(&self, _request: ReconcileRequest) -> Result<Option<String>> {
                 Ok(Some("test_pid".to_string()))
             }

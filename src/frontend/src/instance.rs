@@ -2441,6 +2441,17 @@ mod tests {
             .fail()
         }
 
+        async fn drain_node(
+            &self,
+            _ctx: &ExecutorContext,
+            _datanode_id: u64,
+        ) -> common_meta::error::Result<String> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "drain_node",
+            }
+            .fail()
+        }
+
         async fn reconcile(
             &self,
             _ctx: &ExecutorContext,
@@ -2482,6 +2493,7 @@ mod tests {
         catalog_manager: Arc<catalog::memory::MemoryCatalogManager>,
         next_table_id: std::sync::atomic::AtomicU32,
         submitted: std::sync::Mutex<Vec<DdlTask>>,
+        drained: std::sync::Mutex<Vec<u64>>,
     }
 
     impl MockProcedureExecutor {
@@ -2490,6 +2502,7 @@ mod tests {
                 catalog_manager,
                 next_table_id: std::sync::atomic::AtomicU32::new(1026),
                 submitted: std::sync::Mutex::new(Vec::new()),
+                drained: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -2572,6 +2585,15 @@ mod tests {
                 operation: "migrate_region",
             }
             .fail()
+        }
+
+        async fn drain_node(
+            &self,
+            _ctx: &ExecutorContext,
+            datanode_id: u64,
+        ) -> common_meta::error::Result<String> {
+            self.drained.lock().unwrap().push(datanode_id);
+            Ok("test-drain-pid".to_string())
         }
 
         async fn reconcile(
@@ -3895,6 +3917,28 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_admin_drain_node_submits_procedure() -> TestResult<()> {
+        let catalog_manager =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let executor = Arc::new(MockProcedureExecutor::new(catalog_manager.clone()));
+        let instance = test_instance_with_catalog_manager(
+            catalog_manager,
+            test_table(1025, "target")?,
+            Plugins::new(),
+            None,
+            executor.clone(),
+        )
+        .await?;
+        let query_ctx = test_query_ctx(45);
+        query_ctx.set_current_user(Arc::new(AdminUserInfo));
+
+        let output = execute_one_sql(&instance, "ADMIN drain_node(7)", query_ctx).await?;
+        assert!(output.data.pretty_print().await.contains("test-drain-pid"));
+        assert_eq!(*executor.drained.lock().unwrap(), vec![7]);
         Ok(())
     }
 

@@ -73,6 +73,9 @@ pub trait ProcedureExecutor: Send + Sync {
         request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse>;
 
+    /// Submit a procedure to drain all leader regions from a datanode.
+    async fn drain_node(&self, ctx: &ExecutorContext, datanode_id: u64) -> Result<String>;
+
     /// Submit a reconcile task.
     async fn reconcile(
         &self,
@@ -148,6 +151,13 @@ impl ProcedureExecutor for LocalProcedureExecutor {
     ) -> Result<MigrateRegionResponse> {
         UnsupportedSnafu {
             operation: "migrate_region",
+        }
+        .fail()
+    }
+
+    async fn drain_node(&self, _ctx: &ExecutorContext, _datanode_id: u64) -> Result<String> {
+        UnsupportedSnafu {
+            operation: "drain_node",
         }
         .fail()
     }

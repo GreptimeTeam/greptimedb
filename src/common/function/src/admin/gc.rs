@@ -288,6 +288,14 @@ mod tests {
             unreachable!()
         }
 
+        async fn drain_node(
+            &self,
+            _query_ctx: QueryContextRef,
+            _datanode_id: u64,
+        ) -> Result<String> {
+            unreachable!()
+        }
+
         async fn reconcile(&self, _request: ReconcileRequest) -> Result<Option<String>> {
             unreachable!()
         }

@@ -129,6 +129,12 @@ impl Client {
             .await
     }
 
+    /// Submit a procedure to drain all leader regions from a datanode.
+    pub async fn drain_node(&self, datanode_id: u64) -> Result<String> {
+        let inner = self.inner.read().await;
+        inner.drain_node(datanode_id).await
+    }
+
     /// Reconcile the procedure state.
     pub async fn reconcile(&self, request: ReconcileRequest) -> Result<ReconcileResponse> {
         let inner = self.inner.read().await;
@@ -292,6 +298,14 @@ impl Inner {
             |resp: &MigrateRegionResponse| &resp.header,
         )
         .await
+    }
+
+    // TODO: Send this request through ProcedureService once the drain-node RPC is available.
+    async fn drain_node(&self, _datanode_id: u64) -> Result<String> {
+        error::UnsupportedProcedureRpcSnafu {
+            operation: "drain_node",
+        }
+        .fail()
     }
 
     async fn reconcile(&self, request: ReconcileRequest) -> Result<ReconcileResponse> {
