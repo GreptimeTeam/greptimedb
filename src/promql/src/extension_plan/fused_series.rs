@@ -1319,6 +1319,10 @@ impl ExecutionPlan for FusedSeriesExec {
         Self::name()
     }
 
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metric.clone_inner())
+    }
+
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
@@ -1394,15 +1398,50 @@ impl ExecutionPlan for FusedSeriesExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         if partition >= self.properties.partitioning.partition_count() {
+            if let Some(evidence) = self
+                .duplicate_evidence
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                evidence.abort();
+            }
             return Err(DataFusionError::Execution(
                 "FusedSeries output partition is out of range".into(),
             ));
         }
-        let state = NativeExecutionState::try_new(
+        let evidence = {
+            let mut slot = self
+                .duplicate_evidence
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match slot.as_ref() {
+                Some(existing) => Arc::clone(existing),
+                None => {
+                    let created = Arc::new(DuplicateEvidence::new(
+                        &context.runtime_env().memory_pool,
+                        self.properties.partitioning.partition_count(),
+                    ));
+                    *slot = Some(Arc::clone(&created));
+                    created
+                }
+            }
+        };
+        let mut claim = EvidenceClaim {
+            evidence: Arc::clone(&evidence),
+            active: true,
+        };
+        let state = match NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
-            None,
-        )?;
+            Some(Arc::clone(&evidence)),
+        ) {
+            Ok(state) => state,
+            Err(error) => {
+                claim.abort();
+                return Err(error);
+            }
+        };
         state.register_metrics(&self.metric, partition);
         let mut streams = Vec::new();
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
@@ -1480,6 +1519,9 @@ impl ExecutionPlan for FusedSeriesExec {
             _export_budget: Arc::clone(&export_budget),
             ready: VecDeque::new(),
             done: false,
+            duplicate_evidence: Arc::clone(&evidence),
+            evidence_completed: false,
+            evidence_claim: claim,
         };
         if frame_mode {
             let schema = evaluated_output(&self.tree)?;
@@ -1490,9 +1532,13 @@ impl ExecutionPlan for FusedSeriesExec {
             Ok(Box::pin(stream))
         }
     }
+}
 
-    fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metric.clone_inner())
+impl Drop for FusedSeriesStream {
+    fn drop(&mut self) {
+        if !self.evidence_completed {
+            self.evidence_claim.abort();
+        }
     }
 }
 
@@ -1614,6 +1660,37 @@ pub struct FusedSeriesStream {
     ready: VecDeque<RecordBatch>,
     /// Whether the input ended and everything it settled has been handed out.
     done: bool,
+    duplicate_evidence: Arc<DuplicateEvidence>,
+    evidence_completed: bool,
+    evidence_claim: EvidenceClaim,
+}
+
+struct EvidenceClaim {
+    evidence: Arc<DuplicateEvidence>,
+    active: bool,
+}
+
+impl EvidenceClaim {
+    fn abort(&mut self) {
+        if self.active {
+            self.evidence.abort();
+            self.active = false;
+        }
+    }
+    fn complete(&mut self) -> bool {
+        if self.active {
+            self.active = false;
+            self.evidence.complete()
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for EvidenceClaim {
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 impl FusedSeriesStream {
@@ -1687,6 +1764,10 @@ impl FusedSeriesStream {
     /// hold the evaluator, the decoder's held batch and chunks, and the plan upstream of it.
     fn fail(&mut self) {
         self.done = true;
+        if !self.evidence_completed {
+            self.evidence_claim.abort();
+            self.evidence_completed = true;
+        }
         self.executor = None;
         self.partial_fold = None;
         self.inputs = None;
@@ -1771,6 +1852,15 @@ impl FusedSeriesStream {
                             return Poll::Ready(Some(Err(error)));
                         }
                         self.done = true;
+                        if self.evidence_claim.complete()
+                            && let Some(candidate) = self.duplicate_evidence.verdict()
+                        {
+                            self.fail();
+                            return Poll::Ready(Some(Err(DataFusionError::Execution(
+                                candidate.message,
+                            ))));
+                        }
+                        self.evidence_completed = true;
                         continue;
                     }
                     Err(error) => {

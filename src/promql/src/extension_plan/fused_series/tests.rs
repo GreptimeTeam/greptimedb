@@ -2998,8 +2998,19 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
             actual.iter().map(|row| row.1).collect::<Vec<_>>()
         );
         assert_eq!(1, calls_by_partition[partition].load(Ordering::SeqCst));
-        assert_eq!(0, pool.reserved(), "{host} released reservations at EOF");
+        // Presence storage is execution-scoped: it remains charged until the final partition
+        // completes, then the shared evidence releases it.
+        assert_eq!(
+            if partition + 1 == 4 { 0 } else { 8 },
+            pool.reserved(),
+            "{host}: only execution-scoped duplicate evidence remains live"
+        );
     }
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "execution-scoped evidence is released after all streams"
+    );
     assert_eq!(4 * GRID_LEN as usize, total_rows);
     assert_eq!(
         vec![1, 1, 1, 1],
