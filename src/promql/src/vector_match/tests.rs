@@ -3551,6 +3551,43 @@ fn a_set_operation_charges_its_presence_bitmaps() {
 }
 
 #[test]
+fn binary_field_publishes_presence_and_records_excluded_duplicate() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let grid = budget_grid(1);
+    let schema = schema(1, &grid);
+    let lhs = vec![];
+    let rhs = vec![
+        jobbed_operand(&Arc::new(schema.clone()), "right_a", "x", &[0]),
+        jobbed_operand(&Arc::new(schema.clone()), "right_b", "x", &[0]),
+    ];
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 1);
+
+    let result = super::binary_vectors_inner(
+        &budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new())),
+        &schema,
+        &lhs,
+        &schema,
+        &rhs,
+        Some(super::NodeEvidence {
+            node: 7,
+            evidence: &evidence,
+        }),
+        None,
+    );
+    assert!(
+        result.is_ok(),
+        "the local gate excludes the duplicate: {result:?}"
+    );
+    assert!(evidence.settled(7, 0, false).is_none());
+
+    evidence.publish(7, 0, &[true], &[false]).unwrap();
+    let candidate = evidence.settled(7, 0, false).unwrap();
+    assert_eq!(candidate.point, 0);
+    assert!(candidate.message.contains("found duplicate series"));
+}
+
+#[test]
 fn duplicate_evidence_or_merges_presence_and_flips_gate() {
     use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
     let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
