@@ -17,18 +17,16 @@ that dies with the frontend; the envelope lets the durable phase reuse it.
 Memory is bounded exactly for record bytes. The request path computes the size
 without allocating (`RegionRequest::encoded_len()`), reserves it in one ledger
 whose check and charge happen under a single lock, and only then encodes into
-the reserved buffer; a burst cannot allocate ahead of the budget. A second
-reservation covers the decoded copy, the transport buffer and the rebuild split
-of each in-flight replay, so replay cannot grow memory without bound either.
-Admission has one decision point; the ledger's check-and-charge inside it is the
-linearization point for the bounds.
+the reserved buffer; a burst cannot allocate ahead of the budget. Replay holds
+a permit per in-flight record, which bounds the decoded copy, the transport
+buffer and the rebuild split. Admission has one decision point; the ledger's
+check-and-charge inside it is the linearization point for the bounds.
 
 The queue is compensation, not an acknowledgment: the client still gets the
 original error and `affected_rows` keeps its applied meaning. It is off by
 default, because a client that retries can duplicate the replayed write. Replay
-is per-region FIFO and at-least-once for admitted records not dead-lettered or
-lost with the process; TTL, attempts, failed DDL checks and process exit are
-explicit drops.
+is per-region FIFO and at-least-once; TTL, attempts, failed DDL checks and
+process exit are explicit drops.
 
 A queued record is checked at replay against existing frontend metadata: the
 table exists, its `TableIdent.version` is unchanged, and the record can still be
@@ -49,7 +47,7 @@ Issue #8085 asks for a bounded frontend-side buffer that replays asynchronously.
 
 The queue cannot make the client see success: a queued write has not been
 routed, is invisible to reads until replay, and in v1 lives only in one
-frontend's memory, so v1 keeps the error response. v1 gets the core right first:
+frontend's memory, so v1 keeps the error response and gets the core right first:
 admission, ordering, replay and exact record-byte accounting.
 
 # Goals
@@ -74,18 +72,22 @@ admission, ordering, replay and exact record-byte accounting.
 - Surviving a frontend restart, a pod reschedule or node loss: records live in
   process memory and die with the process; durable recovery is the later phase.
 - Exactly-once delivery; a record without a client idempotency key can duplicate
-  rows. The key is recommended before production enablement, not required in v1.
+  rows. The key is recommended before production enablement; on append-mode
+  tables, where deduplication cannot hide a duplicate, treat it as required.
 - Returning success for a queued write, or changing `affected_rows` from applied
   to accepted (see The `affected_rows` contract).
-- Bulk inserts: v1 queues only `Inserts` and `Deletes`, and a bulk insert's row
-  count lives inside the encoded body rather than in a protobuf field, so it
-  needs its own accounting first.
+- Bulk inserts: their row count lives inside the encoded body rather than in a
+  protobuf field, so they need their own accounting first.
 - Fencing `TRUNCATE` and `DROP` followed by `UNDROP`; v1 documents the window.
 - Standalone mode, which rejects `enable = true` during option validation rather
   than silently ignoring the section.
 - Writes outside the retry and give-up path (such as the enterprise Flow child
   path) and tables that feed a flow: replay goes through the per-region send path
-  below the flow mirror, so a replayed write is never mirrored.
+  below the flow mirror, so a replayed write is never mirrored. Admission checks
+  the table's flow set, a frontend cache, and sheds such a record, and replay
+  checks again, so a flow created after enqueue is caught there. The normal
+  insert path already reads that set to mirror writes, so the check is a warm
+  hit, and the region cannot reject a late write to a flow source.
 - Global ordering, ordering against newer live writes, a query API for dead
   letters, and any backend other than the in-memory store.
 
@@ -98,16 +100,15 @@ The queue hooks the dispatcher's give-up points: the merge branch of
 it exhausts or a terminal sibling ends a later round. By then the write is split
 per region, each error carries a `RetryHint`, and route refresh is available. A
 terminal error is what the client is told, but it does not suppress a retryable
-sibling: a failed write that can still be replayed is queued even when another
-write in the same statement cannot. A request cancelled before its handoff
-begins is not enqueued; once some regions are admitted, cancellation stops the
-rest, and those stay queued.
+sibling: a failed write is queued even when another in the same statement
+cannot. A request cancelled before its handoff begins is not enqueued; once
+some regions are admitted, cancellation stops the rest, and those stay queued.
 
 Admission has one decision point, so "was this write queued?" has a single
-answer and replay never invents work. Inside admission, the ledger's
-check-and-charge is the linearization point for every bound: a record is in the
-queue if and only if it holds a ledger charge. The durable phase moves that
-point to the store's durable commit; the invariant does not change.
+answer. Inside admission, the ledger's check-and-charge is the linearization
+point for every bound: a record is in the queue if and only if it holds a
+ledger charge. The durable phase moves that point to the store's durable
+commit; the invariant does not change.
 
 ## Admission and memory accounting
 
@@ -120,11 +121,13 @@ grouped per table once per batch, so catalog and route reads happen once.
    computes the payload length with `RegionRequest::encoded_len()`, a prost
    field walk that allocates nothing. The record size is that payload plus the
    29-byte envelope header.
-2. It reserves that size in `Mutex<Ledger { pending_bytes, pending_records,
-   transient_bytes }>`. Both checks and both charges happen in one critical
-   section with no `await`, so a burst cannot slip records past a bound the way
-   separate atomic counters can. An oversized record or a crossing reservation
-   is shed and counted at once, before anything is allocated.
+2. It reserves that size in `Mutex<Ledger { pending_bytes, pending_records }>`.
+   Both checks and both charges happen in one critical section with no `await`,
+   so a burst cannot slip records past a bound the way separate atomic counters
+   can: a rollback-based atomic would overshoot by up to concurrent admissions ×
+   `max_record_size`, not a few kilobytes; no `await` inside bounds contenders
+   by worker threads, not in-flight requests. An oversized record or a crossing
+   reservation is shed and counted at once, before anything is allocated.
 3. The reservation then allows one buffer of `header_len + payload_len` bytes:
    header, then the encoded payload. `encoded_len()` is exact for that
    encoding, so the buffer is never reallocated; it becomes the stored record,
@@ -137,7 +140,8 @@ grouped per table once per batch, so catalog and route reads happen once.
    TTL sweeping cannot release it twice.
 
 Per-record bookkeeping is a constant pinned by a test and bounded by
-`max_records`, not by `max_bytes`:
+`max_records`, not by `max_bytes`; it includes each record's `Vec` header and
+allocator metadata:
 
 ```text
 pending record bytes + bookkeeping        <= max_bytes + max_records * overhead
@@ -145,20 +149,19 @@ in-flight replay decode and send buffers  <= replay_concurrency * 3 * max_record
 ```
 
 Replay decodes, and decoding allocates. A lease hands out the stored record
-without copying its payload; before decoding, the worker reserves
-`REPLAY_TRANSIENT_FACTOR × record_len` in the ledger's transient field. The
-factor is a documented constant of 3: the decoded request (container growth is
-at most doubling), the transport buffer the client encodes into, and the split
-`rebuild_write_requests` may perform; a test decodes the largest admitted
+without copying its payload. The worker holds one of `replay_concurrency`
+permits from before decoding until the send finishes; per record the transient
+footprint is at most `REPLAY_TRANSIENT_FACTOR × max_record_size`. The factor is
+the documented constant of 3: the decoded request (container growth is at most
+doubling), the transport buffer the client encodes into, and the split
+`rebuild_write_requests` may perform. A test decodes the largest admitted
 record and sums the decoded containers' capacities to assert it. It is not a
-knob, because a knob would let a deployment weaken the bound the test pins. The
-transient field has its own cap, `replay_concurrency × REPLAY_TRANSIENT_FACTOR ×
-max_record_size`, so replay cannot consume the pending budget.
+knob, because a knob would let a deployment weaken the bound the test pins, and
+a permit wait delays a record instead of dead-lettering it.
 
-A record that does not fit is shed; the client gets the same error it would get
-without the queue. The queue never waits for room and never evicts: rejecting
-equals having no queue, while eviction would make contents depend on the order
-of a failure storm.
+A record that does not fit is shed; the client gets the same error as without
+the queue. The queue never waits for room and never evicts: rejecting equals
+having no queue, while eviction would tie contents to the storm's order.
 
 ## Failure-path budget
 
@@ -182,25 +185,22 @@ is explicit:
 
 There is no store call, no RPC, no blocking work and no task spawn on the
 request path, so a failed request cannot be parked behind the queue; a cache
-miss falls back to the metadata store exactly as the live path already does.
-The writer's drain and completion are memory operations, so the only added
-serialization is the state lock plus the single ledger lock, both integer-only
-and neither able to stall a worker.
+miss falls back to the metadata store exactly as the live path does. The
+writer's drain and completion are memory operations, so the only added
+serialization is the state and ledger locks, neither able to stall a worker.
 
-The handoff must cost less than the retry attempt that just failed: one encode
-and one channel send, no round trip, no store operation. The code PR measures,
-with every region returning `StorageUnavailable`: handoff p50/p99, added CPU per
-failed region, allocations before admission, and end-to-end failure-path p99.
-Acceptance: no allocation before admission; zero queue calls and zero
-record-buffer allocations on the success path; failure-path p99 regression
-within 5%; ledger lock measured at 1, 8 and 64 threads.
+The handoff must cost less than the failed attempt: one encode, one channel
+send, no round trip, no store. The code PR measures, with every region returning
+`StorageUnavailable`: handoff p50/p99, added CPU per failed region, and
+end-to-end failure-path p99. Acceptance: no allocation before admission, zero
+queue calls and record-buffer allocations on the success path, failure-path p99
+regression within 5%, and ledger lock cost at 1, 8 and 64 threads.
 
 ## Storage
 
 The queue is a new base-layer crate, `common-retry-queue`, defining a
-`QueueStore` trait that treats a store as an ordered map from a queue key to
-opaque records, so the crate does not know the write protocol. v1 needs three
-operations:
+`QueueStore` trait as an ordered map from a queue key to opaque records, so the
+crate does not know the write protocol. v1 needs three operations:
 
 - `append(records) -> Vec<EntryId>`: the writer drain; the store assigns entry
   ids.
@@ -213,13 +213,11 @@ attempt counter, retry deadline, TTL); the store keeps each key's encoded
 records in append order and assigns entry ids. `lease` suffices because a key
 has at most one in-flight record and completion is always a prefix. Shutdown is
 task lifecycle, so v1 has no `stop`. The durable phase adds `list_keys`,
-`latest`, `sync`, `create` and `delete` as an extension; the state machine
-depends only on the three operations, and the envelope is the shared format.
+`latest`, `sync`, `create` and `delete` as an extension behind the same seam.
 
-`MemoryQueueStore` keeps encoded bytes, not decoded requests: that makes
-`max_bytes` exact, keeps the crate independent of `store-api` and the protocol,
-and lets a durable adapter persist the same bytes; the cost is one encode per
-failure and one decode per replay.
+`MemoryQueueStore` keeps encoded bytes, not decoded requests: `max_bytes` stays
+exact, the crate stays independent of `store-api` and the protocol, and a
+durable adapter persists the same bytes; the cost is one encode and one decode.
 
 The key is `RegionId::as_u64()`. A record is a versioned envelope:
 
@@ -230,14 +228,12 @@ version u8 | key u64 | rows u64 | table_version u64 | payload_len u32 | payload
 Integers are fixed-width little-endian; the header is 29 bytes. `payload` is the
 protobuf encoding of the `RegionRequest`; `rows` serves the dead-letter metric
 without decoding it; `table_version` is the `TableIdent.version` seen at
-enqueue. v1 stores no route version and no wall-clock enqueue time: replayability
-is decided by whether the source region is still in the current route, because
-a leader change bumps the route version. Age is monotonic, from the state
-machine.
+enqueue. v1 stores no route version and no wall-clock enqueue time: a leader
+change bumps the route version, so replayability is decided by whether the
+source region is still in the current route. Age is monotonic.
 
 There are no ack records: completion is always a prefix. An unknown envelope
-version is invalid: the in-memory store never sees one, but v1 dead-letters it,
-and the durable reader must fail startup on one rather than drop records.
+version is invalid: v1 dead-letters it, a durable reader must fail startup.
 
 Per key the queue keeps a metadata deque and the last entry id. One mutex
 serializes writer insertion, leasing and completion, and only the writer and
@@ -245,21 +241,20 @@ replayer take it, so it never delays a request. A lease is the head record that
 is not in flight and has not expired; `complete` drops the prefix in the store
 and the deque and releases its ledger charge, while `discard` does the same and
 reports a dead letter. TTL is checked at lease time and by a periodic sweep of
-each key's head; age comes from the monotonic instant, so a clock step cannot
-expire a record early or keep it longer.
+each key's head; age is monotonic, so a clock step cannot expire it early.
 
 ## Replay
 
 The replay worker lives in `operator` next to `WriteDispatcher`, because it needs
 the same routing and partition machinery; the queue crate owns admission
 accounting, storage and leasing. It keeps one in-flight record per key, leases
-the head of an idle key, loads the table and applies the checks, reserves its
-transient budget, decodes the payload, resolves the route and leader, applies
-the route check, and sends through the same client the live path uses.
+the head of an idle key, loads the table and applies the checks, acquires a
+replay permit, decodes the payload, resolves the route and leader, applies the
+route check, and sends through the same client the live path uses.
 
 - Success: complete the record and lease the next one.
 - `Retryable`: increment attempts, back off with jitter from about one second,
-  release the transient reservation and leave the record at the head.
+  release the permit and leave the record at the head.
 - `RetryAfterRouteRefresh`: increment attempts, invalidate the route caches and
   resolve again. If the source region is still in the route, only its peer
   moved, so the record goes to the current peer. If the source region is gone
@@ -324,10 +319,9 @@ and envelope version.
 A queued write can outlive the data it was written against. The question is not
 whether a write can overlap a DDL — in-flight writes and retries already can —
 but how much the queue extends that overlap. Today `WriteRetry` retries for
-roughly 10s before the dispatcher returns the error, so an ALTER, TRUNCATE, DROP
-or repartition in that window already races the retry; the queue extends the
-overlap to `ttl` and replays after the client has the error. It makes the
-existing race longer, not new.
+roughly 10s, so an ALTER, TRUNCATE, DROP or repartition already races the
+retry; the queue extends the overlap to `ttl` and replays after the client has
+the error. It makes the existing race longer, not new.
 
 v1 checks what existing frontend metadata exposes, before every send:
 
@@ -341,6 +335,10 @@ v1 checks what existing frontend metadata exposes, before every send:
    repartition), rebuild with `rebuild_write_requests` and compare the rebuilt
    target regions, not the route version. An unplaceable record is a dead
    letter.
+
+The version check is a frontend cache hit, and it cannot be left to the region:
+the region fills default values for columns added after enqueue instead of
+rejecting the request, so without it an ALTER lands old rows with defaults.
 
 These catch ALTER, DROP while the table is absent, repartition and logical-table
 reconciliation. They do not catch `TRUNCATE` or `DROP` followed by `UNDROP`:
@@ -363,18 +361,17 @@ v1's guarantee is bounded compensation, not DDL-safe replay: off by default,
 compensation only, records die with the frontend, and `ttl` caps how long a
 zombie replay can happen. The region-side fence needs a table DDL epoch, the
 replay epoch in the request header, a truncate epoch in the region manifest,
-and new or `UNDROP`-restored regions initialized at the current epoch; it is
-future work.
+and new or `UNDROP`-restored regions initialized at the current epoch.
 
 ## Failure handling
 
 The defaults are fail-closed: invalid options (zero bounds,
 `max_record_size > max_bytes`, `max_record_size > u32::MAX`, overflow) fail
 validation at startup; a full queue, an oversized record or a metadata lookup
-failure sheds and counts, and the client receives the original error; a missing
-table, a version mismatch, an unplaceable route or an unknown envelope version
-is a dead letter; a replay that cannot reserve its transient budget is
-dead-lettered (`TransientFull`) rather than decoding without a charge.
+failure sheds and counts; a missing table, a version mismatch, an unplaceable
+route or an unknown envelope version is a dead letter. A replay waits for a
+`replay_concurrency` permit before decoding, so a busy budget delays a lease
+instead of failing a record.
 
 | Situation | Enqueue | Client | Queue |
 | --- | --- | --- | --- |
@@ -383,7 +380,6 @@ dead-lettered (`TransientFull`) rather than decoding without a charge.
 | terminal failure mixed with retryable ones | retryable siblings queued | terminal error | retryable siblings replay; the terminal one does not |
 | cancellation races the handoff | regions already admitted stay queued; the rest are not | original error | the handoff re-checks cancellation before each reservation |
 | replay `Retryable` / `RetryAfterRouteRefresh` | - | - | attempts++ and backoff / caches refreshed and retried |
-| replay cannot reserve its transient budget, or attempts run out | - | - | reservation released, then dead letter |
 | replay `NonRetryable`, TTL expired, attempts exhausted | - | - | dead letter |
 | ALTER or destructive schema change after enqueue | - | - | version mismatch: discarded as a DDL dead letter |
 | `TRUNCATE` or `UNDROP` after enqueue | - | - | **not detected by v1 checks; a replay may put old rows back** |
@@ -419,8 +415,7 @@ datanode-death detection plus one failover migration: the datanode lease expires
 after `BASE_HEARTBEAT_INTERVAL` 3s × 3 + 1s = 10s, and
 `DEFAULT_REGION_MIGRATION_TIMEOUT` is 120s, about 130s. Three minutes is the
 lower bound; five is the default because failover retries scale that timeout by
-the attempt count, and because restart-to-serving is the one term no constant
-bounds.
+the attempt count, and restart-to-serving is the one term no constant bounds.
 
 Standalone rejects `enable = true`. The queue and `write_retry.max_retries` are
 independent; when the queue is enabled the frontend installs `WriteRetry`
@@ -435,7 +430,7 @@ recovers no state; invalid options fail validation. Shutdown is process exit:
 v1 does not drain in-flight sends because the client already holds the error.
 
 Metrics: handed-off records and bytes (with sheds by reason), pending records
-and bytes, transient bytes and oldest age, replay attempts, dead letters, and
+and bytes, in-flight replays and oldest age, replay attempts, dead letters, and
 handoff/replay latency. Region and table ids are log fields, not labels.
 
 # Alternatives
@@ -456,12 +451,16 @@ handoff/replay latency. Region and table ids are log fields, not labels.
   off-by-default switch and the future region-side fence.
 - The client is told the write failed while it may still be replayed, so a
   retrying client may duplicate rows; a stale replay can override a newer live
-  write, and the window extends to the TTL.
+  write, and the window extends to the TTL. On a table with `append_mode = true`
+  deduplication is off, so a duplicate stays a second row and inflates any
+  count, sum or average over it.
 - The failure path becomes a load path, and the peak is the bound plus the
   replay transient (`max_bytes + replay_concurrency × 3 × max_record_size`,
   about 704MiB with the defaults), so a container sized for `max_bytes` alone
   can be OOM-killed. Replay load also lands as the datanodes recover: old
-  timestamps add flush and compaction work, so size those limits for it.
+  timestamps add flush and compaction work, and write-buffer backpressure only
+  covers rejected writes, so size `max_background_flushes`,
+  `max_background_compactions` and the compaction memory limit for the backlog.
 
 # Future work
 
@@ -472,8 +471,9 @@ handoff/replay latency. Region and table ids are log fields, not labels.
 3. The client idempotency key with region-side deduplication, a replay-side
    newer-write check, and the acknowledged contract (position B) across all
    protocols; later, an object-store-backed queue, persisted attempts and dead
-   letters, an inspect/replay API, per-row filtering, per-datanode rate
-   limiting, per-table fair queueing, and standalone support.
+   letters, an inspect/replay API, per-row filtering, adaptive per-datanode
+   replay rate limiting driven by datanode backpressure, per-table fair
+   queueing, and standalone support.
 
 # Open questions and validation items
 
