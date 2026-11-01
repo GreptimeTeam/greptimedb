@@ -4802,6 +4802,149 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
     }
 }
 
+/// A matcher on a join key is copied to the other operand's scan on the native route as on the
+/// existing one, when the one side is unique on the matching labels: the right table holds ten
+/// namespaces, the left side selects one, and the right scan reads only that namespace's series
+/// without changing the answer. The second query is the shape of o11ybench Q09, where the binary
+/// sits under an aggregation and the one side is grouped. A plain selector as the one side may hold
+/// a duplicate match group the native route has to report, so it is read whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_matching_filters_narrow_the_other_scan() {
+    const POINTS: i64 = 6;
+    const RIGHT_NAMESPACES: usize = 10;
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_matching_filters_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let pods = ["p0", "p1"];
+    // The left counter grows by 2 a second, offset by its pod; the right gauge is 100 per pod index.
+    let left_rows = ["ns0", "ns1"]
+        .iter()
+        .flat_map(|ns| {
+            pods.iter().enumerate().flat_map(move |(pod_index, pod)| {
+                (0..POINTS).map(move |t| {
+                    format!(
+                        "('{ns}', '{pod}', {}, {})",
+                        t * 1000,
+                        10 + 2 * t + pod_index as i64
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let right_rows = (0..RIGHT_NAMESPACES)
+        .flat_map(|ns| {
+            pods.iter().enumerate().flat_map(move |(pod_index, pod)| {
+                (0..POINTS).map(move |t| {
+                    format!(
+                        "('ns{ns}', '{pod}', 'n', {}, {})",
+                        t * 1000,
+                        100 * (pod_index + 1)
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute_all(
+        &instance,
+        &format!(
+            r#"CREATE TABLE native_mf_phy (
+                ts TIMESTAMP TIME INDEX,
+                val DOUBLE
+            ) ENGINE=metric WITH ("physical_metric_table" = "true");
+            CREATE TABLE native_mf_usage (
+                ns STRING,
+                pod STRING,
+                ts TIMESTAMP TIME INDEX,
+                val DOUBLE,
+                PRIMARY KEY (ns, pod)
+            ) ENGINE=metric WITH ("on_physical_table" = 'native_mf_phy');
+            CREATE TABLE native_mf_info (
+                ns STRING,
+                pod STRING,
+                node STRING,
+                ts TIMESTAMP TIME INDEX,
+                val DOUBLE,
+                PRIMARY KEY (ns, pod, node)
+            ) ENGINE=metric WITH ("on_physical_table" = 'native_mf_phy');
+            INSERT INTO native_mf_usage (ns, pod, ts, val) VALUES {left_rows};
+            INSERT INTO native_mf_info (ns, pod, node, ts, val) VALUES {right_rows};"#
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let labels = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let pair = vec![
+        (5_000, labels(&[("ns", "ns0"), ("pod", "p0")]), 20.0 * 100.0),
+        (5_000, labels(&[("ns", "ns0"), ("pod", "p1")]), 21.0 * 200.0),
+    ];
+    // The raw-series scan emits a row per series: the two of `ns0`, or all twenty.
+    for (query, expected, right_series) in [
+        (
+            r#"native_mf_usage{ns="ns0"} * on(ns, pod) max by (ns, pod) (native_mf_info)"#,
+            pair.clone(),
+            pods.len(),
+        ),
+        (
+            r#"sum by (pod) ((8 * rate(native_mf_usage{ns="ns0"}[2s])) * on(ns, pod) group_left() topk by (ns, pod) (1, max by (ns, pod) (native_mf_info)))"#,
+            vec![
+                (5_000, labels(&[("pod", "p0")]), 8.0 * 2.0 * 100.0),
+                (5_000, labels(&[("pod", "p1")]), 8.0 * 2.0 * 200.0),
+            ],
+            pods.len(),
+        ),
+        (
+            r#"native_mf_usage{ns="ns0"} * on(ns, pod) native_mf_info"#,
+            pair,
+            pods.len() * RIGHT_NAMESPACES,
+        ),
+    ] {
+        let sql = format!("TQL EVAL (5, 5, '1s') {query}");
+        let (_, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(legacy_rows, expected, "legacy: {query}");
+
+        observer.clear();
+        let (_, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(observer.take().name(), "FusedSeriesExec", "{query}");
+        assert_eq!(native_rows, expected, "native: {query}");
+
+        let right_scan_rows = observer
+            .take_raw_sources()
+            .iter()
+            .filter(|source| {
+                datafusion::physical_plan::displayable(source.as_ref())
+                    .one_line()
+                    .to_string()
+                    .contains("metric=native_mf_info")
+            })
+            .map(|source| {
+                let scan = source.children()[0];
+                let scan = scan
+                    .downcast_ref::<CooperativeExec>()
+                    .map_or(scan, |cooperative| cooperative.input());
+                scan.downcast_ref::<SeriesScanExec>()
+                    .and_then(|scan| scan.metrics())
+                    .and_then(|metrics| metrics.output_rows())
+                    .unwrap_or_else(|| panic!("{query}: no series scan below {source:?}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(right_scan_rows, vec![right_series], "{query}");
+    }
+}
+
 /// A grouping by the metric name keeps series the schema would have no column for.
 ///
 /// `sum by (__name__) (a or b)` folds two metrics into two groups that differ only in their metric

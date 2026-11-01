@@ -55,13 +55,18 @@ fn evaluated_frame_schema(tree: &NativeTree) -> datafusion::common::DFSchemaRef 
     )
 }
 
-// Reproduction from the review: 16 hosts × 20k samples, `rate[10s]`, and 16 DN
-// partitions produces four batches per chain and fails while unpacking because
-// `CoalescePartitionsExec` interleaves their batches, so a chain is cut and the frames no
-// longer decode. This test asserts that failure, which is why it runs rather than being
-// ignored: it keeps the boundary honest until the frontend region merge becomes
-// chain-atomic, and it is the test to change when that fix lands. The parallelism-one
-// path is exercised by `native_prefix_executes_over_real_mito_region`.
+// Reproduction from the review: 16 hosts over 16 DN partitions, and a `rate[10s]` chain per
+// host that spans several frame batches. `CoalescePartitionsExec` interleaves the partitions'
+// batches, so a chain is cut and the frames no longer decode. This test asserts that failure,
+// which is why it runs rather than being ignored: it keeps the boundary honest until the frontend
+// region merge becomes chain-atomic, and it is the test to change when that fix lands. The
+// parallelism-one path is exercised by `native_prefix_executes_over_real_mito_region`.
+//
+// Nothing keeps a chain inside one batch. Since a raw series closes on the record that completes
+// its package (#10023), a short chain is packed with its closing chunk and only looks atomic. The
+// grid is therefore dense: 399k points per host are about 3 MiB of values, over the evaluated
+// packer's 1 MiB batch cap (`SeriesFrameBuilder::DEFAULT_MAX_BYTES`), so every chain spans
+// several batches.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_prefix_multi_partition_series_chains() {
     let instance = GreptimeDbStandaloneBuilder::new("native_prefix_partitioned_chains")
@@ -110,7 +115,8 @@ async fn native_prefix_multi_partition_series_chains() {
         projection: Some((0..scan.projected_schema.fields().len()).collect()),
         ..scan
     });
-    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(20_000, 1_000, 1).unwrap()).unwrap());
+    let grid =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(10_000, 50, 399_000).unwrap()).unwrap());
     let raw = Arc::new(SeriesSchema {
         fields: Arc::from([FieldSpec {
             name: Arc::from("val"),

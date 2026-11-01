@@ -2806,6 +2806,103 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
     }
 }
 
+/// The metric and the row filters of each raw source the fused node of `plan` reads, in input order.
+fn fused_source_filters(plan: &LogicalPlan) -> Vec<(String, Vec<String>)> {
+    let fused = find_fused_series(plan).unwrap_or_else(|| panic!("no fused node in {plan}"));
+    fused
+        .inputs()
+        .iter()
+        .map(|input| {
+            let LogicalPlan::Extension(Extension { node }) = input else {
+                panic!("expected a raw source, got {input}");
+            };
+            let source = node
+                .as_any()
+                .downcast_ref::<RawSeriesSource>()
+                .unwrap_or_else(|| panic!("expected a raw source, got {input}"));
+            let [LogicalPlan::TableScan(scan)] = UserDefinedLogicalNodeCore::inputs(source)[..]
+            else {
+                panic!("the raw source reads its table scan directly: {input}");
+            };
+            (
+                source.metric_name().to_string(),
+                scan.filters.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect()
+}
+
+/// The native route copies a matcher on a join key to the other operand's scan where the existing
+/// path does and the one side is unique on the matching labels. Q09 of o11ybench is the nested,
+/// grouped case: the right side reads only the series that can find a partner.
+#[tokio::test]
+async fn native_fused_propagates_join_key_matchers_to_the_other_scan() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+    ];
+    // The one side is unique only because `max by` leaves no label but the matching ones, which
+    // the operand's planned tags show and the table's own tags (`tag_2` too) do not.
+    for query in [
+        r#"some_metric{tag_0="a"} * on(tag_0, tag_1) max by (tag_0, tag_1) (other_metric)"#,
+        r#"sum by (tag_1) ((8 * rate(some_metric{tag_0="a"}[5m])) * on(tag_0, tag_1) group_left() topk by (tag_0, tag_1) (1, max by (tag_0, tag_1) (other_metric)))"#,
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            build_test_table_provider_with_tsid(&tables, 3, 1).await,
+        )
+        .await;
+        let sources = fused_source_filters(&plan);
+        assert_eq!(sources[1].0, "other_metric", "{query}: {plan}");
+        assert_eq!(
+            sources[1]
+                .1
+                .iter()
+                .filter(|filter| filter.contains(r#"tag_0 = Utf8("a")"#))
+                .count(),
+            1,
+            "{query}: {plan}"
+        );
+    }
+}
+
+/// Where a join-key matcher may not be copied, the native route reads the receiving operand whole.
+#[tokio::test]
+async fn native_fused_keeps_scans_whole_where_matchers_cannot_cross() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+    ];
+    for (query, receiving) in [
+        // The right side may hold a duplicate match group, which fails the query whether or not
+        // the left side has a partner for it, and which an empty left side at a step never checks.
+        (r#"some_metric{tag_0="a"} * on(tag_0) other_metric"#, 1),
+        (r#"some_metric * on(tag_0) other_metric{tag_0="a"}"#, 0),
+        // `tag_1` survives the aggregation without being matched on.
+        (
+            r#"some_metric{tag_0="a"} * on(tag_0) group_left max by (tag_0, tag_1) (other_metric)"#,
+            1,
+        ),
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            build_test_table_provider_with_tsid(&tables, 2, 1).await,
+        )
+        .await;
+        let sources = fused_source_filters(&plan);
+        assert_eq!(sources.len(), 2, "{query}: {plan}");
+        assert!(
+            !sources[receiving]
+                .1
+                .iter()
+                .any(|filter| filter.contains("tag_0")),
+            "{query}: {plan}"
+        );
+    }
+}
+
 /// Whether `plan` holds a native node over more than one input. The hybrid route plans a binary's
 /// selector operands as single-input nodes under the existing join, which this does not count.
 fn has_pair_node(plan: &LogicalPlan) -> bool {

@@ -205,8 +205,14 @@ impl PromPlanner {
         prom_expr: &PromExpr,
         query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
+        if !self.native_fused {
+            return Ok(None);
+        }
+        let mut prom_expr = prom_expr.clone();
+        self.propagate_matching_filters(&mut prom_expr, query_engine_state)
+            .await;
         Ok(self
-            .try_plan_native_fused_with_context(prom_expr, query_engine_state)
+            .try_plan_native_fused_with_context(&prom_expr, query_engine_state)
             .await?
             .map(|(plan, _)| plan))
     }
