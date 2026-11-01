@@ -3535,3 +3535,115 @@ fn a_set_operation_charges_its_presence_bitmaps() {
         "64 points peak at {short} bytes and 4160 at {long}"
     );
 }
+
+#[test]
+fn duplicate_evidence_or_merges_presence_and_flips_gate() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 2);
+    evidence
+        .publish(0, 0, &[true, false], &[false, false])
+        .unwrap();
+    assert!(evidence.settled(0, 0, false).is_none());
+    evidence
+        .publish(0, 0, &[false, false], &[true, false])
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 0, 0, vec![], "duplicate".into())
+        .unwrap();
+    assert!(evidence.settled(0, 0, false).is_some());
+}
+
+#[test]
+fn duplicate_evidence_candidate_survives_false_gate_until_late_presence() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 1);
+    evidence
+        .record_candidate(0, 0, 0, 0, vec![], "duplicate".into())
+        .unwrap();
+    assert!(evidence.settled(0, 0, false).is_none());
+    evidence.publish(0, 0, &[true], &[true]).unwrap();
+    assert_eq!(evidence.settled(0, 0, false).unwrap().message, "duplicate");
+}
+
+#[test]
+fn duplicate_evidence_skips_ineligible_earlier_point() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 2);
+    evidence
+        .publish(0, 0, &[false, true], &[false, true])
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 0, 0, vec![], "early".into())
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 1, 0, vec![], "later".into())
+        .unwrap();
+    assert_eq!(evidence.settled(0, 0, false).unwrap().message, "later");
+}
+
+#[test]
+fn duplicate_evidence_separates_node_field_pairs() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 1);
+    evidence.publish(0, 0, &[true], &[true]).unwrap();
+    evidence
+        .record_candidate(0, 0, 0, 0, vec![], "first".into())
+        .unwrap();
+    evidence.publish(0, 1, &[false], &[false]).unwrap();
+    evidence
+        .record_candidate(0, 1, 0, 0, vec![], "second".into())
+        .unwrap();
+    assert_eq!(evidence.settled(0, 0, false).unwrap().message, "first");
+    assert!(evidence.settled(0, 1, false).is_none());
+}
+
+#[test]
+fn duplicate_evidence_charges_memory_and_reports_refusal() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
+    let unlimited: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&unlimited, 2);
+    evidence
+        .publish(0, 0, &[false, false], &[false, false])
+        .unwrap();
+    assert_eq!(unlimited.reserved(), 2 * 2 * std::mem::size_of::<bool>());
+    evidence
+        .record_candidate(
+            0,
+            0,
+            0,
+            0,
+            vec![(Arc::from("k"), Arc::from("v"))],
+            "msg".into(),
+        )
+        .unwrap();
+    assert_eq!(unlimited.reserved(), 4 + 1 + 1 + 3);
+    let tiny: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1));
+    let refused = super::DuplicateEvidence::new(&tiny, 2);
+    assert!(
+        refused
+            .publish(0, 0, &[false, false], &[false, false])
+            .is_err()
+    );
+}
+
+#[test]
+fn duplicate_evidence_filling_uses_or_and_non_filling_uses_and() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 2);
+    evidence
+        .publish(0, 0, &[true, false], &[false, true])
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 0, 0, vec![], "left".into())
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 1, 0, vec![], "right".into())
+        .unwrap();
+    assert_eq!(evidence.settled(0, 0, true).unwrap().message, "left");
+    assert_eq!(evidence.settled(0, 0, false), None);
+}
