@@ -76,6 +76,9 @@ use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::promql_tsid_narrow_join::PromqlTsidNarrowJoin;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
+use crate::optimizer::sst_manifest_aggregate::{
+    SstManifestAggregatePlanner, SstManifestAggregateRule,
+};
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
@@ -210,6 +213,14 @@ impl QueryEngineState {
                 FUNCTION_REGISTRY.function_rewrites(),
             )),
         );
+        let inspect_extension = catalog_list
+            .as_any()
+            .downcast_ref::<catalog::kvbackend::KvBackendCatalogManager>()
+            .map(|catalog| catalog.information_extension())
+            .filter(|extension| extension.supports_inspect_query_plan());
+        if inspect_extension.is_some() {
+            analyzer.rules.push(Arc::new(SstManifestAggregateRule));
+        }
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
@@ -649,6 +660,14 @@ impl DfQueryPlanner {
             Arc::new(RangeSelectPlanner),
             Arc::new(RemoteDynFilterReceiverExtensionPlanner),
         ];
+        if let Some(extension) = catalog_manager
+            .as_any()
+            .downcast_ref::<catalog::kvbackend::KvBackendCatalogManager>()
+            .map(|catalog| catalog.information_extension())
+            .filter(|extension| extension.supports_inspect_query_plan())
+        {
+            planners.push(Arc::new(SstManifestAggregatePlanner::new(extension)));
+        }
         if let (Some(region_query_handler), Some(partition_rule_manager)) =
             (region_query_handler, partition_rule_manager)
         {
