@@ -884,6 +884,59 @@ impl SamplesFormatReader for SamplesReadRecorder {
 }
 
 #[tokio::test]
+async fn a_series_indexed_in_several_windows_is_one_candidate() {
+    use crate::series_index::{reconcile_series_indexes_with_mode, series_index_channel};
+
+    let (_env, engine, region) = fixture().await;
+    // The fixture's series, also in the next 100s bucket: a manual build without a compaction
+    // window buckets by the requested width.
+    write(&engine, &region, 0, 150_000, Some(2.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    let store = region.series_index_store.clone().unwrap();
+    let (purger, _purges) = series_index_channel(store.clone());
+    reconcile_series_indexes_with_mode(
+        0,
+        store.clone(),
+        region.clone(),
+        Duration::from_secs(100),
+        0,
+        purger,
+        false,
+        true,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(2, region.series_index_version().series_indexes.len());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let legacy = scanner_with_format(&region, store.clone(), SelectedFormat::Legacy);
+    let oracle = legacy
+        .scan_series_partition(&ctx, &metrics, 0, &labels(legacy.metadata()))
+        .unwrap()
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let scan = scanner(&region, store);
+    scan.prepare_series(&ctx, &metrics, &labels(scan.metadata()))
+        .await
+        .unwrap()
+        .unwrap();
+    let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    assert_eq!(1, source.num_series());
+    let result = source
+        .read_series(0..source.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(3, rows(&result).len());
+    assert_eq!(rows(&oracle), rows(&result));
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     use common_time::{Timestamp, range::TimestampRange};
 
