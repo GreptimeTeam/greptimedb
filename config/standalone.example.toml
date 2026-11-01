@@ -944,6 +944,11 @@ default_flat_format = true
 ## Whether to enable the experimental two-phase mode for eligible metric series scans.
 experimental_series_scan_v2 = false
 
+## Enables exact metadata counts for eligible scalar COUNT queries. Defaults to false.
+## Preparation per region examines at most 64 SSTs, reads at most 8 footers and
+## 1 MiB of footer bytes, and has a 20ms deadline. Unsupported scans fall back.
+experimental_metadata_count = false
+
 ## The options for index in Mito engine.
 [region_engine.mito.index]
 

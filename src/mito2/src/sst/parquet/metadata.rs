@@ -41,6 +41,8 @@ pub struct MetadataLoader<'a> {
     // The size of parquet file
     file_size: u64,
     page_index_policy: PageIndexPolicy,
+    prefetch_size: usize,
+    max_bytes: Option<u64>,
 }
 
 impl<'a> MetadataLoader<'a> {
@@ -55,11 +57,21 @@ impl<'a> MetadataLoader<'a> {
             file_path,
             file_size,
             page_index_policy: Default::default(),
+            prefetch_size: DEFAULT_PREFETCH_SIZE as usize,
+            max_bytes: None,
         }
     }
 
     pub(crate) fn with_page_index_policy(&mut self, page_index_policy: PageIndexPolicy) {
         self.page_index_policy = page_index_policy;
+    }
+
+    /// Restricts an optional statistics read to the trailer and footer only.
+    /// The fetcher reserves bytes before issuing each object-store request.
+    pub(crate) fn with_read_budget(&mut self, max_bytes: u64) {
+        self.prefetch_size = 8;
+        self.max_bytes = Some(max_bytes);
+        self.page_index_policy = PageIndexPolicy::Skip;
     }
 
     /// Get the size of parquet file. If file_size is 0, stat the object store to get the size.
@@ -80,7 +92,7 @@ impl<'a> MetadataLoader<'a> {
         let path = self.file_path;
         let file_size = self.get_file_size().await?;
         let reader = ParquetMetaDataReader::new()
-            .with_prefetch_hint(Some(DEFAULT_PREFETCH_SIZE as usize))
+            .with_prefetch_hint(Some(self.prefetch_size))
             // Mito uses offset indexes to translate row selections into byte ranges. It does not
             // consume Parquet column indexes, so decoding them only bloats the metadata cache.
             .with_column_index_policy(PageIndexPolicy::Skip)
@@ -93,20 +105,21 @@ impl<'a> MetadataLoader<'a> {
             file_path: self.file_path,
             num_reads: &num_reads,
             bytes_read: &bytes_read,
+            max_bytes: self.max_bytes,
         };
 
-        let metadata = reader
-            .load_and_finish(fetch, file_size)
-            .await
-            .map_err(|e| match unbox_external_error(e) {
-                Ok(os_err) => error::OpenDalSnafu {}.into_error(os_err),
-                Err(parquet_err) => error::ReadParquetSnafu { path }.into_error(parquet_err),
-            })?;
+        let metadata =
+            reader.load_and_finish(fetch, file_size).await.map_err(
+                |e| match unbox_external_error(e) {
+                    Ok(os_err) => error::OpenDalSnafu {}.into_error(os_err),
+                    Err(parquet_err) => error::ReadParquetSnafu { path }.into_error(parquet_err),
+                },
+            );
 
         cache_metrics.num_reads = num_reads.into_inner();
         cache_metrics.bytes_read = bytes_read.into_inner();
 
-        Ok(metadata)
+        metadata
     }
 }
 
@@ -169,20 +182,30 @@ struct ObjectStoreFetch<'a> {
     file_path: &'a str,
     num_reads: &'a AtomicUsize,
     bytes_read: &'a AtomicU64,
+    max_bytes: Option<u64>,
 }
 
 impl MetadataFetch for ObjectStoreFetch<'_> {
     fn fetch(&mut self, range: std::ops::Range<u64>) -> BoxFuture<'_, ParquetResult<Bytes>> {
         let bytes_to_read = range.end - range.start;
         async move {
+            if let Some(max_bytes) = self.max_bytes {
+                self.bytes_read
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |read| {
+                        read.checked_add(bytes_to_read)
+                            .filter(|next| *next <= max_bytes)
+                    })
+                    .map_err(|_| ParquetError::General("footer read budget exceeded".into()))?;
+            } else {
+                self.bytes_read.fetch_add(bytes_to_read, Ordering::Relaxed);
+            }
+            self.num_reads.fetch_add(1, Ordering::Relaxed);
             let data = self
                 .object_store
                 .read_with(self.file_path)
                 .range(range)
                 .await
                 .map_err(|e| ParquetError::External(Box::new(e)))?;
-            self.num_reads.fetch_add(1, Ordering::Relaxed);
-            self.bytes_read.fetch_add(bytes_to_read, Ordering::Relaxed);
             Ok(data.to_bytes())
         }
         .boxed()
@@ -207,6 +230,104 @@ mod tests {
     use super::*;
     use crate::sst::parquet::PARQUET_METADATA_KEY;
     use crate::test_util::sst_util::sst_region_metadata;
+
+    #[tokio::test]
+    async fn test_metadata_count_footer_budget_reads_no_data_pages() {
+        let bytes = build_test_parquet_bytes(false, &[], &[1000], EnabledStatistics::Chunk);
+        let len = bytes.len();
+        let footer_size = u32::from_le_bytes(bytes[len - 8..len - 4].try_into().unwrap()) as u64;
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        store.write("file.parquet", bytes).await.unwrap();
+        for budget in [0, 8, footer_size + 7, footer_size + 8] {
+            let mut loader = MetadataLoader::new(store.clone(), "file.parquet", len as u64);
+            loader.with_read_budget(budget);
+            let mut metrics = MetadataCacheMetrics::default();
+            let result = loader.load(&mut metrics).await;
+            assert!(metrics.bytes_read <= budget);
+            if budget == footer_size + 8 {
+                assert_eq!(result.unwrap().file_metadata().num_rows(), 1000);
+                assert_eq!(metrics.bytes_read, footer_size + 8);
+                assert_eq!(metrics.num_reads, 2);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(metrics.bytes_read, if budget < 8 { 0 } else { 8 });
+            }
+        }
+    }
+
+    struct PendingRead {
+        active: Arc<AtomicUsize>,
+    }
+
+    struct ReadGuard(Arc<AtomicUsize>);
+
+    impl Drop for ReadGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    impl PendingRead {
+        async fn block<T>(&self) -> T {
+            self.active.fetch_add(1, Ordering::Relaxed);
+            let _guard = ReadGuard(self.active.clone());
+            std::future::pending().await
+        }
+    }
+
+    impl object_store::layers::mock::Read for PendingRead {
+        async fn read(
+            &self,
+            _: object_store::layers::mock::BytesRange,
+        ) -> object_store::layers::mock::Result<(
+            object_store::layers::mock::RpRead,
+            object_store::layers::mock::Buffer,
+        )> {
+            self.block().await
+        }
+        async fn open(
+            &self,
+            _: object_store::layers::mock::BytesRange,
+        ) -> object_store::layers::mock::Result<(
+            object_store::layers::mock::RpRead,
+            Box<dyn object_store::layers::mock::ReadStreamDyn>,
+        )> {
+            self.block().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metadata_count_footer_timeout_and_cancellation() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let observed = active.clone();
+        let layer = object_store::layers::mock::MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |_, _, _| {
+                Box::new(PendingRead {
+                    active: observed.clone(),
+                })
+            }))
+            .build()
+            .unwrap();
+        let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        store.write("file.parquet", vec![0u8; 100]).await.unwrap();
+        let mut loader = MetadataLoader::new(store, "file.parquet", 100);
+        loader.with_read_budget(100);
+        let mut metrics = MetadataCacheMetrics::default();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(5),
+                loader.load(&mut metrics)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+        let mut future = Box::pin(loader.load(&mut metrics));
+        assert!(futures::poll!(&mut future).is_pending());
+        assert_eq!(active.load(Ordering::Relaxed), 1);
+        drop(future);
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+    }
 
     fn build_test_parquet_bytes(
         include_primary_key: bool,
