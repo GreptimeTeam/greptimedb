@@ -26,13 +26,14 @@ const MATCH_ALL_REGEX: &str = "^(?:.*)$";
 /// Rollup functions emitting at most one output series per input series, carrying the labels of
 /// the matrix selector they wrap. `absent_over_time` is excluded: it synthesizes a series from
 /// the matchers when its input has none.
-const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
+const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 21] = [
     "avg_over_time",
     "changes",
     "count_over_time",
     "delta",
     "deriv",
     "double_exponential_smoothing",
+    "first_over_time",
     "idelta",
     "increase",
     "irate",
@@ -353,6 +354,14 @@ mod tests {
         assert_eq!(rewrite(query).unwrap(), parse(expected).unwrap(), "{query}");
         // Re-running the rewrite must be a no-op, including one-way propagation.
         assert!(rewrite(expected).is_none(), "{expected}");
+    }
+
+    #[test]
+    fn propagates_through_first_over_time() {
+        assert_rewrite(
+            r#"first_over_time(a[5m]) / b{host="x"}"#,
+            r#"first_over_time(a{host="x"}[5m]) / b{host="x"}"#,
+        );
     }
 
     #[test]

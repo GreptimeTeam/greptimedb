@@ -33,8 +33,8 @@ mod vector_matching;
 use std::sync::Arc;
 
 pub use aggr_over_time::{
-    AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
-    PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
+    AbsentOverTime, AvgOverTime, CountOverTime, FirstOverTime, LastOverTime, MaxOverTime,
+    MinOverTime, PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 pub use changes::Changes;
 use datafusion::arrow::array::{
@@ -54,8 +54,8 @@ pub use native_histogram::{
     MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
     NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
     NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
-    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
-    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
+    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFirstOverTime,
+    NativeHistogramFraction, NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
     NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
     NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
@@ -259,6 +259,7 @@ pub fn register_promql_functions(session_state: &mut SessionState) {
     let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
     let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
     let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(FirstOverTime::scalar_udf()));
     let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
     let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
     let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
@@ -289,6 +290,7 @@ pub fn register_promql_functions(session_state: &mut SessionState) {
         NativeHistogramIDelta::scalar_udf(),
         NativeHistogramIRate::scalar_udf(),
         NativeHistogramIncrease::scalar_udf(),
+        NativeHistogramFirstOverTime::scalar_udf(),
         NativeHistogramLastOverTime::scalar_udf(),
         MixedRange::float_udf(None),
         MixedRange::histogram_udf(None),
@@ -499,6 +501,7 @@ mod test {
             "prom_idelta",
             "prom_increase",
             "prom_irate",
+            "prom_first_over_time",
             "prom_last_over_time",
             "prom_le",
             "prom_lt",
@@ -523,6 +526,7 @@ mod test {
             "prom_native_histogram_increase",
             "prom_native_histogram_irate",
             "prom_native_histogram_keep_bool",
+            "prom_native_histogram_first_over_time",
             "prom_native_histogram_last_over_time",
             "prom_native_histogram_mul_scalar",
             "prom_native_histogram_neg",
