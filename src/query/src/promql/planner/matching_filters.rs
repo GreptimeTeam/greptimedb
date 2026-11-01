@@ -163,10 +163,13 @@ impl PromPlanner {
         binary: &BinaryExpr,
         query_engine_state: &QueryEngineState,
     ) -> Option<BinaryExpr> {
-        if let Err(reason) = check_shape(binary, true) {
-            common_telemetry::debug!("Matching filter not propagated ({reason}): {binary}");
-            return None;
-        }
+        let one_side = match check_shape(binary, true) {
+            Ok(one_side) => one_side,
+            Err(reason) => {
+                common_telemetry::debug!("Matching filter not propagated ({reason}): {binary}");
+                return None;
+            }
+        };
         let saved = self.ctx.clone();
         let contexts: error::Result<_> = async {
             self.prom_expr_to_plan(&binary.lhs, query_engine_state)
@@ -195,13 +198,13 @@ impl PromPlanner {
         // side proven unique has no duplicate to hide.
         logged(
             binary,
-            try_propagate(
+            apply_propagation(
                 binary,
+                one_side,
                 &left.tag_columns,
                 &right.tag_columns,
                 &left.aggregation_field_labels,
                 &right.aggregation_field_labels,
-                true,
             ),
         )
     }
@@ -230,6 +233,26 @@ fn try_propagate(
     unique_one_side: bool,
 ) -> Result<BinaryExpr, &'static str> {
     let one_side = check_shape(binary, unique_one_side)?;
+    apply_propagation(
+        binary,
+        one_side,
+        left_tags,
+        right_tags,
+        left_field_labels,
+        right_field_labels,
+    )
+}
+
+/// The refusals of [`try_propagate`] that need the operands' tag columns, and the rewrite, for a
+/// binary [`check_shape`] admitted with `one_side`.
+fn apply_propagation(
+    binary: &BinaryExpr,
+    one_side: Option<OneSide>,
+    left_tags: &[String],
+    right_tags: &[String],
+    left_field_labels: &[String],
+    right_field_labels: &[String],
+) -> Result<BinaryExpr, &'static str> {
     let matching = binary
         .modifier
         .as_ref()
@@ -262,9 +285,6 @@ fn try_propagate(
     let mut rewritten = binary.clone();
     let left = selector_matchers(&mut rewritten.lhs).ok_or("left operand is not a selector")?;
     let right = selector_matchers(&mut rewritten.rhs).ok_or("right operand is not a selector")?;
-    if !left.or_matchers.is_empty() || !right.or_matchers.is_empty() {
-        return Err("selector has an or matcher group");
-    }
 
     let constraints = left
         .matchers
@@ -329,11 +349,15 @@ fn check_shape(
     if one_side_expr.is_some_and(|expr| !has_unique_aggregate_output(expr)) {
         return Err("one-side uniqueness is not proven");
     }
-    if selector_matchers(&mut binary.lhs.as_ref().clone()).is_none() {
-        return Err("left operand is not a selector");
-    }
-    if selector_matchers(&mut binary.rhs.as_ref().clone()).is_none() {
-        return Err("right operand is not a selector");
+    for (operand, absent) in [
+        (&binary.lhs, "left operand is not a selector"),
+        (&binary.rhs, "right operand is not a selector"),
+    ] {
+        let mut operand = operand.as_ref().clone();
+        let matchers = selector_matchers(&mut operand).ok_or(absent)?;
+        if !matchers.or_matchers.is_empty() {
+            return Err("selector has an or matcher group");
+        }
     }
     Ok(one_side)
 }
