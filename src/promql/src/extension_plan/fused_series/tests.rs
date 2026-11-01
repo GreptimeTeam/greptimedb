@@ -456,6 +456,47 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
     tree
 }
 
+fn binary_with_abs_and_matching_key(key: &str) -> NativeTree {
+    let tree = binary_tree(raw_schema(), raw_schema());
+    let mut root = tree.root().clone();
+    let NativeExpr::Binary { left, right, .. } = &mut root.expr else {
+        unreachable!()
+    };
+    for side in [left, right] {
+        let input = side.clone();
+        let output = side.output.clone();
+        **side = NativeNode {
+            expr: NativeExpr::Map {
+                input,
+                op: BoundMap {
+                    ops: Arc::from([MapOp::Math(crate::map::MathOp::Abs)]),
+                },
+            },
+            output,
+        };
+    }
+    let NativeExpr::Binary { matching, .. } = &mut root.expr else {
+        unreachable!()
+    };
+    matching.labels = MatchingLabels::On(vec![Arc::from(key)]);
+    NativeTree::try_new(root).unwrap()
+}
+
+#[test]
+fn math_map_matching_key_preservation_controls_locality() {
+    let name_tree = binary_with_abs_and_matching_key("__name__");
+    assert!(matches!(
+        super::input_locality(name_tree.root()),
+        super::InputLocality::SinglePartition
+    ));
+
+    let host_tree = binary_with_abs_and_matching_key(HOST);
+    assert!(matches!(
+        super::input_locality(host_tree.root()),
+        super::InputLocality::MatchingLocal(_)
+    ));
+}
+
 /// `x - 2 * x`: one source read at both operands, with a scalar multiplier on the right.
 ///
 /// The subtraction and the multiplier together make the answer depend on which operand is which:
