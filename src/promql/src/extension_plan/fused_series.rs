@@ -1418,8 +1418,17 @@ impl ExecutionPlan for FusedSeriesExec {
             match slot.as_ref() {
                 Some(existing) => Arc::clone(existing),
                 None => {
+                    let grid_len = self
+                        .tree
+                        .root()
+                        .output
+                        .grid()
+                        .expect("fused tree has an evaluation grid")
+                        .spec()
+                        .len as usize;
                     let created = Arc::new(DuplicateEvidence::new(
                         &context.runtime_env().memory_pool,
+                        grid_len,
                         self.properties.partitioning.partition_count(),
                     ));
                     *slot = Some(Arc::clone(&created));

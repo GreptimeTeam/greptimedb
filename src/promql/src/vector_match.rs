@@ -1587,13 +1587,14 @@ pub struct DuplicateEvidence {
     reservation: std::sync::Mutex<MemoryReservation>,
     remaining: std::sync::atomic::AtomicUsize,
     aborted: std::sync::atomic::AtomicBool,
+    final_verdict: std::sync::Mutex<Option<DuplicateCandidate>>,
 }
 
 #[derive(Default)]
 struct DuplicateSlot {
     lhs_present: Vec<bool>,
     rhs_present: Vec<bool>,
-    candidates: Vec<Option<DuplicateCandidate>>,
+    candidates: HashMap<usize, DuplicateCandidate>,
     filling: Option<bool>,
 }
 
@@ -1606,25 +1607,57 @@ pub struct DuplicateCandidate {
     pub message: String,
 }
 
+fn candidate_owned_bytes(group: &GroupKey, message: &str) -> usize {
+    group
+        .iter()
+        .map(|(name, value)| name.len().saturating_add(value.len()))
+        .sum::<usize>()
+        .saturating_add(
+            group
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(Arc<str>, Arc<str>)>()),
+        )
+        .saturating_add(message.len())
+        .saturating_add(std::mem::size_of::<DuplicateCandidate>())
+}
+
 impl DuplicateEvidence {
     /// Creates evidence storage sized to the evaluation grid for each output partition.
-    pub fn new(pool: &Arc<dyn MemoryPool>, partitions: usize) -> Self {
+    pub fn new(pool: &Arc<dyn MemoryPool>, grid_len: usize, partitions: usize) -> Self {
         Self {
-            grid_len: partitions,
+            grid_len,
             slots: std::sync::Mutex::new(HashMap::new()),
             reservation: std::sync::Mutex::new(
                 MemoryConsumer::new("DuplicateEvidence").register(pool),
             ),
             remaining: std::sync::atomic::AtomicUsize::new(partitions),
             aborted: std::sync::atomic::AtomicBool::new(false),
+            final_verdict: std::sync::Mutex::new(None),
         }
     }
 
     /// ORs one partition's operand presence into the node/field slot.
     pub fn complete(&self) -> bool {
+        self.exit_claim(false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn slot_count(&self) -> usize {
+        self.slots.lock().unwrap().len()
+    }
+
+    pub fn abort(&self) {
+        self.exit_claim(true);
+    }
+
+    fn exit_claim(&self, aborted: bool) -> bool {
+        if aborted {
+            self.aborted
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         let last = loop {
             let current = self.remaining.load(std::sync::atomic::Ordering::Acquire);
-            if current == 0 || self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+            if current == 0 {
                 return false;
             }
             if self
@@ -1641,42 +1674,25 @@ impl DuplicateEvidence {
             }
         };
         if last {
+            if !self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+                *self.final_verdict.lock().unwrap() = self.current_verdict();
+            }
+            self.slots.lock().unwrap().clear();
             let reservation = self.reservation.lock().unwrap();
             let size = reservation.size();
             reservation.shrink(size);
         }
-        last
-    }
-
-    pub fn abort(&self) {
-        self.aborted
-            .store(true, std::sync::atomic::Ordering::Release);
-        let last = loop {
-            let current = self.remaining.load(std::sync::atomic::Ordering::Acquire);
-            if current == 0 {
-                break false;
-            }
-            if self
-                .remaining
-                .compare_exchange(
-                    current,
-                    current - 1,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                break current == 1;
-            }
-        };
-        if last {
-            let reservation = self.reservation.lock().unwrap();
-            let size = reservation.size();
-            reservation.shrink(size);
-        }
+        last && !self.aborted.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn verdict(&self) -> Option<DuplicateCandidate> {
+        if self.remaining.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return self.final_verdict.lock().unwrap().clone();
+        }
+        self.current_verdict()
+    }
+
+    fn current_verdict(&self) -> Option<DuplicateCandidate> {
         if self.aborted.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
@@ -1687,14 +1703,12 @@ impl DuplicateEvidence {
                 let filling = slot.filling?;
                 slot.candidates
                     .iter()
-                    .enumerate()
-                    .find_map(|(point, candidate)| {
+                    .filter_map(|(&point, candidate)| {
                         let lhs = slot.lhs_present.get(point).copied().unwrap_or(false);
                         let rhs = slot.rhs_present.get(point).copied().unwrap_or(false);
-                        (if filling { lhs || rhs } else { lhs && rhs })
-                            .then(|| candidate.clone())
-                            .flatten()
+                        (if filling { lhs || rhs } else { lhs && rhs }).then(|| candidate.clone())
                     })
+                    .min_by_key(|candidate| candidate.point)
                     .map(|candidate| ((candidate.point, node, field), candidate))
             })
             .min_by_key(|(key, _)| *key)
@@ -1753,46 +1767,39 @@ impl DuplicateEvidence {
         if point >= self.grid_len {
             return Ok(());
         }
-        if slot.candidates.len() != self.grid_len {
-            slot.candidates.resize_with(self.grid_len, || None);
-        }
-        let Some(existing) = slot.candidates.get(point).and_then(Option::as_ref) else {
-            let bytes = group
-                .iter()
-                .map(|(name, value)| name.len().saturating_add(value.len()))
-                .sum::<usize>()
-                .saturating_add(message.len());
-            self.reservation.lock().unwrap().try_grow(bytes)?;
-            if point < self.grid_len {
-                slot.candidates[point] = Some(DuplicateCandidate {
+        let Some(existing) = slot.candidates.get(&point) else {
+            let entry_bytes = candidate_owned_bytes(&group, &message)
+                .saturating_add(std::mem::size_of::<(usize, DuplicateCandidate)>());
+            self.reservation.lock().unwrap().try_grow(entry_bytes)?;
+            if let Err(error) = slot.candidates.try_reserve(1) {
+                self.reservation.lock().unwrap().shrink(entry_bytes);
+                return Err(DataFusionError::Execution(error.to_string()));
+            }
+            slot.candidates.insert(
+                point,
+                DuplicateCandidate {
                     point,
                     rank,
                     group,
                     message,
-                });
-            }
+                },
+            );
             return Ok(());
         };
         if rank < existing.rank {
-            let old_bytes = existing
-                .group
-                .iter()
-                .map(|(name, value)| name.len().saturating_add(value.len()))
-                .sum::<usize>()
-                .saturating_add(existing.message.len());
-            let new_bytes = group
-                .iter()
-                .map(|(name, value)| name.len().saturating_add(value.len()))
-                .sum::<usize>()
-                .saturating_add(message.len());
+            let old_bytes = candidate_owned_bytes(&existing.group, &existing.message);
+            let new_bytes = candidate_owned_bytes(&group, &message);
             self.reservation.lock().unwrap().try_grow(new_bytes)?;
             self.reservation.lock().unwrap().shrink(old_bytes);
-            slot.candidates[point] = Some(DuplicateCandidate {
+            slot.candidates.insert(
                 point,
-                rank,
-                group,
-                message,
-            });
+                DuplicateCandidate {
+                    point,
+                    rank,
+                    group,
+                    message,
+                },
+            );
         }
         Ok(())
     }
@@ -1804,14 +1811,12 @@ impl DuplicateEvidence {
         let filling = slot.filling?;
         slot.candidates
             .iter()
-            .enumerate()
-            .find_map(|(point, candidate)| {
+            .filter_map(|(&point, candidate)| {
                 let lhs = slot.lhs_present.get(point).copied().unwrap_or(false);
                 let rhs = slot.rhs_present.get(point).copied().unwrap_or(false);
-                (if filling { lhs || rhs } else { lhs && rhs })
-                    .then(|| candidate.clone())
-                    .flatten()
+                (if filling { lhs || rhs } else { lhs && rhs }).then(|| candidate.clone())
             })
+            .min_by_key(|candidate| candidate.point)
     }
 }
 

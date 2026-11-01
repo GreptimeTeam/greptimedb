@@ -3001,7 +3001,7 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
         // Presence storage is execution-scoped: it remains charged until the final partition
         // completes, then the shared evidence releases it.
         assert_eq!(
-            if partition + 1 == 4 { 0 } else { 8 },
+            if partition + 1 == 4 { 0 } else { 10 },
             pool.reserved(),
             "{host}: only execution-scoped duplicate evidence remains live"
         );
