@@ -100,7 +100,7 @@ fn run(
     let stmt = stmt(query, start, end, lookback);
     let tree = compile(&stmt, schema(fields), SeriesOrdering::KeyThenTime).unwrap();
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 24));
-    let state = NativeExecutionState::try_new(&tree, pool).unwrap();
+    let state = NativeExecutionState::try_new(&tree, pool, None).unwrap();
     let mut executor = NativeExecutor::new(state);
     executor
         .push_raw(InputId::new(0), raw(times, values, fields, metric("a")))
@@ -341,7 +341,7 @@ fn timestamp_refuses_two_series_that_collapse_to_one_label_set() {
     let stmt = stmt("timestamp(a @ 1)", 0, 4000, 3000);
     let tree = compile(&stmt, schema(1), SeriesOrdering::KeyThenTime).unwrap();
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 24));
-    let state = NativeExecutionState::try_new(&tree, pool).unwrap();
+    let state = NativeExecutionState::try_new(&tree, pool, None).unwrap();
     let mut executor = NativeExecutor::new(state);
     let times = [-1500i64, 500];
     let values = [Some(7.0), Some(1.0)];

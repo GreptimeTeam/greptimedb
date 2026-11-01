@@ -1623,8 +1623,14 @@ fn budgeted(
     limit: usize,
 ) -> (Result<Vec<Series>, DataFusionError>, Vec<usize>) {
     let mut seen = Vec::new();
-    let output =
-        binary_vectors_with_reservation(matching, lhs_schema, lhs, rhs_schema, rhs, &mut |total| {
+    let output = binary_vectors_with_reservation(
+        matching,
+        lhs_schema,
+        lhs,
+        rhs_schema,
+        rhs,
+        None,
+        &mut |total| {
             if total > limit {
                 return Err(DataFusionError::ResourcesExhausted(format!(
                     "a binary operation needs {total} bytes, more than the {limit} admitted"
@@ -1632,7 +1638,8 @@ fn budgeted(
             }
             seen.push(total);
             Ok(())
-        });
+        },
+    );
     (output, seen)
 }
 
@@ -3224,12 +3231,19 @@ fn a_histogram_comparison_filter_keeps_the_payload_of_the_operand_it_keeps() {
     // budgeted one gives, which is asserted to have reserved the workspace it walked.
     let compare = |matching: &BinaryMatching| -> [Vec<Series>; 2] {
         let mut reserved = Vec::new();
-        let budgeted =
-            binary_vectors_with_reservation(matching, &schema, &lhs, &schema, &rhs, &mut |total| {
+        let budgeted = binary_vectors_with_reservation(
+            matching,
+            &schema,
+            &lhs,
+            &schema,
+            &rhs,
+            None,
+            &mut |total| {
                 reserved.push(total);
                 Ok(())
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert!(
             !reserved.is_empty(),
             "the budgeted comparison reserved nothing, so it did not run under a reservation"

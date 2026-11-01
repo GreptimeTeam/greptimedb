@@ -66,7 +66,7 @@ use crate::native::runs::{Run, absorb};
 use crate::range_eval::RangeEvaluator;
 use crate::select::{self, SortOrder};
 use crate::vector_match::{
-    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels,
+    BinaryMatching, BinaryOp, Cardinality, DuplicateEvidence, FillValues, MatchingLabels,
     binary_vectors_with_reservation, set_vectors_with_reservation, validate_binary_operand,
 };
 
@@ -1432,6 +1432,8 @@ impl RetainedInput {
 /// output queue and handed over from there.
 struct BinaryRuntime {
     node_index: usize,
+    #[allow(dead_code)] // The next duplicate-evidence step will consume this handle.
+    evidence: Option<Arc<DuplicateEvidence>>,
     /// The kernel and the modifiers the compiler bound it with.
     kernel: PairKernel,
     /// The layout each operand is bound to, what a chunk of it is checked against: `0` is the left
@@ -1498,10 +1500,22 @@ impl Reader {
 }
 
 impl BinaryRuntime {
+    /// Evidence slot for one field; the next duplicate-evidence step will consume it.
+    #[allow(dead_code)]
+    fn slot(&self, field: usize) -> (usize, usize) {
+        (self.node_index, field)
+    }
+
     /// The run-time state of `kernel` over its two operands.
-    fn new(kernel: PairKernel, schemas: [Arc<SeriesSchema>; 2], node_index: usize) -> Self {
+    fn new(
+        kernel: PairKernel,
+        schemas: [Arc<SeriesSchema>; 2],
+        node_index: usize,
+        evidence: Option<Arc<DuplicateEvidence>>,
+    ) -> Self {
         Self {
             node_index,
+            evidence,
             kernel,
             schemas,
             operands: [RetainedInput::default(), RetainedInput::default()],
@@ -1650,14 +1664,19 @@ impl BinaryRuntime {
                 buffer.resize(bytes)
             };
             match &self.kernel {
-                PairKernel::Binary(matching) => binary_vectors_with_reservation(
-                    matching,
-                    left_schema,
-                    left,
-                    right_schema,
-                    right,
-                    &mut reserve,
-                ),
+                PairKernel::Binary(matching) => {
+                    // The next step replaces `None` with this node and field's evidence.
+                    let evidence_guard = None; // no lock taken yet
+                    binary_vectors_with_reservation(
+                        matching,
+                        left_schema,
+                        left,
+                        right_schema,
+                        right,
+                        evidence_guard,
+                        &mut reserve,
+                    )
+                }
                 PairKernel::Set(set) => set_vectors_with_reservation(
                     set.op,
                     &set.labels,
@@ -2630,6 +2649,8 @@ struct InputSlot {
 /// borrows of this one owner.
 pub struct NativeExecutionState {
     root: RuntimeNode,
+    #[allow(dead_code)] // Retained at execution-state lifetime for the next evidence step.
+    duplicate_evidence: Option<Arc<DuplicateEvidence>>,
     inputs: Vec<InputSlot>,
     /// A constant root waiting for its only pull; operand scalars remain chunkless.
     scalar_root: Option<(Arc<EvalGrid>, f64, NodeState)>,
@@ -2661,6 +2682,7 @@ impl RuntimeNode {
         inputs: &mut Vec<InputSlot>,
         binary_before: &mut usize,
         location: String,
+        duplicate_evidence: Option<Arc<DuplicateEvidence>>,
     ) -> Result<(Self, bool)> {
         let metrics = Arc::new(NodeMetrics::default());
         let (op, shared) = match &node.expr {
@@ -2725,6 +2747,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.input"),
+                    duplicate_evidence.clone(),
                 )?;
                 (
                     RuntimeOp::VectorOf {
@@ -2748,6 +2771,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.input"),
+                    duplicate_evidence.clone(),
                 )?;
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution(
@@ -2780,6 +2804,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.input"),
+                    duplicate_evidence.clone(),
                 )?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("merge does not produce samples".to_string())
@@ -2805,6 +2830,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.input"),
+                    duplicate_evidence.clone(),
                 )?;
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("window consumes non-sample input".to_string())
@@ -2839,6 +2865,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.input"),
+                    duplicate_evidence.clone(),
                 )?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("map does not produce samples".to_string())
@@ -2872,6 +2899,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.input"),
+                    duplicate_evidence.clone(),
                 )?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("map does not produce samples".to_string())
@@ -2893,6 +2921,7 @@ impl RuntimeNode {
                             inputs,
                             binary_before,
                             format!("{location}.parameter{index}"),
+                            duplicate_evidence.clone(),
                         )
                         .map(|(node, _)| node)
                     })
@@ -2926,6 +2955,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.input"),
+                    duplicate_evidence.clone(),
                 )?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("timestamp does not produce samples".to_string())
@@ -2963,6 +2993,7 @@ impl RuntimeNode {
                                 PairKernel::Binary(Arc::new(matching.clone())),
                                 [Arc::clone(left_schema), Arc::clone(right_schema)],
                                 node_index,
+                                duplicate_evidence.clone(),
                             )),
                             None,
                         )
@@ -2975,6 +3006,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.left"),
+                    duplicate_evidence.clone(),
                 )?;
                 let (right_node, right_shared) = Self::build(
                     right,
@@ -2982,6 +3014,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.right"),
+                    duplicate_evidence.clone(),
                 )?;
                 match (binary, broadcast) {
                     (Some(binary), None) => (
@@ -3043,6 +3076,7 @@ impl RuntimeNode {
                     PairKernel::Set(op.clone()),
                     [Arc::clone(left_schema), Arc::clone(right_schema)],
                     node_index,
+                    duplicate_evidence.clone(),
                 );
                 let (left_node, _) = Self::build(
                     left,
@@ -3050,6 +3084,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.left"),
+                    duplicate_evidence.clone(),
                 )?;
                 let (right_node, _) = Self::build(
                     right,
@@ -3057,6 +3092,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.right"),
+                    duplicate_evidence.clone(),
                 )?;
                 // The kernel files one series per label set, so its output shares none.
                 (
@@ -3091,6 +3127,7 @@ impl RuntimeNode {
                     PairKernel::Info(selector.clone()),
                     [Arc::clone(base_schema), Arc::clone(info_schema)],
                     node_index,
+                    duplicate_evidence.clone(),
                 );
                 let (base_node, _) = Self::build(
                     base,
@@ -3098,6 +3135,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.base"),
+                    duplicate_evidence.clone(),
                 )?;
                 let (info_node, _) = Self::build(
                     info,
@@ -3105,6 +3143,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.info"),
+                    duplicate_evidence.clone(),
                 )?;
                 // The kernel merges the results that share a label set, so its output shares none.
                 (
@@ -3146,6 +3185,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.input"),
+                    duplicate_evidence.clone(),
                 )?;
                 (
                     RuntimeOp::Aggregate {
@@ -3181,6 +3221,7 @@ impl RuntimeNode {
                     inputs,
                     binary_before,
                     format!("{location}.input"),
+                    duplicate_evidence.clone(),
                 )?;
                 let limitk = matches!(op, BoundVectorOp::LimitK { .. });
                 if limitk && child_shared {
@@ -4107,7 +4148,11 @@ impl RuntimeNode {
 }
 
 impl NativeExecutionState {
-    pub fn try_new(tree: &NativeTree, pool: Arc<dyn MemoryPool>) -> Result<Self> {
+    pub fn try_new(
+        tree: &NativeTree,
+        pool: Arc<dyn MemoryPool>,
+        duplicate_evidence: Option<Arc<DuplicateEvidence>>,
+    ) -> Result<Self> {
         let mut inputs = Vec::new();
         let mut binary_before = 0usize;
         let (root, _) = RuntimeNode::build(
@@ -4116,6 +4161,7 @@ impl NativeExecutionState {
             &mut inputs,
             &mut binary_before,
             "root".to_string(),
+            duplicate_evidence.clone(),
         )?;
         // A constant root has no node that produces its value, so the state produces it.
         let scalar_root = match (&tree.root().expr, &tree.root().output) {
@@ -4146,6 +4192,7 @@ impl NativeExecutionState {
         }
         Ok(Self {
             root,
+            duplicate_evidence,
             inputs,
             scalar_root,
         })

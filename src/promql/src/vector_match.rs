@@ -195,7 +195,7 @@ pub fn binary_vectors(
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
 ) -> Result<Vec<Series>> {
-    binary_vectors_inner(matching, lhs_schema, lhs, rhs_schema, rhs, None)
+    binary_vectors_inner(matching, lhs_schema, lhs, rhs_schema, rhs, None, None)
 }
 
 /// [`binary_vectors`], handing the live workspace it holds to `reserve` as it allocates.
@@ -213,6 +213,7 @@ pub(crate) fn binary_vectors_with_reservation(
     lhs: &[Series],
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
+    evidence: Option<&DuplicateEvidence>,
     reserve: &mut dyn FnMut(usize) -> Result<()>,
 ) -> Result<Vec<Series>> {
     let mut budget = Budget::new(reserve);
@@ -222,6 +223,7 @@ pub(crate) fn binary_vectors_with_reservation(
         lhs,
         rhs_schema,
         rhs,
+        evidence,
         Some(&mut budget),
     )
 }
@@ -234,6 +236,7 @@ fn binary_vectors_inner(
     lhs: &[Series],
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
+    _evidence: Option<&DuplicateEvidence>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Vec<Series>> {
     // The grid both operands are evaluated on, checked before anything is reserved for them.
@@ -257,6 +260,7 @@ fn binary_vectors_inner(
             &lhs,
             &rhs,
             &mut errors,
+            _evidence,
             budget.as_deref_mut(),
         )?;
         // The field's flags, tables and sort are destroyed with its frame, so its phase ends here:
@@ -713,6 +717,7 @@ fn binary_field(
     lhs: &Operand<'_>,
     rhs: &Operand<'_>,
     errors: &mut Vec<(usize, u8, String)>,
+    _evidence: Option<&DuplicateEvidence>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Results> {
     let (many, one, include, one_is_left) = match &matching.cardinality {

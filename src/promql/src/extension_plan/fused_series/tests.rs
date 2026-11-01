@@ -1328,7 +1328,7 @@ async fn a_runtime_error_after_rows_releases_the_input() {
 fn two_differently_named_series_collide_once_rate_drops_the_name() {
     let tree = rate_tree();
     let mut execution = NativeExecutor::new(
-        NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))
+        NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
             .expect("the runtime executes a rate tree"),
     );
     let samples = series_samples(1.0);
@@ -3240,6 +3240,7 @@ async fn a_later_repeated_source_enqueue_failure_releases_the_input() {
     let probe_state = NativeExecutionState::try_new(
         &subtracted_scaled_tree(),
         Arc::clone(&probe_pool) as Arc<dyn MemoryPool>,
+        None,
     )
     .expect("the repeated-source runtime builds");
     let ids = probe_state.input_ids(0).collect::<Vec<_>>();
@@ -3256,6 +3257,7 @@ async fn a_later_repeated_source_enqueue_failure_releases_the_input() {
     let bounded_state = NativeExecutionState::try_new(
         &subtracted_scaled_tree(),
         Arc::clone(&bounded_pool) as Arc<dyn MemoryPool>,
+        None,
     )
     .expect("the repeated-source runtime builds in the bounded pool");
     let bounded_ids = bounded_state.input_ids(0).collect::<Vec<_>>();
