@@ -761,14 +761,20 @@ fn binary_field(
         // Scanning one group is its own phase: the list of its present points is the only thing it
         // allocates, it is charged by the block it takes as it grows, and it is dropped with the
         // scan, so the next group's list replaces it.
-        let duplicate = overlap(
+        let mut duplicate_at: Option<usize> = None;
+        overlap(
             one,
             members,
-            |point| evaluated[point],
+            |point| {
+                if evaluated[point] && duplicate_at.is_none_or(|first| point < first) {
+                    duplicate_at = Some(point);
+                }
+                Ok(())
+            },
             metadata.tables.saturating_add(metadata.pairing),
             budget.as_deref_mut(),
         )?;
-        if let Some(point) = duplicate
+        if let Some(point) = duplicate_at
             && one_duplicate.is_none_or(|(first, _)| point < first)
         {
             one_duplicate = Some((point, key));
@@ -1579,7 +1585,7 @@ fn group(operand: &Operand<'_>, labels: &MatchingLabels) -> HashMap<GroupKey, Ve
     groups
 }
 
-/// The first point where two `members` are present and `relevant` holds.
+/// Reports every point where two or more `members` are present.
 ///
 /// The group's list of present points is the only thing this scan allocates, and scanning one group
 /// is its own phase: the block the list takes is charged when it outgrows what it holds, and the next
@@ -1588,12 +1594,12 @@ fn group(operand: &Operand<'_>, labels: &MatchingLabels) -> HashMap<GroupKey, Ve
 fn overlap(
     operand: &Operand<'_>,
     members: &[usize],
-    relevant: impl Fn(usize) -> bool,
+    mut on_duplicate: impl FnMut(usize) -> Result<()>,
     base: usize,
     mut budget: Option<&mut Budget<'_>>,
-) -> Result<Option<usize>> {
+) -> Result<()> {
     if members.len() < 2 {
-        return Ok(None);
+        return Ok(());
     }
     // Sorting the present points keeps the cost proportional to them, not to the span.
     let mut points = Vec::new();
@@ -1617,15 +1623,16 @@ fn overlap(
         }
     }
     points.sort_unstable();
-    let duplicate = points
-        .windows(2)
-        .find(|pair| pair[0] == pair[1] && relevant(pair[0]))
-        .map(|pair| pair[0]);
+    for (index, pair) in points.windows(2).enumerate() {
+        if pair[0] == pair[1] && (index == 0 || points[index - 1] != pair[0]) {
+            on_duplicate(pair[0])?;
+        }
+    }
     // The list is dropped with this scan, so the field's own phase figure is live from here on.
     if let Some(budget) = budget {
         budget.phase(base)?;
     }
-    Ok(duplicate)
+    Ok(())
 }
 
 fn result_metric(
