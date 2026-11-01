@@ -3694,9 +3694,11 @@ async fn state_of(
 
 /// The `tag_0` values of one state batch, which are the group's first declared label.
 fn group_label(state: &SchemaRef, batch: &RecordBatch) -> Vec<Option<String>> {
-    batch
+    let column = batch
         .column_by_name(state.field(1).name())
-        .expect("the state carries the group label")
+        .expect("the state carries the group label");
+    datafusion::arrow::compute::cast(column, &DataType::Utf8)
+        .expect("a group label is text")
         .as_any()
         .downcast_ref::<StringArray>()
         .expect("a group label is text")
