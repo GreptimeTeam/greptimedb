@@ -986,15 +986,15 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
             assert_eq!(Some(1601), request.end);
         }
     }
-    // Each selected samples part opens its header once, even when it has multiple series.
-    let mut headers = HashMap::<String, usize>::new();
-    for (path, range) in reads.lock().unwrap().iter() {
-        if path.ends_with(".samples") && range.offset() == 0 {
-            *headers.entry(path.clone()).or_default() += 1;
-        }
-    }
-    assert!(!headers.is_empty());
-    assert!(headers.values().all(|count| *count == 1));
+    // The series-index store is local, so samples parts bypass the object-store reader.
+    #[cfg(unix)]
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(path, _)| !path.ends_with(".samples"))
+    );
     requests.lock().unwrap().clear();
     assert!(
         source
@@ -1314,9 +1314,19 @@ async fn metadata_cache_reuses_structures_and_isolates_storage() {
 
     let (_env, engine, region) = fixture().await;
     build(&engine, &region).await;
+    // Local samples parts bypass the object-store reader, so the artifacts are copied to a
+    // memory store to observe every metadata read.
+    let local = region.series_index_store.clone().unwrap();
+    let copy = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    for entry in local.list_with("").recursive(true).await.unwrap() {
+        if entry.metadata().is_file() {
+            let bytes = local.read(entry.path()).await.unwrap();
+            copy.write(entry.path(), bytes).await.unwrap();
+        }
+    }
     let reads = Arc::new(Mutex::new(Vec::new()));
     let observed = reads.clone();
-    let store = region.series_index_store.clone().unwrap().layer(
+    let store = copy.layer(
         MockLayerBuilder::default()
             .reader_factory(Arc::new(move |path, _, inner| {
                 Box::new(ReadRecorder {

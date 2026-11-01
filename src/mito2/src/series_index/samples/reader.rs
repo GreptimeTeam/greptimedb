@@ -15,6 +15,7 @@
 //! Lazy, selective sample reads with independent traversal and pinned lifetimes.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
@@ -48,8 +49,117 @@ pub(crate) struct SamplesReader {
     schema: SchemaRef,
     cache: Option<MetadataCache>,
     handle: SamplesFileHandle,
-    parts: Arc<Vec<OnceCell<Reader>>>,
+    parts: Arc<Vec<OnceCell<PartReader>>>,
 }
+
+/// Reads byte ranges of one samples part.
+enum PartReader {
+    ObjectStore(Reader),
+    /// The OpenDAL fs backend runs every range read as its own blocking-pool task, and the many
+    /// small block reads of concurrent partitions contend on that pool, so a local part is read
+    /// with `pread` in place. This blocks the async worker on purpose: reads are bounded to one
+    /// block's columns or one metadata page, a page-cache hit is a memory copy, and a miss
+    /// blocks the worker for one such read.
+    #[cfg(unix)]
+    Local {
+        file: std::fs::File,
+        path: String,
+    },
+}
+
+impl PartReader {
+    async fn open(store: &ObjectStore, path: &str) -> Result<Self> {
+        #[cfg(unix)]
+        if store.info().scheme() == object_store::services::FS_SCHEME {
+            let local = std::path::PathBuf::from(store.info().root()).join(path);
+            let file = tokio::fs::File::open(&local)
+                .await
+                .map_err(|e| local_io_error(e, path))?;
+            return Ok(Self::Local {
+                file: file.into_std().await,
+                path: path.to_string(),
+            });
+        }
+        let reader = store
+            .reader_with(path)
+            .concurrent(8)
+            .gap(0)
+            .await
+            .context(OpenDalSnafu)?;
+        Ok(Self::ObjectStore(reader))
+    }
+
+    async fn read(&self, range: Range<u64>) -> Result<bytes::Bytes> {
+        match self {
+            Self::ObjectStore(reader) => {
+                Ok(reader.read(range).await.context(OpenDalSnafu)?.to_bytes())
+            }
+            #[cfg(unix)]
+            Self::Local { file, path } => read_local(file, path, range),
+        }
+    }
+
+    async fn fetch(&self, ranges: Vec<Range<u64>>) -> Result<Vec<bytes::Bytes>> {
+        match self {
+            Self::ObjectStore(reader) => Ok(reader
+                .fetch(ranges)
+                .await
+                .context(OpenDalSnafu)?
+                .into_iter()
+                .map(|buffer| buffer.to_bytes())
+                .collect()),
+            #[cfg(unix)]
+            Self::Local { file, path } => {
+                // Matches the object-store reader's zero-gap coalescing: one read per run of
+                // byte-adjacent ranges, sliced back into per-range buffers.
+                let mut fetched = Vec::with_capacity(ranges.len());
+                let mut run_start = 0;
+                while run_start < ranges.len() {
+                    let mut run_end = run_start + 1;
+                    while run_end < ranges.len() && ranges[run_end].start == ranges[run_end - 1].end
+                    {
+                        run_end += 1;
+                    }
+                    let base = ranges[run_start].start;
+                    let bytes = read_local(file, path, base..ranges[run_end - 1].end)?;
+                    fetched.extend(ranges[run_start..run_end].iter().map(|range| {
+                        bytes.slice((range.start - base) as usize..(range.end - base) as usize)
+                    }));
+                    run_start = run_end;
+                }
+                Ok(fetched)
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_local(file: &std::fs::File, path: &str, range: Range<u64>) -> Result<bytes::Bytes> {
+    use std::os::unix::fs::FileExt;
+
+    let mut buffer = vec![0; (range.end - range.start) as usize];
+    file.read_exact_at(&mut buffer, range.start)
+        .map_err(|e| local_io_error(e, path))?;
+    Ok(buffer.into())
+}
+
+#[cfg(unix)]
+fn local_io_error(error: std::io::Error, path: &str) -> crate::error::Error {
+    use snafu::IntoError;
+
+    // A short part is what OpenDAL reports as an unsatisfiable range, not a retryable failure.
+    let error = if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        object_store::Error::new(
+            object_store::ErrorKind::RangeNotSatisfied,
+            "samples part is shorter than its range",
+        )
+        .set_source(error)
+    } else {
+        object_store::new_std_io_error(error)
+    };
+    OpenDalSnafu.into_error(error.with_context("path", path))
+}
+
 impl SamplesReader {
     pub(crate) async fn open_cached(
         store: ObjectStore,
@@ -228,9 +338,7 @@ impl SamplesFormatReader for SamplesReader {
                 if !matches(bounds, &request) { adjacent = false; continue; }
                 let path = manifest.part_path(part.part_id);
                 // One lazy reader per accessed part, shared across this query's streams.
-                let reader = parts[part.part_id as usize].get_or_try_init(|| async {
-                    store.reader_with(&path).concurrent(8).gap(0).await.context(OpenDalSnafu)
-                }).await?;
+                let reader = parts[part.part_id as usize].get_or_try_init(|| PartReader::open(&store, &path)).await?;
                 let size = part.file_size;
                 let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
                 let header = read_part_range(reader, 0, metadata::HEADER_SIZE).await?;
@@ -310,7 +418,7 @@ async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Re
 /// Reuses validated immutable metadata; traversal remains local to each stream.
 async fn load_metadata_page(
     cache: Option<&MetadataCache>,
-    reader: &Reader,
+    reader: &PartReader,
     object: (&str, u64),
     reference: &PageReference,
     depth: u32,
@@ -365,7 +473,7 @@ fn timestamp_array(values: impl Iterator<Item = i64>, unit: TimestampUnit) -> Ar
     }
 }
 async fn read_block(
-    reader: &Reader,
+    reader: &PartReader,
     block: &Block,
     manifest: &Manifest,
     request: &SamplesReadRequest,
@@ -529,13 +637,9 @@ async fn read_block(
     )))
 }
 
-async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes::Bytes> {
+async fn read_part_range(reader: &PartReader, start: u64, end: u64) -> Result<bytes::Bytes> {
     require(start <= end, "reversed sample byte range")?;
-    let bytes = reader
-        .read(start..end)
-        .await
-        .context(OpenDalSnafu)?
-        .to_bytes();
+    let bytes = reader.read(start..end).await?;
     require(
         bytes.len() as u64 == end - start,
         "sample range length mismatch",
@@ -545,9 +649,9 @@ async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes:
 
 /// Fetch selected ranges with zero-gap coalescing, without reading unselected
 /// fields or blocks. The block size and scan reservation bound retained buffers;
-/// OpenDAL bounds concurrency to 8.
+/// OpenDAL bounds concurrency to 8 for object-store parts.
 async fn fetch_columns(
-    reader: &Reader,
+    reader: &PartReader,
     columns: &[&Column],
     buffers: &mut HashMap<u64, bytes::Bytes>,
 ) -> Result<()> {
@@ -558,13 +662,12 @@ async fn fetch_columns(
         .iter()
         .map(|column| Ok(column.payload.offset..column.payload.end()?))
         .collect::<Result<Vec<_>>>()?;
-    let fetched = reader.fetch(ranges).await.context(OpenDalSnafu)?;
+    let fetched = reader.fetch(ranges).await?;
     require(
         fetched.len() == columns.len(),
         "sample fetch response count mismatch",
     )?;
-    for (column, buffer) in columns.iter().zip(fetched) {
-        let bytes = buffer.to_bytes();
+    for (column, bytes) in columns.iter().zip(fetched) {
         require(
             bytes.len() == column.payload.stored as usize,
             "sample range length mismatch",
