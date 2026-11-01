@@ -1777,6 +1777,10 @@ struct NativePlanObserver(
     Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
     Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
     Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+    /// Every plan a query engine handed to the wrapper, in the order it was wrapped. A statement
+    /// that pushes work into a region wraps that region's own root too, and its sub-plans are not
+    /// reachable from the frontend tree.
+    Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
 );
 
 impl NativePlanObserver {
@@ -1784,6 +1788,19 @@ impl NativePlanObserver {
         *self.0.lock().unwrap() = None;
         self.1.lock().unwrap().clear();
         *self.2.lock().unwrap() = None;
+        self.3.lock().unwrap().clear();
+    }
+
+    /// Every wrapped plan except the frontend's own root, which is where a region's plan lands.
+    fn region_plans(&self) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        let root = self.2.lock().unwrap().clone();
+        self.3
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|plan| root.as_ref().is_none_or(|root| !Arc::ptr_eq(root, plan)))
+            .cloned()
+            .collect()
     }
 
     /// The root of the first plan wrapped after the last `clear`, which is the frontend's own tree
@@ -1826,6 +1843,7 @@ impl PhysicalPlanWrapper for NativePlanObserver {
                 *root = Some(origin.clone());
             }
         }
+        self.3.lock().unwrap().push(origin.clone());
         let mut stack = vec![origin.clone()];
         while let Some(node) = stack.pop() {
             if node.name() == "FusedSeriesExec" {
@@ -2002,6 +2020,28 @@ fn assert_delta_rows(
     }
 }
 
+/// The series scan one fused source reads.
+///
+/// A segment that matches two vectors, or that folds across series, routes its inputs before
+/// reading them, so the scan is no longer the fused node's direct child. Everything between is a
+/// pass-through for this purpose, which is what the walk skips.
+fn series_scan_below(
+    mut plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> &SeriesScanExec {
+    loop {
+        if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
+            return scan;
+        }
+        match plan.children().as_slice() {
+            [only] => plan = only,
+            children => panic!(
+                "{} children below {plan:?}, not one series scan",
+                children.len()
+            ),
+        }
+    }
+}
+
 fn assert_two_source_native_plan(
     plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
     require_multiple_nonempty_partitions: bool,
@@ -2009,8 +2049,20 @@ fn assert_two_source_native_plan(
     use datafusion::physical_plan::metrics::MetricValue;
 
     assert_eq!(plan.name(), "FusedSeriesExec");
-    assert_eq!(plan.output_partitioning().partition_count(), 1);
     assert_eq!(plan.children().len(), 2);
+    // Both sides are routed by one matching key into one width, so every output partition owns
+    // complete match groups and the node answers as many partitions as it routes. Collapsing them
+    // into one would be the gather this shape exists to avoid.
+    let widths = plan
+        .children()
+        .iter()
+        .map(|child| child.output_partitioning().partition_count())
+        .collect::<Vec<_>>();
+    assert!(
+        widths.windows(2).all(|pair| pair[0] == pair[1]),
+        "both sides must route to the same width: {widths:?}"
+    );
+    assert_eq!(plan.output_partitioning().partition_count(), widths[0]);
     let schema = plan.schema();
     assert_eq!(
         schema.fields().len(),
@@ -2024,12 +2076,7 @@ fn assert_two_source_native_plan(
     assert!(!Arc::ptr_eq(children[0], children[1]));
     for (source, child) in children.iter().enumerate() {
         assert_eq!(child.output_partitioning().partition_count(), 4);
-        let scan = child
-            .downcast_ref::<CooperativeExec>()
-            .map_or(*child, |cooperative| cooperative.input());
-        let scan = scan.downcast_ref::<SeriesScanExec>().unwrap_or_else(|| {
-            panic!("source {source} is not a SeriesScanExec: {scan:?}; plan={plan:?}")
-        });
+        let scan = series_scan_below(child);
         let metrics = scan.metrics().expect("series scan metrics");
         assert!(metrics.output_rows().expect("series scan output rows") > 0);
         let mut nonempty_partitions = [false; 4];
@@ -2059,9 +2106,32 @@ fn assert_two_source_native_plan(
     assert_eq!(display.matches("source=1").count(), 1, "{display}");
 }
 
-fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
+fn output_values_per_partition(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> Option<Vec<u64>> {
     use datafusion::physical_plan::metrics::MetricValue;
 
+    if plan.name() != "FusedSeriesExec" {
+        return None;
+    }
+    let partition_count = plan.output_partitioning().partition_count();
+    let metrics = plan.metrics()?;
+    let mut values_by_partition = vec![0_u64; partition_count];
+    let mut found_metric = false;
+    for metric in metrics.iter() {
+        if metric.value().name() == "native.root.output_values"
+            && let MetricValue::Count { count, .. } = metric.value()
+            && let Some(partition) = metric.partition()
+            && let Some(value) = values_by_partition.get_mut(partition)
+        {
+            *value += count.value() as u64;
+            found_metric = true;
+        }
+    }
+    found_metric.then_some(values_by_partition)
+}
+
+fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
     assert_eq!(plan.name(), "FusedSeriesExec");
     assert_eq!(plan.output_partitioning().partition_count(), 4);
     assert_eq!(
@@ -2069,16 +2139,12 @@ fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::Execu
         4,
         "fused scan must have four partitions"
     );
-    let mut values_by_partition = [0_u64; 4];
-    for metric in plan.metrics().expect("fused plan metrics").iter() {
-        if metric.value().name() == "native.root.output_values"
-            && let MetricValue::Count { count, .. } = metric.value()
-            && let Some(partition) = metric.partition()
-            && let Some(value) = values_by_partition.get_mut(partition)
-        {
-            *value += count.value() as u64;
-        }
-    }
+    let values_by_partition = output_values_per_partition(plan).unwrap_or_else(|| {
+        panic!(
+            "the fused producer must report `native.root.output_values` for every partition, \
+             otherwise nothing here shows that the partitions executed"
+        )
+    });
     assert!(
         values_by_partition.iter().all(|value| *value > 0),
         "every native execution partition must produce values: {values_by_partition:?}"
@@ -3032,10 +3098,7 @@ async fn native_promql_set_operators_read_both_scans_whole() {
         assert_eq!(plan.output_partitioning().partition_count(), 1, "{query}");
         let children = plan.children();
         assert_eq!(children.len(), 2, "{query}");
-        let left = children[0]
-            .downcast_ref::<CooperativeExec>()
-            .map_or(children[0], |cooperative| cooperative.input());
-        let left = left.downcast_ref::<SeriesScanExec>().unwrap();
+        let left = series_scan_below(children[0]);
         assert_eq!(left.properties().partitioning.partition_count(), 4);
         let nonempty = left
             .metrics()
@@ -4635,8 +4698,12 @@ async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
     let native_rows = native_result_rows(native_tql_output(&instance, sql, true).await).await;
     let plan = observer.take();
     assert_eq!(plan.name(), "FusedSeriesExec");
-    assert_eq!(plan.output_partitioning().partition_count(), 1);
+    // Both selectors are routed by the same matching key, so the pair is answered in the
+    // partitions they were scanned in rather than gathered into one.
     assert_eq!(plan.children().len(), 2);
+    let width = plan.children()[0].output_partitioning().partition_count();
+    assert!(width > 1, "the pair must keep the scan's partitioning");
+    assert_eq!(plan.output_partitioning().partition_count(), width);
     assert!(
         observer.take_raw_sources().is_empty(),
         "one logical table keeps both scans region-local instead of one raw source per input"
@@ -4737,18 +4804,52 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         );
         assert_eq!(legacy_rows, expected, "legacy: {query}");
 
-        // The native plan: one two-input node over both logical tables' scans, and no split.
+        // The native plan: the whole-vector parent at the frontend, one per-series prefix segment
+        // per region. Each segment binds its own source's metric, which is what makes the division
+        // read two different metrics rather than one read twice.
         observer.clear();
         let (native_columns, native_rows) =
             native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
-        let plan = observer.take();
-        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
-        assert_eq!(plan.output_partitioning().partition_count(), 1, "{query}");
-        assert_eq!(plan.children().len(), 2, "{query}");
+        let root = observer.root_plan();
         assert_eq!(
-            observer.take_raw_sources().len(),
+            root.name(),
+            "FusedSeriesExec",
+            "{query}: the parent is the frontend's own: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        assert_eq!(root.output_partitioning().partition_count(), 1, "{query}");
+        assert_eq!(
+            root.children().len(),
             2,
-            "{query}: each logical table answers through its own raw source"
+            "{query}: one input per segmented prefix: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        // Each region answers one prefix: a repartition over the segment that evaluates the
+        // selector, over the scan bound to that selector's metric.
+        fn scan_metric(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> Option<String> {
+            if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
+                return match scan.label_source() {
+                    store_api::region_engine::RawLabelSource::PrimaryKey {
+                        metric_name, ..
+                    } => Some(metric_name.to_string()),
+                    _ => None,
+                };
+            }
+            plan.children().into_iter().find_map(scan_metric)
+        }
+        let region_metrics = observer
+            .region_plans()
+            .iter()
+            .filter_map(scan_metric)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            std::collections::BTreeSet::from([
+                "native_pair_demo".to_string(),
+                "native_pair_other".to_string(),
+            ]),
+            region_metrics,
+            "{query}: each logical table must be scanned as its own metric: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
         );
         assert!(
             !holds_split_merge(&observer.root_plan()),
@@ -4864,6 +4965,47 @@ async fn native_promql_declines_a_grouping_by_the_metric_name() {
     assert_eq!(
         native_rows, legacy_rows,
         "{query}: the full label sets of every row, not only the values"
+    );
+}
+
+/// Ordinary Mito sources also decline a multi-source grouping by metric name.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_mito_cross_table_grouping_by_metric_name() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_mito_group_by_name",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE name_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         CREATE TABLE name_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         INSERT INTO name_a VALUES ('a', 0, 2); \
+         INSERT INTO name_b VALUES ('b', 0, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let query = r#"sum by (__name__) (name_a{host="a"} or name_b{host="b"})"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    let (_, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(
+        !legacy_rows.is_empty(),
+        "{query}: existing plan must answer"
+    );
+
+    observer.clear();
+    let (_, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert!(
+        observer.fused().is_none(),
+        "{query}: native must decline multi-source grouping by __name__"
+    );
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{query}: compare the full labelled rows from both routes"
     );
 }
 
@@ -5851,6 +5993,1021 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
     assert_eq!(native, legacy);
 }
 
+/// The `ts` and first `Float64` column of a `TQL EVAL` answer, as values.
+///
+/// Answers are compared this way rather than as printed tables: the native route names a field
+/// after its compiled root while the existing planner names a computed column after the
+/// expression, and that difference is older than the native route's segmentation. A statement that
+/// groups nothing also has no label column, which `native_result_rows` needs, so this reads the
+/// two columns an aggregate answers with.
+fn eval_values(output: Output) -> Vec<(i64, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => futures::executor::block_on(collect_batches(stream)).unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let timestamps = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let values = batch
+                .columns()
+                .iter()
+                .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+                .unwrap();
+            (0..batch.num_rows())
+                .map(move |row| (timestamps.value(row), values.value(row)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// A `TQL EVAL` answer as the set of rows it holds: column names, then sorted rows.
+///
+/// Three things differ between the routes and none of them is the answer. This route names a value
+/// column after its compiled root (`val`) while the existing planner names it after the expression
+/// (`abs(val)`, `sum(topk_metric.val)`); the two emit columns in a different order; and this one is
+/// partitioned, so its rows arrive by partition rather than in one sequence. Comparing the answers
+/// as what they are - a set of (labels, timestamp, value) rows - leaves the values as the only thing
+/// the assertion can fail on.
+fn eval_text(output: Output) -> String {
+    use datafusion::arrow::array::RecordBatch;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
+
+    let batches = match output.data {
+        OutputData::Stream(stream) => futures::executor::block_on(collect_batches(stream)).unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut named: Option<Vec<String>> = None;
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for batch in batches {
+        let batch = batch.into_df_record_batch();
+        let fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                let name = if field.data_type() == &DataType::Float64 {
+                    "value".to_string()
+                } else {
+                    field.name().clone()
+                };
+                (name, field.data_type().clone(), field.is_nullable())
+            })
+            .collect::<Vec<_>>();
+        // One column order for every batch: by name, so the two routes agree on it.
+        let mut order = (0..fields.len()).collect::<Vec<_>>();
+        order.sort_by(|left, right| fields[*left].0.cmp(&fields[*right].0));
+        let names = order
+            .iter()
+            .map(|index| fields[*index].0.clone())
+            .collect::<Vec<_>>();
+        match &named {
+            None => named = Some(names),
+            Some(first) => assert_eq!(first, &names, "the answers have different columns"),
+        }
+        let schema = Arc::new(Schema::new(
+            order
+                .iter()
+                .map(|index| {
+                    let (name, data_type, nullable) = fields[*index].clone();
+                    Arc::new(Field::new(name, data_type, nullable))
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let columns = order
+            .iter()
+            .map(|index| batch.column(*index).clone())
+            .collect::<Vec<_>>();
+        let reordered =
+            RecordBatch::try_new(schema, columns).expect("the columns keep their types");
+        let formatters = reordered
+            .columns()
+            .iter()
+            .map(|column| {
+                ArrayFormatter::try_new(column.as_ref(), &FormatOptions::default())
+                    .expect("the answer formats")
+            })
+            .collect::<Vec<_>>();
+        for row in 0..reordered.num_rows() {
+            rows.push(
+                formatters
+                    .iter()
+                    .map(|formatter| formatter.value(row).to_string())
+                    .collect(),
+            );
+        }
+    }
+    rows.sort();
+    let mut out = named.unwrap_or_default().join(" | ");
+    for row in rows {
+        out.push('\n');
+        out.push_str(&row.join(" | "));
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_sum_topk_uses_global_topk_segment() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_sum_topk_segments")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE topk_metric (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO topk_metric (host, ts, val) VALUES \
+         ('a', 0, 2), ('b', 0, 7), ('c', 0, 11), ('a', 1000, 3), ('b', 1000, 13), ('c', 1000, 5)",
+        QueryContext::arc(),
+    )
+    .await;
+    let sql = "TQL EVAL (0, 1, '1s') sum(topk(1, topk_metric))";
+    observer.clear();
+    let native_output = native_tql_output(&instance, sql, true).await;
+    let batches = match native_output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let timestamps = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let values = batch
+                .columns()
+                .iter()
+                .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+                .unwrap();
+            (0..batch.num_rows())
+                .map(move |row| (timestamps.value(row), values.value(row)))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![(0, 11.0), (1_000, 13.0)],
+        "sum(topk(1, ...)) must return the global maximum"
+    );
+    fn walk(
+        plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        found: &mut Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+    ) {
+        if plan.name() == "FusedSeriesExec" {
+            found.push(plan.clone());
+        }
+        for child in plan.children() {
+            walk(child, found);
+        }
+    }
+
+    // The statement splits in two: the per-series prefix stays in the region, and the global
+    // `topk` and `sum` run above it. So the frontend tree holds one segment, and the other is the
+    // root of the region's own execution - which is where the exchange that gathers it lives.
+    let root = observer.root_plan();
+    let mut frontend = Vec::new();
+    walk(&root, &mut frontend);
+    assert_eq!(
+        frontend.len(),
+        1,
+        "the global sum and its topk are one frontend segment: {}",
+        datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+    );
+    let parent = &frontend[0];
+    assert_eq!(
+        parent.output_partitioning().partition_count(),
+        1,
+        "a global topk answers one partition"
+    );
+    let parent_display = datafusion::physical_plan::displayable(parent.as_ref())
+        .indent(true)
+        .to_string();
+    let parent_tree = parent_display
+        .split_once("NativeTree")
+        .map_or(parent_display.as_str(), |(_, tree)| tree);
+    assert!(
+        parent_tree.contains("Aggregate sum by [] complete"),
+        "the parent owns the complete sum: {parent_tree}"
+    );
+    assert!(
+        parent_tree.contains("Vector topk 1 by []"),
+        "the parent owns the global topk: {parent_tree}"
+    );
+    assert!(
+        parent_tree.contains("Input evaluated samples source=0"),
+        "the parent reads its child's evaluated frame, not a scan: {parent_tree}"
+    );
+    assert!(
+        !parent_tree.contains("Instant"),
+        "the prefix was cut out, so no instant evaluation is left in the parent: {parent_tree}"
+    );
+
+    let mut region_fused = Vec::new();
+    for plan in observer.region_plans() {
+        walk(&plan, &mut region_fused);
+    }
+    assert_eq!(
+        region_fused.len(),
+        1,
+        "the prefix is the region's own segment"
+    );
+    let child = &region_fused[0];
+    assert!(
+        child.output_partitioning().partition_count() > 1,
+        "the prefix keeps the scan's partitions, which is the point of cutting below the topk"
+    );
+    let child_display = datafusion::physical_plan::displayable(child.as_ref())
+        .indent(true)
+        .to_string();
+    // The first line names the statement the node was built for, which is the same for both
+    // segments; what a segment computes is the tree below it.
+    let child_tree = child_display
+        .split_once("NativeTree")
+        .map_or(child_display.as_str(), |(_, tree)| tree);
+    assert!(
+        child_tree.contains("Instant"),
+        "the child owns the per-series prefix: {child_tree}"
+    );
+    assert!(
+        !child_tree.contains("topk") && !child_tree.contains("Aggregate"),
+        "the global operations stayed in the parent: {child_tree}"
+    );
+    let declaration =
+        datatypes::series::frame::SeriesFrameDeclaration::parse(child.schema().as_ref())
+            .expect("the child publishes a series frame");
+    assert_eq!(
+        declaration.content(),
+        datatypes::series::frame::FrameContent::Evaluated,
+        "the segment hands its parent computed values"
+    );
+    assert_eq!(
+        declaration.labels(),
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        "the segment names each series"
+    );
+    // The region root is normalized before it leaves: ordinary coalescing would interleave the
+    // segments of one evaluated chain, which the decoder refuses.
+    let region_root = observer
+        .region_plans()
+        .into_iter()
+        .find(|plan| {
+            let mut found = Vec::new();
+            walk(plan, &mut found);
+            !found.is_empty()
+        })
+        .expect("the region plan holding the segment was captured");
+    assert_eq!(
+        region_root.output_partitioning().partition_count(),
+        1,
+        "the region answers one stream: {}",
+        datafusion::physical_plan::displayable(region_root.as_ref()).indent(true)
+    );
+    // The plan the wrapper sees is the optimized one, so the router may be the root itself or sit
+    // directly above the segment.
+    let exchange = if region_root.name() == "SeriesRepartitionExec" {
+        region_root.clone()
+    } else {
+        let region_children = region_root.children();
+        match region_children.first() {
+            Some(only) if only.name() == "SeriesRepartitionExec" => Arc::clone(only),
+            _ => panic!(
+                "the region exit is the series-aware router: {}",
+                datafusion::physical_plan::displayable(region_root.as_ref()).indent(true)
+            ),
+        }
+    };
+    let gathered = exchange.children();
+    assert_eq!(gathered.len(), 1, "the router reads one input");
+    assert!(
+        Arc::ptr_eq(gathered[0], child),
+        "the router gathers the segment itself, not something else: {}",
+        datafusion::physical_plan::displayable(exchange.as_ref()).indent(true)
+    );
+    assert_eq!(
+        exchange.output_partitioning().partition_count(),
+        1,
+        "the region answers one stream"
+    );
+
+    let legacy = eval_values(native_tql_output(&instance, sql, false).await);
+    assert_eq!(rows, legacy, "native and legacy answers differ");
+}
+
+/// A cross-table segmented expression matches exact legacy values and uses the segmented route.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_multi_source_segments_match_legacy_values() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_multi_source_segments")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE seg_m (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         CREATE TABLE seg_n (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO seg_m VALUES ('a', 0, 2), ('b', 0, 6), ('a', 60000, 4), ('b', 60000, 12), ('a', 120000, 8), ('b', 120000, 24); \
+         INSERT INTO seg_n VALUES ('a', 0, 1), ('b', 0, 2), ('a', 60000, 2), ('b', 60000, 4), ('a', 120000, 4), ('b', 120000, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let sql = "TQL EVAL (0, 120, '60s') sum(topk(1, seg_m / seg_n))";
+    observer.clear();
+    let native = eval_values(native_tql_output(&instance, sql, true).await);
+    assert_eq!(native, vec![(0, 3.0), (60_000, 3.0), (120_000, 3.0)]);
+    let root = observer.root_plan();
+    let fused = fused_nodes_in_root(&root);
+    // A cross-table statement splits in two here: the root folds `sum` over `topk`, which reads
+    // only the segment below it, and that segment is the `m / n` match over both tables. So the
+    // frontend tree holds the root and one segment - unlike a single-table `sum(topk(1, m))`,
+    // whose per-series prefix goes into the region and leaves one fused node above it.
+    let segment = fused
+        .iter()
+        .find(|node| node.children().len() == 2)
+        .expect("the m/n matching subtree must be one segment over both tables");
+    // The engine is configured for four workers, and each table arrives from one region as a
+    // single partition. The segment must run at the configured width anyway, so each table's one
+    // partition is spread over four; without this the match runs serial while the scans below it
+    // are parallel.
+    assert_eq!(
+        4,
+        segment.output_partitioning().partition_count(),
+        "a matching segment runs at the configured width, not at its inputs' count"
+    );
+    let child_debug = segment
+        .children()
+        .iter()
+        .map(|child| debug_merge_scan_child(child))
+        .collect::<Vec<_>>();
+    // A segment over two tables cannot sit inside either region, so it runs above them and reads
+    // each table through that table's own raw series reader. What the assertion has to rule out is
+    // the statement falling back at all: the segment exists, it binds one child per source, and
+    // each child names its own table rather than both reading one.
+    assert!(
+        child_debug
+            .iter()
+            .all(|debug| debug.contains("RawSeriesSource")),
+        "each source must be read through its own raw series source: {child_debug:?}"
+    );
+    assert!(
+        child_debug.iter().any(|debug| debug.contains("seg_m"))
+            && child_debug.iter().any(|debug| debug.contains("seg_n")),
+        "the two children must read different tables: {child_debug:?}"
+    );
+
+    let legacy = eval_values(native_tql_output(&instance, sql, false).await);
+    assert_eq!(legacy, native, "native/legacy mismatch");
+}
+
+/// Segments are cut where the physical planner would otherwise have to gather a per-series prefix.
+///
+/// One statement per shape the cut can meet, each asserting only what the rule says: a tree that
+/// already runs on every partition stays one node, a matching tree routes instead of gathering, a
+/// global fold over per-series work cuts that work out, and a constant is never cut out because a
+/// boundary cannot carry one.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_segment_boundaries")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE seg_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         CREATE TABLE seg_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO seg_a VALUES ('a', 0, 2), ('b', 0, 7), ('c', 0, 11), ('a', 1000, 3), ('b', 1000, 13), ('c', 1000, 5); \
+         INSERT INTO seg_b VALUES ('a', 0, 4), ('b', 0, 1), ('c', 0, 22), ('a', 1000, 6), ('b', 1000, 26), ('c', 1000, 10)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    fn fused_in(
+        plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        let mut found = Vec::new();
+        let mut stack = vec![plan.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec" {
+                found.push(node.clone());
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        found
+    }
+
+    // `cuts` is how many per-series prefixes the statement has below a gathered node: the number
+    // of segment boundaries, so the plan holds `cuts + 1` fused nodes.
+    //
+    // `timestamp` over a computed vector reports the evaluation time, and that has to survive the
+    // boundary: the aggregate runs in the gathered segment and the projection above it reads the
+    // grid, which is what Prometheus reports for a sample the aggregate created. These answers
+    // carry labels, so they are compared whole rather than as bare values.
+    for query in ["timestamp(sum(seg_a))", "sum(timestamp(abs(seg_a)))"] {
+        let sql = format!("TQL EVAL (0, 1, '1s') {query}");
+        let native = eval_text(native_tql_output(&instance, &sql, true).await);
+        let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
+        assert_eq!(native, legacy, "{query}: answers differ");
+    }
+
+    for (query, cuts, why) in [
+        // A tree that answers each series on its own needs no gather, so nothing is cut.
+        (
+            "abs(seg_a)",
+            0usize,
+            "a per-series tree runs on every partition",
+        ),
+        // A matching tree routes its inputs; it does not gather them.
+        (
+            "seg_a / on(host) seg_b",
+            0usize,
+            "a matching tree routes rather than gathers",
+        ),
+        // The fold gathers, but the prefixes below it do not need that gather.
+        (
+            "sum(topk(1, seg_a))",
+            1usize,
+            "the per-series prefix under a global topk",
+        ),
+        (
+            "sum(topk(1, abs(seg_a)))",
+            1usize,
+            "the whole per-series prefix is one segment",
+        ),
+        // A boundary cannot carry a constant, so the constant stays inside the segment.
+        (
+            "sum(topk(1, seg_a)) + 1",
+            1usize,
+            "a constant is embedded, not cut out",
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 1, '1s') {query}");
+        observer.clear();
+        let native = eval_text(native_tql_output(&instance, &sql, true).await);
+        let root = observer.root_plan();
+        let frontend = fused_in(&root);
+        let mut regions = 0;
+        for plan in observer.region_plans() {
+            regions += fused_in(&plan).len();
+        }
+        assert_eq!(
+            frontend.len() + regions,
+            cuts + 1,
+            "{query}: {why}: expected {} fused nodes, found {} at the frontend and {} in the region: {}",
+            cuts + 1,
+            frontend.len(),
+            regions,
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        if cuts > 0 {
+            assert_eq!(
+                frontend.len(),
+                1,
+                "{query}: {why}: the gathered node is the frontend's own: {}",
+                datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+            );
+        }
+        let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
+        assert_eq!(native, legacy, "{query}: answers differ");
+    }
+
+    // This two-table statement is segmented: each segment binds its own scan, so it can be placed
+    // in a region. A cut carrying two sources is still declined in `build_inner_segment`, so each
+    // prefix the parent receives reads exactly one source.
+    let query = "sum(max by (host) (seg_a)) / sum(seg_b)";
+    let sql = format!("TQL EVAL (0, 1, '1s') {query}");
+    observer.clear();
+    let native = eval_text(native_tql_output(&instance, &sql, true).await);
+    let root = observer.root_plan();
+    let frontend = fused_in(&root);
+    let mut regions = 0;
+    for plan in observer.region_plans() {
+        regions += fused_in(&plan).len();
+    }
+    assert_eq!(
+        frontend.len(),
+        1,
+        "{query}: the whole-vector parent is the frontend's own: {}",
+        datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+    );
+    assert!(
+        regions >= 1,
+        "{query}: each prefix segment runs in a region: {}",
+        datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+    );
+    let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
+    assert_eq!(native, legacy, "{query}: answers differ");
+}
+
+/// Range-function prefixes on two table sources retain their own samples in each segment.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bounds() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_cross_table_offsets")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE off_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         CREATE TABLE off_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         INSERT INTO off_a VALUES ('a', 0, 10), ('a', 60000, 20), ('a', 120000, 30); \
+         INSERT INTO off_b VALUES ('a', 0, 1), ('a', 60000, 2), ('a', 120000, 3)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The two-region plan does not promise row order, so sort without deduplicating before comparing.
+    let sorted_rows = |mut rows: Vec<(i64, f64)>| {
+        rows.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.total_cmp(&right.1))
+        });
+        rows
+    };
+    let offset_query = "sum(off_a) / sum(off_b offset 60s)";
+    let offset_sql = format!("TQL EVAL (60, 120, '1m') {offset_query}");
+    observer.clear();
+    let legacy_output = native_tql_output(&instance, &offset_sql, false).await;
+    let legacy_rows = sorted_rows(eval_values(legacy_output));
+    let legacy_root = observer.root_plan();
+    let mut stack = vec![legacy_root.clone()];
+    while let Some(node) = stack.pop() {
+        assert_ne!(node.name(), "FusedSeriesExec", "legacy plan must not fuse");
+        assert_ne!(
+            node.name(),
+            "AggregateFinalizeExec",
+            "legacy plan must not finalize"
+        );
+        stack.extend(node.children().into_iter().cloned());
+    }
+    assert_eq!(legacy_rows, vec![(60_000, 20.0), (120_000, 15.0)]);
+
+    let unoffset_sql = "TQL EVAL (60, 120, '1m') sum(off_a) / sum(off_b)";
+    let unoffset_legacy = sorted_rows(eval_values(
+        native_tql_output(&instance, unoffset_sql, false).await,
+    ));
+    assert_eq!(unoffset_legacy, vec![(60_000, 10.0), (120_000, 10.0)]);
+    assert_ne!(
+        legacy_rows, unoffset_legacy,
+        "the offset must change the answer; otherwise this case does not prove the two segments \
+         carry distinct scan bounds"
+    );
+
+    observer.clear();
+    let offset_native = sorted_rows(eval_values(
+        native_tql_output(&instance, &offset_sql, true).await,
+    ));
+    assert_eq!(
+        offset_native, legacy_rows,
+        "native offset result differs from legacy"
+    );
+    observer.clear();
+    let unoffset_native = sorted_rows(eval_values(
+        native_tql_output(&instance, unoffset_sql, true).await,
+    ));
+    assert_eq!(
+        unoffset_native, unoffset_legacy,
+        "native unoffset result differs from legacy"
+    );
+    assert_ne!(
+        offset_native, unoffset_native,
+        "native offset must change the answer; otherwise the segments do not carry distinct scan bounds"
+    );
+
+    observer.clear();
+    let _ = native_tql_output(&instance, &offset_sql, true).await;
+    let root = observer.root_plan();
+    fn fused_in(
+        plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        let mut found = Vec::new();
+        let mut stack = vec![plan.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec" {
+                found.push(node.clone());
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        found
+    }
+    let root_display = datafusion::physical_plan::displayable(root.as_ref())
+        .indent(true)
+        .to_string();
+    let parent_nodes = fused_in(&root);
+    assert_eq!(
+        parent_nodes.len(),
+        1,
+        "frontend has one fused parent:\n{root_display}"
+    );
+    let children = parent_nodes[0].children();
+    assert_eq!(children.len(), 2, "parent has two scans:\n{root_display}");
+    let merge_scans = children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| {
+            let scan = if child.is::<CooperativeExec>() {
+                let wrapped = child.children();
+                assert_eq!(
+                    wrapped.len(),
+                    1,
+                    "child {index} cooperative wrapper:\\n{root_display}"
+                );
+                wrapped[0]
+            } else {
+                child
+            };
+            scan.downcast_ref::<MergeScanExec>()
+                .unwrap_or_else(|| panic!("child {index} is not a MergeScanExec: {root_display}"))
+        })
+        .collect::<Vec<_>>();
+    let scan_debug = merge_scans
+        .iter()
+        .map(|scan| format!("{scan:?}"))
+        .collect::<Vec<_>>();
+    assert!(scan_debug.iter().any(|debug| debug.contains("off_a")));
+    assert!(scan_debug.iter().any(|debug| debug.contains("off_b")));
+    assert!(scan_debug.iter().all(|debug| debug.contains("FusedSeries")));
+    assert_ne!(
+        scan_debug[0], scan_debug[1],
+        "segments must bind distinct scans"
+    );
+    // MergeScan Debug contains its table and remote segment plan; the offset/unoffset answer
+    // assertion above independently proves that the two time bounds affect results.
+    // Per-partition segment output evidence is asserted by
+    // `native_aggregate_test.rs::check_two_source_segregation`. Here, MergeScanExec keeps its
+    // remote segment plan privately and the observer cannot reach that region-side physical plan.
+}
+
+/// A range function on each side of a cross-table division remains a cut candidate.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cross_table_range_aggregate_segments_keep_windows() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_cross_table_range_segments")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE rng_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         CREATE TABLE rng_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         INSERT INTO rng_a VALUES ('a', 0, 0), ('a', 60000, 60), ('a', 120000, 120); \
+         INSERT INTO rng_b VALUES ('a', 0, 0), ('a', 60000, 30), ('a', 120000, 90)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // At t=60 the 2m increases are 60/30 = 2. At t=120 they are 120/90 = 4/3,
+    // so a window bound accidentally shared across sources changes the stepwise ratio.
+    let query = "sum(increase(rng_a[2m])) / sum(increase(rng_b[2m]))";
+    let sql = format!("TQL EVAL (60, 120, '1m') {query}");
+    let sorted_rows = |mut rows: Vec<(i64, f64)>| {
+        rows.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.total_cmp(&right.1))
+        });
+        rows
+    };
+
+    observer.clear();
+    let legacy_rows = sorted_rows(eval_values(native_tql_output(&instance, &sql, false).await));
+    let legacy_root = observer.root_plan();
+    let mut stack = vec![legacy_root];
+    while let Some(node) = stack.pop() {
+        assert_ne!(node.name(), "FusedSeriesExec", "legacy plan must not fuse");
+        assert_ne!(
+            node.name(),
+            "AggregateFinalizeExec",
+            "legacy plan must not finalize"
+        );
+        stack.extend(node.children().into_iter().cloned());
+    }
+    assert_eq!(legacy_rows, vec![(60_000, 2.0), (120_000, 4.0 / 3.0)]);
+    assert_ne!(
+        legacy_rows[0].1, legacy_rows[1].1,
+        "different step values are needed to expose a wrong window boundary"
+    );
+
+    observer.clear();
+    let native_rows = sorted_rows(eval_values(native_tql_output(&instance, &sql, true).await));
+    assert_eq!(
+        native_rows, legacy_rows,
+        "native range result differs from legacy"
+    );
+
+    observer.clear();
+    let _ = native_tql_output(&instance, &sql, true).await;
+    let root = observer.root_plan();
+    let root_display = datafusion::physical_plan::displayable(root.as_ref())
+        .indent(true)
+        .to_string();
+    let mut fused = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.name() == "FusedSeriesExec" {
+            fused.push(node.clone());
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    assert_eq!(fused.len(), 1, "one frontend parent:\n{root_display}");
+    let children = fused[0].children();
+    assert_eq!(children.len(), 2, "two source segments:\n{root_display}");
+    let scans = children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| {
+            let scan = if child.is::<CooperativeExec>() {
+                let wrapped = child.children();
+                assert_eq!(wrapped.len(), 1, "child {index} wrapper:\\n{root_display}");
+                wrapped[0]
+            } else {
+                child
+            };
+            scan.downcast_ref::<MergeScanExec>()
+                .unwrap_or_else(|| panic!("child {index} is not MergeScanExec:\\n{root_display}"))
+        })
+        .collect::<Vec<_>>();
+    let scan_debug = scans
+        .iter()
+        .map(|scan| format!("{scan:?}"))
+        .collect::<Vec<_>>();
+    assert!(scan_debug.iter().any(|debug| debug.contains("rng_a")));
+    assert!(scan_debug.iter().any(|debug| debug.contains("rng_b")));
+    assert!(scan_debug.iter().all(|debug| debug.contains("FusedSeries")));
+    // Per-partition segment evidence is covered by
+    // `native_aggregate_test.rs::check_two_source_segregation`; this harness cannot access the
+    // private region-side physical segment held by each MergeScanExec.
+}
+
+/// Sets up a shared physical metric table and the query-specific logical metric tables and rows.
+/// Explicit INSERT columns are essential because the physical column order differs from the
+/// logical tables; SQL keywords such as `cluster` must be quoted; and timestamps at zero are
+/// excluded by the scan lower bound and PromQL staleness handling.
+async fn setup_real_query_metric_fixture(instance: &Arc<Instance>, fixture_sql: &str) {
+    execute_all(instance, fixture_sql, QueryContext::arc()).await;
+}
+
+fn fused_nodes_in_root(
+    root: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        if node.name() == "FusedSeriesExec" {
+            found.push(node.clone());
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    found
+}
+
+fn debug_merge_scan_child(child: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> String {
+    // A matching segment re-declares each source at the configured width, so a one-partition
+    // region scan arrives under a router. Look through both the cooperative wrapper and that
+    // router to reach the scan the source is actually read from.
+    let mut child = child;
+    while child.is::<CooperativeExec>()
+        || child.is::<promql::extension_plan::SeriesRepartitionExec>()
+    {
+        let wrapped = child.children();
+        assert_eq!(wrapped.len(), 1, "a wrapper here must have one child");
+        child = wrapped[0];
+    }
+    let scan = child
+        .downcast_ref::<MergeScanExec>()
+        .expect("frontend child must be a MergeScanExec");
+    format!("{scan:?}")
+}
+
+/// Reports native planning and labelled answers for the real Q07 aggregate pair.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_real_query_q07_throttled_periods() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_real_q07")).await;
+    let instance = standalone.fe_instance().clone();
+    setup_real_query_metric_fixture(
+        &instance,
+        r#"CREATE TABLE real_q_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE container_cpu_cfs_throttled_periods_total (
+            "cluster" STRING, job STRING, metrics_path STRING, namespace STRING,
+            pod STRING, container STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY(cluster, job, metrics_path, namespace, pod, container)
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q_phy');
+        CREATE TABLE container_cpu_cfs_periods_total (
+            "cluster" STRING, job STRING, metrics_path STRING, namespace STRING,
+            pod STRING, container STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY(cluster, job, metrics_path, namespace, pod, container)
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q_phy');
+        INSERT INTO container_cpu_cfs_throttled_periods_total ("cluster", job, metrics_path, namespace, pod, container, ts, val) VALUES
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',2000,0),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',301000,60),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',2000,0),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',301000,30);
+        INSERT INTO container_cpu_cfs_periods_total ("cluster", job, metrics_path, namespace, pod, container, ts, val) VALUES
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',2000,0),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',301000,120),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',2000,0),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',301000,60)"#,
+    )
+    .await;
+    let query = r#"sum(increase(container_cpu_cfs_throttled_periods_total{job="kubelet",metrics_path="/metrics/cadvisor",namespace="app-0",pod="pod-0",container!="",cluster="eks-us-east-1-qa1"}[5m])) by (container) / sum(increase(container_cpu_cfs_periods_total{job="kubelet",metrics_path="/metrics/cadvisor",namespace="app-0",pod="pod-0",container!="",cluster="eks-us-east-1-qa1"}[5m])) by (container)"#;
+    let sql = format!("TQL EVAL (301, 301, '1m') {query}");
+    observer.clear();
+    let (legacy_columns, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(!legacy_rows.is_empty(), "Q07 legacy rows must be nonempty");
+    observer.clear();
+    let (native_columns, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    let root = observer.root_plan();
+    let root_display = datafusion::physical_plan::displayable(root.as_ref())
+        .indent(true)
+        .to_string();
+    let native = observer.fused().is_some();
+    assert!(
+        native,
+        "{query}: the native route must answer this statement; it declined: {root_display}"
+    );
+    let frontend_fused = fused_nodes_in_root(&root);
+    let child_debug = frontend_fused[0]
+        .children()
+        .iter()
+        .map(|child| debug_merge_scan_child(child))
+        .collect::<Vec<_>>();
+    common_telemetry::info!(
+        "Q07 root name={} fused_frontend={} child merge scans={child_debug:?} value columns legacy={legacy_columns:?} native={native_columns:?}, legacy_rows={legacy_rows:?} native_rows={native_rows:?}, root:\n{root_display}",
+        root.name(),
+        frontend_fused.len()
+    );
+    assert_eq!(native_rows, legacy_rows, "Q07 labelled rows");
+    assert_eq!(root.name(), "FusedSeriesExec");
+    assert_eq!(frontend_fused.len(), 1);
+    let children = frontend_fused[0].children();
+    assert_eq!(children.len(), 2);
+    assert!(
+        child_debug
+            .iter()
+            .any(|debug| debug.contains("container_cpu_cfs_throttled_periods_total"))
+    );
+    assert!(
+        child_debug
+            .iter()
+            .any(|debug| debug.contains("container_cpu_cfs_periods_total"))
+    );
+    assert!(
+        child_debug
+            .iter()
+            .all(|debug| debug.contains("FusedSeries"))
+    );
+    // Known computed-column naming gap from the ungrouped two-source case; values agree.
+    assert!(
+        legacy_columns
+            .iter()
+            .any(|column| column.contains("prom_increase"))
+    );
+    assert_eq!(
+        native_columns
+            .iter()
+            .filter(|column| *column == "val")
+            .count(),
+        1
+    );
+}
+
+/// Reports native planning and labelled answers for corpus Q04 verbatim.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_real_query_q04_namespace_cpu_requests() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_real_q04")).await;
+    let instance = standalone.fe_instance().clone();
+    setup_real_query_metric_fixture(
+        &instance,
+        r#"CREATE TABLE real_q04_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m" (
+            "cluster" STRING, namespace STRING, pod STRING, container STRING,
+            ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY(cluster, namespace, pod, container)
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q04_phy');
+        CREATE TABLE "namespace_cpu:kube_pod_container_resource_requests:sum" (
+            "cluster" STRING, namespace STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY(cluster, namespace)
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q04_phy');
+        INSERT INTO "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m" ("cluster", namespace, pod, container, ts, val) VALUES
+            ('eks-us-east-1-qa1','app-0','pod-0','main',2000,1),
+            ('eks-us-east-1-qa1','app-0','pod-0','main',301000,3),
+            ('eks-us-east-1-qa1','app-1','pod-1','main',2000,2),
+            ('eks-us-east-1-qa1','app-1','pod-1','main',301000,4);
+        INSERT INTO "namespace_cpu:kube_pod_container_resource_requests:sum" ("cluster", namespace, ts, val) VALUES
+            ('eks-us-east-1-qa1','app-0',2000,2), ('eks-us-east-1-qa1','app-0',301000,4),
+            ('eks-us-east-1-qa1','app-1',2000,4), ('eks-us-east-1-qa1','app-1',301000,8)"#,
+    )
+    .await;
+    let query = r#"sum(max by (cluster, namespace, pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m{cluster="eks-us-east-1-qa1"})) by (namespace) / sum(namespace_cpu:kube_pod_container_resource_requests:sum{cluster="eks-us-east-1-qa1"}) by (namespace)"#;
+    let sql = format!("TQL EVAL (301, 301, '1m') {query}");
+    observer.clear();
+    let (legacy_columns, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(!legacy_rows.is_empty(), "Q04 legacy rows must be nonempty");
+    observer.clear();
+    let (native_columns, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    let root = observer.root_plan();
+    let root_display = datafusion::physical_plan::displayable(root.as_ref())
+        .indent(true)
+        .to_string();
+    let native = observer.fused().is_some();
+    assert!(
+        native,
+        "{query}: the native route must answer this statement; it declined: {root_display}"
+    );
+    let frontend_fused = fused_nodes_in_root(&root);
+    let child_debug = frontend_fused[0]
+        .children()
+        .iter()
+        .map(|child| debug_merge_scan_child(child))
+        .collect::<Vec<_>>();
+    common_telemetry::info!(
+        "Q04 root name={} fused_frontend={} child merge scans={child_debug:?} value columns legacy={legacy_columns:?} native={native_columns:?}, legacy_rows={legacy_rows:?} native_rows={native_rows:?}, root:\n{root_display}",
+        root.name(),
+        frontend_fused.len()
+    );
+    assert_eq!(native_rows, legacy_rows, "Q04 labelled rows");
+    assert_eq!(root.name(), "FusedSeriesExec");
+    assert_eq!(frontend_fused.len(), 1);
+    let children = frontend_fused[0].children();
+    assert_eq!(children.len(), 2);
+    assert!(child_debug.iter().any(|debug| {
+        debug.contains("node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m")
+    }));
+    assert!(
+        child_debug
+            .iter()
+            .any(|debug| debug.contains("namespace_cpu:kube_pod_container_resource_requests:sum"))
+    );
+    assert!(
+        child_debug
+            .iter()
+            .all(|debug| debug.contains("FusedSeries"))
+    );
+    // Known computed-column naming gap from the ungrouped two-source case; values agree.
+    assert!(legacy_columns.iter().any(|column| column.contains("max(")));
+    assert_eq!(
+        native_columns
+            .iter()
+            .filter(|column| *column == "val")
+            .count(),
+        1
+    );
+}
+
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
 /// parameter that reads no data runs per partition over the scan. The answers are Prometheus'
 /// literal ones: the existing planner does not plan a parameter that is not a number literal, so it
@@ -5893,5 +7050,487 @@ async fn native_promql_map_with_varying_parameters_matches_prometheus() {
             (20_000, "b", 12.0),
             (30_000, "b", 24.0),
         ])
+    );
+}
+
+struct CorpusCase {
+    label: &'static str,
+    promql: &'static str,
+    metrics: &'static [&'static str],
+}
+
+const CORPUS: &[CorpusCase] = &[
+    CorpusCase {
+        label: "Q01",
+        promql: r#"cluster:node_cpu:ratio_rate5m{cluster="eks-us-east-1-qa1"}"#,
+        metrics: &["cluster:node_cpu:ratio_rate5m"],
+    },
+    CorpusCase {
+        label: "Q02",
+        promql: r#"sum(max by (cluster, namespace, pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m{cluster="eks-us-east-1-qa1"})) by (namespace)"#,
+        metrics: &["node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m"],
+    },
+    CorpusCase {
+        label: "Q03",
+        promql: r#"sum(max by (cluster, namespace, pod, container) (container_memory_rss{job="kubelet",metrics_path="/metrics/cadvisor",cluster="eks-us-east-1-qa1",container!=""})) by (namespace)"#,
+        metrics: &["container_memory_rss"],
+    },
+    CorpusCase {
+        label: "Q05",
+        promql: r#"sum(8 * rate(container_network_receive_bytes_total{job="kubelet",metrics_path="/metrics/cadvisor",cluster="eks-us-east-1-qa1",namespace=~".+"}[5m])) by (namespace)"#,
+        metrics: &["container_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "Q06",
+        promql: r#"sum(8 * irate(container_network_receive_bytes_total{job="kubelet",metrics_path="/metrics/cadvisor",cluster="eks-us-east-1-qa1",namespace="app-0",pod=~"pod-0"}[5m])) by (pod)"#,
+        metrics: &["container_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "Q08",
+        promql: r#"sum(max by (cluster, namespace, pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m{cluster="eks-us-east-1-qa1",namespace="app-0"}) * on(cluster, namespace, pod) group_left(workload, workload_type) namespace_workload_pod:kube_pod_owner:relabel{cluster="eks-us-east-1-qa1",namespace="app-0",workload=~".*",workload_type=~".*"}) by (pod)"#,
+        metrics: &[
+            "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m",
+            "namespace_workload_pod:kube_pod_owner:relabel",
+        ],
+    },
+    CorpusCase {
+        label: "Q09",
+        promql: r#"sum by (pod) ((8 * rate(container_network_receive_bytes_total{cluster="eks-us-east-1-qa1",namespace=~"app-0"}[5m])) * on(cluster, namespace, pod) group_left() topk by (cluster, namespace, pod) (1, max by (cluster, namespace, pod) (kube_pod_info{host_network="false"})))"#,
+        metrics: &["container_network_receive_bytes_total", "kube_pod_info"],
+    },
+    CorpusCase {
+        label: "Q10",
+        promql: r#"histogram_quantile(0.99, sum(rate(kubelet_pleg_relist_duration_seconds_bucket{cluster="eks-us-east-1-qa1",job="kubelet",instance=~".*"}[5m])) by (instance, le))"#,
+        metrics: &["kubelet_pleg_relist_duration_seconds_bucket"],
+    },
+    CorpusCase {
+        label: "Q11",
+        promql: r#"sum(rate(rest_client_requests_total{cluster="eks-us-east-1-qa1",job="kubelet",instance=~".*",code=~"2.."}[5m]))"#,
+        metrics: &["rest_client_requests_total"],
+    },
+    CorpusCase {
+        label: "Q12",
+        promql: r#"sum without(instance, node) (topk(1, kubelet_volume_stats_available_bytes{cluster="eks-us-east-1-qa1",job="kubelet",namespace="app-0",persistentvolumeclaim="persistentvolumeclaim0"}))"#,
+        metrics: &["kubelet_volume_stats_available_bytes"],
+    },
+    CorpusCase {
+        label: "L01",
+        promql: r#"100 - (avg by (region, az, hostname) (rate(node_cpu_seconds_total{mode="idle", region="us-west-2"}[1m])) * 100)"#,
+        metrics: &["node_cpu_seconds_total"],
+    },
+    CorpusCase {
+        label: "L02",
+        promql: r#"avg without(cpu) (rate(node_cpu_seconds_total{mode!="idle", region="us-west-2"}[5m]))"#,
+        metrics: &["node_cpu_seconds_total"],
+    },
+    CorpusCase {
+        label: "L03",
+        promql: r#"sum by (region, az) (rate(node_network_receive_bytes_total{device!="lo", region="us-west-2"}[5m]))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "L04",
+        promql: r#"sum by (region, az, hostname) (rate(node_network_transmit_bytes_total{device!="lo", region="us-west-2"}[5m]))"#,
+        metrics: &["node_network_transmit_bytes_total"],
+    },
+    CorpusCase {
+        label: "L05",
+        promql: r#"node_memory_MemAvailable_bytes{region="us-west-2"} / node_memory_MemTotal_bytes{region="us-west-2"}"#,
+        metrics: &[
+            "node_memory_MemAvailable_bytes",
+            "node_memory_MemTotal_bytes",
+        ],
+    },
+    CorpusCase {
+        label: "L06",
+        promql: r#"100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|vfat", region="us-west-2"} / node_filesystem_size_bytes{fstype!~"tmpfs|vfat", region="us-west-2"})"#,
+        metrics: &["node_filesystem_avail_bytes", "node_filesystem_size_bytes"],
+    },
+    CorpusCase {
+        label: "L07",
+        promql: r#"rate(node_disk_io_time_seconds_total{device="nvme0n1", region="us-west-2"}[5m])"#,
+        metrics: &["node_disk_io_time_seconds_total"],
+    },
+    CorpusCase {
+        label: "L08",
+        promql: r#"rate(node_disk_read_time_seconds_total{device="nvme0n1", region="us-west-2"}[1m]) / rate(node_disk_reads_completed_total{device="nvme0n1", region="us-west-2"}[1m])"#,
+        metrics: &[
+            "node_disk_read_time_seconds_total",
+            "node_disk_reads_completed_total",
+        ],
+    },
+    CorpusCase {
+        label: "L09",
+        promql: r#"topk(10, sum by (hostname) (rate(node_network_receive_bytes_total{device!="lo", region="us-west-2"}[5m])))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "L10",
+        promql: r#"count by (region, az) (node_cpu_seconds_total{mode="idle", region="us-west-2"})"#,
+        metrics: &["node_cpu_seconds_total"],
+    },
+    CorpusCase {
+        label: "L11",
+        promql: r#"sum by (region, az, hostname, device) (rate(node_network_receive_bytes_total{region="us-west-2"}[5m]))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "L12",
+        promql: r#"avg by (region, az) (node_load1{region="us-west-2"})"#,
+        metrics: &["node_load1"],
+    },
+    CorpusCase {
+        label: "R01",
+        promql: r#"sum by (region, az) (rate(node_network_receive_bytes_total{region="us-west-2"}[1h]))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "R02",
+        promql: r#"100 - (avg by (region, az, hostname) (rate(node_cpu_seconds_total{mode="idle", region="us-west-2"}[1h])) * 100)"#,
+        metrics: &["node_cpu_seconds_total"],
+    },
+    CorpusCase {
+        label: "R03",
+        promql: r#"100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|vfat", region="us-west-2"} / node_filesystem_size_bytes{fstype!~"tmpfs|vfat", region="us-west-2"})"#,
+        metrics: &["node_filesystem_avail_bytes", "node_filesystem_size_bytes"],
+    },
+    CorpusCase {
+        label: "R04",
+        promql: r#"topk(10, sum by (hostname) (rate(node_network_receive_bytes_total{device!="lo", region="us-west-2"}[1h])))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "R05",
+        promql: r#"sum by (region, az, hostname, device) (rate(node_network_receive_bytes_total{region="us-west-2"}[1h]))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_corpus_route_matrix() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_corpus_route_matrix",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let all_tags = &[
+        "cluster",
+        "namespace",
+        "pod",
+        "container",
+        "job",
+        "metrics_path",
+        "instance",
+        "code",
+        "persistentvolumeclaim",
+        "node",
+        "mode",
+        "region",
+        "az",
+        "hostname",
+        "cpu",
+        "device",
+        "fstype",
+        "workload",
+        "workload_type",
+        "le",
+        "host_network",
+    ];
+    let metrics = CORPUS
+        .iter()
+        .flat_map(|case| case.metrics.iter().copied())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut fixture = String::from(
+        r#"CREATE TABLE corpus_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ("physical_metric_table"="true");"#,
+    );
+    for metric in &metrics {
+        fixture.push_str(&format!(" CREATE TABLE \"{metric}\" ("));
+        for tag in all_tags {
+            fixture.push_str(&format!("\"{tag}\" STRING, "));
+        }
+        fixture.push_str("ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(");
+        fixture.push_str(
+            &all_tags
+                .iter()
+                .map(|t| format!("\"{t}\""))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        fixture.push_str(")) ENGINE=metric WITH (\"on_physical_table\"='corpus_phy');");
+        // Histogram bucket samples need multiple `le` values at each timestamp; a single
+        // bucket would make Q10's histogram quantile degenerate.
+        let samples = if *metric == "kubelet_pleg_relist_duration_seconds_bucket" {
+            [
+                ("h0", "pod-0", "a0", 242000, 1.0),
+                ("h0", "pod-0", "a0", 300000, 301.0),
+                ("h1", "pod-1", "a1", 242000, 2.0),
+                ("h1", "pod-1", "a1", 300000, 602.0),
+            ]
+            .into_iter()
+            .flat_map(|(host, pod, az, ts, value)| {
+                ["0.5", "1", "5", "+Inf"]
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(index, le)| (host, pod, az, ts, value * (index + 1) as f64, le))
+            })
+            .collect::<Vec<_>>()
+        } else {
+            [
+                ("h0", "pod-0", "a0", 242000, 1.0),
+                ("h0", "pod-0", "a0", 300000, 301.0),
+                ("h1", "pod-1", "a1", 242000, 2.0),
+                ("h1", "pod-1", "a1", 300000, 602.0),
+            ]
+            .into_iter()
+            .map(|(host, pod, az, ts, value)| (host, pod, az, ts, value, "+Inf"))
+            .collect()
+        };
+        for (host, pod, az, ts, value, le) in samples {
+            let columns = all_tags
+                .iter()
+                .map(|t| format!("\"{t}\""))
+                .chain(["ts".to_string(), "val".to_string()])
+                .collect::<Vec<_>>();
+            let values = all_tags
+                .iter()
+                .map(|tag| match *tag {
+                    "cluster" => "eks-us-east-1-qa1".to_string(),
+                    "namespace" => "app-0".to_string(),
+                    "pod" => pod.to_string(),
+                    "container" => "main".to_string(),
+                    "job" => "kubelet".to_string(),
+                    "metrics_path" => "/metrics/cadvisor".to_string(),
+                    "code" => "200".to_string(),
+                    "instance" => host.to_string(),
+                    "persistentvolumeclaim" => "persistentvolumeclaim0".to_string(),
+                    "node" => host.to_string(),
+                    "region" => "us-west-2".to_string(),
+                    "az" => az.to_string(),
+                    "hostname" => host.to_string(),
+                    "mode" => if host == "h0" { "idle" } else { "user" }.to_string(),
+                    "cpu" => if host == "h0" { "0" } else { "1" }.to_string(),
+                    "device" => "nvme0n1".to_string(),
+                    "fstype" => "ext4".to_string(),
+                    "workload" => format!("wl-{pod}"),
+                    "workload_type" => "deployment".to_string(),
+                    "le" => le.to_string(),
+                    "host_network" => "false".to_string(),
+                    _ => String::new(),
+                })
+                .map(|v| format!("'{v}'"))
+                .chain([ts.to_string(), value.to_string()])
+                .collect::<Vec<_>>();
+            fixture.push_str(&format!(
+                " INSERT INTO \"{metric}\" ({}) VALUES ({});",
+                columns.join(","),
+                values.join(",")
+            ));
+        }
+    }
+    execute_all(&instance, &fixture, QueryContext::arc()).await;
+    let mut table_rows = Vec::new();
+    for case in CORPUS {
+        let sql = format!("TQL EVAL (301, 361, '1m') {}", case.promql);
+        observer.clear();
+        let (legacy_columns, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !legacy_rows.is_empty(),
+            "{} legacy fixture produced no rows",
+            case.label
+        );
+        observer.clear();
+        let (native_columns, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let root = observer.root_plan();
+        let root_display = datafusion::physical_plan::displayable(root.as_ref())
+            .indent(true)
+            .to_string();
+        let regions = observer.region_plans();
+        let region_displays = regions
+            .iter()
+            .map(|plan| {
+                datafusion::physical_plan::displayable(plan.as_ref())
+                    .indent(true)
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let fused = !fused_nodes_in_root(&root).is_empty();
+        let split = root_display.contains("AggregateFinalizeExec")
+            && regions.iter().any(|p| {
+                let d = datafusion::physical_plan::displayable(p.as_ref())
+                    .indent(true)
+                    .to_string();
+                d.contains("FusedSeriesExec") && d.contains("partial state:")
+            });
+        // `segmented` means the frontend's native node consumes what a region's native node
+        // produced. A `MergeScan` alone does not show that: its region side can be a plain scan
+        // feeding raw frames, which is a different placement and says nothing about a prefix
+        // running in the region. The merge scan's own `Debug` carries the plan its region runs, so
+        // the check reads that for the segment.
+        let region_native_children = fused_nodes_in_root(&root).first().is_some_and(|frontend| {
+            let children = frontend.children();
+            !children.is_empty()
+                && children.iter().all(|child| {
+                    let scan = if child.is::<CooperativeExec>() {
+                        let wrapped = child.children();
+                        if wrapped.len() != 1 {
+                            return false;
+                        }
+                        wrapped[0]
+                    } else {
+                        child
+                    };
+                    scan.downcast_ref::<MergeScanExec>()
+                        .is_some_and(|scan| format!("{scan:?}").contains("FusedSeries"))
+                })
+        });
+        let segmented = fused && region_native_children;
+        // The frontend native node reads raw frames from its scans: the tree runs above the
+        // region rather than a prefix running inside it.
+        let frontend_raw =
+            fused && !region_native_children && root_display.contains("MergeScanExec");
+        let region_local = regions.iter().any(|plan| {
+            let mut stack = vec![plan.clone()];
+            while let Some(node) = stack.pop() {
+                if node.name() == "FusedSeriesExec" {
+                    return true;
+                }
+                stack.extend(node.children().into_iter().cloned());
+            }
+            false
+        });
+        let route = if segmented {
+            "segmented"
+        } else if split {
+            "aggregate-split"
+        } else if frontend_raw {
+            "frontend-raw"
+        } else if region_local {
+            "region-local"
+        } else {
+            "legacy"
+        };
+        // Every corpus query is meant to answer natively; a fallback here is the regression this
+        // table exists to catch, so it fails rather than being recorded as a route.
+        assert_ne!(
+            route, "legacy",
+            "{} fell back to the existing plan; root:\n{root_display}\nregions: {region_displays:?}",
+            case.label
+        );
+        // For aggregate-split, counts are per-partition partial-state rows, not final query values.
+        let mut partition_vectors = Vec::new();
+        for plan in &regions {
+            let mut stack = vec![plan.clone()];
+            while let Some(node) = stack.pop() {
+                if node.name() == "FusedSeriesExec"
+                    && let Some(counts) = output_values_per_partition(&node)
+                {
+                    partition_vectors.push(counts);
+                }
+                stack.extend(node.children().into_iter().cloned());
+            }
+        }
+        // This is not a parallelism measurement: the matrix fixtures are not designed to
+        // distribute series across partition boundaries, so [4,0,0,0] means rows were read,
+        // not that the prefix is parallel. See native_aggregate_test.rs::check_two_source_segregation
+        // for the partition-filling fixture that asserts all four partitions are used.
+        let partitions_report = if route == "legacy" {
+            "n/a".to_string()
+        } else if partition_vectors.is_empty() {
+            "no metric".to_string()
+        } else {
+            for counts in &partition_vectors {
+                assert!(
+                    counts.iter().any(|count| *count > 0),
+                    "{} native execution produced no output values in any partition: {counts:?}; region plans: {region_displays:?}",
+                    case.label
+                );
+            }
+            partition_vectors
+                .iter()
+                .map(|counts| {
+                    let nonempty = counts.iter().filter(|count| **count > 0).count();
+                    format!("{counts:?} ({nonempty}/{})", counts.len())
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let rows_equal = native_rows == legacy_rows;
+        if case.label == "L07" || case.label == "Q01" {
+            let mut repeated_values = Vec::new();
+            for enabled in [false, false, true] {
+                repeated_values.push(
+                    native_labelled_rows(native_tql_output(&instance, &sql, enabled).await)
+                        .await
+                        .1,
+                );
+            }
+            common_telemetry::info!(
+                "{} triple runs [native off, native off, native on]: {repeated_values:?}",
+                case.label
+            );
+        }
+        let max_rel_diff = native_rows
+            .iter()
+            .zip(&legacy_rows)
+            .map(|(native, legacy)| (native.2 - legacy.2).abs() / legacy.2.abs().max(1.0))
+            .fold(0.0_f64, f64::max);
+        if route != "legacy" {
+            assert_eq!(
+                native_rows.len(),
+                legacy_rows.len(),
+                "{} row count mismatch",
+                case.label
+            );
+            for (native_row, legacy_row) in native_rows.iter().zip(&legacy_rows) {
+                assert_eq!(
+                    (native_row.0, &native_row.1),
+                    (legacy_row.0, &legacy_row.1),
+                    "{} labels/timestamps",
+                    case.label
+                );
+                assert!(
+                    (native_row.2 - legacy_row.2).abs() <= 1e-10 * legacy_row.2.abs().max(1.0),
+                    "{} value mismatch: {native_row:?} vs {legacy_row:?}",
+                    case.label
+                );
+            }
+        }
+        let value_column = native_columns
+            .iter()
+            .find(|column| {
+                column.as_str() != "ts"
+                    && native_rows
+                        .first()
+                        .is_none_or(|row| !row.1.contains_key(column.as_str()))
+            })
+            .cloned()
+            .unwrap_or_else(|| {
+                if case.label == "Q01" {
+                    "val".to_string()
+                } else {
+                    String::new()
+                }
+            });
+        let row = format!(
+            "{} | {} | {} | {} | {:.6e} | {} | {}",
+            case.label,
+            route,
+            if route == "legacy" { "unknown" } else { "—" },
+            rows_equal,
+            max_rel_diff,
+            value_column,
+            partitions_report
+        );
+        common_telemetry::info!(
+            "{row} | legacy rows={legacy_rows:?} legacy columns={legacy_columns:?} native rows={native_rows:?} native columns={native_columns:?} max_rel_diff={max_rel_diff:.6e} root:\n{root_display} region_plans={region_displays:?}"
+        );
+        table_rows.push(row);
+    }
+    common_telemetry::info!(
+        "label | route | gate-if-legacy | rows==legacy | max rel diff | native value column | partitions used\n{}",
+        table_rows.join("\n")
     );
 }

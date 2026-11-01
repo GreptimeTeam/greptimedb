@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_query::series_frame::unpack_evaluated_series;
+use common_query::series_frame::{pack_evaluated_series, unpack_evaluated_series};
 use datafusion::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -292,6 +292,68 @@ fn binary_tree_over_sources(
     .unwrap()
 }
 
+/// A mixed-input binary: raw source 0 is rate-evaluated, while evaluated source 1 is already on `grid`.
+fn mixed_raw_evaluated_tree() -> NativeTree {
+    let grid = grid();
+    let raw = raw_schema();
+    let evaluated_schema = Arc::new(SeriesSchema {
+        fields: raw.fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let evaluated = NativeType::Samples(Arc::clone(&evaluated_schema));
+    let raw_type = NativeType::Samples(Arc::clone(&raw));
+    let left_input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: raw_type.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: raw_type,
+    };
+    let left = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(left_input),
+            op: BoundWindow {
+                function: RangeFunction::Rate,
+                window: RangeWindow {
+                    range_ms: RANGE_MS,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let right = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: evaluated.clone(),
+            source_index: 1,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: evaluated.clone(),
+    };
+    let output = crate::vector_match::binary_output_schema(&evaluated_schema, &evaluated_schema)
+        .expect("same-grid samples can be matched");
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op: BinaryOp::Add,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Samples(output),
+    })
+    .expect("raw-rate and evaluated samples share the output grid")
+}
+
 /// The constant scalar `value`, evaluated on `grid`.
 ///
 /// A scalar is the one thing a tree can produce while reading no source, so this is the tree the
@@ -392,6 +454,47 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
         .expect("another declared ordering keeps the tree legal");
     assert_eq!(orderings.len(), seen, "one ordering per input of the tree");
     tree
+}
+
+fn binary_with_abs_and_matching_key(key: &str) -> NativeTree {
+    let tree = binary_tree(raw_schema(), raw_schema());
+    let mut root = tree.root().clone();
+    let NativeExpr::Binary { left, right, .. } = &mut root.expr else {
+        unreachable!()
+    };
+    for side in [left, right] {
+        let input = side.clone();
+        let output = side.output.clone();
+        **side = NativeNode {
+            expr: NativeExpr::Map {
+                input,
+                op: BoundMap {
+                    ops: Arc::from([MapOp::Math(crate::map::MathOp::Abs)]),
+                },
+            },
+            output,
+        };
+    }
+    let NativeExpr::Binary { matching, .. } = &mut root.expr else {
+        unreachable!()
+    };
+    matching.labels = MatchingLabels::On(vec![Arc::from(key)]);
+    NativeTree::try_new(root).unwrap()
+}
+
+#[test]
+fn math_map_matching_key_preservation_controls_locality() {
+    let name_tree = binary_with_abs_and_matching_key("__name__");
+    assert!(matches!(
+        super::input_locality(name_tree.root()),
+        super::InputLocality::SinglePartition
+    ));
+
+    let host_tree = binary_with_abs_and_matching_key(HOST);
+    assert!(matches!(
+        super::input_locality(host_tree.root()),
+        super::InputLocality::MatchingLocal(_)
+    ));
 }
 
 /// `x - 2 * x`: one source read at both operands, with a scalar multiplier on the right.
@@ -1822,6 +1925,134 @@ async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
     }
 }
 
+fn binary_identity_rows(batches: &[RecordBatch]) -> Vec<(Option<String>, i64, Option<f64>)> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let time = batch
+                .column_by_name(TIME)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let value = batch
+                .column_by_name(VALUE)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let host = batch
+                .column_by_name(HOST)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        host.is_valid(row).then(|| host.value(row).to_string()),
+                        time.value(row),
+                        value.is_valid(row).then(|| value.value(row)),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Configured matching parallelism overrides both one-partition and uneven source widths.
+#[tokio::test]
+async fn matching_parallelism_uses_configured_width_without_changing_rows() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let mk_inputs = |left_parts: Vec<Vec<RecordBatch>>, right_parts: Vec<Vec<RecordBatch>>| {
+        vec![
+            (
+                memory_exec_partitioned(left_parts),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                memory_exec_partitioned(right_parts),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ]
+    };
+    let left = frame(&series_chunk("web-1", &[(GRID_START, 3.0)], true));
+    let right = frame(&series_chunk("web-1", &[(GRID_START, 4.0)], true));
+    for (parts, configured_width) in [(1, 4), (3, 4)] {
+        let left_parts = (0..parts)
+            .map(|i| if i == 0 { vec![left.clone()] } else { vec![] })
+            .collect();
+        let right_parts = (0..if parts == 3 { 2 } else { 1 })
+            .map(|i| if i == 0 { vec![right.clone()] } else { vec![] })
+            .collect();
+        let inputs = mk_inputs(left_parts, right_parts);
+        let parallel = node
+            .to_execution_plan_with_parallelism(inputs, configured_width)
+            .unwrap();
+        assert_eq!(
+            configured_width,
+            parallel
+                .properties()
+                .output_partitioning()
+                .partition_count()
+        );
+        let actual = binary_identity_rows(
+            &collect(parallel, SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        );
+        let baseline_inputs = mk_inputs(
+            (0..parts)
+                .map(|i| if i == 0 { vec![left.clone()] } else { vec![] })
+                .collect(),
+            (0..if parts == 3 { 2 } else { 1 })
+                .map(|i| if i == 0 { vec![right.clone()] } else { vec![] })
+                .collect(),
+        );
+        let baseline = node
+            .to_execution_plan_with_parallelism(baseline_inputs, 1)
+            .unwrap();
+        assert_eq!(
+            1,
+            baseline
+                .properties()
+                .output_partitioning()
+                .partition_count()
+        );
+        let mut expected = binary_identity_rows(
+            &collect(baseline, SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        );
+        let mut actual = actual;
+        let sort_rows = |rows: &mut Vec<(Option<String>, i64, Option<f64>)>| {
+            rows.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then(a.1.cmp(&b.1))
+                    .then_with(|| a.2.unwrap_or_default().total_cmp(&b.2.unwrap_or_default()))
+            })
+        };
+        sort_rows(&mut expected);
+        sort_rows(&mut actual);
+        assert_eq!(
+            expected, actual,
+            "all labels/timestamps/values match width one without duplicates or omissions"
+        );
+        assert_eq!(1, actual.len());
+        assert_eq!(Some(7.0), actual[0].2);
+    }
+}
+
 /// Independent sources gather all child partitions, without zipping.
 #[tokio::test]
 async fn independent_sources_execute_all_partitions() {
@@ -1863,7 +2094,7 @@ async fn independent_sources_execute_all_partitions() {
             (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
         ])
         .unwrap();
-    assert_eq!(1, exec.properties().output_partitioning().partition_count());
+    assert_eq!(3, exec.properties().output_partitioning().partition_count());
     let results = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
         .await
         .unwrap();
@@ -2615,7 +2846,7 @@ fn a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built() {
     let error = plan(rate_tree(), source).expect_err("the frame declares a grid");
     let message = error_chain(&error);
     assert!(
-        message.contains("expected a raw frame, found an evaluated one"),
+        message.contains("frame content does not match its compiled input"),
         "refused for another reason: {message}"
     );
     assert!(
@@ -2934,8 +3165,8 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
 
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let context = task_context(&pool);
-    let expected_times = grid_timestamps();
     let mut total_rows = 0;
+    let mut all_rows = Vec::new();
     for partition in 0..4 {
         let mut stream = exec
             .execute(partition, Arc::clone(&context))
@@ -2978,28 +3209,25 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
             })
             .collect::<Vec<_>>();
         total_rows += actual.len();
-        let host = format!("web-{partition}");
-        assert_eq!(GRID_LEN as usize, actual.len(), "{host}: {actual:?}");
-        assert_eq!(
-            expected_times,
-            actual.iter().map(|row| row.0).collect::<Vec<_>>(),
-            "{host} timestamps preserve grid order"
-        );
-        assert!(
-            actual
-                .iter()
-                .all(|row| row.2.as_deref() == Some(host.as_str()))
-        );
-        let expected_values = (0..GRID_LEN as usize)
-            .map(|index| Some(-((partition * 10 + index + 1) as f64)))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            expected_values,
-            actual.iter().map(|row| row.1).collect::<Vec<_>>()
-        );
+        all_rows.extend(actual);
         assert_eq!(1, calls_by_partition[partition].load(Ordering::SeqCst));
-        assert_eq!(0, pool.reserved(), "{host} released reservations at EOF");
     }
+    all_rows.sort_by(|left, right| left.2.cmp(&right.2).then(left.0.cmp(&right.0)));
+    let expected = (0..4)
+        .flat_map(|partition| {
+            (0..GRID_LEN as usize).map(move |index| {
+                (
+                    GRID_START + index as i64 * GRID_STEP,
+                    Some(-((partition * 10 + index + 1) as f64)),
+                    Some(format!("web-{partition}")),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expected, all_rows,
+        "all routed partitions match the reference results"
+    );
     assert_eq!(4 * GRID_LEN as usize, total_rows);
     assert_eq!(
         vec![1, 1, 1, 1],
@@ -4019,6 +4247,165 @@ async fn a_failed_input_exports_no_partial_state() {
     );
 }
 
+/// A fused tree can decode its raw source and already-evaluated source independently.
+#[tokio::test]
+async fn mixed_raw_and_evaluated_inputs_execute_with_source_local_decoders() {
+    let tree = mixed_raw_evaluated_tree();
+    let mut evaluated_batches = Vec::new();
+    for (host, values) in [
+        ("web-1", vec![10.0, 20.0, 30.0, 40.0, 50.0]),
+        ("web-2", vec![60.0, 70.0, 80.0, 90.0, 100.0]),
+    ] {
+        let schema = Arc::new(SeriesSchema {
+            fields: raw_schema().fields.clone(),
+            eval_grid: Some(grid()),
+        });
+        let chunk = EvaluatedChunk::try_new(
+            Series {
+                metric: metric(&[(HOST, host)], Some(METRIC)),
+                time: TimeAxis::from_grid_spans(
+                    Arc::clone(schema.eval_grid.as_ref().unwrap()),
+                    vec![GridSpan::new(0, GRID_LEN as usize)],
+                )
+                .unwrap(),
+                fields: SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(
+                    values,
+                ))])
+                .unwrap(),
+            },
+            true,
+        )
+        .unwrap();
+        evaluated_batches.extend(
+            pack_evaluated_series(
+                Box::pin(futures::stream::iter(vec![Ok((
+                    chunk.series,
+                    chunk.is_last,
+                ))])),
+                schema,
+            )
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap(),
+        );
+    }
+    let raw_batches = frames(&[
+        series_chunk("web-1", &series_samples(1.0), true),
+        series_chunk("web-2", &series_samples(1.0), true),
+    ]);
+    let evaluated_frame_schema = series_frame_schema(
+        &SeriesSchema {
+            fields: raw_schema().fields.clone(),
+            eval_grid: Some(grid()),
+        },
+        FrameLabelMode::Explicit,
+        None,
+    )
+    .unwrap();
+    let exec = FusedSeries::try_new(
+        Arc::from("mixed raw/evaluated"),
+        tree.clone(),
+        binding_of(
+            &tree,
+            raw_schema(),
+            vec![HOST.to_string(), NAME.to_string()],
+        ),
+        vec![
+            input_plan(frame_schema()),
+            input_plan(evaluated_frame_schema.clone()),
+        ],
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap()
+    .to_execution_plan(vec![
+        (
+            memory_exec(raw_batches),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        ),
+        (
+            memory_exec_with(evaluated_frame_schema, evaluated_batches),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        ),
+    ])
+    .unwrap();
+    let mut actual = rows(
+        &collect(exec, SessionContext::default().task_ctx())
+            .await
+            .unwrap(),
+    );
+    let mut expected = vec![
+        (GRID_START, Some(11.0), Some("web-1".into()), None),
+        (
+            GRID_START + GRID_STEP,
+            Some(21.0),
+            Some("web-1".into()),
+            None,
+        ),
+        (
+            GRID_START + 2 * GRID_STEP,
+            Some(31.0),
+            Some("web-1".into()),
+            None,
+        ),
+        (
+            GRID_START + 3 * GRID_STEP,
+            Some(41.0),
+            Some("web-1".into()),
+            None,
+        ),
+        (
+            GRID_START + 4 * GRID_STEP,
+            Some(51.0),
+            Some("web-1".into()),
+            None,
+        ),
+        (GRID_START, Some(61.0), Some("web-2".into()), None),
+        (
+            GRID_START + GRID_STEP,
+            Some(71.0),
+            Some("web-2".into()),
+            None,
+        ),
+        (
+            GRID_START + 2 * GRID_STEP,
+            Some(81.0),
+            Some("web-2".into()),
+            None,
+        ),
+        (
+            GRID_START + 3 * GRID_STEP,
+            Some(91.0),
+            Some("web-2".into()),
+            None,
+        ),
+        (
+            GRID_START + 4 * GRID_STEP,
+            Some(101.0),
+            Some("web-2".into()),
+            None,
+        ),
+    ];
+    actual.sort_by(|left, right| {
+        (left.0, left.2.as_deref(), left.3.as_deref()).cmp(&(
+            right.0,
+            right.2.as_deref(),
+            right.3.as_deref(),
+        ))
+    });
+    expected.sort_by(|left, right| {
+        (left.0, left.2.as_deref(), left.3.as_deref()).cmp(&(
+            right.0,
+            right.2.as_deref(),
+            right.3.as_deref(),
+        ))
+    });
+    assert_eq!(10, actual.len());
+    assert_eq!(expected, actual);
+}
+
 /// Frame output is planned from the evaluated root and is emitted without flattening to rows.
 #[tokio::test]
 async fn series_frame_output_uses_evaluated_codec_schema() {
@@ -4061,11 +4448,11 @@ async fn series_frame_output_uses_evaluated_codec_schema() {
     assert!(batches.iter().any(|batch| batch.num_rows() > 0));
 }
 
-/// Frame output refuses the currently unsupported multi-source physical shape at planning time.
+/// Frame output accepts multiple sources when their partition counts agree.
 #[test]
-fn series_frame_rejects_multiple_sources_during_planning() {
+fn series_frame_accepts_multiple_sources_with_equal_partition_counts() {
     let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
-    let err = FusedSeries::try_new_with_format(
+    let node = FusedSeries::try_new_with_format(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
@@ -4073,8 +4460,22 @@ fn series_frame_rejects_multiple_sources_during_planning() {
         canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("multiple sources"));
+    .unwrap();
+    let plan = node
+        .to_execution_plan(vec![
+            (
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect("equal source partition counts are accepted");
+    assert_eq!(2, plan.properties().partitioning.partition_count());
 }
 
 /// A real four-partition input remains four independent frame-output executions.

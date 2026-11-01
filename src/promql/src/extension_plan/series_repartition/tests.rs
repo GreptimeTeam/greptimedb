@@ -51,7 +51,11 @@ use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::limit::LocalLimitExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::prelude::SessionContext;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::series::Label;
+use datatypes::series::frame::{
+    FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeTag,
+};
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
@@ -64,6 +68,7 @@ use super::*;
 use crate::extension_plan::test_util::prepare_test_data;
 use crate::grid_series::{render_label_set, series_bytes};
 use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
+use crate::vector_match::MatchingLabels;
 
 const TEST_FIXTURE_VOLUME: usize = 4;
 const GRID_START: i64 = 0;
@@ -552,6 +557,63 @@ fn raw_chunk(
     .expect("a legal raw chunk")
 }
 
+/// The description a dense key of one string column `host` declares.
+///
+/// A region hands this node what it scanned, and what it scanned names its labels rather than
+/// carrying them, so this is the shape the node meets in a real plan.
+fn host_decode() -> LabelDecodeSpec {
+    LabelDecodeSpec {
+        version: LABEL_DECODE_VERSION,
+        metric_name: "m".to_string(),
+        encoding: LabelDecodeEncoding::Dense,
+        primary_key: vec![LabelDecodeColumn {
+            column_id: 1,
+            name: "host".to_string(),
+            physical_type: ConcreteDataType::string_datatype(),
+        }],
+        logical_tags: vec![LabelDecodeTag {
+            column_id: 1,
+            name: "host".to_string(),
+        }],
+    }
+}
+
+/// The dense key bytes of `{host="<host>"}`.
+fn key_bytes(host: &str) -> Buffer {
+    let mut bytes = Vec::new();
+    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
+
+    DensePrimaryKeyCodec::with_fields(vec![(
+        1,
+        SortField::new(ConcreteDataType::string_datatype()),
+    )])
+    .encode_values(
+        &[(1, datatypes::prelude::Value::String(host.into()))],
+        &mut bytes,
+    )
+    .expect("a dense key of one string");
+    Buffer::from(bytes)
+}
+
+/// One chunk of the dense key of `{host="<host>"}`, carrying no labels of its own.
+fn keyed_raw_chunk(
+    host: &str,
+    times: &[i64],
+    values: Vec<Option<f64>>,
+    last: bool,
+) -> RawSeriesChunk {
+    let fields = vec![Samples::from_float(Float64Array::from(values))];
+    RawSeriesChunk::try_new(
+        &raw_schema(),
+        key_bytes(host),
+        None,
+        RawTimestamps::try_new(ScalarBuffer::from(times.to_vec())).expect("ascending timestamps"),
+        SeriesFields::try_from_vec(fields).expect("one sample per timestamp per field"),
+        last,
+    )
+    .expect("a legal raw chunk")
+}
+
 /// `{__name__="m", host="<host>"}`.
 fn raw_metric(host: &str) -> SeriesLabels {
     SeriesLabels::try_new(
@@ -576,6 +638,8 @@ struct RawScript {
     chunks: std::vec::IntoIter<RawSeriesChunk>,
     schema: Arc<SeriesSchema>,
     binding: store_api::region_engine::RawLabelSource,
+    /// The description its frames declare, or `None` when they carry their labels.
+    decode: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     gate: Option<Arc<Switch>>,
     gate_chunks: bool,
@@ -611,6 +675,9 @@ impl RawSeriesStream for RawScript {
     fn label_source(&self) -> &store_api::region_engine::RawLabelSource {
         &self.binding
     }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.decode.as_ref()
+    }
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
     }
@@ -620,6 +687,7 @@ impl RawSeriesStream for RawScript {
 struct RawScripted {
     partitions: Vec<RawPartition>,
     series_schema: Arc<SeriesSchema>,
+    decode: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     properties: Arc<PlanProperties>,
 }
@@ -650,7 +718,37 @@ impl RawScripted {
         Arc::new(Self {
             partitions,
             series_schema,
+            decode: None,
             ordering,
+            properties,
+        })
+    }
+
+    /// The child over `partitions` whose frames name their labels by their key instead.
+    ///
+    /// This is what a region hands the node when it scanned the series itself, so a test that
+    /// routes by labels has to start from it rather than from an already-labelled frame.
+    fn plan_keyed(partitions: Vec<RawPartition>) -> Arc<dyn ExecutionPlan> {
+        let series_schema = raw_schema();
+        let decode = host_decode();
+        let frame = common_query::series_frame::frame_schema_with(
+            &series_schema,
+            FrameLabelMode::Key,
+            Some(&decode),
+            SeriesOrdering::KeyThenTime,
+        )
+        .expect("a key schema declares a key frame and its ordering");
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(frame),
+            Partitioning::UnknownPartitioning(partitions.len()),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Arc::new(Self {
+            partitions,
+            series_schema,
+            decode: Some(decode),
+            ordering: SeriesOrdering::KeyThenTime,
             properties,
         })
     }
@@ -705,6 +803,7 @@ impl ExecutionPlan for RawScripted {
             chunks: spec.chunks.into_iter(),
             schema: Arc::clone(&self.series_schema),
             binding: store_api::region_engine::RawLabelSource::Explicit,
+            decode: self.decode.clone(),
             // The packed batches have to declare what this child's own plan declares: the
             // sequence validator and the receiver both read the ordering off the frame, so a
             // stream that reported a different one would be validated under the wrong contract.
@@ -713,6 +812,168 @@ impl ExecutionPlan for RawScripted {
             gate_chunks: spec.gate_chunks,
         }))
     }
+}
+
+/// Every output partition of a raw plan, decoded, with the error it ended with if any.
+async fn drain_raw_all(
+    plan: &Arc<SeriesRepartitionExec>,
+    context: &Arc<TaskContext>,
+) -> Vec<Result<Vec<RawSeriesChunk>, BoxedError>> {
+    let mut outputs = Vec::new();
+    for partition in 0..plan.properties().partitioning.partition_count() {
+        let frames = plan
+            .execute(partition, Arc::clone(context))
+            .expect("the partition exists");
+        outputs.push(
+            unpack_raw_series(frames, Some(raw_schema()))
+                .expect("the frame decodes")
+                .try_collect()
+                .await,
+        );
+    }
+    outputs
+}
+
+/// A key-labelled raw input is what a region produces, and routing it is the node's whole job.
+///
+/// The frame names its labels through its key rather than carrying them, so the node has to decode
+/// before it can group or hash them. Refusing the frame would make every single-table selector
+/// unroutable, which is the shape the matching policies exist for.
+#[tokio::test]
+async fn a_key_labelled_raw_input_is_routed() {
+    let child = RawScripted::plan_keyed(vec![RawPartition {
+        chunks: vec![keyed_raw_chunk("a", &[1], vec![Some(1.0)], true)],
+        gate: None,
+        gate_chunks: false,
+    }]);
+    let plan = Arc::new(raw_node(child, 2));
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let outputs = drain_raw_all(&plan, &context).await;
+    let published = outputs
+        .into_iter()
+        .flat_map(|output| output.expect("a routed key chain succeeds"))
+        .collect::<Vec<_>>();
+    assert_eq!(published.len(), 1, "one identity is published once");
+    assert_eq!(
+        published[0].metric.as_ref(),
+        Some(&raw_metric("a")),
+        "the node hands its consumer labels, which is what makes its output explicit"
+    );
+    assert_eq!(
+        published[0].time.as_buffer().to_vec(),
+        vec![1],
+        "the samples survive the decode"
+    );
+}
+
+/// Matching routing over a key-labelled input puts one label set in one owner.
+///
+/// The two chunks of `host="a"` arrive in different partitions, as two scan partitions of one
+/// series would. Their labels are only readable after decoding, so this fails if the node routes
+/// before it decodes: the pieces would then land in different owners instead of joining.
+///
+/// What the owner publishes is one identity, but its frame may present that identity as several
+/// chunks: a merge keeps the source sample segments, and the frame cannot span a segment boundary.
+/// What the consumer relies on is that the pieces of one label set arrive together and that only
+/// the last of them closes the identity.
+#[tokio::test]
+async fn matching_routes_a_key_labelled_input_by_its_decoded_labels() {
+    let policy = MatchingLabels::On(vec![Arc::from("host")]);
+    let child = RawScripted::plan_keyed(vec![
+        RawPartition {
+            chunks: vec![
+                // `is_last` closes this input's contribution, not the series: the other input
+                // still holds a piece of `host="a"`, and the two must reach one owner.
+                keyed_raw_chunk("a", &[1], vec![Some(1.0)], true),
+            ],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![
+                keyed_raw_chunk("a", &[2], vec![Some(3.0)], true),
+                keyed_raw_chunk("b", &[1], vec![Some(2.0)], true),
+            ],
+            gate: None,
+            gate_chunks: false,
+        },
+    ]);
+    let plan = Arc::new(
+        raw_node_with_routing(child, 2, SeriesRouting::Matching(policy))
+            .expect("matching accepts a key-labelled raw frame"),
+    );
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let outputs = drain_raw_all(&plan, &context).await;
+    // Which owner published each label set, its samples in order, and how many times it closed.
+    let mut owners: std::collections::BTreeMap<String, (usize, Vec<i64>, usize)> =
+        std::collections::BTreeMap::new();
+    for (owner, output) in outputs.into_iter().enumerate() {
+        for chunk in output.expect("each owner succeeds") {
+            let host = render_label_set(&label_set(
+                chunk
+                    .metric
+                    .as_ref()
+                    .expect("a published chunk is labelled"),
+            ));
+            let entry = owners.entry(host).or_insert_with(|| (owner, Vec::new(), 0));
+            assert_eq!(
+                entry.0, owner,
+                "one label set must land in one owner, not be split across two"
+            );
+            entry.1.extend(chunk.time.as_buffer().iter().copied());
+            entry.2 += usize::from(chunk.is_last);
+        }
+    }
+    let a = owners
+        .get("{__name__=\"m\", host=\"a\"}")
+        .unwrap_or_else(|| panic!("host a is published by one owner: {owners:?}"));
+    assert_eq!(a.1, vec![1, 2], "both pieces of host a are one identity");
+    assert_eq!(a.2, 1, "the identity is closed exactly once");
+    let b = owners
+        .get("{__name__=\"m\", host=\"b\"}")
+        .unwrap_or_else(|| panic!("host b is published by one owner: {owners:?}"));
+    assert_eq!(b.1, vec![1]);
+    assert_eq!(b.2, 1, "the identity is closed exactly once");
+}
+
+/// `RawPrimaryKey` routing still groups a key-labelled input by its stored key.
+///
+/// Decoding is a side effect of the label-carrying output, not of the policy: the key is what this
+/// policy hashes, so two pieces of one key must still meet in one owner even though the node had to
+/// decode them to publish them.
+#[tokio::test]
+async fn raw_primary_key_still_groups_a_key_labelled_input_by_its_key() {
+    let child = RawScripted::plan_keyed(vec![
+        RawPartition {
+            chunks: vec![keyed_raw_chunk("a", &[1], vec![Some(1.0)], true)],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![keyed_raw_chunk("a", &[2], vec![Some(3.0)], true)],
+            gate: None,
+            gate_chunks: false,
+        },
+    ]);
+    let plan = Arc::new(raw_node(child, 2));
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let outputs = drain_raw_all(&plan, &context).await;
+    let mut owners = Vec::new();
+    for (owner, output) in outputs.into_iter().enumerate() {
+        for chunk in output.expect("each owner succeeds") {
+            assert_eq!(
+                chunk.metric.as_ref(),
+                Some(&raw_metric("a")),
+                "the key decodes to the same labels in both pieces"
+            );
+            owners.extend(chunk.time.as_buffer().iter().map(|_| owner));
+        }
+    }
+    assert_eq!(owners.len(), 2, "both pieces are published");
+    assert_eq!(
+        owners[0], owners[1],
+        "two pieces of one stored key must meet in one owner"
+    );
 }
 
 /// The raw owner over `child` routing by an explicit policy.
