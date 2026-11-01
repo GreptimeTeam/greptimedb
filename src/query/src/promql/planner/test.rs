@@ -3433,10 +3433,106 @@ async fn native_fused_nested_aggregate_keeps_the_outer_names() {
     );
 }
 
+/// One-row-layout classic histogram fixture with the bucket label the histogram planner folds.
+async fn native_classic_histogram_provider() -> DfTableSourceProvider {
+    let catalog = MemoryCatalogManager::with_default_setup();
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new(LE_COLUMN_NAME, ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new(
+            "timestamp",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("field_0", ConcreteDataType::float64_datatype(), true),
+    ]));
+    let meta = TableMetaBuilder::empty()
+        .schema(schema)
+        .engine(NATIVE_ENGINE.to_string())
+        .primary_key_indices(vec![0, 1])
+        .value_indices(vec![3])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let info = TableInfoBuilder::default()
+        .name("m")
+        .meta(meta)
+        .build()
+        .unwrap();
+    catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "m".to_string(),
+            table_id: 1024,
+            table: EmptyTable::from_table_info(&info),
+        })
+        .unwrap();
+    DfTableSourceProvider::new(
+        catalog,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
 /// A classic histogram function above the cut is the split's: `histogram_quantile` reads each
 /// histogram off the bucket series the merge produced, which are the ones the statement's input
 /// would have produced in one execution, so the statement is answered by the merge over the partial
 /// producer instead of falling back to the existing plan.
+#[tokio::test]
+async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching() {
+    let provider = native_classic_histogram_provider().await;
+    let plan = build_native_fused_plan_with_provider(
+        "histogram_quantile(0.9, m) / histogram_quantile(0.5, m)",
+        true,
+        provider,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    // The whole statement has two same-table selectors and declines at that guard. Each
+    // histogram_quantile is nevertheless a one-selector operand and is admitted by the hybrid path.
+    assert_eq!(4, display.matches("FusedSeries").count(), "{display}");
+    assert!(
+        !display.contains(".le ="),
+        "join key still references dropped `le`: {display}"
+    );
+    assert!(
+        plan.schema()
+            .fields()
+            .iter()
+            .all(|field| field.name() != LE_COLUMN_NAME),
+        "output schema still contains dropped `le`: {display}"
+    );
+
+    // Check the contexts returned at the contract boundary for both calls independently.
+    let mut planner = PromPlanner {
+        table_provider: native_classic_histogram_provider().await,
+        ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt(
+            "histogram_quantile(0.9, m) / histogram_quantile(0.5, m)",
+        ))
+        .unwrap(),
+        promql_annotations: None,
+        native_fused: true,
+    };
+    let PromExpr::Binary(binary) =
+        parser::parse("histogram_quantile(0.9, m) / histogram_quantile(0.5, m)").unwrap()
+    else {
+        unreachable!()
+    };
+    for operand in [&binary.lhs, &binary.rhs] {
+        let (_, context) = planner
+            .try_plan_native_operand(operand, &build_query_engine_state())
+            .await
+            .unwrap()
+            .expect("each histogram call is admitted as one native operand");
+        assert_eq!(vec!["host"], context.tag_columns);
+        assert!(!context.tag_columns.contains(&LE_COLUMN_NAME.to_string()));
+    }
+}
+
 #[tokio::test]
 async fn native_fused_histogram_quantile_over_aggregate_splits() {
     let query = "histogram_quantile(0.99, sum by (tag_0) (rate(some_metric[5m])))";
