@@ -2984,7 +2984,12 @@ async fn test_sequence_range_producer_keeps_memtable_only_for_non_mito_source() 
     )
     .await;
     configure_source_capability(&parts.query_engine, "file", true).await;
-    let task = parts.task;
+    let mut task = parts.task;
+    // Covers the aggregate producer's memtable-only fallback; the row-local delta path rejects
+    // that fallback instead of silently skipping SST rows.
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .simple_source_delta = false;
     task.state
         .write()
         .unwrap()
@@ -3011,12 +3016,17 @@ async fn test_sequence_range_producer_keeps_memtable_only_for_non_mito_source() 
 
 #[tokio::test]
 async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
-    let (task, _) = new_test_task_engine_and_plan_with_query(
+    let (mut task, _) = new_test_task_engine_and_plan_with_query(
         "SELECT number, ts FROM numbers_with_ts",
         "numbers_with_ts",
     )
     .await
     .into_task_and_plan();
+    // This test covers the aggregate extension producer, whose memtable-only fallback stays
+    // unchanged. The row-local delta path rejects that fallback, so it is not under test here.
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .simple_source_delta = false;
 
     let extensions = task.build_flow_query_extensions(false, true).await.unwrap();
     assert_eq!(
@@ -4024,9 +4034,16 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
     let sink_table = "auto_created_aggregate_sink";
     let query = "SELECT max(number) AS number, ts FROM numbers_with_ts GROUP BY ts";
     let TestTaskParts {
-        task, query_engine, ..
+        mut task,
+        query_engine,
+        ..
     } = new_test_task_engine_and_plan_with_query(query, sink_table).await;
     register_auto_created_aggregate_sink(&query_engine, sink_table);
+    // The shared helper retains a plain projection plan, but this test covers the aggregate
+    // extension producer, so it must not be classified as a row-local delta flow.
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .simple_source_delta = false;
 
     let ctx = task.state.read().unwrap().query_ctx.clone();
     let plan = sql_to_df_plan(ctx, query_engine.clone(), query, true)
