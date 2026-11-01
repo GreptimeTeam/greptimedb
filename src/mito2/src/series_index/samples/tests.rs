@@ -1255,3 +1255,53 @@ async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
     assert_eq!(10, reads.len());
     assert_eq!(timestamp_read, reads[3]);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_parts_read_like_object_store_parts() {
+    let dir = common_test_util::temp_dir::create_temp_dir("samples-local-read");
+    let local =
+        ObjectStore::new(object_store::services::Fs::default().root(dir.path().to_str().unwrap()))
+            .unwrap();
+    let remote = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 3,
+        part_bytes: 1,
+        ..Default::default()
+    };
+    let input = vec![
+        (1, 1, 0, 6, 1, Some(7)),
+        (1, 1, 10, 5, 0, None),
+        (1, 1, 20, 4, 1, Some(9)),
+        (1, 2, 30, 3, 1, Some(10)),
+        (1, 2, 40, 2, 1, None),
+        (1, 2, 50, 1, 1, Some(12)),
+    ];
+    let mut readers = Vec::new();
+    for store in [&local, &remote] {
+        let handle = build(&format, store, m.clone(), &[batch(&m, &input, false)]).await;
+        readers.push(format.reader(store.clone(), handle).await.unwrap());
+    }
+    let mut bounded = full_request();
+    bounded.start = Some(5);
+    bounded.end = Some(45);
+    // `ts` and `field_0` are not byte-adjacent once sequences and operations are skipped.
+    let mut gapped = request(&["field_0", "ts"]);
+    gapped.start = Some(10);
+    for request in [full_request(), bounded, gapped] {
+        let mut outputs = Vec::new();
+        for reader in &readers {
+            outputs.push(
+                reader
+                    .read(request.clone())
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert!(!outputs[0].is_empty());
+        assert_eq!(outputs[0], outputs[1]);
+    }
+}
