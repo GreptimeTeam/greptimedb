@@ -82,6 +82,7 @@ use crate::native::plan::{
     reads_across_series,
 };
 use crate::source::materialize_raw_labels;
+use crate::vector_match::DuplicateEvidence;
 
 #[cfg(test)]
 mod tests;
@@ -1106,6 +1107,10 @@ pub struct FusedSeriesExec {
     /// The columns this node produces.
     output_schema: SchemaRef,
     /// Per-node metrics, registered by each execution of the tree.
+    #[allow(dead_code)]
+    // Retained at plan-instance lifetime for the next duplicate-evidence step.
+    duplicate_evidence: Mutex<Option<Arc<DuplicateEvidence>>>,
+    /// Per-node metrics, registered by each execution of the tree.
     metric: ExecutionPlanMetricsSet,
     /// Aggregate state exported by each partition, when this is the partial mode.
     partial_fold: Option<BoundAggregate>,
@@ -1171,7 +1176,8 @@ impl FusedSeriesExec {
             )));
         }
         // Building a state proves the runtime executes this tree; drop the validation state now.
-        let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
+        let _ =
+            NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)?;
         let output_series = tree.root().output.samples();
         let scalar_root = matches!(tree.root().output, NativeType::Scalar(_));
         if let Some(op) = &partial_fold {
@@ -1274,6 +1280,7 @@ impl FusedSeriesExec {
             time_column,
             tags: tags.into(),
             output_schema,
+            duplicate_evidence: Mutex::new(None),
             metric: ExecutionPlanMetricsSet::new(),
             properties,
             partial_fold,
@@ -1394,6 +1401,7 @@ impl ExecutionPlan for FusedSeriesExec {
         let state = NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
+            None,
         )?;
         state.register_metrics(&self.metric, partition);
         let mut streams = Vec::new();
