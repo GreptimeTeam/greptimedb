@@ -14,10 +14,15 @@
 
 //! Propagation of label matchers between the operands of a PromQL binary expression.
 
+use async_recursion::async_recursion;
 use promql_parser::label::{MatchOp, Matcher, Matchers};
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Expr, LabelModifier, VectorMatchCardinality, token,
 };
+
+use crate::promql::error;
+use crate::promql::planner::PromPlanner;
+use crate::query_engine::QueryEngineState;
 
 /// [`super::PromPlanner::matchers_to_expr`] emits no filter for this, so copying it would only
 /// force a re-plan.
@@ -77,13 +82,133 @@ pub(super) fn propagate(
     left_field_labels: &[String],
     right_field_labels: &[String],
 ) -> Option<BinaryExpr> {
-    match try_propagate(
+    logged(
         binary,
-        left_tags,
-        right_tags,
-        left_field_labels,
-        right_field_labels,
+        try_propagate(
+            binary,
+            left_tags,
+            right_tags,
+            left_field_labels,
+            right_field_labels,
+            false,
+        ),
+    )
+}
+
+impl PromPlanner {
+    /// Applies the rewrite of [`propagate`] to every binary expression of `expr`, for the native
+    /// route, which compiles the whole statement and so never reaches the rewrite the existing
+    /// path applies while planning each binary.
+    ///
+    /// The operands' tag columns and value-field grouping labels are read off the contexts the
+    /// existing path plans for them, so a rewrite made here is the one that path makes for the
+    /// binary; one-to-one matching is rewritten only over a unique one side.
+    /// A binary whose operands do not both reach a scan is never probed, which leaves no binary
+    /// nested in a probed operand; the rewrites are therefore independent of their order.
+    #[async_recursion]
+    pub(super) async fn propagate_matching_filters(
+        &mut self,
+        expr: &mut Expr,
+        query_engine_state: &QueryEngineState,
     ) {
+        match expr {
+            Expr::Aggregate(aggregate) => {
+                self.propagate_matching_filters(&mut aggregate.expr, query_engine_state)
+                    .await;
+                if let Some(param) = &mut aggregate.param {
+                    self.propagate_matching_filters(param, query_engine_state)
+                        .await;
+                }
+            }
+            Expr::Unary(unary) => {
+                self.propagate_matching_filters(&mut unary.expr, query_engine_state)
+                    .await
+            }
+            Expr::Paren(paren) => {
+                self.propagate_matching_filters(&mut paren.expr, query_engine_state)
+                    .await
+            }
+            Expr::Subquery(subquery) => {
+                self.propagate_matching_filters(&mut subquery.expr, query_engine_state)
+                    .await
+            }
+            Expr::Call(call) => {
+                for arg in &mut call.args.args {
+                    self.propagate_matching_filters(arg, query_engine_state)
+                        .await;
+                }
+            }
+            Expr::Binary(binary) => {
+                self.propagate_matching_filters(&mut binary.lhs, query_engine_state)
+                    .await;
+                self.propagate_matching_filters(&mut binary.rhs, query_engine_state)
+                    .await;
+                if let Some(rewritten) = self
+                    .propagate_binary_matching_filters(binary, query_engine_state)
+                    .await
+                {
+                    *binary = rewritten;
+                }
+            }
+            Expr::NumberLiteral(_)
+            | Expr::StringLiteral(_)
+            | Expr::VectorSelector(_)
+            | Expr::MatrixSelector(_)
+            | Expr::Extension(_) => {}
+        }
+    }
+
+    async fn propagate_binary_matching_filters(
+        &mut self,
+        binary: &BinaryExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Option<BinaryExpr> {
+        if let Err(reason) = check_shape(binary, true) {
+            common_telemetry::debug!("Matching filter not propagated ({reason}): {binary}");
+            return None;
+        }
+        let saved = self.ctx.clone();
+        let contexts: error::Result<_> = async {
+            self.prom_expr_to_plan(&binary.lhs, query_engine_state)
+                .await?;
+            let left = self.ctx.clone();
+            self.prom_expr_to_plan(&binary.rhs, query_engine_state)
+                .await?;
+            Ok((left, self.ctx.clone()))
+        }
+        .await;
+        self.ctx = saved;
+        // The plans are only read for their contexts. An operand that cannot be planned proves
+        // nothing about a rewrite; the statement's own planning decides what that failure means.
+        let (left, right) = match contexts {
+            Ok(contexts) => contexts,
+            Err(error) => {
+                common_telemetry::debug!(
+                    "Matching filter not propagated (operand not planned: {error}): {binary}"
+                );
+                return None;
+            }
+        };
+        // The native route reports a duplicate on the one side as Prometheus does, and that
+        // check reads the one side whole: a narrower one side, or a many side narrowed to nothing
+        // at a step (which skips every check there), would answer where Prometheus fails. A one
+        // side proven unique has no duplicate to hide.
+        logged(
+            binary,
+            try_propagate(
+                binary,
+                &left.tag_columns,
+                &right.tag_columns,
+                &left.aggregation_field_labels,
+                &right.aggregation_field_labels,
+                true,
+            ),
+        )
+    }
+}
+
+fn logged(binary: &BinaryExpr, outcome: Result<BinaryExpr, &'static str>) -> Option<BinaryExpr> {
+    match outcome {
         Ok(rewritten) => Some(rewritten),
         Err(reason) => {
             common_telemetry::debug!("Matching filter not propagated ({reason}): {binary}");
@@ -93,24 +218,18 @@ pub(super) fn propagate(
 }
 
 /// `Err` carries why the rewrite does not apply, for [`propagate`] to log.
+///
+/// `unique_one_side` extends the one-side uniqueness requirement of grouped matching to one-to-one
+/// matching, whose one side is the right operand.
 fn try_propagate(
     binary: &BinaryExpr,
     left_tags: &[String],
     right_tags: &[String],
     left_field_labels: &[String],
     right_field_labels: &[String],
+    unique_one_side: bool,
 ) -> Result<BinaryExpr, &'static str> {
-    if !matches!(
-        binary.op.id(),
-        token::T_ADD | token::T_SUB | token::T_MUL | token::T_DIV | token::T_MOD | token::T_POW
-    ) {
-        return Err("operator is not arithmetic");
-    }
-    if let Some(modifier) = &binary.modifier
-        && (modifier.fill_values.lhs.is_some() || modifier.fill_values.rhs.is_some())
-    {
-        return Err("operand carries a fill modifier");
-    }
+    let one_side = check_shape(binary, unique_one_side)?;
     let matching = binary
         .modifier
         .as_ref()
@@ -130,23 +249,15 @@ fn try_propagate(
                 Some(LabelModifier::Exclude(ignoring)) => !ignoring.labels.contains(name),
             }
     };
-    if let Some(modifier) = &binary.modifier {
-        let unique_on_matching_labels = |expr: &Expr, tags: &[String]| {
-            has_unique_aggregate_output(expr) && tags.iter().all(&is_matching_label)
-        };
-        let supported_cardinality = match &modifier.card {
-            VectorMatchCardinality::OneToOne => true,
-            VectorMatchCardinality::ManyToOne(_) => {
-                unique_on_matching_labels(&binary.rhs, right_tags)
-            }
-            VectorMatchCardinality::OneToMany(_) => {
-                unique_on_matching_labels(&binary.lhs, left_tags)
-            }
-            VectorMatchCardinality::ManyToMany => false,
-        };
-        if !supported_cardinality {
-            return Err("one-side uniqueness is not proven");
-        }
+    // The one side's output labels must all be matching labels for its unique aggregate output
+    // to be unique per match group.
+    let one_side_tags = match one_side {
+        Some(OneSide::Left) => left_tags,
+        Some(OneSide::Right) => right_tags,
+        None => &[],
+    };
+    if !one_side_tags.iter().all(&is_matching_label) {
+        return Err("one-side uniqueness is not proven");
     }
     let mut rewritten = binary.clone();
     let left = selector_matchers(&mut rewritten.lhs).ok_or("left operand is not a selector")?;
@@ -179,6 +290,59 @@ fn try_propagate(
         return Err("operands already carry the same matching-label matchers");
     }
     Ok(rewritten)
+}
+
+/// The operand of a binary whose uniqueness on the matching labels the rewrite relies on.
+enum OneSide {
+    Left,
+    Right,
+}
+
+/// The part of [`try_propagate`]'s refusals the expression alone decides, so a caller can skip
+/// planning the operands of a binary that cannot be rewritten.
+///
+/// Returns the operand that has to be unique on the matching labels, which [`try_propagate`]
+/// completes with its tag columns.
+fn check_shape(
+    binary: &BinaryExpr,
+    unique_one_side: bool,
+) -> Result<Option<OneSide>, &'static str> {
+    if !is_arithmetic(binary.op) {
+        return Err("operator is not arithmetic");
+    }
+    if let Some(modifier) = &binary.modifier
+        && (modifier.fill_values.lhs.is_some() || modifier.fill_values.rhs.is_some())
+    {
+        return Err("operand carries a fill modifier");
+    }
+    let one_side = match binary.modifier.as_ref().map(|modifier| &modifier.card) {
+        None | Some(VectorMatchCardinality::OneToOne) => unique_one_side.then_some(OneSide::Right),
+        Some(VectorMatchCardinality::ManyToOne(_)) => Some(OneSide::Right),
+        Some(VectorMatchCardinality::OneToMany(_)) => Some(OneSide::Left),
+        Some(VectorMatchCardinality::ManyToMany) => return Err("matching is many-to-many"),
+    };
+    let one_side_expr = match one_side {
+        Some(OneSide::Left) => Some(binary.lhs.as_ref()),
+        Some(OneSide::Right) => Some(binary.rhs.as_ref()),
+        None => None,
+    };
+    if one_side_expr.is_some_and(|expr| !has_unique_aggregate_output(expr)) {
+        return Err("one-side uniqueness is not proven");
+    }
+    if selector_matchers(&mut binary.lhs.as_ref().clone()).is_none() {
+        return Err("left operand is not a selector");
+    }
+    if selector_matchers(&mut binary.rhs.as_ref().clone()).is_none() {
+        return Err("right operand is not a selector");
+    }
+    Ok(one_side)
+}
+
+fn is_arithmetic(op: token::TokenType) -> bool {
+    matches!(
+        op.id(),
+        token::T_ADD | token::T_SUB | token::T_MUL | token::T_DIV | token::T_MOD | token::T_POW
+    )
 }
 
 fn matches_every_value(matcher: &Matcher) -> bool {
@@ -226,11 +390,7 @@ fn has_unique_aggregate_output(expr: &Expr) -> bool {
 }
 
 fn vector_operand_is_lhs(binary: &BinaryExpr) -> Option<bool> {
-    if !matches!(
-        binary.op.id(),
-        token::T_ADD | token::T_SUB | token::T_MUL | token::T_DIV | token::T_MOD | token::T_POW
-    ) || binary.modifier.is_some()
-    {
+    if !is_arithmetic(binary.op) || binary.modifier.is_some() {
         return None;
     }
     if matches!(binary.lhs.as_ref(), Expr::NumberLiteral(_)) {
