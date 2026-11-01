@@ -28,7 +28,9 @@ use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
+use crate::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
+};
 
 fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
@@ -1345,7 +1347,10 @@ fn a_scalar_node_must_produce_a_scalar() {
 fn an_input_must_report_the_binding_it_was_bound_to() {
     let node = NativeNode {
         expr: NativeExpr::Input(BoundInput {
-            output: raw(),
+            output: NativeType::Samples(Arc::new(SeriesSchema {
+                fields: fields(1),
+                eval_grid: None,
+            })),
             source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
         }),
@@ -1372,17 +1377,105 @@ fn an_input_can_bind_aggregate_state() {
     // A `Final` aggregate can then consume it, which is the shape of a distributed aggregate.
     assert!(final_aggregate(bound).validate().is_ok());
 
-    // A fresh state allocation is a different binding, so it cannot be reported as the bound one.
-    let other = NativeNode {
+    // Equivalent independent allocations are accepted; field, order, grid, and group changes remain invalid.
+    let evaluated_a = evaluated(fields(2), grid(0, 60_000, 4));
+    let equivalent = NativeNode {
         expr: NativeExpr::Input(BoundInput {
-            output: state.output.clone(),
+            output: evaluated_a.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
         }),
-        output: partial_aggregate(window_over(input(), None)).output,
+        output: evaluated(fields(2), grid(0, 60_000, 4)),
     };
-    let error = other.validate().unwrap_err();
-    assert!(error.to_string().contains("not the binding"), "{error}");
+    assert!(equivalent.validate().is_ok());
+
+    let mismatches = [
+        evaluated(fields(1), grid(0, 60_000, 4)),
+        evaluated(
+            Arc::from([
+                FieldSpec {
+                    name: Arc::from("f1"),
+                },
+                FieldSpec {
+                    name: Arc::from("f0"),
+                },
+            ]),
+            grid(0, 60_000, 4),
+        ),
+        evaluated(fields(2), grid(60_000, 60_000, 4)),
+    ];
+    for output in mismatches {
+        let mismatch = NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                output: evaluated_a.clone(),
+                source_index: 0,
+                ordering: SeriesOrdering::Contiguous,
+            }),
+            output,
+        };
+        assert!(mismatch.validate().is_err());
+    }
+
+    let state_a = partial_aggregate(window_over(input(), None)).output;
+    let NativeType::AggregateState(schema_a) = &state_a else {
+        unreachable!()
+    };
+    let state_group_mismatch = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+        group: Grouping::Without(Arc::new([Arc::from("job")])),
+        accumulators: schema_a.accumulators.clone(),
+        grid: schema_a.grid.clone(),
+    }));
+    let mismatch = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: state_a,
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: state_group_mismatch,
+    };
+    assert!(mismatch.validate().is_err());
+
+    let state_grid = grid(0, 60_000, 4);
+    let state = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from("job")])),
+        accumulators: fields(2),
+        grid: Arc::clone(&state_grid),
+    }));
+    let equivalent_state = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from("job")])),
+        accumulators: fields(2),
+        grid: Arc::clone(&state_grid),
+    }));
+    let state_input = |bound: NativeType, output: NativeType| NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: bound,
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output,
+    };
+    assert!(
+        state_input(state.clone(), equivalent_state)
+            .validate()
+            .is_ok()
+    );
+    let reversed_accumulators = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from("job")])),
+        accumulators: Arc::from([
+            FieldSpec {
+                name: Arc::from("f1"),
+            },
+            FieldSpec {
+                name: Arc::from("f0"),
+            },
+        ]),
+        grid: state_grid,
+    }));
+    assert!(
+        state_input(state.clone(), reversed_accumulators)
+            .validate()
+            .is_err()
+    );
 }
 
 /// A vector operation reads the values at each grid point, so raw samples, which have no shared points,
@@ -1400,21 +1493,25 @@ fn a_vector_operation_cannot_consume_raw_samples() {
     assert!(error.to_string().contains("an evaluated vector"), "{error}");
 }
 
-/// A node that reports samples while holding no input node is refused where the node is built.
-///
-/// The tree is constructed directly here — a child module of `native::plan` may — because the node
-/// is one the public constructors decline: a constant does not produce samples, and a zero-input
-/// tree has no scan that would refuse it later. Every public constructor therefore stays a checked
-/// one.
+/// FusedSeries must reject a tree constructed outside the checked NativeTree constructor.
 #[test]
-fn a_samples_root_without_an_input_is_refused() {
+fn fused_series_rejects_a_tree_over_the_depth_limit() {
+    use super::MAX_NATIVE_NODE_DEPTH;
+
     let statement_grid = grid(0, 60_000, 4);
-    let tree = NativeTree {
-        root: NativeNode {
-            expr: NativeExpr::Scalar(BoundScalar { value: 1.0 }),
+    let mut root = input_on(Arc::clone(&statement_grid));
+    for _ in 0..MAX_NATIVE_NODE_DEPTH {
+        root = NativeNode {
+            expr: NativeExpr::Map {
+                input: Box::new(root),
+                op: BoundMap {
+                    ops: Arc::new([MapOp::Math(MathOp::Abs)]),
+                },
+            },
             output: evaluated(Arc::new([]), Arc::clone(&statement_grid)),
-        },
-    };
+        };
+    }
+    let tree = NativeTree { root };
     let binding = FusedSeriesBinding {
         grid: statement_grid,
         time_index: "time".to_string(),
@@ -1431,10 +1528,7 @@ fn a_samples_root_without_an_input_is_refused() {
     )
     .expect_err("a samples root reads no source while reporting samples");
 
-    assert!(
-        error.to_string().contains("does not produce a scalar"),
-        "the refusal must name the contract the root breaks: {error}"
-    );
+    assert!(error.to_string().contains("exceeds 64"), "{error}");
 }
 
 /// `info` reads its info side's values as sample times, so it accepts only the instant selection
@@ -1475,4 +1569,136 @@ fn info_reads_the_sample_times_of_one_field() {
         let error = info_of(value, fields).validate().unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+#[test]
+fn native_tree_depth_limit_holds_across_lifecycle_on_named_worker_stack() {
+    use super::MAX_NATIVE_NODE_DEPTH;
+
+    fn nested_maps(map_count: usize) -> NativeTree {
+        let mut node = input_on(grid(0, 60_000, 1));
+        let output = node.output.clone();
+        for _ in 0..map_count {
+            node = NativeNode {
+                expr: NativeExpr::Map {
+                    input: Box::new(node),
+                    op: BoundMap {
+                        ops: Arc::new([MapOp::Math(MathOp::Abs)]),
+                    },
+                },
+                output: output.clone(),
+            };
+        }
+        NativeTree { root: node }
+    }
+
+    // A leaf counts as one node; test exactly the cap and rejection on a named 2 MiB worker.
+    std::thread::Builder::new()
+        .name("native-tree-depth-boundary".to_string())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let at_limit = nested_maps(MAX_NATIVE_NODE_DEPTH - 1);
+            let checked = NativeTree::try_new(at_limit.root.clone()).unwrap();
+            let bytes = postcard::to_stdvec(&checked).unwrap();
+            let decoded: NativeTree = postcard::from_bytes(&bytes).unwrap();
+            decoded.root().validate().unwrap();
+            drop((decoded, bytes, checked, at_limit));
+
+            // Construct wire data beyond the cap without passing through try_new.
+            let over_limit = nested_maps(MAX_NATIVE_NODE_DEPTH);
+            let bytes = postcard::to_stdvec(&over_limit).unwrap();
+            assert_eq!(
+                postcard::from_bytes::<NativeTree>(&bytes).unwrap_err(),
+                postcard::Error::SerdeDeCustom
+            );
+            assert!(NativeTree::try_new(over_limit.root.clone()).is_err());
+            drop(over_limit);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn native_tree_postcard_float_fidelity_round_trip() {
+    for bits in [
+        0x7ff8_0000_0000_0001,
+        0,
+        0x8000_0000_0000_0000,
+        f64::INFINITY.to_bits(),
+        f64::NEG_INFINITY.to_bits(),
+        1,
+    ] {
+        let value = f64::from_bits(bits);
+        let tree = NativeTree::try_new(scalar_on(value, grid(0, 1, 1))).unwrap();
+        let decoded: NativeTree =
+            postcard::from_bytes(&postcard::to_stdvec(&tree).unwrap()).unwrap();
+        let NativeExpr::Scalar(value) = &decoded.root().expr else {
+            panic!("scalar shape changed")
+        };
+        assert_eq!(value.value.to_bits(), bits);
+    }
+}
+
+#[test]
+fn native_tree_postcard_rejects_trailing_bytes() {
+    let tree = NativeTree::try_new(input()).unwrap();
+    let mut bytes = postcard::to_stdvec(&tree).unwrap();
+    bytes.push(0);
+    let (_, remainder) = postcard::take_from_bytes::<NativeTree>(&bytes).unwrap();
+    assert!(!remainder.is_empty());
+}
+
+#[test]
+fn native_tree_non_prefix_shapes_round_trip() {
+    let grid = grid(0, 60_000, 4);
+    let lhs = window_on(input(), None, Arc::clone(&grid));
+    let rhs = window_on(input_with_fields(0), None, Arc::clone(&grid));
+    let binary = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(lhs.clone()),
+            right: Box::new(rhs.clone()),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&grid)),
+    };
+    let aggregate = partial_aggregate(window_on(input(), None, Arc::clone(&grid)));
+    let set = NativeNode {
+        expr: NativeExpr::Set {
+            left: Box::new(lhs),
+            right: Box::new(rhs),
+            op: super::BoundSetOp {
+                op: SetOp::Or,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+            },
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&grid)),
+    };
+    let trees = vec![
+        NativeTree::try_new(input()).unwrap(),
+        NativeTree::try_new(input_on(Arc::clone(&grid))).unwrap(),
+        NativeTree::try_new(scalar_on(3.0, Arc::clone(&grid))).unwrap(),
+        NativeTree::try_new(binary).unwrap(),
+        NativeTree::try_new(aggregate).unwrap(),
+        NativeTree::try_new(set).unwrap(),
+    ];
+    for tree in trees {
+        let decoded: NativeTree =
+            postcard::from_bytes(&postcard::to_stdvec(&tree).unwrap()).unwrap();
+        assert_eq!(decoded, tree);
+    }
+}
+
+#[test]
+fn independently_allocated_binding_mismatch_is_rejected() {
+    let node = input_with_fields(1);
+    let mut mismatch = node.clone();
+    let NativeExpr::Input(binding) = &mut mismatch.expr else {
+        unreachable!()
+    };
+    binding.output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: fields(2),
+        eval_grid: None,
+    }));
+    assert!(mismatch.validate().is_err());
 }

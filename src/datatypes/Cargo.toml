@@ -33,7 +33,7 @@ parquet-variant-compute.workspace = true
 parquet-variant-json.workspace = true
 paste.workspace = true
 regex.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true

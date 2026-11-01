@@ -90,6 +90,36 @@ pub struct EvalGrid {
     spec: GridSpec,
     timestamps: OnceCell<ScalarBuffer<i64>>,
 }
+impl serde::Serialize for EvalGrid {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.spec.serialize(serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for EvalGrid {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let spec = GridSpec::deserialize(deserializer)?;
+        Self::try_deferred(spec).map_err(serde::de::Error::custom)
+    }
+}
+
+impl PartialEq for EvalGrid {
+    fn eq(&self, other: &Self) -> bool {
+        self.spec == other.spec
+    }
+}
+impl Eq for EvalGrid {}
+impl std::hash::Hash for EvalGrid {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.spec.start_ms.hash(state);
+        self.spec.step_ms.hash(state);
+        self.spec.len.hash(state)
+    }
+}
 
 impl EvalGrid {
     /// Allocates the grid timestamps once for sharing across result series.
