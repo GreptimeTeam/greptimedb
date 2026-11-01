@@ -294,6 +294,22 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "FUTURE_SEQUENCE_BOUND: scan bound is ahead of the read view, region: {}, scan_id: {}, given_seq: {}, committed_seq: {}, retry_hint: REBIND_SEQUENCE_BOUND",
+        region_id,
+        scan_id,
+        given_seq,
+        committed_seq
+    ))]
+    FutureSequenceBound {
+        region_id: RegionId,
+        scan_id: u32,
+        given_seq: u64,
+        committed_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "SEQUENCE_RANGE_UNSUPPORTED: exact sequence-range read unsupported, region: {}, min_seq: {}, max_seq: {}, reason: {}, retry_hint: FALLBACK_MEMTABLE_ONLY_OR_FULL_RECOMPUTE",
         region_id,
         min_seq,
@@ -1555,7 +1571,9 @@ impl ErrorExt for Error {
             | SerializePartitionExpr { .. }
             | InvalidSourceAndTargetRegion { .. } => StatusCode::InvalidArguments,
 
-            IncrementalQueryStale { .. } | SnapshotFenceStale { .. } => StatusCode::RequestOutdated,
+            IncrementalQueryStale { .. }
+            | SnapshotFenceStale { .. }
+            | FutureSequenceBound { .. } => StatusCode::RequestOutdated,
 
             SequenceRangeUnsupported { .. } => StatusCode::Unsupported,
 
