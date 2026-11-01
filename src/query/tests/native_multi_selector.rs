@@ -199,7 +199,7 @@ fn scan_push(
 /// mean a node computed over half a vector.
 fn run(compiled: &CompiledTree, pushes: Vec<(usize, RawSeriesChunk)>) -> Vec<EvaluatedChunk> {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-    let state = NativeExecutionState::try_new(&compiled.tree, Arc::clone(&pool))
+    let state = NativeExecutionState::try_new(&compiled.tree, Arc::clone(&pool), None)
         .expect("the runtime executes this tree");
     let mut input_ids = Vec::with_capacity(compiled.inputs.len());
     for input in compiled.inputs.iter() {

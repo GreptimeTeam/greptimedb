@@ -3953,6 +3953,66 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn native_duplicate_evidence_keeps_late_grid_point_across_partitions() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_duplicate_evidence_late_point",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_dup_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+           CREATE TABLE native_dup_left (match_key STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY (match_key)) ENGINE=metric WITH ("on_physical_table" = 'native_dup_phy');
+           CREATE TABLE native_dup_right (match_key STRING, variant STRING, ts TIMESTAMP TIME INDEX,
+            val DOUBLE, PRIMARY KEY (match_key, variant))
+            ENGINE=metric WITH ("on_physical_table" = 'native_dup_phy');
+           CREATE TABLE native_dup_empty (match_key STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY (match_key)) ENGINE=metric WITH ("on_physical_table" = 'native_dup_phy');
+           INSERT INTO native_dup_left (match_key, ts, val) VALUES ('k', 4000, 1);
+           INSERT INTO native_dup_right (match_key, variant, ts, val) VALUES ('k', 'a', 4000, 2), ('k', 'b', 4000, 3);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // TQL range 0..4 seconds at 1 second steps is 5 points; parallelism 2 gives fewer
+    // partitions than points. The duplicate is at point index 4, beyond the old partition-sized
+    // evidence array.
+    let duplicate_sql =
+        "TQL EVAL (0, 4, '1s') native_dup_left + on(match_key) group_left() native_dup_right";
+    let output = instance
+        .do_query(duplicate_sql, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .expect("query should produce a stream");
+    let error = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream)
+            .await
+            .expect_err("late duplicate must fail while executing the native query"),
+        _ => panic!("TQL EVAL returns a stream"),
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("found duplicate series for the match group"),
+        "{message}"
+    );
+    assert!(message.contains("{match_key=\"k\"}"), "{message}");
+    assert!(message.contains("on the right hand-side"), "{message}");
+
+    // The same duplicate right side is harmless where the matching left side is absent.
+    let control_sql =
+        "TQL EVAL (0, 4, '1s') native_dup_empty + on(match_key) group_left() native_dup_right";
+    let output = instance
+        .do_query(control_sql, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .expect("duplicate group is ineligible while the left side is absent");
+    let _ = native_result_rows(output).await;
+}
+
 /// A set operator over a two-field table keeps the existing plan, which refuses it: neither
 /// Prometheus nor that plan defines per-field presence.
 #[tokio::test(flavor = "multi_thread")]

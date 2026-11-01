@@ -586,6 +586,8 @@ fn binary_runtime(
         BinaryRuntime::new(
             PairKernel::Binary(Arc::new(binary_matching(BinaryOp::Add))),
             [Arc::clone(schema), Arc::clone(schema)],
+            0,
+            None,
         ),
     )
 }
@@ -749,7 +751,7 @@ fn bounded_pool(bytes: usize) -> Arc<dyn MemoryPool> {
 }
 
 fn executor(tree: &NativeTree, pool: Arc<dyn MemoryPool>) -> NativeExecutor {
-    NativeExecutor::new(NativeExecutionState::try_new(tree, pool).unwrap())
+    NativeExecutor::new(NativeExecutionState::try_new(tree, pool, None).unwrap())
 }
 
 /// Pulls until the tree has nothing settled, then closes it.
@@ -819,7 +821,7 @@ fn scalar_root_reserves_before_allocating_and_counts_its_output() {
 
     let pool = pool();
     let metrics = ExecutionPlanMetricsSet::new();
-    let state = NativeExecutionState::try_new(&tree, Arc::clone(&pool)).unwrap();
+    let state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
     state.register_metrics(&metrics, 0);
     let mut execution = NativeExecutor::new(state);
     execution.end_of_input().unwrap();
@@ -1753,7 +1755,7 @@ fn an_unimplemented_node_is_reported_not_panicked() {
     for (kind, reason, root) in cases {
         // Legality stays `validate`'s: the plan accepts these trees, the runtime does not run them.
         let tree = NativeTree::try_new(root).expect("the bound tree is legal");
-        let error = match NativeExecutionState::try_new(&tree, pool()) {
+        let error = match NativeExecutionState::try_new(&tree, pool(), None) {
             Ok(_) => panic!("the runtime accepted a {kind} node"),
             Err(error) => error,
         };
@@ -4283,7 +4285,7 @@ fn a_window_over_an_interleaved_input_is_rejected() {
         Arc::clone(&outer_grid),
     ))
     .expect("the binding accepts a window over a map");
-    let error = match NativeExecutionState::try_new(&tree, pool()) {
+    let error = match NativeExecutionState::try_new(&tree, pool(), None) {
         Ok(_) => panic!("the runtime accepted an interleaved input under a window"),
         Err(error) => error,
     };
@@ -4311,7 +4313,7 @@ fn an_interleaved_input_is_refused_without_a_window() {
         vec![MathOp::Abs],
     ))
     .expect("the binding accepts a map over an interleaved input");
-    let error = match NativeExecutionState::try_new(&tree, pool()) {
+    let error = match NativeExecutionState::try_new(&tree, pool(), None) {
         Ok(_) => panic!("the runtime accepted an interleaved input with no window above it"),
         Err(error) => error,
     };
@@ -5813,6 +5815,42 @@ fn binary_of(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> N
     }
 }
 
+#[test]
+fn binary_runtime_indices_are_assigned_in_preorder() {
+    let grid = grid(0, 60_000, 2);
+    let inner = binary_of(
+        evaluated_input(Arc::clone(&grid)),
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let root = binary_of(
+        inner,
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Mul),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let execution = NativeExecutionState::try_new(&tree, pool(), None).unwrap();
+
+    let RuntimeOp::Binary {
+        left,
+        binary: Some(root_binary),
+        ..
+    } = &execution.root.op
+    else {
+        panic!("the root is not a binary runtime");
+    };
+    let RuntimeOp::Binary {
+        binary: Some(inner_binary),
+        ..
+    } = &left.op
+    else {
+        panic!("the left child is not a binary runtime");
+    };
+
+    assert_eq!(root_binary.node_index, 0);
+    assert_eq!(inner_binary.node_index, 1);
+}
+
 /// A source of evaluated chunks over `count` float fields.
 fn evaluated_input_of(count: usize, grid: Arc<EvalGrid>) -> NativeNode {
     let output = NativeType::Samples(Arc::new(SeriesSchema {
@@ -5967,6 +6005,37 @@ fn binary_tree(op: BinaryOp, points: u64) -> (NativeTree, Arc<EvalGrid>, InputId
         InputId::new(0),
         InputId::new(1),
     )
+}
+
+/// Binary runtime indexes follow the tree's pre-order traversal.
+#[test]
+fn binary_runtime_indexes_follow_pre_order() {
+    let out_grid = grid(0, 60_000, 2);
+    let input = || evaluated_input_with_source_index(Arc::clone(&out_grid), 0);
+    let tree = NativeTree::try_new(binary_of(
+        binary_of(input(), input(), binary_matching(BinaryOp::Add)),
+        input(),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let execution = executor(&tree, pool());
+    let RuntimeOp::Binary {
+        left,
+        binary: Some(root_binary),
+        ..
+    } = &execution.state().root.op
+    else {
+        panic!("expected the root binary runtime");
+    };
+    let RuntimeOp::Binary {
+        binary: Some(left_binary),
+        ..
+    } = &left.op
+    else {
+        panic!("expected the left binary runtime");
+    };
+    assert_eq!(root_binary.node_index, 0);
+    assert_eq!(left_binary.node_index, 1);
 }
 
 /// Runtime source indexes map to all matching leaf slots, including below unary and scalar nodes.
@@ -10055,7 +10124,7 @@ fn an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named() {
     };
 
     for (found, tree) in [("Quantile", kind_tree), ("Partial", partial_tree)] {
-        let error = match NativeExecutionState::try_new(&tree, pool()) {
+        let error = match NativeExecutionState::try_new(&tree, pool(), None) {
             Ok(_) => panic!("the runtime accepted a {found} aggregate"),
             Err(error) => error,
         };
@@ -10171,7 +10240,7 @@ fn count_values_runtime_rejects_grouping_by_another_value_field() {
         },
     ))
     .unwrap();
-    let error = NativeExecutionState::try_new(&tree, pool())
+    let error = NativeExecutionState::try_new(&tree, pool(), None)
         .err()
         .expect("grouping by another value field is unsupported");
     assert!(
@@ -10223,7 +10292,7 @@ fn topk_runtime_rejects_grouping_by_a_value_field() {
         },
     ))
     .unwrap();
-    let error = NativeExecutionState::try_new(&tree, pool())
+    let error = NativeExecutionState::try_new(&tree, pool(), None)
         .err()
         .expect("grouping by a value field is unsupported");
     assert!(
@@ -10251,7 +10320,7 @@ fn topk_runtime_accepts_grouping_by_a_label() {
         },
     ))
     .unwrap();
-    NativeExecutionState::try_new(&tree, pool()).expect("a label grouping stays supported");
+    NativeExecutionState::try_new(&tree, pool(), None).expect("a label grouping stays supported");
 }
 
 /// The positions a series decided, with their values.

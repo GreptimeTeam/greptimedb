@@ -1623,8 +1623,14 @@ fn budgeted(
     limit: usize,
 ) -> (Result<Vec<Series>, DataFusionError>, Vec<usize>) {
     let mut seen = Vec::new();
-    let output =
-        binary_vectors_with_reservation(matching, lhs_schema, lhs, rhs_schema, rhs, &mut |total| {
+    let output = binary_vectors_with_reservation(
+        matching,
+        lhs_schema,
+        lhs,
+        rhs_schema,
+        rhs,
+        None,
+        &mut |total| {
             if total > limit {
                 return Err(DataFusionError::ResourcesExhausted(format!(
                     "a binary operation needs {total} bytes, more than the {limit} admitted"
@@ -1632,7 +1638,8 @@ fn budgeted(
             }
             seen.push(total);
             Ok(())
-        });
+        },
+    );
     (output, seen)
 }
 
@@ -3224,12 +3231,19 @@ fn a_histogram_comparison_filter_keeps_the_payload_of_the_operand_it_keeps() {
     // budgeted one gives, which is asserted to have reserved the workspace it walked.
     let compare = |matching: &BinaryMatching| -> [Vec<Series>; 2] {
         let mut reserved = Vec::new();
-        let budgeted =
-            binary_vectors_with_reservation(matching, &schema, &lhs, &schema, &rhs, &mut |total| {
+        let budgeted = binary_vectors_with_reservation(
+            matching,
+            &schema,
+            &lhs,
+            &schema,
+            &rhs,
+            None,
+            &mut |total| {
                 reserved.push(total);
                 Ok(())
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert!(
             !reserved.is_empty(),
             "the budgeted comparison reserved nothing, so it did not run under a reservation"
@@ -3533,5 +3547,265 @@ fn a_set_operation_charges_its_presence_bitmaps() {
     assert!(
         long >= short + GROUPS * 64 * std::mem::size_of::<u64>(),
         "64 points peak at {short} bytes and 4160 at {long}"
+    );
+}
+
+#[test]
+fn binary_field_publishes_presence_and_records_excluded_duplicate() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let grid = budget_grid(1);
+    let schema = schema(1, &grid);
+    let lhs = vec![];
+    let rhs = vec![
+        jobbed_operand(&Arc::new(schema.clone()), "right_a", "x", &[0]),
+        jobbed_operand(&Arc::new(schema.clone()), "right_b", "x", &[0]),
+    ];
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 1, 1);
+
+    let result = super::binary_vectors_inner(
+        &budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new())),
+        &schema,
+        &lhs,
+        &schema,
+        &rhs,
+        Some(super::NodeEvidence {
+            node: 7,
+            evidence: &evidence,
+        }),
+        None,
+    );
+    assert!(
+        result.is_ok(),
+        "the local gate excludes the duplicate: {result:?}"
+    );
+    assert!(evidence.settled(7, 0).is_none());
+    assert!(
+        evidence.verdict().is_none(),
+        "absent left keeps duplicate ineligible"
+    );
+
+    evidence.publish(7, 0, &[true], &[false], false).unwrap();
+    let candidate = evidence.settled(7, 0).unwrap();
+    assert_eq!(candidate.point, 0);
+    assert!(candidate.message.contains("found duplicate series"));
+}
+
+#[test]
+fn duplicate_evidence_or_merges_presence_and_flips_gate() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 2, 2);
+    evidence
+        .publish(0, 0, &[true, false], &[false, false], false)
+        .unwrap();
+    assert!(evidence.settled(0, 0).is_none());
+    evidence
+        .publish(0, 0, &[false, false], &[true, false], false)
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 0, 0, vec![], "duplicate".into())
+        .unwrap();
+    assert!(evidence.settled(0, 0).is_some());
+}
+
+#[test]
+fn duplicate_evidence_last_grid_point_survives_partition_completion() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 5, 2);
+    evidence
+        .publish(
+            0,
+            0,
+            &[false, false, false, false, true],
+            &[false; 5],
+            false,
+        )
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 4, 0, vec![], "last point duplicate".into())
+        .unwrap();
+    assert!(!evidence.complete());
+    evidence
+        .publish(
+            0,
+            0,
+            &[false; 5],
+            &[false, false, false, false, true],
+            false,
+        )
+        .unwrap();
+    assert!(evidence.complete());
+    assert_eq!(evidence.verdict().unwrap().point, 4);
+}
+
+#[test]
+fn duplicate_evidence_last_exit_clears_slots_and_abort_releases_claims() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 3, 2);
+    evidence
+        .publish(0, 0, &[true; 3], &[true; 3], false)
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 2, 0, vec![], "duplicate".into())
+        .unwrap();
+    assert!(pool.reserved() > 0);
+    assert!(!evidence.complete());
+    assert!(evidence.complete());
+    assert_eq!(evidence.slot_count(), 0);
+    assert_eq!(pool.reserved(), 0);
+
+    let aborted = super::DuplicateEvidence::new(&pool, 3, 2);
+    aborted
+        .publish(0, 0, &[true; 3], &[true; 3], false)
+        .unwrap();
+    aborted.abort();
+    assert!(!aborted.complete());
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(aborted.slot_count(), 0);
+}
+
+#[test]
+fn duplicate_evidence_candidate_survives_false_gate_until_late_presence() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 1, 1);
+    evidence
+        .record_candidate(0, 0, 0, 0, vec![], "duplicate".into())
+        .unwrap();
+    assert!(evidence.settled(0, 0).is_none());
+    evidence.publish(0, 0, &[true], &[true], false).unwrap();
+    assert_eq!(evidence.settled(0, 0).unwrap().message, "duplicate");
+}
+
+#[test]
+fn duplicate_evidence_skips_ineligible_earlier_point() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 2, 2);
+    evidence
+        .publish(0, 0, &[false, true], &[false, true], false)
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 0, 0, vec![], "early".into())
+        .unwrap();
+    evidence
+        .record_candidate(0, 0, 1, 0, vec![], "later".into())
+        .unwrap();
+    assert_eq!(evidence.settled(0, 0).unwrap().message, "later");
+    assert_eq!(evidence.verdict().unwrap().message, "later");
+}
+
+#[test]
+fn duplicate_evidence_separates_node_field_pairs() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 1, 1);
+    evidence.publish(0, 0, &[true], &[true], false).unwrap();
+    evidence
+        .record_candidate(0, 0, 0, 0, vec![], "first".into())
+        .unwrap();
+    evidence.publish(0, 1, &[false], &[false], false).unwrap();
+    evidence
+        .record_candidate(0, 1, 0, 0, vec![], "second".into())
+        .unwrap();
+    assert_eq!(evidence.settled(0, 0).unwrap().message, "first");
+    assert!(evidence.settled(0, 1).is_none());
+    assert_eq!(evidence.verdict().unwrap().message, "first");
+}
+
+#[test]
+fn duplicate_evidence_charges_memory_and_reports_refusal() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
+    let unlimited: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&unlimited, 2, 2);
+    evidence
+        .publish(0, 0, &[false, false], &[false, false], false)
+        .unwrap();
+    assert_eq!(unlimited.reserved(), 2 * 2 * std::mem::size_of::<bool>());
+    evidence
+        .record_candidate(
+            0,
+            0,
+            0,
+            0,
+            vec![(Arc::from("k"), Arc::from("v"))],
+            "msg".into(),
+        )
+        .unwrap();
+    assert!(unlimited.reserved() >= 4 + 1 + 1 + 3);
+    let tiny: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1));
+    let refused = super::DuplicateEvidence::new(&tiny, 2, 2);
+    assert!(
+        refused
+            .publish(0, 0, &[false, false], &[false, false], false)
+            .is_err()
+    );
+}
+
+#[test]
+fn duplicate_evidence_completion_is_order_independent_and_aborts_failed_partition() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    for duplicate_first in [true, false] {
+        let evidence = super::DuplicateEvidence::new(&pool, 2, 2);
+        let duplicate = || {
+            evidence
+                .record_candidate(0, 0, 0, 0, vec![], "duplicate".into())
+                .unwrap()
+        };
+        let presence = || evidence.publish(0, 0, &[true], &[true], false).unwrap();
+        if duplicate_first {
+            duplicate();
+            assert!(!evidence.complete());
+            presence();
+        } else {
+            presence();
+            assert!(!evidence.complete());
+            duplicate();
+        }
+        assert!(evidence.complete());
+        assert_eq!(evidence.verdict().unwrap().message, "duplicate");
+    }
+    let failed = super::DuplicateEvidence::new(&pool, 2, 2);
+    failed.abort();
+    assert!(!failed.complete());
+    assert!(failed.verdict().is_none());
+}
+
+#[test]
+fn duplicate_evidence_filling_uses_published_gate_and_rejects_disagreement() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let filling = super::DuplicateEvidence::new(&pool, 2, 2);
+    filling
+        .publish(0, 0, &[true, false], &[false, true], true)
+        .unwrap();
+    filling
+        .record_candidate(0, 0, 0, 0, vec![], "left".into())
+        .unwrap();
+    filling
+        .record_candidate(0, 0, 1, 0, vec![], "right".into())
+        .unwrap();
+    assert_eq!(filling.settled(0, 0).unwrap().message, "left");
+
+    let non_filling = super::DuplicateEvidence::new(&pool, 2, 2);
+    non_filling
+        .publish(0, 0, &[true, false], &[false, true], false)
+        .unwrap();
+    non_filling
+        .record_candidate(0, 0, 0, 0, vec![], "left".into())
+        .unwrap();
+    non_filling
+        .record_candidate(0, 0, 1, 0, vec![], "right".into())
+        .unwrap();
+    assert_eq!(non_filling.settled(0, 0), None);
+
+    assert!(
+        non_filling
+            .publish(0, 0, &[false, false], &[false, false], true)
+            .is_err()
     );
 }

@@ -1328,7 +1328,7 @@ async fn a_runtime_error_after_rows_releases_the_input() {
 fn two_differently_named_series_collide_once_rate_drops_the_name() {
     let tree = rate_tree();
     let mut execution = NativeExecutor::new(
-        NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))
+        NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
             .expect("the runtime executes a rate tree"),
     );
     let samples = series_samples(1.0);
@@ -2998,8 +2998,19 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
             actual.iter().map(|row| row.1).collect::<Vec<_>>()
         );
         assert_eq!(1, calls_by_partition[partition].load(Ordering::SeqCst));
-        assert_eq!(0, pool.reserved(), "{host} released reservations at EOF");
+        // Presence storage is execution-scoped: it remains charged until the final partition
+        // completes, then the shared evidence releases it.
+        assert_eq!(
+            if partition + 1 == 4 { 0 } else { 10 },
+            pool.reserved(),
+            "{host}: only execution-scoped duplicate evidence remains live"
+        );
     }
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "execution-scoped evidence is released after all streams"
+    );
     assert_eq!(4 * GRID_LEN as usize, total_rows);
     assert_eq!(
         vec![1, 1, 1, 1],
@@ -3240,6 +3251,7 @@ async fn a_later_repeated_source_enqueue_failure_releases_the_input() {
     let probe_state = NativeExecutionState::try_new(
         &subtracted_scaled_tree(),
         Arc::clone(&probe_pool) as Arc<dyn MemoryPool>,
+        None,
     )
     .expect("the repeated-source runtime builds");
     let ids = probe_state.input_ids(0).collect::<Vec<_>>();
@@ -3256,6 +3268,7 @@ async fn a_later_repeated_source_enqueue_failure_releases_the_input() {
     let bounded_state = NativeExecutionState::try_new(
         &subtracted_scaled_tree(),
         Arc::clone(&bounded_pool) as Arc<dyn MemoryPool>,
+        None,
     )
     .expect("the repeated-source runtime builds in the bounded pool");
     let bounded_ids = bounded_state.input_ids(0).collect::<Vec<_>>();
