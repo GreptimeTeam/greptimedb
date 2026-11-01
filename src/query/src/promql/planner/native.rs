@@ -648,12 +648,10 @@ impl PromPlanner {
             })
             .collect::<std::result::Result<Vec<_>, DataFusionError>>()
             .context(DataFusionPlanningSnafu)?;
-        // Ordinary pointwise trees and trees of one-to-one matches, on one table or across
-        // several, are answered per partition. A tree that folds across series - an aggregate - is
-        // not, and one selector's fold is carried by the aggregate split below.
+        // Admission and placement are separate: `independent_scan_pair` admits nested native
+        // matches, while the physical locality classification decides whether their inputs need
+        // gathering or segmentation.
         let root = compiled.tree.root();
-        let per_partition =
-            !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
         // The split is only ever a one-child plan: it exports each partition's leaf state and merges
         // them above the region. A tree over two metric logical tables of ONE physical table is not
         // split, because a node whose locality is `SinglePartition` normalizes every input to one
@@ -702,7 +700,14 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        if !per_partition {
+        let per_partition =
+            !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
+        let locality = input_locality(root);
+        let needs_nested_match_segmentation = cross_table
+            && !multi_input
+            && matches!(locality, InputLocality::SinglePartition)
+            && nested_vector_match(root);
+        if !per_partition || needs_nested_match_segmentation {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather
             // than whole samples, so it moves less between the two halves than a sample boundary
             // would. The general segmentation below is the fallback for the trees it declines,
@@ -749,6 +754,7 @@ impl PromPlanner {
             if selectors.len() != 1 && !cross_table {
                 return Ok(None);
             }
+            let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = Box::pin(segment_tree(
                 self,
                 prom_expr,
@@ -761,7 +767,7 @@ impl PromPlanner {
                 &grid,
                 &time,
                 &tags,
-                &metric,
+                &segment_metric,
             ))
             .await?;
             if let Some(plan) = plan {
@@ -1479,6 +1485,20 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
 /// maps each series of the match on its own, so the tree still reads every scan whole exactly once.
 /// An operand may itself be such a match, as in `(a - b) / c`: the inner match is answered whole
 /// before the outer one reads it.
+/// Whether `root` is an outer vector match with a nested independent vector match operand.
+fn nested_vector_match(root: &NativeNode) -> bool {
+    let NativeExpr::Binary { left, right, .. } = &root.expr else {
+        return false;
+    };
+    matches!(left.output, NativeType::Samples(_))
+        && matches!(right.output, NativeType::Samples(_))
+        && [left.as_ref(), right.as_ref()].into_iter().any(|operand| {
+            matches!(operand.expr, NativeExpr::Binary { .. })
+                && matches!(operand.output, NativeType::Samples(_))
+                && independent_scan_pair(operand)
+        })
+}
+
 pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
     let (left, right, matching) = match &root.expr {
         NativeExpr::Binary {
@@ -1976,7 +1996,7 @@ mod tests {
 
     use super::{
         NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, fused_output_tags, hybrid_binary_admitted,
-        independent_scan_pair, native_promql_requested, scan_time_filter,
+        independent_scan_pair, native_promql_requested, nested_vector_match, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -2107,6 +2127,27 @@ mod tests {
 
     /// A match whose operand is itself a match reads every scan whole; a nested operand that folds
     /// or matches many-to-one does not.
+    #[test]
+    fn nested_vector_match_only_identifies_direct_nested_binary_matches() {
+        for query in ["x + y + z", "(x - y) / on(host) z"] {
+            assert!(
+                nested_vector_match(compiled_test_tree(query).root()),
+                "{query}"
+            );
+        }
+        for query in [
+            "x unless y",
+            "info(x)",
+            "round(x, time()) - on(host) x",
+            "x + y",
+        ] {
+            assert!(
+                !nested_vector_match(compiled_test_tree(query).root()),
+                "{query}"
+            );
+        }
+    }
+
     #[test]
     fn independent_scan_pair_admits_nested_one_to_one_matches() {
         for query in [

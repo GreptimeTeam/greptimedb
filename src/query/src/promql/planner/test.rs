@@ -42,8 +42,10 @@ use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
-use promql::extension_plan::{AggregateFinalize, FusedSeries, HistogramFold, RawSeriesSource};
-use promql::native::plan::NativeExpr;
+use promql::extension_plan::{
+    AggregateFinalize, FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
+};
+use promql::native::plan::{NativeExpr, NativeNode};
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::QueryContext;
@@ -2848,6 +2850,47 @@ fn has_pair_node(plan: &LogicalPlan) -> bool {
     plan.inputs().into_iter().any(has_pair_node)
 }
 
+/// A nested three-source match segments its inner pair, then partitions the outer match.
+#[tokio::test]
+async fn native_fused_nested_match_segments_inner_pair_and_partitions_outer_match() {
+    for query in [
+        "some_metric + other_metric + some_metric",
+        "(some_metric + on(tag_0) other_metric) / on(job) some_metric",
+    ] {
+        let provider = native_two_table_provider(vec![]).await;
+        let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+        assert!(has_pair_node(&plan), "{query}: {plan}");
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        assert!(matches!(
+            input_locality(fused.tree().root()),
+            InputLocality::MatchingLocal(_)
+        ));
+        let inner = fused
+            .inputs()
+            .iter()
+            .find_map(|input| find_fused_series(input))
+            .unwrap_or_else(|| panic!("inner segment missing: {query}: {plan}"));
+        assert!(matches!(
+            input_locality(inner.tree().root()),
+            InputLocality::MatchingLocal(_)
+        ));
+    }
+}
+
+/// A same-table nested match retains its prior direct native admission behavior.
+#[tokio::test]
+async fn native_fused_same_table_nested_match_keeps_prior_admission() {
+    let plan = build_native_fused_plan("some_metric + some_metric + some_metric", true).await;
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{plan}"));
+    assert_eq!(3, fused.inputs().len(), "{plan}");
+    assert!(
+        fused
+            .inputs()
+            .iter()
+            .all(|input| matches!(input, LogicalPlan::TableScan(_)))
+    );
+}
+
 /// Two selectors over tables split into regions are not one two-input node, across tables as on
 /// one; the hybrid route may still plan each operand natively under the existing join.
 #[tokio::test]
@@ -3102,27 +3145,76 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
         .await;
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
         let cross_table = tables.iter().any(|table| *table != tables[0]);
-        let read_tables = fused
-            .inputs()
-            .iter()
-            .map(|input| match input {
-                LogicalPlan::TableScan(scan) if !cross_table => scan.table_name.table().to_string(),
-                LogicalPlan::Extension(Extension { node }) if cross_table => {
-                    let source = node
-                        .as_any()
-                        .downcast_ref::<RawSeriesSource>()
-                        .unwrap_or_else(|| panic!("{query}: expected a raw source, got {input}"));
-                    let [LogicalPlan::TableScan(scan)] =
-                        UserDefinedLogicalNodeCore::inputs(source)[..]
-                    else {
-                        panic!("{query}: the raw source reads its table scan directly");
-                    };
-                    assert_eq!(source.metric_name(), scan.table_name.table(), "{query}");
-                    scan.table_name.table().to_string()
+        fn visit(node: &NativeNode, fused: &FusedSeries, output: &mut Vec<String>) {
+            let mut child = |node: &NativeNode| visit(node, fused, output);
+            match &node.expr {
+                NativeExpr::Input(input) => {
+                    let inputs = fused.inputs();
+                    let plan = inputs.get(input.source_index).unwrap_or_else(|| {
+                        panic!(
+                            "source index {} is out of bounds: {fused:?}",
+                            input.source_index
+                        )
+                    });
+                    match plan {
+                        LogicalPlan::TableScan(scan) => {
+                            let table = scan.table_name.table();
+                            assert_eq!(
+                                Some(table),
+                                fused.binding().metric_name.as_deref(),
+                                "{plan}"
+                            );
+                            output.push(table.to_string());
+                        }
+                        LogicalPlan::Extension(Extension { node }) => {
+                            if let Some(source) = node.as_any().downcast_ref::<RawSeriesSource>() {
+                                let [LogicalPlan::TableScan(scan)] =
+                                    UserDefinedLogicalNodeCore::inputs(source)[..]
+                                else {
+                                    panic!("raw source must have one table scan: {source:?}");
+                                };
+                                let table = scan.table_name.table();
+                                assert_eq!(source.metric_name(), table, "{source:?}");
+                                output.push(source.metric_name().to_string());
+                            } else if let Some(nested) = node.as_any().downcast_ref::<FusedSeries>()
+                            {
+                                visit(nested.tree().root(), nested, output);
+                            } else {
+                                panic!("unsupported native input: {plan}");
+                            }
+                        }
+                        other => panic!("unsupported native input: {other}"),
+                    }
                 }
-                other => panic!("{query}: unexpected input {other}"),
-            })
-            .collect::<Vec<_>>();
+                NativeExpr::Instant { input, .. }
+                | NativeExpr::Window { input, .. }
+                | NativeExpr::Merge { input }
+                | NativeExpr::Map { input, .. }
+                | NativeExpr::Timestamp { input }
+                | NativeExpr::Vector { input, .. }
+                | NativeExpr::Aggregate { input, .. }
+                | NativeExpr::VectorOf { input } => child(input),
+                NativeExpr::ParameterizedMap {
+                    input, parameters, ..
+                } => {
+                    child(input);
+                    for parameter in parameters.iter() {
+                        child(parameter);
+                    }
+                }
+                NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                    child(left);
+                    child(right);
+                }
+                NativeExpr::Info { base, info, .. } => {
+                    child(base);
+                    child(info);
+                }
+                NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
+            }
+        }
+        let mut read_tables = Vec::new();
+        visit(fused.tree().root(), fused, &mut read_tables);
         assert_eq!(read_tables, tables, "{query}");
         assert_eq!(
             cross_table,
