@@ -462,9 +462,8 @@ impl MemtableBuilderProvider {
     pub(crate) fn new(
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: Arc<MitoConfig>,
+        compact_dispatcher: Arc<CompactDispatcher>,
     ) -> Self {
-        let compact_dispatcher =
-            Arc::new(CompactDispatcher::new(config.max_background_compactions));
         let default_bulk_memtable_config = BulkMemtableConfig::default_for_write_buffer_size(
             config.global_write_buffer_size.as_bytes() as usize,
         );
@@ -916,7 +915,11 @@ mod tests {
 
     #[test]
     fn test_forced_bulk_memtable_preserves_bulk_config() {
-        let provider = MemtableBuilderProvider::new(None, Arc::new(MitoConfig::default()));
+        let provider = MemtableBuilderProvider::new(
+            None,
+            Arc::new(MitoConfig::default()),
+            Arc::new(CompactDispatcher::new(1)),
+        );
         let config = BulkMemtableConfig {
             merge_threshold: 7,
             encode_row_threshold: 11,
@@ -941,7 +944,11 @@ mod tests {
             global_write_buffer_size: ReadableSize::gb(8),
             ..Default::default()
         };
-        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let provider = MemtableBuilderProvider::new(
+            None,
+            Arc::new(config),
+            Arc::new(CompactDispatcher::new(1)),
+        );
         let options = RegionOptions::default();
 
         let builder =
@@ -956,7 +963,11 @@ mod tests {
             global_write_buffer_size: ReadableSize::gb(8),
             ..Default::default()
         };
-        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let provider = MemtableBuilderProvider::new(
+            None,
+            Arc::new(config),
+            Arc::new(CompactDispatcher::new(1)),
+        );
         let options = HashMap::from([("memtable.type".to_string(), "bulk".to_string())]);
 
         let options = provider
@@ -975,7 +986,11 @@ mod tests {
             global_write_buffer_size: ReadableSize::gb(8),
             ..Default::default()
         };
-        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let provider = MemtableBuilderProvider::new(
+            None,
+            Arc::new(config),
+            Arc::new(CompactDispatcher::new(1)),
+        );
         let options = HashMap::from([
             ("memtable.type".to_string(), "bulk".to_string()),
             (
