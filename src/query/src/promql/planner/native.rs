@@ -176,7 +176,24 @@ impl PromPlanner {
                 return Ok(None);
             }
         };
-        self.ctx = operand_ctx.clone();
+        // The scan context is only the input layout. Calls such as histogram_quantile can
+        // remove labels while producing the fused node, so publish only columns actually in
+        // that node's output schema to the binary matcher.
+        let mut output_ctx = operand_ctx;
+        output_ctx.tag_columns.retain(|tag| {
+            plan.schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == tag)
+        });
+        output_ctx.field_columns.retain(|field| {
+            plan.schema()
+                .fields()
+                .iter()
+                .any(|column| column.name() == field)
+        });
+        output_ctx.use_tsid = false;
+        self.ctx = output_ctx.clone();
         let table_ref = self.table_ref();
         self.ctx = saved;
         let table_ref = table_ref?;
@@ -185,7 +202,7 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
-        Ok(Some((plan, operand_ctx)))
+        Ok(Some((plan, output_ctx)))
     }
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
