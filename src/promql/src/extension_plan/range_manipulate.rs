@@ -682,9 +682,58 @@ impl RangeManipulateStream {
     // But they are not exactly the same, because we don't eager-evaluate on the data in this plan.
     // And the generated timestamp is not aligned to the step. It's expected to do later.
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
+        // Prometheus sample identity is one sample per series per timestamp, and this operator's
+        // input is one series per batch (the planner inserts a `SeriesDivide` for that). A read
+        // path that does not deduplicate can still deliver two rows for one timestamp, and every
+        // range function reads its samples from here, so collapse them once instead of
+        // special-casing each function. Comparing native ticks rather than the millisecond
+        // payload keeps distinct sub-millisecond samples apart.
+        //
+        // The first row of a tied group wins. A deduplicating scan also keeps the first row
+        // after ordering equal primary keys and timestamps by descending sequence, so the values
+        // agree when the scan presents those rows newest-first. This operator cannot establish
+        // that order itself: unordered scans and scans whose sequence values were overwritten
+        // can select a different tied value. The collapse fixes sample multiplicity, not global
+        // newest-write conflict resolution.
+        let (native_timestamps, _) = timestamp_array_to_primitive(input.column(self.time_index))
+            .ok_or_else(|| {
+                DataFusionError::Execution("Time index column is not a timestamp".into())
+            })?;
+        let native_values = native_timestamps.values().as_ref();
+        let first_duplicate = if native_timestamps.null_count() == 0 {
+            native_values
+                .windows(2)
+                .position(|pair| pair[0] == pair[1])
+                .map(|index| index + 1)
+        } else {
+            (1..input.num_rows()).find(|&i| {
+                !native_timestamps.is_null(i - 1)
+                    && !native_timestamps.is_null(i)
+                    && native_values[i - 1] == native_values[i]
+            })
+        };
+        let indices = first_duplicate.map(|first_duplicate| {
+            let mut indices = Vec::with_capacity(input.num_rows());
+            indices.extend(0..first_duplicate);
+            indices.extend((first_duplicate + 1..input.num_rows()).filter(|&i| {
+                native_timestamps.is_null(i)
+                    || native_timestamps.is_null(i - 1)
+                    || native_values[i] != native_values[i - 1]
+            }));
+            Int64Array::from_iter_values(indices.into_iter().map(|index| index as i64))
+        });
+        // Only sample columns need collapsing. Tags below still come from row zero of the
+        // original batch, and the aligned time index is replaced below. In particular, do not
+        // build a RecordBatch with collapsed sample columns and uncollapsed tags: Arrow requires
+        // all columns to have the same length.
+        let ts_column = match indices.as_ref() {
+            Some(indices) => compute::take(input.column(self.time_index), indices, None)?,
+            None => input.column(self.time_index).clone(),
+        };
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
+        other_columns.remove(&self.time_index);
         // calculate the range
-        let (ranges, (start, end)) = self.calculate_range(&input)?;
+        let (ranges, (start, end)) = self.calculate_range_on_timestamps(&ts_column)?;
         // ignore this if all ranges are empty
         if ranges.iter().all(|(_, len)| *len == 0) {
             return Ok(None);
@@ -694,9 +743,12 @@ impl RangeManipulateStream {
         let mut new_columns = input.columns().to_vec();
         for index in self.field_columns.iter() {
             let _ = other_columns.remove(index);
-            let column = input.column(*index);
+            let column = match indices.as_ref() {
+                Some(indices) => compute::take(input.column(*index), indices, None)?,
+                None => input.column(*index).clone(),
+            };
             let new_column = Arc::new(
-                RangeArray::from_ranges(column.clone(), ranges.clone())
+                RangeArray::from_ranges(column, ranges.clone())
                     .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
                     .into_dict(),
             );
@@ -707,7 +759,6 @@ impl RangeManipulateStream {
         // only when its own data type already is that ABI: the output schema fixes the
         // dictionary value type, so a millisecond column carrying a timezone must be
         // converted like any other native unit.
-        let ts_column = input.column(self.time_index);
         let timestamp_values: ArrayRef = if self.offset == 0
             && matches!(
                 ts_column.data_type(),
@@ -718,7 +769,7 @@ impl RangeManipulateStream {
             // Shift in wide native precision before truncating toward zero, preserving
             // null validity.
             let scale = nanoseconds_per_native_tick(self.time_unit);
-            let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
+            let (timestamps, _) = timestamp_array_to_primitive(&ts_column).ok_or_else(|| {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
             })?;
             // Single pass over the timestamps: an i128 intermediate holds any native
@@ -796,12 +847,20 @@ impl RangeManipulateStream {
     /// Return values:
     /// - A vector of tuples where each tuple contains the start index and length of the range.
     /// - A tuple of the actual start/end timestamp used to calculate the range.
+    #[cfg(test)]
     #[allow(clippy::type_complexity)]
     fn calculate_range(
         &self,
         input: &RecordBatch,
     ) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
-        let ts_column = input.column(self.time_index);
+        self.calculate_range_on_timestamps(input.column(self.time_index))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn calculate_range_on_timestamps(
+        &self,
+        ts_column: &ArrayRef,
+    ) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
         let scale = nanoseconds_per_native_tick(self.time_unit);
         let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
             DataFusionError::Execution("Time index column is not a timestamp".into())
@@ -1168,6 +1227,340 @@ mod test {
             .unwrap();
 
         assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn duplicate_native_timestamps_collapse_in_real_plan() {
+        use datafusion::arrow::array::Float64Array;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    29_600, 29_600, 59_600, 59_600,
+                ])),
+                Arc::new(Float64Array::from(vec![100.0, 100.0, 102.0, 102.0])),
+            ],
+        )
+        .unwrap();
+        let plan = RangeManipulate::new(
+            60_000,
+            60_000,
+            60_000,
+            0,
+            60_000,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.clone().to_dfschema_ref().unwrap(),
+            }),
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let batches = datafusion::physical_plan::collect(
+            plan.to_execution_plan(input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+        let out = &batches[0];
+        let values = RangeArray::try_new(
+            out.column(1)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let timestamps = RangeArray::try_new(
+            out.column(2)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            values
+                .get(0)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values(),
+            &[100.0, 102.0]
+        );
+        assert_eq!(
+            timestamps
+                .get(0)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .values(),
+            &[29_600, 59_600]
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_timestamp_keeps_first_row_and_aligned_tags() {
+        use datafusion::arrow::array::{Float64Array, StringArray};
+
+        // Rows sharing a timestamp but carrying different values and tags show which row the
+        // collapse keeps, and that every column follows the same index instead of drifting apart.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, false),
+            Field::new("tag", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    5_000, 10_000, 10_000, 15_000,
+                ])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+            ],
+        )
+        .unwrap();
+        let plan = RangeManipulate::new(
+            20_000,
+            20_000,
+            20_000,
+            0,
+            20_000,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.clone().to_dfschema_ref().unwrap(),
+            }),
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let batches = datafusion::physical_plan::collect(
+            plan.to_execution_plan(input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+        let out = &batches[0];
+        let values = RangeArray::try_new(
+            out.column(1)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let timestamps = RangeArray::try_new(
+            out.column(3)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        // The first row of the tied pair is kept, matching what a deduplicating read returns, so
+        // 2.0 survives and 3.0 is dropped.
+        assert_eq!(
+            values
+                .get(0)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values(),
+            &[1.0, 2.0, 4.0]
+        );
+        assert_eq!(
+            timestamps
+                .get(0)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .values(),
+            &[5_000, 10_000, 15_000]
+        );
+        // Tag columns are not range payloads, so the operator repeats the batch's first row for
+        // every output row: a batch holds one series, so every row's tag is that series' tag.
+        assert_eq!(
+            out.column(2)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![Some("a")]
+        );
+    }
+
+    #[test]
+    fn duplicate_sample_range_udfs_report_deduplicated_values() {
+        use crate::functions::{CountOverTime, Delta, IDelta, Increase, Rate};
+        use datafusion::arrow::array::Float64Array;
+        use datafusion::physical_plan::ColumnarValue;
+        use datafusion_common::config::ConfigOptions;
+        use datafusion_expr::ScalarFunctionArgs;
+        let evaluate = |udf: datafusion::logical_expr::ScalarUDF, range_ms: Option<i64>| {
+            let ts = RangeArray::from_ranges(
+                Arc::new(TimestampMillisecondArray::from(vec![29_600, 59_600])),
+                [(0, 2)],
+            )
+            .unwrap();
+            let values =
+                RangeArray::from_ranges(Arc::new(Float64Array::from(vec![100.0, 102.0])), [(0, 2)])
+                    .unwrap();
+            let mut args = vec![
+                ColumnarValue::Array(Arc::new(ts.into_dict())),
+                ColumnarValue::Array(Arc::new(values.into_dict())),
+            ];
+            let mut arg_fields = args
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    Arc::new(Field::new(
+                        if i == 0 { "ts" } else { "value" },
+                        arg.data_type(),
+                        false,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if let Some(range_ms) = range_ms {
+                let eval_ts: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![60_000]));
+                args.push(ColumnarValue::Array(eval_ts));
+                args.push(ColumnarValue::Scalar(
+                    datafusion_common::ScalarValue::Int64(Some(range_ms)),
+                ));
+                arg_fields.push(Arc::new(Field::new("eval_ts", args[2].data_type(), false)));
+                arg_fields.push(Arc::new(Field::new("range", DataType::Int64, false)));
+            }
+            let result = udf
+                .invoke_with_args(ScalarFunctionArgs {
+                    args,
+                    arg_fields,
+                    number_rows: 1,
+                    return_field: Arc::new(Field::new("result", DataType::Float64, false)),
+                    config_options: Arc::new(ConfigOptions::default()),
+                })
+                .unwrap();
+            let array = match result {
+                ColumnarValue::Array(a) => a,
+                ColumnarValue::Scalar(s) => s.to_array_of_size(1).unwrap(),
+            };
+            array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0)
+        };
+        assert_eq!(evaluate(CountOverTime::scalar_udf(), None), 2.0);
+        assert_eq!(evaluate(Delta::scalar_udf(), Some(60_000)), 4.0);
+        assert_eq!(evaluate(Increase::scalar_udf(), Some(60_000)), 4.0);
+        assert!((evaluate(Rate::scalar_udf(), Some(60_000)) - 4.0 / 60.0).abs() < 0.0001);
+        assert_eq!(evaluate(IDelta::<false>::scalar_udf(), None), 2.0);
+        assert!((evaluate(IDelta::<true>::scalar_udf(), None) - 2.0 / 30.0).abs() < 0.0001);
+    }
+
+    #[tokio::test]
+    async fn distinct_submillisecond_timestamps_are_not_collapsed() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![1_000_001, 1_000_002])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+            ],
+        )
+        .unwrap();
+        let plan = RangeManipulate::new(
+            1_001,
+            1_001,
+            1,
+            0,
+            1,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.clone().to_dfschema_ref().unwrap(),
+            }),
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let batches = datafusion::physical_plan::collect(
+            plan.to_execution_plan(input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+        let output = &batches[0];
+        let values = RangeArray::try_new(
+            output
+                .column(1)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let timestamps = RangeArray::try_new(
+            output
+                .column(2)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            values
+                .get(0)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values(),
+            &[10.0, 20.0]
+        );
+        assert_eq!(
+            timestamps
+                .get(0)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .values(),
+            &[1_000, 1_000]
+        );
     }
 
     #[tokio::test]
