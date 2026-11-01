@@ -19,11 +19,13 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::expr::{Like, ScalarFunction};
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::schema::FulltextBackend;
+use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use store_api::metadata::RegionMetadata;
 use store_api::region_request::PathType;
-use store_api::storage::{ColumnId, ConcreteDataType};
+#[cfg(test)]
+use store_api::storage::ConcreteDataType;
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
@@ -144,6 +146,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
                 requests,
                 self.puffin_manager_factory,
             )
+            .with_metadata(self.metadata)
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
             .with_bloom_filter_cache(self.bloom_filter_cache)
@@ -153,7 +156,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
     fn extract_requests(
         expr: &Expr,
         metadata: &'a RegionMetadata,
-        requests: &mut BTreeMap<ColumnId, FulltextRequest>,
+        requests: &mut BTreeMap<IndexTarget, FulltextRequest>,
     ) {
         match expr {
             Expr::BinaryExpr(BinaryExpr {
@@ -165,15 +168,15 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
                 Self::extract_requests(right, metadata, requests);
             }
             Expr::Like(like) => {
-                if let Some((column_id, like)) = Self::expr_to_like(metadata, like) {
-                    requests.entry(column_id).or_default().likes.push(like);
+                if let Some((target, like)) = Self::expr_to_like(metadata, like) {
+                    requests.entry(target).or_default().likes.push(like);
                 }
             }
             Expr::ScalarFunction(func) => {
-                if let Some((column_id, query)) = Self::expr_to_query(metadata, func) {
-                    requests.entry(column_id).or_default().queries.push(query);
-                } else if let Some((column_id, term)) = Self::expr_to_term(metadata, func) {
-                    requests.entry(column_id).or_default().terms.push(term);
+                if let Some((target, query)) = Self::expr_to_query(metadata, func) {
+                    requests.entry(target).or_default().queries.push(query);
+                } else if let Some((target, term)) = Self::expr_to_term(metadata, func) {
+                    requests.entry(target).or_default().terms.push(term);
                 }
             }
             _ => {}
@@ -183,7 +186,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
     fn expr_to_query(
         metadata: &RegionMetadata,
         f: &ScalarFunction,
-    ) -> Option<(ColumnId, FulltextQuery)> {
+    ) -> Option<(IndexTarget, FulltextQuery)> {
         if f.name() != "matches" {
             return None;
         }
@@ -191,26 +194,25 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         }
 
-        let Expr::Column(c) = &f.args[0] else {
+        let target = Self::expr_target(metadata, &f.args[0])?;
+
+        let Expr::Literal(
+            ScalarValue::Utf8(Some(query))
+            | ScalarValue::LargeUtf8(Some(query))
+            | ScalarValue::Utf8View(Some(query)),
+            _,
+        ) = &f.args[1]
+        else {
             return None;
         };
-        let column = metadata.column_by_name(&c.name)?;
 
-        if column.column_schema.data_type != ConcreteDataType::string_datatype() {
-            return None;
-        }
-
-        let Expr::Literal(ScalarValue::Utf8(Some(query)), _) = &f.args[1] else {
-            return None;
-        };
-
-        Some((column.column_id, FulltextQuery(query.clone())))
+        Some((target, FulltextQuery(query.clone())))
     }
 
     fn expr_to_term(
         metadata: &RegionMetadata,
         f: &ScalarFunction,
-    ) -> Option<(ColumnId, FulltextTerm)> {
+    ) -> Option<(IndexTarget, FulltextTerm)> {
         if f.name() != "matches_term" {
             return None;
         }
@@ -218,35 +220,21 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         }
 
-        let mut lowered = false;
-        let column;
-        match &f.args[0] {
-            Expr::Column(c) => {
-                column = c;
-            }
-            Expr::ScalarFunction(f) => {
-                let lower_arg = Self::extract_lower_arg(f)?;
-                lowered = true;
-                if let Expr::Column(c) = lower_arg {
-                    column = c;
-                } else {
-                    return None;
-                }
-            }
-            _ => return None,
-        }
+        let (expr, lowered) = Self::unwrap_lower(&f.args[0]);
+        let target = Self::expr_target(metadata, expr)?;
 
-        let column = metadata.column_by_name(&column.name)?;
-        if column.column_schema.data_type != ConcreteDataType::string_datatype() {
-            return None;
-        }
-
-        let Expr::Literal(ScalarValue::Utf8(Some(term)), _) = &f.args[1] else {
+        let Expr::Literal(
+            ScalarValue::Utf8(Some(term))
+            | ScalarValue::LargeUtf8(Some(term))
+            | ScalarValue::Utf8View(Some(term)),
+            _,
+        ) = &f.args[1]
+        else {
             return None;
         };
 
         Some((
-            column.column_id,
+            target,
             FulltextTerm {
                 col_lowered: lowered,
                 term: term.clone(),
@@ -254,7 +242,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         ))
     }
 
-    fn expr_to_like(metadata: &RegionMetadata, like: &Like) -> Option<(ColumnId, FulltextLike)> {
+    fn expr_to_like(metadata: &RegionMetadata, like: &Like) -> Option<(IndexTarget, FulltextLike)> {
         // `ILIKE` uses Unicode case folding, which disagrees with the index's
         // `to_lowercase` on characters like 'ſ', so its probes could miss rows.
         if like.negated || like.case_insensitive {
@@ -265,21 +253,9 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         }
 
-        let (c, col_lowered) = match like.expr.as_ref() {
-            Expr::Column(c) => (c, false),
-            Expr::ScalarFunction(f) => match Self::extract_lower_arg(f)? {
-                Expr::Column(c) => (c, true),
-                _ => return None,
-            },
-            _ => return None,
-        };
-        let column = metadata.column_by_name(&c.name)?;
-        if column.column_schema.data_type != ConcreteDataType::string_datatype() {
-            return None;
-        }
-        // `LIKE` is common on unindexed columns and with patterns like '%word%' that have
-        // no probe; skip them instead of opening every SST's index for nothing.
-        let options = column.column_schema.fulltext_options().ok()??;
+        let (expr, col_lowered) = Self::unwrap_lower(&like.expr);
+        let target = Self::expr_target(metadata, expr)?;
+        let options = crate::sst::index::column::fulltext_target_options(metadata, &target)?;
         if !options.enable || options.backend != FulltextBackend::Bloom {
             return None;
         }
@@ -298,12 +274,39 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         }
 
         Some((
-            column.column_id,
+            target,
             FulltextLike {
                 col_lowered,
                 pattern: pattern.clone(),
             },
         ))
+    }
+
+    fn expr_target(metadata: &RegionMetadata, expr: &Expr) -> Option<IndexTarget> {
+        if let Expr::Column(column) = expr {
+            let column = metadata.column_by_name(&column.name)?;
+            return column
+                .column_schema
+                .data_type
+                .is_string()
+                .then_some(IndexTarget::ColumnId(column.column_id));
+        }
+        let (target, ty) = crate::sst::index::column::json_index_target(metadata, expr, |hint| {
+            hint.fulltext_index
+                .as_ref()
+                .is_some_and(|options| options.enable)
+        })
+        .ok()??;
+        ty.is_string().then_some(target)
+    }
+
+    fn unwrap_lower(expr: &Expr) -> (&Expr, bool) {
+        if let Expr::ScalarFunction(func) = expr
+            && let Some(inner) = Self::extract_lower_arg(func)
+        {
+            return (inner, true);
+        }
+        (expr, false)
     }
 
     fn extract_lower_arg(lower_func: &ScalarFunction) -> Option<&Expr> {
@@ -378,6 +381,31 @@ mod tests {
     }
 
     #[test]
+    fn test_fulltext_string_literal_representations() {
+        let metadata = mock_metadata();
+        for literal in [
+            ScalarValue::Utf8(Some("foo".into())),
+            ScalarValue::LargeUtf8(Some("foo".into())),
+            ScalarValue::Utf8View(Some("foo".into())),
+        ] {
+            let args = vec![
+                Expr::Column(Column::from_name("text")),
+                Expr::Literal(literal, None),
+            ];
+            let query = ScalarFunction {
+                args: args.clone(),
+                func: matches_func(),
+            };
+            assert!(FulltextIndexApplierBuilder::expr_to_query(&metadata, &query).is_some());
+            let term = ScalarFunction {
+                args,
+                func: matches_term_func(),
+            };
+            assert!(FulltextIndexApplierBuilder::expr_to_term(&metadata, &term).is_some());
+        }
+    }
+
+    #[test]
     fn test_expr_to_query_basic() {
         let metadata = mock_metadata();
 
@@ -386,9 +414,8 @@ mod tests {
             func: matches_func(),
         };
 
-        let (column_id, query) =
-            FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).unwrap();
-        assert_eq!(column_id, 1);
+        let (target, query) = FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).unwrap();
+        assert_eq!(target, IndexTarget::ColumnId(1));
         assert_eq!(query, FulltextQuery("foo".to_string()));
     }
 
@@ -449,9 +476,8 @@ mod tests {
             func: matches_term_func(),
         };
 
-        let (column_id, term) =
-            FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
-        assert_eq!(column_id, 1);
+        let (target, term) = FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
+        assert_eq!(target, IndexTarget::ColumnId(1));
         assert_eq!(
             term,
             FulltextTerm {
@@ -475,9 +501,8 @@ mod tests {
             func: matches_term_func(),
         };
 
-        let (column_id, term) =
-            FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
-        assert_eq!(column_id, 1);
+        let (target, term) = FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
+        assert_eq!(target, IndexTarget::ColumnId(1));
         assert_eq!(
             term,
             FulltextTerm {
@@ -551,7 +576,7 @@ mod tests {
         FulltextIndexApplierBuilder::extract_requests(&matches_expr, &metadata, &mut requests);
 
         assert_eq!(requests.len(), 1);
-        let request = requests.get(&1).unwrap();
+        let request = requests.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(request.queries.len(), 1);
         assert_eq!(request.terms.len(), 0);
         assert_eq!(request.queries[0], FulltextQuery("foo".to_string()));
@@ -605,7 +630,7 @@ mod tests {
                     &like(false, false, escape_char, "%foo bar baz%")
                 ),
                 Some((
-                    1,
+                    IndexTarget::ColumnId(1),
                     FulltextLike {
                         col_lowered: false,
                         pattern: "%foo bar baz%".to_string(),
@@ -623,7 +648,7 @@ mod tests {
         assert_eq!(
             FulltextIndexApplierBuilder::expr_to_like(&bloom, &lowered),
             Some((
-                1,
+                IndexTarget::ColumnId(1),
                 FulltextLike {
                     col_lowered: true,
                     pattern: "%foo bar baz%".to_string(),
@@ -685,7 +710,7 @@ mod tests {
         FulltextIndexApplierBuilder::extract_requests(&binary_expr, &metadata, &mut requests);
 
         assert_eq!(requests.len(), 1);
-        let request = requests.get(&1).unwrap();
+        let request = requests.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(request.queries.len(), 1);
         assert_eq!(request.terms.len(), 1);
         assert_eq!(request.queries[0], FulltextQuery("foo".to_string()));
