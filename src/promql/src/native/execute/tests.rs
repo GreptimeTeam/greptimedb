@@ -586,6 +586,7 @@ fn binary_runtime(
         BinaryRuntime::new(
             PairKernel::Binary(Arc::new(binary_matching(BinaryOp::Add))),
             [Arc::clone(schema), Arc::clone(schema)],
+            0,
         ),
     )
 }
@@ -5813,6 +5814,42 @@ fn binary_of(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> N
     }
 }
 
+#[test]
+fn binary_runtime_indices_are_assigned_in_preorder() {
+    let grid = grid(0, 60_000, 2);
+    let inner = binary_of(
+        evaluated_input(Arc::clone(&grid)),
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let root = binary_of(
+        inner,
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Mul),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let execution = NativeExecutionState::try_new(&tree, pool()).unwrap();
+
+    let RuntimeOp::Binary {
+        left,
+        binary: Some(root_binary),
+        ..
+    } = &execution.root.op
+    else {
+        panic!("the root is not a binary runtime");
+    };
+    let RuntimeOp::Binary {
+        binary: Some(inner_binary),
+        ..
+    } = &left.op
+    else {
+        panic!("the left child is not a binary runtime");
+    };
+
+    assert_eq!(root_binary.node_index, 0);
+    assert_eq!(inner_binary.node_index, 1);
+}
+
 /// A source of evaluated chunks over `count` float fields.
 fn evaluated_input_of(count: usize, grid: Arc<EvalGrid>) -> NativeNode {
     let output = NativeType::Samples(Arc::new(SeriesSchema {
@@ -5967,6 +6004,37 @@ fn binary_tree(op: BinaryOp, points: u64) -> (NativeTree, Arc<EvalGrid>, InputId
         InputId::new(0),
         InputId::new(1),
     )
+}
+
+/// Binary runtime indexes follow the tree's pre-order traversal.
+#[test]
+fn binary_runtime_indexes_follow_pre_order() {
+    let out_grid = grid(0, 60_000, 2);
+    let input = || evaluated_input_with_source_index(Arc::clone(&out_grid), 0);
+    let tree = NativeTree::try_new(binary_of(
+        binary_of(input(), input(), binary_matching(BinaryOp::Add)),
+        input(),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let execution = executor(&tree, pool());
+    let RuntimeOp::Binary {
+        left,
+        binary: Some(root_binary),
+        ..
+    } = &execution.state().root.op
+    else {
+        panic!("expected the root binary runtime");
+    };
+    let RuntimeOp::Binary {
+        binary: Some(left_binary),
+        ..
+    } = &left.op
+    else {
+        panic!("expected the left binary runtime");
+    };
+    assert_eq!(root_binary.node_index, 0);
+    assert_eq!(left_binary.node_index, 1);
 }
 
 /// Runtime source indexes map to all matching leaf slots, including below unary and scalar nodes.
