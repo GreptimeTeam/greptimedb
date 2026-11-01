@@ -1059,6 +1059,63 @@ fn same_source(node: &NativeNode) -> Option<usize> {
     }
 }
 
+/// Whether every operation in `node` preserves the labels used by `matching`.
+///
+/// This is deliberately separate from `same_source`: a subtree can read one source while
+/// changing the labels used to route its eventual vector match.
+fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool {
+    const COMPUTED_LABELS: [&str; 3] = [METRIC_NAME, "__type__", "__unit__"];
+    let key_contains = |label: &str| match matching {
+        MatchingLabels::On(labels) => labels.iter().any(|candidate| candidate.as_ref() == label),
+        MatchingLabels::Ignoring(labels) => {
+            label != METRIC_NAME && !labels.iter().any(|candidate| candidate.as_ref() == label)
+        }
+    };
+    let labels_removed = |labels: &[&str]| labels.iter().any(|label| key_contains(label));
+
+    match &node.expr {
+        NativeExpr::Input(_) => true,
+        NativeExpr::Instant { input, .. } => preserves_matching_key(input, matching),
+        NativeExpr::Map { input, op } => {
+            op.ops.iter().all(|op| match op {
+                crate::native::plan::MapOp::Math(_) => !labels_removed(&COMPUTED_LABELS),
+                // Label rewrites and histogram maps are not proven to retain the requested key.
+                crate::native::plan::MapOp::Label(_) | crate::native::plan::MapOp::Histogram(_) => {
+                    false
+                }
+            }) && preserves_matching_key(input, matching)
+        }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            !labels_removed(&COMPUTED_LABELS)
+                && preserves_matching_key(input, matching)
+                && parameters.iter().all(|parameter| {
+                    matches!(
+                        parameter.expr,
+                        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. }
+                    )
+                })
+        }
+        NativeExpr::Timestamp { input } => {
+            !labels_removed(&COMPUTED_LABELS) && preserves_matching_key(input, matching)
+        }
+        NativeExpr::Window { input, op } => {
+            (!op.function.drops_metric_name() || !labels_removed(&COMPUTED_LABELS))
+                && preserves_matching_key(input, matching)
+        }
+        NativeExpr::Binary { left, right, .. } if matches!(left.output, NativeType::Scalar(_)) => {
+            preserves_matching_key(right, matching)
+        }
+        NativeExpr::Binary { left, right, .. } if matches!(right.output, NativeType::Scalar(_)) => {
+            preserves_matching_key(left, matching)
+        }
+        // These operations can change labels or select/merge series; absent a node-specific
+        // proof, do not claim that the routed key survives.
+        _ => false,
+    }
+}
+
 /// Derives the partition contract from the bound root, not from a physical property registry.
 /// Whether `node` contains a vector-vector binary, which matches series of the whole vector.
 ///
@@ -1139,7 +1196,15 @@ pub fn input_locality(root: &NativeNode) -> InputLocality {
         // Only a tree that matches two vectors needs its matching-key classes to meet in one
         // partition. A tree of unary nodes answers each series on its own, and asking for the
         // router there would both cost a shuffle and hide the ownership a Window needs.
-        if raw || !needs_vector_matching(root) {
+        if !needs_vector_matching(root) {
+            return InputLocality::PartitionLocal;
+        }
+        if raw {
+            if let Some((left, right, labels)) = matching_site(root)
+                && (!preserves_matching_key(left, labels) || !preserves_matching_key(right, labels))
+            {
+                return InputLocality::SinglePartition;
+            }
             return InputLocality::PartitionLocal;
         }
         return InputLocality::MatchingLocal(MatchingLabels::Ignoring(Vec::new()));
@@ -1148,6 +1213,8 @@ pub fn input_locality(root: &NativeNode) -> InputLocality {
     // sits under the pointwise nodes above it.
     if let Some((left, right, labels)) = matching_site(root)
         && let (Some(_left_source), Some(_right_source)) = (same_source(left), same_source(right))
+        && preserves_matching_key(left, labels)
+        && preserves_matching_key(right, labels)
     {
         return InputLocality::MatchingLocal(labels.clone());
     }
