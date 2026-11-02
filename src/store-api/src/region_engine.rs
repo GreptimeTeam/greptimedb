@@ -332,6 +332,10 @@ pub struct ScannerProperties {
     /// Whether total_rows is exact before applying query predicates.
     total_rows_is_exact: bool,
 
+    /// Exact rows after static query predicates, prepared against the scanner's
+    /// read view. Unknown unless an engine has proved all visibility conditions.
+    exact_num_rows: Option<usize>,
+
     /// Whether to yield an empty batch to distinguish partition ranges.
     pub distinguish_partition_range: bool,
 
@@ -367,6 +371,22 @@ impl ScannerProperties {
         self
     }
 
+    /// Sets an exact count for the complete scan, including static predicates.
+    pub fn with_exact_num_rows(mut self, rows: Option<usize>) -> Self {
+        self.exact_num_rows = rows;
+        self
+    }
+
+    /// Returns the prepared exact count after all static scan predicates.
+    pub fn exact_num_rows(&self) -> Option<usize> {
+        self.exact_num_rows
+    }
+
+    /// Invalidates prepared statistics when the scan gains a dynamic predicate.
+    pub fn clear_exact_num_rows(&mut self) {
+        self.exact_num_rows = None;
+    }
+
     /// Creates a new [`ScannerProperties`] with the given partitioning.
     pub fn new(partitions: Vec<Vec<PartitionRange>>, append_mode: bool, total_rows: usize) -> Self {
         Self {
@@ -374,6 +394,7 @@ impl ScannerProperties {
             append_mode,
             total_rows,
             total_rows_is_exact: false,
+            exact_num_rows: None,
             distinguish_partition_range: false,
             target_partitions: 0,
             logical_region: false,
