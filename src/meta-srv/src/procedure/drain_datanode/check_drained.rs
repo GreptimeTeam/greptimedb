@@ -69,7 +69,7 @@ impl State for CheckDrained {
             node_id, remaining_leader_regions, rescan_round
         );
 
-        Ok((Box::new(Dispatch), Status::executing(false)))
+        Ok((Box::new(Dispatch::default()), Status::executing(false)))
     }
 
     fn as_any(&self) -> &dyn Any {
