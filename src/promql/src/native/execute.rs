@@ -5509,7 +5509,7 @@ impl NativeExecutor {
     ///
     /// Only a leaf bound to state accepts one, which is what keeps a state chunk from ever being
     /// read as a value: the leaf refuses it before any node above sees it.
-    pub fn push_state(&mut self, input: InputId, chunk: StateChunk) -> Result<()> {
+    pub(crate) fn push_state(&mut self, input: InputId, chunk: StateChunk) -> Result<()> {
         self.push_source(input, NativeChunk::AggregateState(chunk))
     }
 
@@ -5561,7 +5561,7 @@ impl NativeExecutor {
     /// that runs one pulls here instead of [`Self::next_chunk`]. The two are separate calls on
     /// purpose: a chunk handed up a state tree is not a query value, and accepting one where a
     /// value is expected would be a type error the compiler has already ruled out.
-    pub fn next_state(&mut self) -> Result<Option<StateChunk>> {
+    pub(crate) fn next_state(&mut self) -> Result<Option<StateChunk>> {
         match self.next_output()? {
             Some(NativeChunk::AggregateState(chunk)) => Ok(Some(chunk)),
             Some(other) => {

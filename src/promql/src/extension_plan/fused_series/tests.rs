@@ -4367,15 +4367,6 @@ fn partial_op(kind: AggregateKind, grouped_by: &[&str]) -> BoundAggregate {
     }
 }
 
-/// The binding of the prefix tree, declaring `tags` as the node's labels.
-fn partial_binding_of(tree: &NativeTree, tags: &[&str]) -> FusedSeriesBinding {
-    binding_of(
-        tree,
-        raw_schema(),
-        tags.iter().map(|tag| (*tag).to_string()).collect(),
-    )
-}
-
 /// The logical node that runs the prefix and exports `kind`'s state, grouped by `host`.
 ///
 /// The prefix's one raw input is bound to source `0`, which is the only child the node carries: a

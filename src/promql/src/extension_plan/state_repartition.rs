@@ -111,6 +111,11 @@ impl StateRepartitionExec {
             properties: Arc::new(properties),
         })
     }
+
+    /// How many output partitions this node has.
+    pub fn outputs(&self) -> usize {
+        self.outputs
+    }
 }
 
 impl fmt::Debug for StateRepartitionExec {

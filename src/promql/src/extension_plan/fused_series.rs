@@ -57,8 +57,8 @@ use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMil
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{MemoryPool, MemoryReservation, UnboundedMemoryPool};
@@ -87,12 +87,11 @@ use table::table::scan::SeriesScanExec;
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
+use crate::extension_plan::state_repartition::StateRepartitionExec;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
-use crate::native::plan::{
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, Grouping, InstantValue, NativeExpr, NativeNode,
     NativeTree, NativeType, reads_across_series,
-};
 };
 use crate::native::state::{StateChunk, state_chunk_from_frame_row};
 use crate::source::materialize_raw_labels;
@@ -534,6 +533,57 @@ impl FusedSeries {
         )
     }
 
+    /// Creates the state-exporting half of a split aggregate.
+    ///
+    /// The node runs a `Partial` tree and answers aggregate-state frames, so its output layout is
+    /// the one `tree` declares rather than a caller's: the alternative is a caller free to declare a
+    /// state frame the tree does not produce, which `try_new_with_format` would then only catch for
+    /// some of its columns.
+    pub fn try_new_state_export(
+        promql: Arc<str>,
+        tree: NativeTree,
+        binding: FusedSeriesBinding,
+        children: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        let schema = state_frame_output_schema(&tree)?;
+        let output_schema = DFSchema::try_from(schema).map_err(|error| {
+            DataFusionError::Plan(format!(
+                "FusedSeries cannot declare its state schema: {error}"
+            ))
+        })?;
+        Self::try_new_with_format(
+            promql,
+            tree,
+            binding,
+            children,
+            Arc::new(output_schema),
+            FusedOutputFormat::SeriesFrame,
+        )
+    }
+
+    /// The two trees a native aggregate over `tree` is split into, if it can be split at all.
+    ///
+    /// The first runs where the series are read and answers the state each partition folded; the
+    /// second runs where every partition's state has arrived and answers the statement's series.
+    /// `time_index` is the column the tree's grid points are reported under.
+    pub fn split_aggregate(
+        tree: &NativeTree,
+        time_index: &str,
+    ) -> DataFusionResult<Option<(NativeTree, NativeTree)>> {
+        let fields = crate::native::split::prefix_fields(tree)?;
+        let split = match crate::native::split::split(tree.root(), &fields, time_index) {
+            Ok(Some(split)) => split,
+            Ok(None) => return Ok(None),
+            // A shape the split cannot carry is not a failure: the caller keeps the plan it would
+            // have built without this route.
+            Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(split
+            .into_trees()?
+            .map(|trees| (trees.partial, trees.final_tree)))
+    }
+
     /// The evaluated series-frame schema declared by a native tree's root.
     pub fn series_frame_schema(tree: &NativeTree) -> DataFusionResult<SchemaRef> {
         series_frame_output_schema(evaluated_output(tree)?.as_ref())
@@ -578,6 +628,18 @@ impl FusedSeries {
     /// The selected output representation.
     pub fn format(&self) -> FusedOutputFormat {
         self.format
+    }
+
+    /// Whether this node's tree reads its input as aggregate state rather than as series.
+    ///
+    /// A state root is the `Final` half of a split aggregate, which reads what the `Partial` half
+    /// exported. The kind is the tree's own: its inputs' bindings decide what each child must
+    /// produce, so a caller that needs to recognize the second half of a split does not have to
+    /// read the first one's labels.
+    pub fn reads_aggregate_state(&self) -> bool {
+        tree_inputs(&self.tree)
+            .iter()
+            .any(|input| matches!(input.output, NativeType::AggregateState(_)))
     }
 
     /// The compiled tree this node runs.
@@ -639,6 +701,7 @@ impl FusedSeries {
                 .is_ok_and(|declaration| declaration.content() == FrameContent::Evaluated)
         });
         let locality = input_locality(self.tree.root());
+        let state_group = state_routing(self.tree.root());
         let normalize = matches!(locality, InputLocality::SinglePartition);
         let matching_policy = match &locality {
             InputLocality::MatchingLocal(policy) => Some(policy.clone()),
@@ -686,6 +749,34 @@ impl FusedSeries {
                         "FusedSeries source supplied ordering does not match its frame declaration"
                             .into(),
                     ));
+                }
+                if declaration.content() == FrameContent::AggregateState {
+                    // State routing is its own path: a `Final` aggregate reads the rows of one group
+                    // in whatever order they arrive, so it needs every row of every group to reach
+                    // one owner, not the matching-key classes a label match co-locates.
+                    let group = state_group.ok_or_else(|| {
+                        DataFusionError::Plan(
+                            "FusedSeries reads aggregate state but holds no Final aggregate".into(),
+                        )
+                    })?;
+                    let count = input.properties().partitioning.partition_count();
+                    // One group has one owner: two would be two partial folds of one answer. More
+                    // than one group splits the work the way the session asks, and a caller that
+                    // names no width keeps the width the producers already have.
+                    let required = match group {
+                        StateGroup::Single => 1,
+                        StateGroup::Grouped => target_partitions.unwrap_or(count).max(1),
+                    };
+                    let has_router = input
+                        .downcast_ref::<StateRepartitionExec>()
+                        .is_some_and(|router| router.outputs() == required);
+                    if count == required && (has_router || required == 1) {
+                        return Ok((input, label_source, ordering));
+                    }
+                    let routed = Arc::new(StateRepartitionExec::try_new(input, required)?)
+                        as Arc<dyn ExecutionPlan>;
+                    let ordering = series_frame_ordering(routed.schema().as_ref())?;
+                    return Ok((routed, RawLabelSource::Explicit, ordering));
                 }
                 if declaration.content() != FrameContent::Evaluated {
                     let count = input.properties().partitioning.partition_count();
@@ -1334,6 +1425,51 @@ fn tree_inputs_for_locality(root: &NativeNode) -> Vec<&crate::native::plan::Boun
     inputs
 }
 
+/// The grouping a `Final` aggregate over state routes by, and how many owners it needs.
+///
+/// A tree whose input is aggregate state holds exactly one such aggregate: the `Final` the split
+/// put at the cut. Its grouping is the key a router sends the rows of a group by, and its own
+/// arity decides how many owners there are to have - a single group needs one, since two would be
+/// two partial folds of the same answer - so the width is fixed here at plan time rather than
+/// coalesced after the fact. The walk only answers the aggregate; whether this tree reads state at
+/// all is the input frame declaration's business.
+fn state_routing(root: &NativeNode) -> Option<StateGroup> {
+    fn find(node: &NativeNode) -> Option<&Grouping> {
+        match &node.expr {
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final => {
+                Some(&op.group)
+            }
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ParameterizedMap { input, .. }
+            | NativeExpr::Aggregate { input, .. } => find(input),
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                find(left).or_else(|| find(right))
+            }
+            NativeExpr::Info { base, info, .. } => find(base).or_else(|| find(info)),
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => None,
+        }
+    }
+    Some(match find(root)? {
+        Grouping::By(labels) if labels.is_empty() => StateGroup::Single,
+        _ => StateGroup::Grouped,
+    })
+}
+
+/// How many owners the groups of a state input have to be split across.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StateGroup {
+    /// One group: every row belongs to it, so one owner folds the answer.
+    Single,
+    /// More than one group: the rows can be split by their group's labels.
+    Grouped,
+}
+
 fn validate_binding(
     tree: &NativeTree,
     binding: &FusedSeriesBinding,
@@ -1973,7 +2109,12 @@ impl FusedSeriesExec {
                     "FusedSeries input {index} has {count} partitions; every source must have the same positive count ({partition_count})"
                 )));
             }
-            if matches!(locality, InputLocality::SinglePartition) && count != 1 {
+            // State is the one input a cross-series tree may read from more than one partition:
+            // the router above the producers put every row of a group in exactly one of them, so
+            // the `Final` aggregate folds that group's whole contribution where it arrives. Any
+            // other global input has no such owner and has to be gathered.
+            let state = source_kinds[index] == FusedInputKind::AggregateState;
+            if matches!(locality, InputLocality::SinglePartition) && count != 1 && !state {
                 return Err(DataFusionError::Plan(format!(
                     "FusedSeries global evaluated input {index} must have one partition"
                 )));
@@ -2226,12 +2367,6 @@ impl ExecutionPlan for FusedSeriesExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        if matches!(&self.tree.root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final)
-        {
-            return Err(DataFusionError::Execution(
-                "FusedSeries Final execution is not implemented yet".into(),
-            ));
-        }
         if partition >= self.properties.partitioning.partition_count() {
             return Err(DataFusionError::Execution(
                 "FusedSeries output partition is out of range".into(),
