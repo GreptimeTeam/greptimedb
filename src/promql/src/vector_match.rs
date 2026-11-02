@@ -801,7 +801,17 @@ fn binary_field(
             one,
             members,
             |point| {
-                if let Some(evidence) = &evidence {
+                if evaluated[point] {
+                    // This partition's own presence already decides the point: the duplicate below
+                    // aborts the execution from here, so recording it for the other partitions
+                    // would only take their lock to store a verdict nobody will ask for.
+                    if duplicate_at.is_none_or(|first| point < first) {
+                        duplicate_at = Some(point);
+                    }
+                } else if let Some(evidence) = &evidence {
+                    // The gate is false here only because this partition holds one side of the
+                    // match. Whether the point is eligible is a property of the whole execution,
+                    // so the finding is recorded and judged once every partition has reported.
                     let side = if one_is_left { "left" } else { "right" };
                     evidence.evidence.record_candidate(
                         evidence.node,
@@ -812,9 +822,6 @@ fn binary_field(
                         side,
                         timestamp_at(point),
                     )?;
-                }
-                if evaluated[point] && duplicate_at.is_none_or(|first| point < first) {
-                    duplicate_at = Some(point);
                 }
                 Ok(())
             },
