@@ -111,17 +111,17 @@ impl FulltextIndexer {
                     let Some(options) = hint.fulltext_index.as_ref().filter(|o| o.enable) else {
                         continue;
                     };
-                    let target = IndexTarget::new_json_path(column.column_id, hint.path.clone())
-                        .map_err(|err| {
-                            crate::error::InvalidRecordBatchSnafu {
-                                reason: format!(
-                                    "Invalid JSON fulltext path {:?}: {err}",
-                                    hint.path
-                                ),
-                            }
-                            .build()
-                        })?;
-                    targets.push((target, options.clone()));
+                    match IndexTarget::new_json_path(column.column_id, hint.path.clone()) {
+                        Ok(target) => targets.push((target, options.clone())),
+                        Err(err) => {
+                            warn!(
+                                err;
+                                "Skip invalid JSON fulltext index target, column_id: {}, path: {:?}",
+                                column.column_id,
+                                hint.path
+                            );
+                        }
+                    }
                 }
             }
             for (target, options) in targets {
