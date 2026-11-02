@@ -78,6 +78,7 @@ use datatypes::series::time::EvalGrid;
 use futures::stream::SelectAll;
 use futures::{Stream, StreamExt};
 use store_api::region_engine::RawLabelSource;
+use table::table::scan::SeriesScanExec;
 
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::SeriesRouting;
@@ -1659,6 +1660,32 @@ pub struct FusedSeriesExec {
 }
 
 impl FusedSeriesExec {
+    /// Returns whether each output series identity is confined to one input partition.
+    ///
+    /// This is true only for a single per-series scan (or another proven fused chain) whose
+    /// native tree consists solely of identity-preserving instant selections and inputs.
+    pub fn has_partition_disjoint_identities(&self) -> bool {
+        fn preserves_identity(node: &NativeNode) -> bool {
+            match &node.expr {
+                NativeExpr::Input(_) => true,
+                NativeExpr::Instant { input, op } => {
+                    op.value == InstantValue::Sample && preserves_identity(input)
+                }
+                _ => false,
+            }
+        }
+
+        if self.inputs.len() != 1 || !preserves_identity(self.tree.root()) {
+            return false;
+        }
+
+        let input = &self.inputs[0].0;
+        input.downcast_ref::<SeriesScanExec>().is_some()
+            || input
+                .downcast_ref::<FusedSeriesExec>()
+                .is_some_and(FusedSeriesExec::has_partition_disjoint_identities)
+    }
+
     /// Creates the node, rejecting whatever this node cannot execute or convert.
     ///
     /// `input` produces native raw series frames: the series' encoded key, its finality, its

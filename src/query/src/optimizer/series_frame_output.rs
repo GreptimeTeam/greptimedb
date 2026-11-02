@@ -82,7 +82,10 @@ impl PhysicalOptimizerRule for SeriesFrameOutput {
         let completion = plan
             .downcast_ref::<RawSeriesSourceExec>()
             .is_some_and(RawSeriesSourceExec::is_per_series_scan)
-            || plan.downcast_ref::<SeriesRepartitionExec>().is_some();
+            || plan.downcast_ref::<SeriesRepartitionExec>().is_some()
+            || plan
+                .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+                .is_some_and(|fused| fused.has_partition_disjoint_identities());
         if completion {
             Ok(Arc::new(SeriesRepartitionExec::try_new_complete_disjoint(
                 plan, 1,
