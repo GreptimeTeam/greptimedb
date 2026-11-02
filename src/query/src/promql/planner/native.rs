@@ -43,15 +43,16 @@ use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::UnboundedMemoryPool;
+use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder};
 use datafusion::prelude::Expr as DfExpr;
-use datafusion_expr::Expr;
+use datafusion_expr::{Expr, lit};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
-    input_locality, matching_operands_drop_key, tree_source_fields,
+    FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RangeManipulate,
+    RawSeriesSource, input_locality, matching_operands_drop_key, tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -62,7 +63,7 @@ use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
+    BinModifier, Call, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
     VectorMatchCardinality, VectorSelector, token,
 };
 use session::context::QueryContextRef;
@@ -73,8 +74,11 @@ use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
     InfoInput, compile_selectors, compile_statement, constant_value, info_input, statement_grid,
 };
-use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
+use crate::promql::planner::{
+    DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner, ScalarFunc,
+};
 use crate::query_engine::QueryEngineState;
+use promql::functions::Rate;
 
 /// The query-context key that turns the native fused-series route on for one query.
 ///
@@ -1480,7 +1484,15 @@ async fn segment_tree(
     let plan = LogicalPlan::Extension(Extension {
         node: Arc::new(plan),
     });
-    let Some(projected) = segmented_aggregate_projection(prom_expr, &plan, tree, bare_scans) else {
+    let Some(projected) = segmented_aggregate_projection(
+        planner,
+        query_engine_state,
+        prom_expr,
+        &plan,
+        tree,
+        bare_scans,
+        per_source,
+    ) else {
         return Ok(Some(plan));
     };
     Ok(Some(projected))
@@ -1488,28 +1500,43 @@ async fn segment_tree(
 
 /// Applies the legacy expression-derived names to a completed segmented aggregate.
 fn segmented_aggregate_projection(
+    planner: &PromPlanner,
+    query_engine_state: &QueryEngineState,
     prom_expr: &PromExpr,
     plan: &LogicalPlan,
     tree: &NativeTree,
     scans: &[LogicalPlan],
+    per_source: &[(Option<Arc<str>>, String, Vec<String>)],
 ) -> Option<LogicalPlan> {
-    fn collect<'a>(
-        expr: &'a PromExpr,
-        aggregates: &mut Vec<&'a promql_parser::parser::AggregateExpr>,
-    ) -> bool {
+    fn collect<'a>(expr: &'a PromExpr, operations: &mut Vec<&'a PromExpr>) -> bool {
         match expr {
-            PromExpr::Paren(paren) => collect(&paren.expr, aggregates),
+            PromExpr::Paren(paren) => collect(&paren.expr, operations),
             PromExpr::Aggregate(aggregate) => {
-                aggregates.push(aggregate);
-                collect(&aggregate.expr, aggregates)
+                operations.push(expr);
+                collect(&aggregate.expr, operations)
+            }
+            PromExpr::Call(Call { func, args }) if func.name == "abs" && args.args.len() == 1 => {
+                operations.push(expr);
+                collect(&args.args[0], operations)
+            }
+            PromExpr::Call(Call { func, args }) if func.name == "rate" && args.args.len() == 1 => {
+                let PromExpr::MatrixSelector(_) = &*args.args[0] else {
+                    return false;
+                };
+                operations.push(expr);
+                true
             }
             PromExpr::VectorSelector(_) => true,
             _ => false,
         }
     }
 
-    let mut aggregates = Vec::new();
-    if !collect(prom_expr, &mut aggregates) || aggregates.is_empty() {
+    let mut operations = Vec::new();
+    if !collect(prom_expr, &mut operations)
+        || !operations
+            .iter()
+            .any(|expr| matches!(expr, PromExpr::Aggregate(_)))
+    {
         return None;
     }
     let source_fields = tree_source_fields(tree).ok()?;
@@ -1562,18 +1589,80 @@ fn segmented_aggregate_projection(
     if named_fields.len() != 1 {
         return None;
     }
-    let mut columns = named_fields.pop()?;
+    let mut naming_exprs = named_fields.pop()?;
+    let source_index = bound_inputs.first()?.source_index;
+    let time_index = &per_source.get(source_index)?.1;
     let mut exprs = Vec::new();
-    for aggregate in aggregates.iter().rev() {
-        exprs = columns
-            .into_iter()
-            .map(|input| {
-                PromPlanner::create_numeric_aggregate_expr(aggregate.op, &aggregate.param, input)
+    for operation in operations.iter().rev() {
+        exprs = match operation {
+            PromExpr::Aggregate(aggregate) => naming_exprs
+                .clone()
+                .into_iter()
+                .map(|input| {
+                    PromPlanner::create_numeric_aggregate_expr(
+                        aggregate.op,
+                        &aggregate.param,
+                        input,
+                    )
                     .ok()
                     .map(PromPlanner::alias_extremum_as_builtin)
-            })
-            .collect::<Option<Vec<_>>>()?;
-        columns = exprs
+                })
+                .collect::<Option<Vec<_>>>()?,
+            PromExpr::Call(call) if call.func.name == "abs" => {
+                let scalar = planner
+                    .resolve_scalar_function("abs", query_engine_state, false)
+                    .ok()?;
+                let func = match scalar {
+                    ScalarFunc::DataFusionBuiltin(func) | ScalarFunc::DataFusionUdf(func) => func,
+                    _ => return None,
+                };
+                naming_exprs
+                    .clone()
+                    .into_iter()
+                    .map(|input| {
+                        let value = input;
+                        Some(DfExpr::ScalarFunction(ScalarFunction {
+                            func: Arc::clone(&func),
+                            args: vec![value],
+                        }))
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            }
+            PromExpr::Call(call) if call.func.name == "rate" => {
+                let PromExpr::Call(_) = operation else {
+                    return None;
+                };
+                let PromExpr::MatrixSelector(matrix) = &*call.args.args[0] else {
+                    return None;
+                };
+                let range_ms = i64::try_from(matrix.range.as_millis()).ok()?;
+                let rate_udf = Arc::new(Rate::scalar_udf());
+                naming_exprs
+                    .clone()
+                    .into_iter()
+                    .map(|input| {
+                        let value =
+                            DfExpr::Column(datafusion::prelude::Column::from_name(match &input {
+                                DfExpr::Column(column) => column.name.clone(),
+                                _ => input.schema_name().to_string(),
+                            }));
+                        Some(DfExpr::ScalarFunction(ScalarFunction {
+                            func: Arc::clone(&rate_udf),
+                            args: vec![
+                                DfExpr::Column(datafusion::prelude::Column::from_name(
+                                    RangeManipulate::build_timestamp_range_name(time_index),
+                                )),
+                                value,
+                                DfExpr::Column(datafusion::prelude::Column::from_name(time_index)),
+                                lit(range_ms),
+                            ],
+                        }))
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            }
+            _ => return None,
+        };
+        naming_exprs = exprs
             .iter()
             .map(|expr| {
                 DfExpr::Column(datafusion::prelude::Column::from_name(

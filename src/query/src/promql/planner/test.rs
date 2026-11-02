@@ -3666,6 +3666,45 @@ async fn native_fused_multi_source_segments_bind_their_own_table_scan() {
     );
 }
 
+/// Nested rate/aggregate expressions keep identical schema names on both planning routes.
+#[tokio::test]
+async fn native_fused_nested_rate_abs_aggregates_keep_legacy_schema_names() {
+    for query in [
+        "sum(abs(avg(rate(some_metric[5m])) by (tag_0)))",
+        "abs(sum(avg(rate(some_metric[5m])) by (tag_0)))",
+    ] {
+        let native = build_native_fused_plan(query, true).await;
+        let legacy = build_native_fused_plan(query, false).await;
+
+        assert!(
+            find_fused_series(&native).is_some(),
+            "{query}: native planning must produce a fused-series node: {native}"
+        );
+        let legacy_names = sorted_column_names(&legacy);
+        assert_eq!(
+            legacy_names,
+            sorted_column_names(&native),
+            "{query}: native names must match the independently planned legacy schema"
+        );
+        assert!(
+            native
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.data_type() == &ArrowDataType::Float64),
+            "{query}: native plan must retain a Float64 value field: {native}"
+        );
+        assert!(
+            legacy
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.data_type() == &ArrowDataType::Float64),
+            "{query}: legacy plan must retain a Float64 value field: {legacy}"
+        );
+    }
+}
+
 /// A nested aggregate is not split, and both routes report the explicit expression-derived name.
 #[tokio::test]
 async fn native_fused_declined_nested_aggregate_keeps_the_expression_name() {
