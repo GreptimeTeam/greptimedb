@@ -412,10 +412,9 @@ mod tests {
     use datafusion_functions::core::coalesce;
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datatypes::series::SeriesOrdering;
+    use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::extension_plan::{
-        AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource,
-    };
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding, RawSeriesSource};
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
     };
@@ -821,6 +820,8 @@ mod tests {
             },
             output: NativeType::AggregateState(Arc::new(AggregateStateSchema {
                 group,
+                kind: AggregateStateKind::Sum,
+                components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
                 accumulators: Arc::from([]),
                 grid: statement_grid(&native_statement()).unwrap(),
             })),
@@ -1040,12 +1041,11 @@ mod tests {
         );
     }
 
-    /// A split aggregate's merge, over a scan and bound to `sum(some_metric)`.
+    /// A split aggregate over a scan and bound to `sum(some_metric)`.
     ///
-    /// The tree is the compiler's own, so the two halves this plan is built from are the ones a query
-    /// plans: the aggregate is split out of it, and the producer below the merge runs the per-series
-    /// prefix.
-    fn aggregate_finalize_plan(input: LogicalPlan) -> LogicalPlan {
+    /// The compiler's tree is split into a `Partial` state-exporting node over the scan and a
+    /// `Final` node above it, matching the two halves a query plans.
+    fn split_aggregate_plan(input: LogicalPlan) -> LogicalPlan {
         let stmt = promql_parser::parser::EvalStmt {
             expr: parser::parse("sum(some_metric)").unwrap(),
             ..native_statement()
@@ -1087,23 +1087,37 @@ mod tests {
             .unwrap(),
         );
 
+        let (partial_tree, final_tree) =
+            FusedSeries::split_aggregate(&tree, "ts").unwrap().unwrap();
+        let partial = FusedSeries::try_new_state_export(
+            Arc::from("sum(some_metric)"),
+            partial_tree,
+            binding.clone(),
+            vec![input],
+        )
+        .unwrap();
+        let final_node = FusedSeries::try_new(
+            Arc::from("sum(some_metric)"),
+            final_tree,
+            binding,
+            vec![LogicalPlan::Extension(Extension {
+                node: Arc::new(partial),
+            })],
+            output_schema,
+        )
+        .unwrap();
         LogicalPlan::Extension(Extension {
-            node: Arc::new(
-                AggregateFinalize::try_new(
-                    Arc::from("sum(some_metric)"),
-                    tree,
-                    binding,
-                    input,
-                    output_schema,
-                )
-                .unwrap(),
-            ),
+            node: Arc::new(final_node),
         })
     }
 
-    fn as_aggregate_finalize(plan: &LogicalPlan) -> Option<&AggregateFinalize> {
+    fn as_final_split(plan: &LogicalPlan) -> Option<&FusedSeries> {
         if let LogicalPlan::Extension(extension) = plan {
-            extension.node.as_any().downcast_ref::<AggregateFinalize>()
+            extension
+                .node
+                .as_any()
+                .downcast_ref::<FusedSeries>()
+                .filter(|fused| fused.reads_aggregate_state())
         } else {
             None
         }
@@ -1119,112 +1133,98 @@ mod tests {
         plan.inputs().into_iter().find_map(first_fused_series)
     }
 
-    /// The merge reads every partition's state, so it cannot run in one of them.
+    /// The final half stays above the cut; only the partial half is commutative.
     #[test]
-    fn a_split_aggregate_is_not_commutative() {
-        let plan = aggregate_finalize_plan(table_scan_plan());
-
+    fn a_split_aggregate_is_commutative_only_below_the_cut() {
+        let plan = split_aggregate_plan(table_scan_plan());
         assert!(matches!(
             Categorizer::check_plan(&plan, None).unwrap(),
             Commutativity::NonCommutative
         ));
+
+        let final_node = as_final_split(&plan).unwrap();
+        let [partial] = final_node.children() else {
+            panic!("expected the final node to have one partial child: {plan}");
+        };
+        assert!(matches!(
+            Categorizer::check_plan(partial, None).unwrap(),
+            Commutativity::Commutative
+        ));
     }
 
-    /// The merge stays on the frontend and the producer rides inside the merge scan, so the plan a
-    /// region is handed is exactly the per-series prefix over its own scan.
-    ///
-    /// Over the wire nothing changes: the merge has no serializer branch either, so the boundary is
-    /// still drawn at the producer, which is the same place the existing route draws it.
+    /// The final half stays on the frontend and the partial half rides inside the region scan.
     #[test]
-    fn a_split_aggregate_merges_above_the_region_only_in_process() {
-        let plan = aggregate_finalize_plan(table_scan_plan());
+    fn a_split_aggregate_finalizes_above_the_region_only_in_process() {
+        let plan = split_aggregate_plan(table_scan_plan());
         assert!(
             DFLogicalSubstraitConvertor
                 .encode(&plan, DefaultSerializer)
                 .is_err(),
-            "the merge encodes now, so the encoding gate decides nothing"
+            "the split plan must remain unencodable across the wire"
         );
 
         let in_process = analyze(DistPlannerAnalyzer::new(true), plan.clone());
         assert!(
-            as_aggregate_finalize(&in_process).is_some(),
-            "the merge must stay on the frontend: {in_process}"
+            as_final_split(&in_process).is_some(),
+            "the final node must stay on the frontend: {in_process}"
         );
-        let inputs = in_process.inputs();
-        let [child] = inputs.as_slice() else {
-            panic!("expected the merge to keep one input in: {in_process}");
+        let final_node = as_final_split(&in_process).unwrap();
+        let [child] = final_node.children() else {
+            panic!("expected the final node to keep one input: {in_process}");
         };
-        // `expand` keeps a projection over the merge scan to restore the schema of what it wrapped,
-        // so the boundary is the first merge scan under the child.
         let merge_scan = first_merge_scan(child)
-            .unwrap_or_else(|| panic!("expected a merge scan below the merge in: {in_process}"));
-        let producer = first_fused_series(merge_scan.input()).unwrap_or_else(|| {
-            panic!("expected the producer in the region input of: {in_process}")
+            .unwrap_or_else(|| panic!("expected a merge scan below the final node: {in_process}"));
+        let partial = first_fused_series(merge_scan.input()).unwrap_or_else(|| {
+            panic!("expected the partial node in the region input: {in_process}")
         });
-        assert!(
-            producer.partial_fold().is_some(),
-            "the region input exports state, not values"
-        );
-        assert!(
-            holds_table_scan(merge_scan.input()),
-            "the producer still reads its own scan in: {in_process}"
-        );
+        assert!(!partial.reads_aggregate_state());
+        assert!(matches!(
+            &partial.tree().root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+        ));
+        assert!(holds_table_scan(merge_scan.input()));
 
-        // Over the wire the plan has to encode, so the boundary is drawn at the producer.
         let encoded = analyze(DistPlannerAnalyzer::new(false), plan);
         assert!(
             !any_remote_input_holds(&encoded, holds_fused_series),
-            "the analyzer placed the producer although its plan has to encode: {encoded}"
+            "the analyzer placed a fused node although its plan has to encode: {encoded}"
         );
     }
 
-    /// The merge of `plan`, with its partition-local producer replaced by `producer`.
-    ///
-    /// A swap like this is what a node has to tolerate: `with_exprs_and_inputs` rebuilds it from
-    /// whatever input an optimizer holds, so the analyzer cannot take a merge over a fused node to be
-    /// the one `AggregateFinalize::try_new` built.
-    fn merge_over(plan: LogicalPlan, producer: LogicalPlan) -> LogicalPlan {
+    /// The final half of `plan`, with its partial input replaced by `producer`.
+    fn final_over(plan: LogicalPlan, producer: LogicalPlan) -> LogicalPlan {
         let LogicalPlan::Extension(extension) = &plan else {
             panic!("a split aggregate is an extension node: {plan}");
         };
-        let finalize = extension
+        let fused = extension
             .node
             .as_any()
-            .downcast_ref::<AggregateFinalize>()
-            .expect("a split aggregate is a merge");
+            .downcast_ref::<FusedSeries>()
+            .expect("a split aggregate's final half is a FusedSeries");
         // Qualified: both `UserDefinedLogicalNode` and `UserDefinedLogicalNodeCore` declare this
         // method, and only the latter's answer is the node itself.
-        let swapped =
-            UserDefinedLogicalNodeCore::with_exprs_and_inputs(finalize, Vec::new(), vec![producer])
-                .expect("a merge holds the one input it is given");
+        let rebuilt =
+            UserDefinedLogicalNodeCore::with_exprs_and_inputs(fused, Vec::new(), vec![producer])
+                .expect("the final node holds the one input it is given");
         LogicalPlan::Extension(Extension {
-            node: Arc::new(swapped),
+            node: Arc::new(rebuilt),
         })
     }
 
-    /// The in-process exception admits the split the route builds, not the shape it looks like: a
-    /// merge whose child is an ordinary `FusedSeries` - one that answers with computed values - over
-    /// the same scan is refused the exception, so the encoding gate still draws the boundary at the
-    /// scan and the merge stays on the frontend.
-    ///
-    /// Skipping the gate for it would let a region's values be merged as if they were that
-    /// partition's contribution to the group, which is the shape no constructor check can rule out:
-    /// `with_exprs_and_inputs` accepts the replacement.
+    /// Only the real partial state-exporting child gets the in-process exception; an ordinary
+    /// values-producing fused child over the same scan does not.
     #[test]
-    fn a_merge_over_an_ordinary_fused_series_keeps_the_encoding_gate() {
+    fn a_final_over_an_ordinary_fused_series_keeps_the_encoding_gate() {
         let scan = table_scan_plan();
-        let split = aggregate_finalize_plan(scan.clone());
-        // The control: the split's own producer exports state, so it is the shape the exception
-        // admits and it does ride into the region.
+        let split = split_aggregate_plan(scan.clone());
         let producer_placed = analyze(DistPlannerAnalyzer::new(true), split.clone());
         assert!(
             any_remote_input_holds(&producer_placed, holds_fused_series),
-            "the split's partial producer rides inside the merge scan: {producer_placed}"
+            "the split's partial producer rides inside the final node: {producer_placed}"
         );
 
-        // The same merge over the same scan, with a producer that answers with values.
         let values = fused_series_plan(scan);
-        let swapped = merge_over(split, values);
+        let swapped = final_over(split, values);
         let analyzed = analyze(DistPlannerAnalyzer::new(true), swapped);
         assert!(
             !any_remote_input_holds(&analyzed, holds_fused_series),

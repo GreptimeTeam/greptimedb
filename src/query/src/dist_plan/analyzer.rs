@@ -595,8 +595,9 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
         return false;
     };
     if !fused.reads_aggregate_state() {
-        // A node reading its own scan is the route's whole plan by itself.
-        return fused.children().len() == 1;
+        // A node reading its own scans is the route's whole plan by itself: one scan, or the
+        // same-table one-to-one pair the route admits over two.
+        return true;
     }
     let [LogicalPlan::Extension(partial)] = fused.children() else {
         return false;

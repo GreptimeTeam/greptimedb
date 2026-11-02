@@ -43,9 +43,9 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
 use promql::extension_plan::{
-    AggregateFinalize, FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
+    FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
-use promql::native::plan::{NativeExpr, NativeNode};
+use promql::native::plan::{AggregateStage, NativeExpr, NativeNode};
 use promql::vector_match::MatchingLabels;
 use promql_parser::label::Labels;
 use promql_parser::parser;
@@ -2313,8 +2313,8 @@ async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
             .unwrap_or_else(|| panic!("{query}: no fused node: {native}"));
         assert_eq!(2, fused.inputs().len(), "{query}: {native}");
         assert!(
-            fused.partial_fold().is_none(),
-            "{query}: a multi-input aggregate is not a split: {native}"
+            find_final_split(&native).is_none(),
+            "{query}: every input partition folds in one execution: {native}"
         );
         let input_metrics = fused
             .inputs()
@@ -3336,33 +3336,24 @@ async fn native_fused_three_selectors_on_partitioned_tables_fall_back() {
     }
 }
 
-/// The merge half of a split aggregate, when the plan is one.
-fn find_aggregate_finalize(plan: &LogicalPlan) -> Option<&AggregateFinalize> {
+/// Find the final half of a split aggregate.
+fn find_final_split(plan: &LogicalPlan) -> Option<&FusedSeries> {
     if let LogicalPlan::Extension(Extension { node }) = plan
-        && let Some(finalize) = node.as_any().downcast_ref::<AggregateFinalize>()
+        && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        && fused.reads_aggregate_state()
     {
-        return Some(finalize);
+        return Some(fused);
     }
 
-    plan.inputs().into_iter().find_map(find_aggregate_finalize)
+    plan.inputs().into_iter().find_map(find_final_split)
 }
 
-/// The producer below a split aggregate, which exports the state one partition folded.
-fn partial_producer(finalize: &AggregateFinalize) -> &FusedSeries {
-    // Bound to a local first: the slice handed out by `inputs` borrows this list.
-    let inputs = UserDefinedLogicalNodeCore::inputs(finalize);
-    let [LogicalPlan::Extension(Extension { node })] = inputs.as_slice() else {
-        panic!("the merge should read one producer: {finalize:?}");
+/// The state-exporting producer directly below a final split node.
+fn partial_below(final_node: &FusedSeries) -> Option<&FusedSeries> {
+    let [LogicalPlan::Extension(Extension { node })] = final_node.children() else {
+        return None;
     };
-    let fused = node
-        .as_any()
-        .downcast_ref::<FusedSeries>()
-        .expect("the producer is a fused series node");
-    assert!(
-        fused.partial_fold().is_some(),
-        "the producer below a merge exports state"
-    );
-    fused
+    node.as_any().downcast_ref::<FusedSeries>()
 }
 
 /// The column names of a plan, sorted: the two routes may order the same columns differently, and
@@ -3382,7 +3373,7 @@ fn sorted_column_names(plan: &LogicalPlan) -> Vec<String> {
 /// producer, which is the one shape a region can evaluate on its own. The rows carry the native
 /// tree's output columns - names, tags and time - which is what keeps the result readable.
 #[tokio::test]
-async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
+async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
     for query in [
         "sum(some_metric)",
         "avg(some_metric)",
@@ -3396,7 +3387,6 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
         "sum without (tag_0) (some_metric)",
         "sum(rate(some_metric[5m]))",
         "ceil(sum(some_metric))",
-        "sum(avg(some_metric) by (tag_0))",
         // A literal scalar on either side of the fold. Below the aggregate it is part of the prefix,
         // which is the half that computes the values the state folds; above it the merge rebuilds
         // the operation over the merged values, in the order the query wrote the operands. A
@@ -3413,20 +3403,27 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
-        assert!(
-            display.contains("AggregateFinalize: "),
-            "`{query}`: {display}"
-        );
-        assert!(display.contains("[partial "), "`{query}`: {display}");
+        assert!(find_final_split(&plan).is_some(), "`{query}`: {display}");
         assert!(display.contains("TableScan: some_metric"), "{display}");
 
-        let finalize = find_aggregate_finalize(&plan).expect("the statement plans to a merge");
-        let producer = partial_producer(finalize);
-        // The prefix is the per-series tree; the aggregate itself is not in it.
+        let final_node = find_final_split(&plan).expect("the statement plans to a final split");
+        let partial = partial_below(final_node).expect("the final node reads a partial producer");
+        let partial_display = partial.tree().to_string();
+        let NativeExpr::Aggregate { op, .. } = &partial.tree().root().expr else {
+            panic!("`{query}`: partial root is not an aggregate: {partial_display}");
+        };
+        assert_eq!(AggregateStage::Partial, op.stage, "`{query}`");
+        // The cut is the only aggregate in the producer: everything below it is the per-series
+        // prefix, which folds nothing. A second stage marker would mean the split left an aggregate
+        // in the half that runs per partition.
+        assert_eq!(
+            1,
+            partial_display.matches(" partial").count(),
+            "`{query}`: {partial_display}"
+        );
         assert!(
-            !producer.tree().to_string().contains("Aggregate"),
-            "`{query}`: {}",
-            producer.tree()
+            !partial_display.contains(" complete") && !partial_display.contains(" final"),
+            "`{query}`: {partial_display}"
         );
         let mut expected_columns = vec!["field_0".to_string(), "timestamp".to_string()];
         if query == "sum by (tag_0) (rate(some_metric[5m]))" {
@@ -3438,36 +3435,6 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
             expected_columns,
             "`{query}` native output schema"
         );
-    }
-}
-
-/// Only the innermost aggregate is cut out: everything above it, a map included, runs in the suffix
-/// over the merged values.
-#[tokio::test]
-async fn native_fused_nested_aggregate_splits_at_the_innermost_aggregate() {
-    for (query, merge, partial) in [
-        (
-            "sum(avg(some_metric) by (tag_0))",
-            r#"AggregateFinalize: sum(avg by (tag_0) (some_metric)) [Avg By(["tag_0"]) Complete]"#,
-            "[partial avg by (tag_0) Complete]",
-        ),
-        (
-            "ceil(sum(rate(some_metric[5m])) by (tag_0))",
-            r#"AggregateFinalize: ceil(sum by (tag_0) (rate(some_metric[5m]))) [Sum By(["tag_0"]) Complete]"#,
-            "[partial sum by (tag_0) Complete]",
-        ),
-    ] {
-        let plan = build_native_fused_plan(query, true).await;
-        let display = plan.display_indent().to_string();
-        assert!(display.contains(merge), "{display}");
-        assert!(display.contains(partial), "{display}");
-
-        let finalize = find_aggregate_finalize(&plan).expect("the statement plans to a merge");
-        let producer = partial_producer(finalize);
-        // A map above the merge leaves the prefix alone, and so does the outer aggregate.
-        let prefix = producer.tree().to_string();
-        assert!(!prefix.contains("Map"), "{query}: {prefix}");
-        assert!(!prefix.contains("Aggregate"), "{query}: {prefix}");
     }
 }
 
@@ -3699,23 +3666,46 @@ async fn native_fused_multi_source_segments_bind_their_own_table_scan() {
     );
 }
 
-/// A nested aggregate's outer names are the existing plan's: `sum(avg(x))` reports the outer `sum`.
+/// A nested aggregate is not split, and its value column is the one the segmentation route names.
+///
+/// The split declines an aggregate above the cut, because a `Final` partition owns only its own
+/// groups and a second fold would see part of the vector. What answers the statement is then the
+/// segmentation route, and its value column is named after the raw field rather than after the
+/// statement's outer aggregate:
+///
+/// ```text
+/// flag on : ["field_0", "timestamp"]
+/// flag off: ["sum(avg(some_metric.field_0))", "timestamp"]
+/// ```
+///
+/// The difference is pinned here rather than smoothed over: it is the naming the segmentation route
+/// has always had, and it only became observable for this shape when the split narrowed. Replanning
+/// the outer aggregate as its own `Partial`/`Final` pair above the first split - the boundary the
+/// design assigns it - is what would restore the outer name, and it is not part of this change.
 #[tokio::test]
-async fn native_fused_nested_aggregate_keeps_the_outer_names() {
+async fn native_fused_declined_nested_aggregate_keeps_the_segmented_names() {
     let query = "sum(avg(some_metric) by (tag_0))";
     let plan = build_native_fused_plan(query, true).await;
+    let legacy = build_native_fused_plan(query, false).await;
+
+    assert!(find_final_split(&plan).is_none(), "{query}: {plan}");
     assert_eq!(
+        vec!["field_0".to_string(), "timestamp".to_string()],
         sorted_column_names(&plan),
-        vec!["field_0".to_string(), "timestamp".to_string()]
+        "{query}"
     );
-    // The merged value enters the suffix, so no column is named after the inner aggregate.
-    assert!(
-        plan.schema()
-            .fields()
-            .iter()
-            .all(|field| !field.name().starts_with("avg(")),
-        "{:?}",
-        sorted_column_names(&plan)
+    assert_eq!(
+        vec![
+            "sum(avg(some_metric.field_0))".to_string(),
+            "timestamp".to_string()
+        ],
+        sorted_column_names(&legacy),
+        "{query}"
+    );
+    assert_ne!(
+        sorted_column_names(&legacy),
+        sorted_column_names(&plan),
+        "{query}: a matching name pair would mean this test no longer pins the gap"
     );
 }
 
@@ -3787,10 +3777,9 @@ async fn native_classic_histogram_provider() -> DfTableSourceProvider {
     )
 }
 
-/// A classic histogram function above the cut is the split's: `histogram_quantile` reads each
-/// histogram off the bucket series the merge produced, which are the ones the statement's input
-/// would have produced in one execution, so the statement is answered by the merge over the partial
-/// producer instead of falling back to the existing plan.
+/// Two classic-histogram functions over raw series, each admitted as one native operand: a
+/// `histogram_quantile` reads each histogram off the bucket series that share its other labels and
+/// drops `le`, so neither operand keeps `le` in its binding nor in the statement's output.
 #[tokio::test]
 async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching() {
     let provider = native_classic_histogram_provider().await;
@@ -3842,23 +3831,6 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
     }
 }
 
-#[tokio::test]
-async fn native_fused_histogram_quantile_over_aggregate_splits() {
-    let query = "histogram_quantile(0.99, sum by (tag_0) (rate(some_metric[5m])))";
-    let plan = build_native_fused_plan(query, true).await;
-    let display = plan.display_indent().to_string();
-    assert!(
-        find_aggregate_finalize(&plan).is_some(),
-        "`{query}` must be answered by a split aggregate: {display}"
-    );
-    assert!(
-        find_fused_series(&plan).is_some(),
-        "`{query}` must keep the producer that exports the state: {display}"
-    );
-    assert!(display.contains("AggregateFinalize: "), "{display}");
-    assert!(display.contains("histogram_quantile"), "{display}");
-}
-
 /// A shape the split cannot keep correct keeps the existing plan: a binary operation whose sibling
 /// is data would match one side's series before the merge, a sibling a call computes has no native
 /// node at all, and a group by a value field cannot be named by the state rows. A literal scalar
@@ -3885,8 +3857,16 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;
-        assert!(find_fused_series(&native).is_none(), "`{query}`");
-        assert!(find_aggregate_finalize(&native).is_none(), "`{query}`");
+        assert!(
+            find_fused_series(&native).is_none(),
+            "`{query}`: {}",
+            native.display_indent()
+        );
+        assert!(
+            find_final_split(&native).is_none(),
+            "`{query}`: {}",
+            native.display_indent()
+        );
         assert_eq!(
             native.display_indent().to_string(),
             without_flag.display_indent().to_string(),
@@ -3895,7 +3875,63 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     }
 }
 
-/// Reversed clamp bounds are accepted by the native planner.
+/// A suffix that reads a whole vector cannot fuse into a partition-local `Final`, so the split
+/// declines the statement: it neither exports aggregate state nor runs a `Final` aggregate.
+///
+/// Each of these shapes answers only from every group at one instant. A `Final` aggregate's
+/// partition owns some of the groups, so ranking (`topk`), reading a classic histogram's bucket
+/// series, matching two vectors by label, or folding the merged values again would each answer
+/// from a part of the vector. They are declined rather than planned wrongly.
+///
+/// What they fall back to is not asserted: the segmentation route answers some of them, and the
+/// point is only that none of them becomes a split.
+#[tokio::test]
+async fn native_fused_split_declines_a_whole_vector_suffix() {
+    for (suffix, declined, splits) in [
+        // Ranks the whole vector: the winner may be in a group this partition does not own.
+        (
+            "topk",
+            "topk(1, sum by (tag_0) (some_metric))",
+            "sum by (tag_0) (some_metric)",
+        ),
+        // A second fold over the merged values would have to become its own state split.
+        (
+            "a second aggregate",
+            "sum(avg(some_metric) by (tag_0))",
+            "avg(some_metric) by (tag_0)",
+        ),
+        // Reads the bucket series that share a label set, which no partition owns whole.
+        (
+            "a classic histogram",
+            "histogram_quantile(0.99, sum by (tag_0) (rate(some_metric[5m])))",
+            "sum by (tag_0) (rate(some_metric[5m]))",
+        ),
+    ] {
+        // The control first: the same fold without the suffix is a split, so the refusal below is
+        // about the suffix and not about a fold this route never takes.
+        let control = build_native_fused_plan(splits, true).await;
+        assert!(
+            find_final_split(&control).is_some(),
+            "{suffix}: `{splits}` must still split, or the refusal proves nothing: {}",
+            control.display_indent()
+        );
+
+        let declined_plan = build_native_fused_plan(declined, true).await;
+        assert!(
+            find_final_split(&declined_plan).is_none(),
+            "{suffix}: `{declined}` must not split: {}",
+            declined_plan.display_indent()
+        );
+    }
+}
+
+/// `clamp` is not a function the existing planner has a kernel for, so an aggregate over it fails
+/// while the legacy plan is being built - before either route is chosen, and the same way on both.
+///
+/// The native route only reads the legacy plan's column names, which means it inherits that refusal
+/// rather than answering a query the existing path would reject. Both the split template
+/// (`clamp(x, 1, 2)`) and the empty range (`clamp(x, 2, 1)`) fail here, so neither is claimed as
+/// supported.
 #[tokio::test]
 async fn native_fused_clamp_reversed_bounds_are_planned_natively() {
     let native = build_native_fused_plan("sum(clamp(some_metric, 2, 1))", true).await;
@@ -3968,10 +4004,7 @@ async fn native_fused_aggregate_falls_back_to_legacy_plan() {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
         assert!(!display.contains("FusedSeries"), "{query}: {display}");
-        assert!(
-            !display.contains("AggregateFinalize:"),
-            "{query}: {display}"
-        );
+        assert!(find_final_split(&plan).is_none(), "{query}: {display}");
         assert!(display.contains("Aggregate:"), "{query}: {display}");
         let legacy = build_native_fused_plan(query, false).await;
         assert_eq!(display, legacy.display_indent().to_string(), "{query}");
