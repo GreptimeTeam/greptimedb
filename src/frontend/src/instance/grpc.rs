@@ -27,7 +27,8 @@ use api::v1::{
 use async_stream::try_stream;
 use async_trait::async_trait;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTargets,
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTarget,
+    PermissionTableTargets,
 };
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
@@ -85,6 +86,20 @@ impl GrpcQueryHandler for Instance {
                         Some(&ctx.current_schema()),
                     )
                     .context(PermissionSnafu)?;
+
+                if let Some(checker) = self.plugins.get::<PermissionCheckerRef>()
+                    && checker.uses_table_targets()
+                {
+                    let targets = checker.grpc_table_targets(
+                        &request,
+                        ctx.current_catalog(),
+                        &ctx.current_schema(),
+                    );
+                    let targets = self.resolve_query_permission_targets(targets, &ctx)
+                        .await.map_err(BoxedError::new).context(ExternalSnafu)?;
+                    self.check_table_permission(&ctx, PermissionReq::GrpcRequest(&request), targets)
+                        .context(PermissionSnafu)?;
+                }
             }
 
             let output = match request {
@@ -438,6 +453,23 @@ impl Instance {
                         .with_context(|| TableNotFoundSnafu {
                             table_name: table_name.to_string(),
                         })?;
+
+                    let mut target = PermissionTableTarget::new(
+                        &table_name.catalog_name,
+                        &table_name.schema_name,
+                        &table_name.table_name,
+                    );
+                    target.is_physical_metric_table = table.table_info().is_physical_table();
+                    plugins.get::<PermissionCheckerRef>().as_ref()
+                        .check_permission_with_table_targets(
+                            ctx.current_user(),
+                            PermissionReq::BulkInsert {
+                                catalog: &table_name.catalog_name,
+                                schema: &table_name.schema_name,
+                                table: &table_name.table_name,
+                            },
+                            PermissionTableTargets::resolved(vec![target]),
+                        ).context(PermissionSnafu)?;
 
                     // Check permissions for the table
                     let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();

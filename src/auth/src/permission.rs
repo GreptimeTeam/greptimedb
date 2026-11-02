@@ -34,6 +34,9 @@ pub struct PermissionTableTarget {
     pub catalog: String,
     pub schema: String,
     pub table: String,
+    /// Set from catalog metadata, never from a client-supplied table name.
+    /// Physical metric tables contain data belonging to multiple logical tables.
+    pub is_physical_metric_table: bool,
 }
 
 impl PermissionTableTarget {
@@ -47,6 +50,7 @@ impl PermissionTableTarget {
             catalog: catalog.into(),
             schema: schema.into(),
             table: table.into(),
+            is_physical_metric_table: false,
         }
     }
 }
@@ -183,6 +187,11 @@ pub enum PermissionReq<'a> {
     GrpcRequest(&'a Request),
     SqlStatement(&'a Statement),
     Action(PermissionAction),
+    /// Enumerates a schema's metadata without accessing any table data.
+    SchemaRead {
+        catalog: &'a str,
+        schema: &'a str,
+    },
     BulkInsert {
         catalog: &'a str,
         schema: &'a str,
@@ -199,6 +208,7 @@ impl<'a> PermissionReq<'a> {
             }
             PermissionReq::SqlStatement(stmt) => stmt.is_readonly(),
             PermissionReq::Action(action) => action.access_mode() == AccessMode::Read,
+            PermissionReq::SchemaRead { .. } => true,
 
             PermissionReq::GrpcRequest(_) | PermissionReq::BulkInsert { .. } => false,
         }
@@ -239,6 +249,17 @@ pub trait PermissionChecker: Send + Sync {
     /// the `targets` passed to [`Self::check_permission_with_table_targets`].
     fn uses_table_targets(&self) -> bool {
         true
+    }
+
+    /// Extracts user-visible gRPC targets before the frontend classifies them
+    /// using catalog metadata. Unrecognized requests must fail closed.
+    fn grpc_table_targets(
+        &self,
+        _request: &Request,
+        _catalog: &str,
+        _schema: &str,
+    ) -> PermissionTableTargets {
+        PermissionTableTargets::Unresolved
     }
 
     /// Checks the operation privilege and its resolved user-visible table targets.
@@ -293,6 +314,18 @@ impl PermissionChecker for Option<&PermissionCheckerRef> {
         match self {
             Some(checker) => checker.uses_table_targets(),
             None => false,
+        }
+    }
+
+    fn grpc_table_targets(
+        &self,
+        request: &Request,
+        catalog: &str,
+        schema: &str,
+    ) -> PermissionTableTargets {
+        match self {
+            Some(checker) => checker.grpc_table_targets(request, catalog, schema),
+            None => PermissionTableTargets::Unresolved,
         }
     }
 
@@ -384,6 +417,20 @@ mod tests {
             _req: PermissionReq,
         ) -> Result<PermissionResp> {
             Ok(PermissionResp::Reject)
+        }
+
+        fn grpc_table_targets(
+            &self,
+            request: &Request,
+            catalog: &str,
+            schema: &str,
+        ) -> PermissionTableTargets {
+            match request {
+                Request::RowInserts(requests) => {
+                    PermissionTableTargets::from_row_insert_requests(catalog, schema, requests)
+                }
+                _ => PermissionTableTargets::Unresolved,
+            }
         }
 
         fn check_permission_with_table_targets(
@@ -600,8 +647,8 @@ mod tests {
 
     #[test]
     fn test_table_target_permission_forwarding() {
-        let checker: PermissionCheckerRef = Arc::new(TargetAwarePermissionChecker);
-        let checker = Some(&checker);
+        let inner_checker: PermissionCheckerRef = Arc::new(TargetAwarePermissionChecker);
+        let checker = Some(&inner_checker);
         assert!(checker.uses_table_targets());
 
         let allowed = checker
@@ -658,6 +705,25 @@ mod tests {
 
         let no_checker: Option<&PermissionCheckerRef> = None;
         assert!(!no_checker.uses_table_targets());
+        for request in [
+            Request::RowInserts(RowInsertRequests {
+                inserts: vec![api::v1::RowInsertRequest {
+                    table_name: "allowed".to_string(),
+                    ..Default::default()
+                }],
+            }),
+            Request::RowInserts(RowInsertRequests::default()),
+            Request::Query(api::v1::QueryRequest::default()),
+        ] {
+            assert_eq!(
+                inner_checker.grpc_table_targets(&request, "catalog", "schema"),
+                checker.grpc_table_targets(&request, "catalog", "schema"),
+            );
+            assert_eq!(
+                PermissionTableTargets::Unresolved,
+                no_checker.grpc_table_targets(&request, "catalog", "schema"),
+            );
+        }
         let allowed = no_checker
             .check_permission_with_table_targets(
                 crate::userinfo_by_name(None),
