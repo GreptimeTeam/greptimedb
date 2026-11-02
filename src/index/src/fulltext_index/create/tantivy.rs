@@ -14,9 +14,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_telemetry::warn;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{OptionExt, ResultExt};
 use tantivy::indexer::NoMergePolicy;
@@ -37,6 +40,8 @@ pub const ROWID_FIELD_NAME: &str = "greptime_fulltext_rowid";
 pub struct TantivyFulltextIndexCreator {
     /// The tantivy index writer.
     writer: Option<IndexWriter>,
+    /// Retained across awaits so abort can join a cancelled finish operation.
+    finishing: Option<common_runtime::JoinHandle<Result<()>>>,
 
     /// The field for the text.
     text_field: tantivy::schema::Field,
@@ -47,28 +52,94 @@ pub struct TantivyFulltextIndexCreator {
     /// The current max row id.
     max_rowid: u64,
 
-    /// The directory path in filesystem to store the index.
-    path: PathBuf,
+    /// Shared with blocking work so cancellation cannot unlink an active index.
+    directory: Arc<TempIndexDirectory>,
 
     /// The configuration of the fulltext index.
     config: Config,
 }
 
+/// Owns an empty temporary directory, never a pre-existing index.
+struct TempIndexDirectory {
+    path: PathBuf,
+    removed: AtomicBool,
+}
+
+impl TempIndexDirectory {
+    fn create(path: PathBuf) -> Result<Arc<Self>> {
+        std::fs::create_dir_all(&path).context(IoSnafu)?;
+        if std::fs::read_dir(&path)
+            .context(IoSnafu)?
+            .next()
+            .transpose()
+            .context(IoSnafu)?
+            .is_some()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Tantivy temporary directory must be empty",
+            ))
+            .context(IoSnafu);
+        }
+        Ok(Arc::new(Self {
+            path,
+            removed: AtomicBool::new(false),
+        }))
+    }
+}
+
+impl Drop for TempIndexDirectory {
+    fn drop(&mut self) {
+        if self.removed.load(Ordering::Relaxed) {
+            return;
+        }
+        let path = self.path.clone();
+        common_runtime::spawn_blocking_global(move || {
+            if let Err(error) = std::fs::remove_dir_all(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(error; "Failed to remove temporary Tantivy directory: {}", path.display());
+            }
+        });
+    }
+}
+
+impl Drop for TantivyFulltextIndexCreator {
+    fn drop(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            let directory = self.directory.clone();
+            // IndexWriter::drop joins its threads; neither that nor directory
+            // removal may block the async task cancelling this creator.
+            common_runtime::spawn_blocking_global(move || {
+                drop(writer);
+                drop(directory);
+            });
+        }
+    }
+}
+
 impl TantivyFulltextIndexCreator {
     /// Creates a new `TantivyFulltextIndexCreator`.
     ///
-    /// The `path` is the directory path in filesystem to store the index.
+    /// `path` must be an empty temporary directory. It is removed after the
+    /// creator and any in-flight blocking work release it.
     pub async fn new(path: impl AsRef<Path>, config: Config, memory_limit: usize) -> Result<Self> {
-        tokio::fs::create_dir_all(path.as_ref())
+        let path = path.as_ref().to_path_buf();
+        // Keep creation and its guard in the same task: dropping the awaiting
+        // future must not race mkdir against cleanup.
+        common_runtime::spawn_blocking_global(move || Self::create(path, config, memory_limit))
             .await
-            .context(IoSnafu)?;
+            .context(JoinSnafu)?
+    }
 
+    fn create(path: PathBuf, config: Config, memory_limit: usize) -> Result<Self> {
+        let directory = TempIndexDirectory::create(path)?;
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field(TEXT_FIELD_NAME, TEXT);
         let rowid_field = schema_builder.add_u64_field(ROWID_FIELD_NAME, STORED);
         let schema = schema_builder.build();
 
-        let mut index = Index::create_in_dir(&path, schema).context(TantivySnafu)?;
+        let mut index = Index::create_in_dir(&directory.path, schema).context(TantivySnafu)?;
         index.settings_mut().docstore_compression = Compressor::Zstd(ZstdCompressor::default());
         index.set_tokenizers(config.build_tantivy_tokenizer());
 
@@ -82,12 +153,31 @@ impl TantivyFulltextIndexCreator {
 
         Ok(Self {
             writer: Some(writer),
+            finishing: None,
             text_field,
             rowid_field,
             max_rowid: 0,
-            path: path.as_ref().to_path_buf(),
+            directory,
             config,
         })
+    }
+
+    async fn finish_writer(&mut self) -> Result<()> {
+        if self.finishing.is_none() {
+            let writer = self.writer.take().context(FinishedSnafu)?;
+            let directory = self.directory.clone();
+            self.finishing = Some(common_runtime::spawn_blocking_global(move || {
+                let _directory = directory;
+                // Declare the writer after the lease so error unwinding also
+                // drops/joins it before releasing the directory.
+                let mut writer = writer;
+                writer.commit().context(TantivySnafu)?;
+                writer.wait_merging_threads().context(TantivySnafu)
+            }));
+        }
+        let completed = self.finishing.as_mut().context(FinishedSnafu)?.await;
+        self.finishing.take();
+        completed.context(JoinSnafu)?
     }
 
     fn sanitize_memory_limit(memory_limit: usize) -> usize {
@@ -116,13 +206,7 @@ impl FulltextIndexCreator for TantivyFulltextIndexCreator {
         blob_key: &str,
         put_options: PutOptions,
     ) -> Result<u64> {
-        let mut writer = self.writer.take().context(FinishedSnafu)?;
-        common_runtime::spawn_blocking_global(move || {
-            writer.commit().context(TantivySnafu)?;
-            writer.wait_merging_threads().context(TantivySnafu)
-        })
-        .await
-        .context(JoinSnafu)??;
+        self.finish_writer().await?;
 
         let property_key = KEY_FULLTEXT_CONFIG.to_string();
         let property_value = serde_json::to_string(&self.config).context(SerializeToJsonSnafu)?;
@@ -130,7 +214,7 @@ impl FulltextIndexCreator for TantivyFulltextIndexCreator {
         puffin_writer
             .put_dir(
                 blob_key,
-                self.path.clone(),
+                self.directory.path.clone(),
                 put_options,
                 HashMap::from([(property_key, property_value)]),
             )
@@ -140,15 +224,15 @@ impl FulltextIndexCreator for TantivyFulltextIndexCreator {
     }
 
     async fn abort(&mut self) -> Result<()> {
-        let mut writer = self.writer.take().context(FinishedSnafu)?;
-        common_runtime::spawn_blocking_global(move || {
-            writer.commit().context(TantivySnafu)?;
-            writer.wait_merging_threads().context(TantivySnafu)
-        })
-        .await
-        .context(JoinSnafu)??;
-
-        tokio::fs::remove_dir_all(&self.path).await.context(IoSnafu)
+        if self.writer.is_some() || self.finishing.is_some() {
+            self.finish_writer().await?;
+        }
+        match tokio::fs::remove_dir_all(&self.directory.path).await {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            removed => removed.context(IoSnafu)?,
+        }
+        self.directory.removed.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     fn memory_usage(&self) -> usize {
@@ -171,7 +255,10 @@ mod tests {
     use super::*;
     use crate::fulltext_index::Analyzer;
 
-    struct MockPuffinWriter;
+    #[derive(Default)]
+    struct MockPuffinWriter {
+        blocked: Option<Arc<tokio::sync::Notify>>,
+    }
 
     #[async_trait]
     impl PuffinWriter for MockPuffinWriter {
@@ -191,10 +278,15 @@ mod tests {
         async fn put_dir(
             &mut self,
             _key: &str,
-            _dir: PathBuf,
+            dir: PathBuf,
             _options: PutOptions,
             _properties: HashMap<String, String>,
         ) -> puffin::error::Result<u64> {
+            if let Some(blocked) = &self.blocked {
+                assert!(dir.join("meta.json").exists());
+                blocked.notify_one();
+                futures::future::pending::<()>().await;
+            }
             Ok(0)
         }
         fn set_footer_lz4_compressed(&mut self, _lz4_compressed: bool) {
@@ -206,6 +298,116 @@ mod tests {
         }
     }
 
+    async fn assert_directory_removed(path: &Path) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while tokio::fs::try_exists(path).await.unwrap() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("temporary Tantivy directory leaked");
+    }
+
+    #[tokio::test]
+    async fn test_creator_drop_cleans_temporary_files() {
+        for stage in ["active", "finished", "aborted"] {
+            let root = create_temp_dir("tantivy-drop-");
+            let path = root.path().join("index");
+            let mut creator = TantivyFulltextIndexCreator::new(&path, Config::default(), 1)
+                .await
+                .unwrap();
+            creator.push_text("indexed text").await.unwrap();
+            assert!(path.join("meta.json").exists());
+            match stage {
+                "finished" => {
+                    creator
+                        .finish(
+                            &mut MockPuffinWriter::default(),
+                            "index",
+                            PutOptions::default(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                "aborted" => {
+                    creator.abort().await.unwrap();
+                }
+                _ => {}
+            }
+            drop(creator);
+            assert_directory_removed(&path).await;
+            assert!(root.path().exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_abort_after_cancelled_finish_cleans_temporary_files() {
+        let root = create_temp_dir("tantivy-cancel-finish-");
+        let path = root.path().join("index");
+        let mut creator = TantivyFulltextIndexCreator::new(&path, Config::default(), 1)
+            .await
+            .unwrap();
+        creator.push_text("indexed text").await.unwrap();
+        let blocked = Arc::new(tokio::sync::Notify::new());
+        let mut writer = MockPuffinWriter {
+            blocked: Some(blocked.clone()),
+        };
+        {
+            let finishing = creator.finish(&mut writer, "index", PutOptions::default());
+            tokio::pin!(finishing);
+            tokio::select! {
+                _ = blocked.notified() => {}
+                result = &mut finishing => panic!("finish did not reach the blocked upload: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("finish stalled"),
+            }
+        }
+        creator.abort().await.unwrap();
+        creator.abort().await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_detached_initialization_cleans_its_result() {
+        let root = create_temp_dir("tantivy-detached-init-");
+        let path = root.path().join("index");
+        let creating_path = path.clone();
+        let (ready, initialized) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        // The real constructor runs on the blocking pool. Detaching its handle
+        // must clean even if cancellation happens before the result is delivered.
+        let creating = common_runtime::spawn_blocking_global(move || {
+            let creator =
+                TantivyFulltextIndexCreator::create(creating_path, Config::default(), 1).unwrap();
+            ready.send(()).unwrap();
+            released.recv().unwrap();
+            creator
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), initialized)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(path.join("meta.json").exists());
+        drop(creating);
+        release.send(()).unwrap();
+        assert_directory_removed(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_initialization_preserves_nonempty_directory() {
+        let root = create_temp_dir("tantivy-existing-");
+        let sentinel = root.path().join("existing");
+        tokio::fs::write(&sentinel, "must survive").await.unwrap();
+        assert!(
+            TantivyFulltextIndexCreator::new(root.path(), Config::default(), 1)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            "must survive",
+            tokio::fs::read_to_string(&sentinel).await.unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn test_creator_basic() {
         let memory_limits = [1, 64_000_000, usize::MAX];
@@ -215,7 +417,7 @@ mod tests {
 
             let texts = vec!["hello", "world", "hello, world", "foo!", "Bar"];
             let config = Config::default();
-            build_index(&texts, temp_dir.path(), config, memory_limit).await;
+            let _creator = build_index(&texts, temp_dir.path(), config, memory_limit).await;
 
             let cases = [
                 ("hello", vec![0u32, 2]),
@@ -239,7 +441,7 @@ mod tests {
                 case_sensitive: true,
                 ..Config::default()
             };
-            build_index(&texts, temp_dir.path(), config, memory_limit).await;
+            let _creator = build_index(&texts, temp_dir.path(), config, memory_limit).await;
 
             let cases = [
                 ("hello", vec![0u32, 2]),
@@ -267,7 +469,7 @@ mod tests {
                 analyzer: Analyzer::Chinese,
                 ..Config::default()
             };
-            build_index(&texts, temp_dir.path(), config, memory_limit).await;
+            let _creator = build_index(&texts, temp_dir.path(), config, memory_limit).await;
 
             let cases = [
                 ("你好", vec![0u32, 2, 3]),
@@ -291,7 +493,7 @@ mod tests {
                 case_sensitive: true,
                 analyzer: Analyzer::Chinese,
             };
-            build_index(&texts, temp_dir.path(), config, memory_limit).await;
+            let _creator = build_index(&texts, temp_dir.path(), config, memory_limit).await;
 
             let cases = [
                 ("你好", vec![0u32, 2, 3]),
@@ -307,7 +509,12 @@ mod tests {
         }
     }
 
-    async fn build_index(texts: &[&str], path: &Path, config: Config, memory_limit: usize) {
+    async fn build_index(
+        texts: &[&str],
+        path: &Path,
+        config: Config,
+        memory_limit: usize,
+    ) -> TantivyFulltextIndexCreator {
         let mut creator = TantivyFulltextIndexCreator::new(path, config, memory_limit)
             .await
             .unwrap();
@@ -315,9 +522,10 @@ mod tests {
             creator.push_text(text).await.unwrap();
         }
         creator
-            .finish(&mut MockPuffinWriter, "", PutOptions::default())
+            .finish(&mut MockPuffinWriter::default(), "", PutOptions::default())
             .await
             .unwrap();
+        creator
     }
 
     async fn query_and_check(path: &Path, config: Config, cases: &[(&str, Vec<u32>)]) {

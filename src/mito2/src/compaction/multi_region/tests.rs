@@ -24,6 +24,7 @@ use datatypes::arrow::datatypes::{DataType, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use futures::TryStreamExt;
+use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use partition::expr::col;
 use partition::multi_dim::MultiDimPartitionRule;
 use store_api::codec::PrimaryKeyEncoding;
@@ -1356,6 +1357,213 @@ async fn assert_spill_cleaned(path: &std::path::Path) {
     })
     .await
     .expect("attempt spill resources leaked");
+}
+
+struct BlockIndexedSstWrite {
+    inner: oio::Writer,
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl oio::Write for BlockIndexedSstWrite {
+    async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+        self.inner.write(buffer).await?;
+        self.started.notify_one();
+        futures::future::pending().await
+    }
+
+    async fn close(&mut self) -> mock::Result<mock::Metadata> {
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> mock::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+struct FailIndexSibling {
+    protection: Arc<Protection>,
+    fail: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl SstWriteGuard for FailIndexSibling {
+    async fn before_create(&self, file_id: RegionFileId) -> Result<()> {
+        if file_id.region_id().region_sequence() == 1 {
+            self.fail.notified().await;
+            return InvalidMultiRegionCompactionSnafu {
+                reason: "injected indexed sibling failure",
+            }
+            .fail();
+        }
+        self.protection.before_create(file_id).await
+    }
+}
+
+#[rstest::rstest]
+#[case::cancel(false)]
+#[case::sibling_failure(true)]
+#[tokio::test]
+async fn interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibling: bool) {
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{
+        ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions,
+    };
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+
+    let mut fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
+        ["000", "020"]
+            .into_iter()
+            .map(|tag| {
+                let rows = if tag == "000" { 262_144 } else { 1 };
+                let batch = new_record_batch_with_custom_sequence(&[tag, "series"], 0, rows, 5);
+                let mut columns = batch.columns().to_vec();
+                // Exceed both the Arrow writer's internal buffer and the object
+                // store chunk, forcing a write before EOF/index finish.
+                let mut rng = 0x1234_5678_9abc_def0_u64;
+                columns[2] = Arc::new(UInt64Array::from_iter_values((0..rows).map(|_| {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    rng
+                })));
+                RecordBatch::try_new(batch.schema(), columns).unwrap()
+            })
+            .collect()
+    })
+    .await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let notifying = started.clone();
+    let layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _, inner| {
+            if path.contains("1_0000000000/") && path.ends_with(".parquet") {
+                Box::new(BlockIndexedSstWrite {
+                    inner,
+                    started: notifying.clone(),
+                }) as oio::Writer
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    fixture.layer = Arc::new(AccessLayer::new(
+        fixture.layer.table_dir(),
+        fixture.layer.path_type(),
+        fixture.layer.object_store().clone().layer(layer),
+        fixture.layer.puffin_manager_factory().clone(),
+        fixture.layer.intermediate_manager().clone(),
+    ));
+    let mut plan = fixture.plan(2);
+    plan.memory_limit = 1024 * 1024;
+    for target in plan.targets.values_mut() {
+        let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
+        builder.push_column_metadata(ColumnMetadata {
+            column_id: 10,
+            semantic_type: api::v1::SemanticType::Field,
+            column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), false)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::String(
+                    "indexed text".into(),
+                ))))
+                .unwrap()
+                .with_fulltext_options(FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::English,
+                    false,
+                    FulltextBackend::Tantivy,
+                    1,
+                    0.01,
+                ))
+                .unwrap(),
+        });
+        target.metadata = Arc::new(builder.build().unwrap());
+    }
+    let (mut context, protection) = fixture.context(None);
+    let cancellation = context.cancellation.clone();
+    let fail = Arc::new(tokio::sync::Notify::new());
+    context.protection = Arc::new(FailIndexSibling {
+        protection: protection.clone(),
+        fail: fail.clone(),
+    });
+    let execution = compact_regions(plan, context);
+    tokio::pin!(execution);
+    tokio::select! {
+        _ = started.notified() => {}
+        result = &mut execution => panic!("writer did not block: {}", result.err().map_or("success".into(), |error| error.to_string())),
+        _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("indexed writer did not reach object storage"),
+    }
+    let protected = protection
+        .files
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(1, protected.len());
+    let file = protected[0];
+    let intm_dir = fixture
+        .env
+        .path
+        .path()
+        .join("table-index/__intm")
+        .join(file.region_id().as_u64().to_string())
+        .join(file.file_id().to_string());
+    let mut entries = tokio::fs::read_dir(&intm_dir).await.unwrap();
+    let mut tantivy_dirs = Vec::new();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        if entry.file_name().to_string_lossy().starts_with("fulltext-") {
+            assert!(
+                tokio::fs::try_exists(entry.path().join("meta.json"))
+                    .await
+                    .unwrap()
+            );
+            tantivy_dirs.push(entry.path());
+        }
+    }
+    assert_eq!(
+        1,
+        tantivy_dirs.len(),
+        "the test must cancel AFTER Tantivy initialization"
+    );
+    if fail_sibling {
+        fail.notify_one();
+    } else {
+        cancellation.cancel();
+    }
+    let error = tokio::time::timeout(Duration::from_secs(60), execution)
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+    if fail_sibling {
+        assert!(
+            matches!(&error, crate::error::Error::InvalidMultiRegionCompaction { reason, .. } if reason == "injected indexed sibling failure"),
+            "{error:?}"
+        );
+    } else {
+        assert!(matches!(
+            error,
+            crate::error::Error::CompactionCancelled { .. }
+        ));
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for path in &tantivy_dirs {
+            while tokio::fs::try_exists(path).await.unwrap() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    })
+    .await
+    .expect("cancelled worker leaked Tantivy intermediate files");
+    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
+    // Attempt cleanup must not delete sources or protected SSTs owned by the caller.
+    for id in [fixture.source.file_id(), file] {
+        let path = crate::sst::location::sst_file_path(
+            fixture.layer.table_dir(),
+            id,
+            fixture.layer.path_type(),
+        );
+        assert!(fixture.layer.object_store().exists(&path).await.unwrap());
+    }
 }
 
 struct CancelBeforeCreate(Arc<CancellationHandle>);
