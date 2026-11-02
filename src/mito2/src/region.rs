@@ -56,8 +56,8 @@ pub use utils::*;
 use crate::access_layer::AccessLayerRef;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
-    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
+    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, RegionNotFoundSnafu,
+    RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::lease::Deadline;
 use crate::manifest::action::{
@@ -1457,6 +1457,7 @@ impl ManifestContext {
         committed.index_version = updated.index_version;
 
         let edit = crate::manifest::action::RegionEdit {
+            table_compaction: None,
             files_to_add: vec![committed.clone()],
             files_to_remove: Vec::new(),
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
@@ -1563,6 +1564,27 @@ impl ManifestContext {
             let RegionMetaAction::Edit(edit) = &action else {
                 continue;
             };
+
+            // A plan can be accepted before Adopt installs its Version, even after
+            // the manifest reclassification. Fence stale ordinary edits under the
+            // same lock as publication, including overwrites using the old file ID.
+            if edit.table_compaction.is_none() {
+                ensure!(
+                    edit.files_to_add
+                        .iter()
+                        .chain(&edit.files_to_remove)
+                        .all(|file| {
+                            file.level != crate::sst::file::LEVEL_SHARED
+                                && manifest.files.get(&file.file_id).is_none_or(|current| {
+                                    current.level != crate::sst::file::LEVEL_SHARED
+                                })
+                        }),
+                    InvalidRequestSnafu {
+                        region_id: manifest.metadata.region_id,
+                        reason: "Ordinary manifest edits cannot modify shared SSTs",
+                    }
+                );
+            }
 
             // Checks whether the region is truncated.
             let Some(truncated_entry_id) = manifest.truncated_entry_id else {
@@ -2419,6 +2441,7 @@ mod tests {
 
     fn empty_edit() -> RegionEdit {
         RegionEdit {
+            table_compaction: None,
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),
             timestamp_ms: None,
@@ -2455,6 +2478,7 @@ mod tests {
 
         let file_id = FileId::random();
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+            table_compaction: None,
             files_to_add: vec![crate::sst::file::FileMeta {
                 region_id: region.region_id,
                 file_id,

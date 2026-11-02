@@ -192,7 +192,11 @@ impl<S> RegionWorkerLoop<S> {
                 .levels()
                 .iter()
                 .flat_map(|level| level.files.iter())
-                .filter(|(_, handle)| !handle.is_deleted() && !handle.compacting())
+                .filter(|(_, handle)| {
+                    !handle.is_deleted()
+                        && !handle.compacting()
+                        && handle.level() < crate::sst::file::LEVEL_SHARED
+                })
                 .map(|(id, handle)| (*id, handle.clone()))
                 .collect();
             let snapshot = IndexBuildSnapshot {
@@ -386,6 +390,7 @@ impl<S> RegionWorkerLoop<S> {
         if is_current {
             region.version_control.apply_edit(
                 Some(RegionEdit {
+                    table_compaction: None,
                     files_to_add: vec![file_meta.clone()],
                     files_to_remove: Vec::new(),
                     timestamp_ms: None,

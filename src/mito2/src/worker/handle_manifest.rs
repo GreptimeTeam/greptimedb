@@ -105,6 +105,7 @@ impl RegionEditQueue {
                 && edit.flushed_entry_id.is_none()
                 && edit.flushed_sequence.is_none()
                 && edit.committed_sequence.is_none()
+                && edit.table_compaction.is_none()
         }
 
         let mut merged = self.requests.pop_front()?;
@@ -315,17 +316,77 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters,
             preload_sst_cache,
         } = request;
-        let file_sequence = region.version_control.current().last_sequence + 1;
-        edit.committed_sequence = Some(file_sequence);
-
-        // Generic region edits (direct/import/staging) assign a new destination
-        // sequence domain but cannot prove or rewrite the physical per-row sequence
-        // column. The added files are therefore atomic/untrusted: clear the
-        // `preserve_row_sequence` marker so exact sequence-range scans fail closed
-        // until the scan reaches the assigned max sequence.
-        for file in &mut edit.files_to_add {
-            file.sequence = NonZeroU64::new(file_sequence);
-            file.preserve_row_sequence = false;
+        if let Err(error) = validate_edit_lane(&region, &edit) {
+            let error = Arc::new(error);
+            waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
+            return;
+        }
+        {
+            let current = region.version_control.current();
+            let is_remap = edit.table_compaction.is_some();
+            let existing_sequence = |file: &crate::sst::file::FileMeta| {
+                (is_remap && file.level == crate::sst::file::LEVEL_SHARED)
+                    .then(|| {
+                        current
+                            .version
+                            .table_compaction
+                            .registrations
+                            .get(&file.file_id().to_string())
+                    })
+                    .flatten()
+                    .and_then(|receipt| receipt.file.sequence)
+            };
+            // In-place repartition must not re-admit a source already known to this
+            // target, including a retired receipt that the copy explicitly restores.
+            let needs_admission = !is_remap
+                || edit
+                    .files_to_add
+                    .iter()
+                    .any(|file| existing_sequence(file).is_none());
+            let file_sequence = if needs_admission {
+                let Some(sequence) = current.last_sequence.checked_add(1) else {
+                    waiters.reply_with(|| {
+                        crate::error::InvalidRequestSnafu {
+                            region_id,
+                            reason: "Region sequence exhausted",
+                        }
+                        .fail()
+                    });
+                    return;
+                };
+                edit.committed_sequence = Some(sequence);
+                NonZeroU64::new(sequence)
+            } else {
+                None
+            };
+            // Direct/import/staging edits cannot prove physical row sequences in
+            // the destination domain, so exact sequence-range scans stay fail-closed.
+            for file in &mut edit.files_to_add {
+                file.sequence = existing_sequence(file).or(file_sequence);
+                file.preserve_row_sequence = false;
+            }
+            if let Some(action) = edit.table_compaction.as_deref_mut()
+                && let crate::manifest::table_compaction::TableCompactionAction::Remap { state } =
+                    action
+            {
+                if let Err(error) = state.merge_from(&region.version().table_compaction, region_id)
+                {
+                    let error = Arc::new(error);
+                    waiters
+                        .reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
+                    return;
+                }
+                let mut files = region
+                    .version()
+                    .ssts
+                    .levels()
+                    .iter()
+                    .flat_map(|level| level.files())
+                    .map(|file| file.meta_ref().clone())
+                    .collect::<Vec<_>>();
+                files.extend(edit.files_to_add.iter().cloned());
+                state.reconcile_files(&files);
+            }
         }
 
         // Allow retrieving `is_staging` before spawn the edit region task.
@@ -341,7 +402,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| Err(e.clone()).context(EditRegionSnafu { region_id }));
             return;
         }
-        region.version_control.update_last_sequence(file_sequence);
+        if let Some(sequence) = edit.committed_sequence {
+            region.version_control.update_last_sequence(sequence);
+        }
 
         let request_sender = self.sender.clone();
         let cache_manager = self.cache_manager.clone();
@@ -363,6 +426,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region_id,
                 notify: BackgroundNotify::RegionEdit(RegionEditResult {
                     region_id,
+                    origin: region,
                     waiters,
                     edit,
                     result,
@@ -405,6 +469,37 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        if !Arc::ptr_eq(&region, &edit_result.origin) {
+            // The durable edit will be recovered by open. Never replay its old
+            // completion over newer receipts, or change the new incarnation's queues.
+            edit_result.waiters.reply_with(|| {
+                RegionNotFoundSnafu {
+                    region_id: edit_result.region_id,
+                }
+                .fail()
+            });
+            return;
+        }
+        let requires_reopen = edit_result.result.is_err()
+            && region
+                .manifest_ctx
+                .manifest_manager
+                .read()
+                .await
+                .is_stopped();
+        if let Err(error) = &edit_result.result
+            && requires_reopen
+        {
+            // An ambiguous table-protocol write requires reopen/replay. Keeping
+            // the old Version writable could discard an already durable receipt.
+            self.remove_region(edit_result.region_id).await;
+            edit_result.waiters.reply_with(|| {
+                Err(error.clone()).context(EditRegionSnafu {
+                    region_id: edit_result.region_id,
+                })
+            });
+            return;
+        }
         let need_compaction = if edit_result.is_staging {
             if edit_result.update_region_state {
                 // For staging regions, edits are not applied immediately,
@@ -416,7 +511,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         } else {
             let need_compaction = self.config.schedule_compaction_after_edit
                 && edit_result.result.is_ok()
-                && !edit_result.edit.files_to_add.is_empty();
+                && edit_result
+                    .edit
+                    .files_to_add
+                    .iter()
+                    .any(|file| file.level < crate::sst::file::LEVEL_SHARED);
 
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
@@ -555,6 +654,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // WAL after a restart skips everything the memtables held. The WAL must be
             // durable through that entry before the manifest names it.
             let edit = RegionEdit {
+                table_compaction: None,
                 files_to_add: Vec::new(),
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
@@ -672,6 +772,41 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
+fn validate_edit_lane(region: &MitoRegionRef, edit: &RegionEdit) -> Result<()> {
+    use crate::manifest::table_compaction::TableCompactionAction;
+    use crate::sst::file::{LEVEL_SHARED, MAX_LEVEL};
+    let region_id = region.region_id;
+    if let Some(TableCompactionAction::Remap { state }) = edit.table_compaction.as_deref() {
+        snafu::ensure!(
+            state.min_request_epoch >= region.version().table_compaction.min_request_epoch
+                && edit.files_to_add.iter().all(|file| file.level < MAX_LEVEL
+                    && (file.level != LEVEL_SHARED
+                        || state
+                            .registrations
+                            .contains_key(&file.file_id().to_string()))),
+            crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: "Invalid receipt staging promotion"
+            }
+        );
+        return Ok(());
+    }
+    let version = region.version();
+    let shared = &version.ssts.levels()[LEVEL_SHARED as usize].files;
+    snafu::ensure!(
+        edit.table_compaction.is_none()
+            && edit.files_to_add
+                .iter()
+                .chain(&edit.files_to_remove)
+                .all(|file| file.level < LEVEL_SHARED && !shared.contains_key(&file.file_id)),
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: "Shared SSTs require the table protocol"
+        }
+    );
+    Ok(())
+}
+
 /// Checks the edit, writes and applies it.
 async fn edit_region(
     region: &MitoRegionRef,
@@ -760,10 +895,25 @@ async fn edit_region(
         region_id, is_staging
     );
 
+    let carries_receipts = edit.table_compaction.is_some();
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
-    region
+    let result = region
         .manifest_ctx
         .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
-        .await
-        .map(|_| ())
+        .await;
+    if carries_receipts
+        && let Err(error) = &result
+        && error.may_have_persisted_manifest_update()
+    {
+        // Internal Remap imports the same durable fences as coordinator operations.
+        // Recover them before accepting another edit after an uncertain write.
+        region
+            .manifest_ctx
+            .manifest_manager
+            .write()
+            .await
+            .stop()
+            .await;
+    }
+    result.map(|_| ())
 }

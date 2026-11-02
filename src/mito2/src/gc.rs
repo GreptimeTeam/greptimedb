@@ -343,7 +343,7 @@ impl LocalGcWorker {
                 .await?;
             let RegionGcOutcome {
                 removed_files,
-                extension_cleanup_failed,
+                needs_retry,
             } = outcome;
             let index_files = removed_files
                 .iter()
@@ -356,9 +356,9 @@ impl LocalGcWorker {
                     RemovedFile::Index(_, _) => None,
                 })
                 .collect();
-            // Don't acknowledge the region as processed until extension cleanup
-            // succeeds; retry it next pass instead.
-            if extension_cleanup_failed {
+            // A deferred deletion batch or failed extension cleanup must not
+            // acknowledge the region as fully processed.
+            if needs_retry {
                 need_retry_regions.insert(*region_id);
             } else {
                 deleted_files.insert(*region_id, data_files);
@@ -387,21 +387,21 @@ impl LocalGcWorker {
 
 /// Per-region outcome of [`LocalGcWorker::do_region_gc`].
 ///
-/// `extension_cleanup_failed` records whether a registered extension's
-/// [`RegionHook::on_region_gc`] could not finish; the caller must then keep the
-/// region un-acknowledged (retry set) so the next GC pass replays the callback.
+/// Unfinished deletion or extension cleanup keeps the region in the retry set.
 pub(crate) struct RegionGcOutcome {
     /// Files physically deleted this pass.
     pub removed_files: Vec<RemovedFile>,
-    /// `true` if a registered extension's `on_region_gc` returned `Err`; the
-    /// caller retries the region next pass.
-    pub extension_cleanup_failed: bool,
+    /// Deletion was deferred, the snapshot changed, or extension cleanup failed.
+    pub needs_retry: bool,
 }
 
 impl LocalGcWorker {
     /// concurrency of listing files per region.
     /// This is used to limit the number of concurrent listing operations and speed up listing
     pub const CONCURRENCY_LIST_PER_FILES: usize = 1024;
+
+    /// Bounds remote deletion work between opportunities for manifest writers.
+    const MAX_FILES_PER_DELETE_BATCH: usize = 128;
 
     /// Perform GC for the region.
     /// 1. Get all the removed files in delta manifest files and their expel times
@@ -470,7 +470,7 @@ impl LocalGcWorker {
                     .inc();
                 return Ok(RegionGcOutcome {
                     removed_files: vec![],
-                    extension_cleanup_failed: false,
+                    needs_retry: false,
                 });
             }
             Some(manifest)
@@ -529,7 +529,7 @@ impl LocalGcWorker {
             .map(|file_ref| (file_ref.file_id, file_ref.index_version))
             .collect::<HashSet<_>>();
 
-        let deletable_files = self
+        let mut deletable_files = self
             .list_to_be_deleted_files(
                 region_id,
                 is_region_dropped,
@@ -540,8 +540,17 @@ impl LocalGcWorker {
             )
             .await?;
 
-        let unused_file_cnt = deletable_files.len();
-
+        if let Some(hook) = &self.hook {
+            let candidates = deletable_files
+                .iter()
+                .map(|file| RegionFileId::new(region_id, file.file_id()))
+                .collect::<Vec<_>>();
+            let protected = hook
+                .protected_sst_files(&self.access_layer, &candidates)
+                .await?;
+            deletable_files
+                .retain(|file| !protected.contains(&RegionFileId::new(region_id, file.file_id())));
+        }
         info!(
             "gc: for region{}{region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete count: {}",
             if region.is_none() {
@@ -568,11 +577,33 @@ impl LocalGcWorker {
         let _delete_timer = GC_DURATION_SECONDS
             .with_label_values(&["delete_files"])
             .start_timer();
-        self.delete_files(region_id, &deletable_files).await?;
+        let mut deleted_count = 0;
+        // Empty passes take no lock. One or multiple batches keep the same
+        // publication fence, but let queued writers run between remote deletes.
+        for batch in deletable_files.chunks(Self::MAX_FILES_PER_DELETE_BATCH) {
+            let manifest_guard = match &region {
+                Some(region) => Some(region.manifest_ctx.manifest_manager.read().await),
+                None => None,
+            };
+            if let (Some(guard), Some(snapshot)) = (&manifest_guard, &manifest)
+                && (guard.is_stopped()
+                    || guard.manifest().manifest_version != snapshot.manifest_version
+                    || region
+                        .as_ref()
+                        .is_some_and(|region| !matches!(region.state(), RegionRoleState::Leader(_))))
+            {
+                break;
+            }
+            self.delete_files(region_id, batch).await?;
+            deleted_count += batch.len();
+            drop(manifest_guard);
+        }
+        let deletion_deferred = deleted_count != deletable_files.len();
+        deletable_files.truncate(deleted_count);
 
         debug!(
             "Successfully deleted {} unused files for region {}",
-            unused_file_cnt, region_id
+            deleted_count, region_id
         );
 
         // Notify extensions so they can clean up sidecar files. Fire when there
@@ -622,7 +653,7 @@ impl LocalGcWorker {
 
         Ok(RegionGcOutcome {
             removed_files: deletable_files,
-            extension_cleanup_failed,
+            needs_retry: extension_cleanup_failed || deletion_deferred,
         })
     }
 

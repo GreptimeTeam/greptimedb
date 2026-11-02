@@ -693,6 +693,7 @@ async fn test_index_build_uses_physical_file_region_and_logical_manifest_region(
         .edit_region(
             target_region_id,
             RegionEdit {
+                table_compaction: None,
                 files_to_add: source_files.clone(),
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,

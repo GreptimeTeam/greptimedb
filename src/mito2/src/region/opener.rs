@@ -424,13 +424,16 @@ impl RegionOpener {
             .flushed_entry_id(flushed_entry_id)
             .build();
         let version_control = Arc::new(VersionControl::new(version));
-        let access_layer = Arc::new(AccessLayer::new(
-            self.table_dir.clone(),
-            self.path_type,
-            object_store,
-            self.puffin_manager_factory,
-            self.intermediate_manager,
-        ));
+        let access_layer = Arc::new(
+            AccessLayer::new(
+                self.table_dir.clone(),
+                self.path_type,
+                object_store,
+                self.puffin_manager_factory,
+                self.intermediate_manager,
+            )
+            .with_file_protection(self.hook.clone()),
+        );
         let now = self.time_provider.current_time_millis();
 
         Ok(Arc::new(MitoRegion {
@@ -558,13 +561,16 @@ impl RegionOpener {
             region_id, self.table_dir, self.options
         );
 
-        let access_layer = Arc::new(AccessLayer::new(
-            self.table_dir.clone(),
-            self.path_type,
-            object_store,
-            self.puffin_manager_factory.clone(),
-            self.intermediate_manager.clone(),
-        ));
+        let access_layer = Arc::new(
+            AccessLayer::new(
+                self.table_dir.clone(),
+                self.path_type,
+                object_store,
+                self.puffin_manager_factory.clone(),
+                self.intermediate_manager.clone(),
+            )
+            .with_file_protection(self.hook.clone()),
+        );
         let file_purger = create_file_purger(
             config.gc.enable,
             self.path_type,
@@ -786,6 +792,7 @@ pub(crate) fn version_builder_from_manifest(
     region_options: RegionOptions,
 ) -> VersionBuilder {
     VersionBuilder::new(metadata, mutable)
+        .table_compaction(manifest.table_compaction.clone())
         .add_files(file_purger, manifest.files.values().cloned())
         .flushed_entry_id(manifest.flushed_entry_id)
         .flushed_sequence(manifest.flushed_sequence)
@@ -1507,6 +1514,7 @@ mod tests {
 
     fn build_test_manifest(sst_format: FormatType) -> RegionManifest {
         RegionManifest {
+            table_compaction: Default::default(),
             metadata: Arc::new(sst_region_metadata()),
             files: HashMap::new(),
             removed_files: RemovedFilesRecord::default(),

@@ -23,6 +23,7 @@ use common_base::Plugins;
 use common_telemetry::init_default_ut_logging;
 use common_time::Timestamp;
 use futures::TryStreamExt;
+use object_store::layers::mock::{MockLayerBuilder, OpDelete, oio};
 use object_store::{Entry, ObjectStore, services};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine as _, RegionRole};
@@ -306,6 +307,7 @@ async fn test_gc_reclaims_obsolete_index_after_readers_and_linger_release(
             .update_manifest(
                 RegionLeaderState::Writable,
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                    table_compaction: None,
                     files_to_add: vec![meta],
                     files_to_remove: vec![],
                     timestamp_ms: Some(removed_at),
@@ -1155,6 +1157,355 @@ impl RegionHook for GcCountingHook {
         }
         Ok(())
     }
+}
+
+#[derive(Default)]
+struct DeleteBatchBarrier {
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    blocked: AtomicBool,
+}
+
+struct BlockingSstDeleter {
+    inner: oio::Deleter,
+    barrier: Arc<DeleteBatchBarrier>,
+}
+
+impl oio::Delete for BlockingSstDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> object_store::Result<()> {
+        if path.ends_with(".parquet") && !self.barrier.blocked.swap(true, Ordering::SeqCst) {
+            self.barrier.entered.notify_one();
+            self.barrier.resume.notified().await;
+        }
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> object_store::Result<()> {
+        self.inner.close().await
+    }
+}
+
+#[rstest::rstest]
+#[case::uncontended(false)]
+#[case::publication_between_batches(true)]
+#[tokio::test]
+async fn test_gc_batches_yield_to_publication_and_recheck(#[case] publish: bool) {
+    let barrier = Arc::new(DeleteBatchBarrier::default());
+    let factory_barrier = barrier.clone();
+    let layer = MockLayerBuilder::default()
+        .deleter_factory(Arc::new(move |inner| {
+            Box::new(BlockingSstDeleter {
+                inner,
+                barrier: factory_barrier.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            gc: GcConfig {
+                enable: true,
+                lingering_time: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let mut files = Vec::new();
+    let mut paths = Vec::new();
+    for _ in 0..=LocalGcWorker::MAX_FILES_PER_DELETE_BATCH {
+        let file = crate::sst::file::FileMeta {
+            region_id,
+            file_id: store_api::storage::FileId::random(),
+            ..Default::default()
+        };
+        let path = crate::sst::location::sst_file_path(
+            region.access_layer.table_dir(),
+            file.file_id(),
+            region.access_layer.path_type(),
+        );
+        region
+            .access_layer
+            .object_store()
+            .write(&path, Bytes::from_static(b"retired SST"))
+            .await
+            .unwrap();
+        paths.push(path);
+        files.push(file);
+    }
+    engine
+        .edit_region(
+            region_id,
+            crate::manifest::action::RegionEdit {
+                files_to_add: files.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    engine
+        .edit_region(
+            region_id,
+            crate::manifest::action::RegionEdit {
+                files_to_remove: files,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let refs = FileRefsManifest {
+        manifest_version: [(region_id, region.manifest_ctx.manifest_version().await)].into(),
+        file_refs: Default::default(),
+        cross_region_refs: Default::default(),
+    };
+    let worker = create_gc_worker(
+        &engine,
+        [(region_id, Some(region.clone()))].into(),
+        &refs,
+        false,
+    )
+    .await;
+    let (report, ()) = tokio::join!(worker.run(), async {
+        barrier.entered.notified().await;
+        if publish {
+            let update = region.manifest_ctx.update_manifest(
+                crate::region::RegionLeaderState::Writable,
+                crate::manifest::action::RegionMetaActionList::with_action(
+                    crate::manifest::action::RegionMetaAction::Edit(Default::default()),
+                ),
+                false,
+            );
+            tokio::pin!(update);
+            // Poll once so the writer is queued behind the first deletion batch.
+            assert!(futures::poll!(&mut update).is_pending());
+            barrier.resume.notify_one();
+            update.await.unwrap();
+        } else {
+            barrier.resume.notify_one();
+        }
+    });
+    let report = report.unwrap();
+    assert_eq!(publish, report.need_retry_regions.contains(&region_id));
+    assert_eq!(!publish, report.processed_regions.contains(&region_id));
+    let mut existing = 0;
+    for path in &paths {
+        existing += usize::from(region.access_layer.object_store().exists(path).await.unwrap());
+    }
+    assert_eq!(usize::from(publish), existing);
+    if publish {
+        let refs = FileRefsManifest {
+            manifest_version: [(region_id, region.manifest_ctx.manifest_version().await)].into(),
+            ..refs
+        };
+        let worker = create_gc_worker(
+            &engine,
+            [(region_id, Some(region.clone()))].into(),
+            &refs,
+            false,
+        )
+        .await;
+        let report = worker.run().await.unwrap();
+        assert!(report.processed_regions.contains(&region_id));
+        assert!(report.need_retry_regions.is_empty());
+        for path in &paths {
+            assert!(!region.access_layer.object_store().exists(path).await.unwrap());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProtectionOutcome {
+    Protected,
+    Unavailable,
+    PublishedDuringLookup,
+    Unprotected,
+}
+
+#[derive(Debug)]
+struct BlockingProtectionHook {
+    outcome: ProtectionOutcome,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl RegionHook for BlockingProtectionHook {
+    async fn protected_sst_files(
+        &self,
+        _access: &crate::access_layer::AccessLayer,
+        files: &[crate::sst::file::RegionFileId],
+    ) -> crate::error::Result<HashSet<crate::sst::file::RegionFileId>> {
+        self.entered.notify_one();
+        self.resume.notified().await;
+        match self.outcome {
+            ProtectionOutcome::Protected => Ok(files.iter().copied().collect()),
+            ProtectionOutcome::Unavailable => UnexpectedSnafu {
+                reason: "protection service unavailable",
+            }
+            .fail(),
+            _ => Ok(HashSet::new()),
+        }
+    }
+}
+
+#[rstest::rstest]
+#[case::protected(ProtectionOutcome::Protected)]
+#[case::unavailable(ProtectionOutcome::Unavailable)]
+#[case::published(ProtectionOutcome::PublishedDuringLookup)]
+#[case::unprotected(ProtectionOutcome::Unprotected)]
+#[tokio::test]
+async fn test_gc_table_compaction_protection_and_manifest_recheck(
+    #[case] outcome: ProtectionOutcome,
+) {
+    let mut env = TestEnv::new().await;
+    let hook = Arc::new(BlockingProtectionHook {
+        outcome,
+        entered: Default::default(),
+        resume: Default::default(),
+    });
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+    let engine = env
+        .create_engine_with_plugins(
+            MitoConfig {
+                schedule_compaction_after_edit: false,
+                gc: GcConfig {
+                    enable: true,
+                    lingering_time: None,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            plugins,
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let file = crate::sst::file::FileMeta {
+        region_id,
+        file_id: store_api::storage::FileId::random(),
+        ..Default::default()
+    };
+    let path = crate::sst::location::sst_file_path(
+        region.access_layer.table_dir(),
+        file.file_id(),
+        region.access_layer.path_type(),
+    );
+    region
+        .access_layer
+        .object_store()
+        .write(&path, Bytes::from_static(b"unreferenced SST"))
+        .await
+        .unwrap();
+    engine
+        .edit_region(
+            region_id,
+            crate::manifest::action::RegionEdit {
+                files_to_add: vec![file.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    engine
+        .edit_region(
+            region_id,
+            crate::manifest::action::RegionEdit {
+                files_to_remove: vec![file.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let refs = FileRefsManifest {
+        manifest_version: [(region_id, region.manifest_ctx.manifest_version().await)].into(),
+        file_refs: Default::default(),
+        cross_region_refs: Default::default(),
+    };
+    let worker = create_gc_worker(
+        &engine,
+        [(region_id, Some(region.clone()))].into(),
+        &refs,
+        false,
+    )
+    .await;
+    let temporary_refs = HashSet::new();
+    let (gc, ()) = tokio::join!(
+        worker.do_region_gc(region_id, Some(region.clone()), &temporary_refs),
+        async {
+            hook.entered.notified().await;
+            if matches!(outcome, ProtectionOutcome::PublishedDuringLookup) {
+                engine
+                    .edit_region(
+                        region_id,
+                        crate::manifest::action::RegionEdit {
+                            files_to_add: vec![file],
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            hook.resume.notify_one();
+        }
+    );
+    if matches!(outcome, ProtectionOutcome::Unavailable) {
+        assert!(gc.is_err());
+    } else {
+        let gc = gc.unwrap();
+        assert_eq!(
+            usize::from(matches!(outcome, ProtectionOutcome::Unprotected)),
+            gc.removed_files.len()
+        );
+    }
+    assert_eq!(
+        !matches!(outcome, ProtectionOutcome::Unprotected),
+        region
+            .access_layer
+            .object_store()
+            .exists(&path)
+            .await
+            .unwrap()
+    );
 }
 
 /// `on_region_gc` is **skipped** for a live region in **fast mode** (no full

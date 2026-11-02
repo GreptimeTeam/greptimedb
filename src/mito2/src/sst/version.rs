@@ -83,6 +83,11 @@ impl SstVersion {
         for file in files_to_add {
             let level = file.level;
             let new_index_version = file.index_version;
+            // A trusted L0 adoption changes classification, not the physical object.
+            // Detach the old handle without marking it deleted (old readers may hold it).
+            if level == crate::sst::file::LEVEL_SHARED {
+                levels[0].files.remove(&file.file_id);
+            }
             // If the file already exists, then we should only replace the handle when the index is outdated.
             levels[level as usize]
                 .files

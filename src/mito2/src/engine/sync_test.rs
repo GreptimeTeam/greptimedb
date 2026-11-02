@@ -203,6 +203,7 @@ async fn test_sync_after_flush_region_with_format(flat_format: bool) {
         .edit_region(
             region_id,
             crate::manifest::action::RegionEdit {
+                table_compaction: None,
                 files_to_add: vec![file],
                 files_to_remove: vec![],
                 timestamp_ms: None,

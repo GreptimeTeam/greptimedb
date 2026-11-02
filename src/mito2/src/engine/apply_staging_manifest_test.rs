@@ -854,6 +854,7 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
                     append_mode: None,
                 }),
                 RegionMetaAction::Edit(RegionEdit {
+                    table_compaction: None,
                     files_to_add: Vec::new(),
                     files_to_remove: Vec::new(),
                     timestamp_ms: None,

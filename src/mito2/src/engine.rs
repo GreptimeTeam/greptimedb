@@ -791,6 +791,12 @@ impl MitoEngine {
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
     (!edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty())
+        && edit.table_compaction.is_none()
+        && edit
+            .files_to_add
+            .iter()
+            .chain(&edit.files_to_remove)
+            .all(|file| file.level < crate::sst::file::LEVEL_SHARED)
         && matches!(
             edit,
             RegionEdit {
@@ -1844,6 +1850,7 @@ mod tests {
     fn test_is_valid_region_edit() {
         // Valid: has only "files_to_add"
         let edit = RegionEdit {
+            table_compaction: None,
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
             timestamp_ms: None,
@@ -1856,6 +1863,7 @@ mod tests {
 
         // Invalid: "files_to_add" and "files_to_remove" are both empty
         let edit = RegionEdit {
+            table_compaction: None,
             files_to_add: vec![],
             files_to_remove: vec![],
             timestamp_ms: None,
@@ -1868,6 +1876,7 @@ mod tests {
 
         // Valid: has only "files_to_remove"
         let edit = RegionEdit {
+            table_compaction: None,
             files_to_add: vec![],
             files_to_remove: vec![FileMeta::default()],
             timestamp_ms: None,
@@ -1880,6 +1889,7 @@ mod tests {
 
         // Valid: both "files_to_add" and "files_to_remove" are not empty
         let edit = RegionEdit {
+            table_compaction: None,
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![FileMeta::default()],
             timestamp_ms: None,
@@ -1896,6 +1906,7 @@ mod tests {
             files_to_remove: vec![],
             timestamp_ms: None,
             compaction_time_window: Some(Duration::from_secs(1)),
+            table_compaction: None,
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
@@ -1907,6 +1918,7 @@ mod tests {
             timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: Some(1),
+            table_compaction: None,
             flushed_sequence: None,
             committed_sequence: None,
         };
@@ -1918,6 +1930,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: Some(1),
+            table_compaction: None,
             committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));

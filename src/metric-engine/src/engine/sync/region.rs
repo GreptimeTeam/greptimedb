@@ -115,6 +115,7 @@ impl MetricEngineInner {
             .await?;
 
         let edit = RegionEdit {
+            table_compaction: None,
             files_to_add: vec![],
             files_to_remove: files_to_remove.clone(),
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),

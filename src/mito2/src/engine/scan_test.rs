@@ -3029,6 +3029,7 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
     // sequence fails closed in `files_allow_exact_sequence_range`, covered by
     // the unit test.)
     let edit = RegionEdit {
+        table_compaction: None,
         files_to_add: vec![FileMeta {
             region_id,
             file_id: FileId::random(),
@@ -3116,6 +3117,7 @@ async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
         .edit_region(
             region_id,
             RegionEdit {
+                table_compaction: None,
                 files_to_add: vec![FileMeta {
                     region_id: RegionId::new(1, 2),
                     file_id: FileId::random(),
@@ -4237,6 +4239,7 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input(
         .edit_region(
             region_id,
             RegionEdit {
+                table_compaction: None,
                 files_to_add: vec![unmarked],
                 files_to_remove: vec![],
                 timestamp_ms: None,

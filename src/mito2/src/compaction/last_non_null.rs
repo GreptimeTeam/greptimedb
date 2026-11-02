@@ -167,7 +167,10 @@ fn build_closed_outputs(
         };
         let output = expand_closure(output, &mut seeds, &seed_by_file, &mut remaining);
         // Defer the entire closure rather than truncate it around busy files.
-        if !output.inputs.iter().any(FileHandle::compacting)
+        if !output
+            .inputs
+            .iter()
+            .any(|file| file.compacting() || file.level() == crate::sst::file::LEVEL_SHARED)
             && inputs_precede_memtables(&output.inputs, limits.memtable_min_sequence)
         {
             outputs.push(output);

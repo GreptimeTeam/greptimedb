@@ -18,5 +18,6 @@ pub mod action;
 mod checkpointer;
 pub mod manager;
 pub mod storage;
+pub mod table_compaction;
 #[cfg(test)]
 mod tests;

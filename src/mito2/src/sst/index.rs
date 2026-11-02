@@ -1723,6 +1723,7 @@ mod tests {
             .update_manifest(
                 RegionLeaderState::Writable,
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                    table_compaction: None,
                     files_to_add: vec![file_meta.clone()],
                     files_to_remove: Vec::new(),
                     timestamp_ms: None,

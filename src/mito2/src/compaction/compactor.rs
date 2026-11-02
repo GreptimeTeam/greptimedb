@@ -26,7 +26,7 @@ use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
@@ -442,6 +442,7 @@ impl CompactionContext {
         merge_output: MergeOutput,
     ) -> Result<(RegionEdit, ManifestVersion)> {
         let edit = RegionEdit {
+            table_compaction: None,
             files_to_add: merge_output.files_to_add,
             files_to_remove: merge_output.files_to_remove,
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
@@ -587,6 +588,21 @@ fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
     crate::sst::file::known_max_input_sequence(inputs.iter().map(FileHandle::meta_ref))
 }
 
+fn validate_region_compaction_output(region_id: RegionId, output: &CompactionOutput) -> Result<()> {
+    ensure!(
+        output.output_level < crate::sst::file::LEVEL_SHARED
+            && output
+                .inputs
+                .iter()
+                .all(|file| file.level() < crate::sst::file::LEVEL_SHARED),
+        error::InvalidRequestSnafu {
+            region_id,
+            reason: "Region compaction cannot consume or produce shared SSTs",
+        }
+    );
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl SstMerger for DefaultSstMerger {
     async fn merge_single_output(
@@ -596,6 +612,7 @@ impl SstMerger for DefaultSstMerger {
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = context.region_id;
+        validate_region_compaction_output(region_id, &output)?;
         let index_options = context.version_options.index_options.clone();
         let append_mode = context.version_options.append_mode;
         let merge_mode = context.version_options.merge_mode();
@@ -827,6 +844,19 @@ where
         compaction_region: &CompactionRegion,
         mut picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
+        for output in &picker_output.outputs {
+            validate_region_compaction_output(compaction_region.region_id, output)?;
+        }
+        ensure!(
+            picker_output
+                .expired_ssts
+                .iter()
+                .all(|file| file.level() < crate::sst::file::LEVEL_SHARED),
+            error::InvalidRequestSnafu {
+                region_id: compaction_region.region_id,
+                reason: "Region compaction cannot expire shared SSTs",
+            }
+        );
         let internal_parallelism = compaction_region.max_parallelism.max(1);
         let compaction_time_window = picker_output.time_window_size;
         let region_id = compaction_region.region_id;
@@ -1107,6 +1137,7 @@ mod tests {
                 .await
                 .update(
                     RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                        table_compaction: None,
                         committed_sequence: Some(committed_sequence),
                         files_to_add: vec![],
                         files_to_remove: vec![],

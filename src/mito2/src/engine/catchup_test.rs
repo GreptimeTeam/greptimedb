@@ -263,6 +263,7 @@ async fn test_catchup_preserves_region_edit_sequence(
         .edit_region(
             region_id,
             RegionEdit {
+                table_compaction: None,
                 files_to_add: vec![file],
                 files_to_remove: vec![],
                 timestamp_ms: None,

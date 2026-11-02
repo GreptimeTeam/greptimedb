@@ -115,7 +115,10 @@ impl WindowedCompactionPicker {
                 .iter()
                 .flat_map(|level| level.files.values())
                 .filter(|file| !expired_file_ids.contains(&file.file_id()))
-                .filter(|file| last_non_null || !file.compacting()),
+                .filter(|file| {
+                    last_non_null
+                        || (!file.compacting() && file.level() < crate::sst::file::LEVEL_SHARED)
+                }),
         );
         let windows = filter_time_windows(windows, self.time_range);
 
@@ -123,7 +126,9 @@ impl WindowedCompactionPicker {
         // would remove that SST without rewriting all its remaining segments.
         if last_non_null
             && windows.values().any(|(_, inputs)| {
-                inputs.iter().any(FileHandle::compacting)
+                inputs
+                    .iter()
+                    .any(|file| file.compacting() || file.level() == crate::sst::file::LEVEL_SHARED)
                     || !inputs_precede_memtables(inputs, current_version.memtable_min_sequence)
             })
         {

@@ -188,6 +188,7 @@ pub(super) fn get_expired_ssts(
 
     levels
         .iter()
+        .filter(|level| level.level < crate::sst::file::LEVEL_SHARED)
         .flat_map(|l| l.get_expired_files(&now, &ttl).into_iter())
         .collect()
 }
