@@ -126,10 +126,7 @@ async fn build(
 ) -> SamplesFileHandle {
     let file_id = FileId::random();
     let generation = FileId::random();
-    let prefix = format!(
-        "{}/samples/{file_id}/{generation}/",
-        meta.region_id.as_u64()
-    );
+    let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
     let mut writer = format
         .writer(meta.clone(), store.clone(), &prefix, file_id, generation)
         .await
@@ -433,7 +430,7 @@ async fn failed_writer_and_abort_remove_outputs() {
     for drop_writer in [false, true] {
         let id = FileId::random();
         let generation = FileId::random();
-        let prefix = format!("{}/samples/{id}/{generation}/", m.region_id.as_u64());
+        let prefix = format!("{}/samples/{generation}/", m.region_id.as_u64());
         let mut writer = format
             .writer(m.clone(), store.clone(), &prefix, id, generation)
             .await
@@ -934,7 +931,7 @@ async fn wide_schema_byte_bound_and_unsupported_input() {
     ));
     let id = FileId::random();
     let generation = FileId::random();
-    let prefix = format!("{}/samples/{id}/{generation}/", m.region_id.as_u64());
+    let prefix = format!("{}/samples/{generation}/", m.region_id.as_u64());
     assert!(
         format
             .writer(wrong, store.clone(), &prefix, id, generation)
@@ -1019,7 +1016,7 @@ async fn output_failures_and_cancelled_finish_clean_up() {
             .unwrap();
         let id = FileId::random();
         let generation = FileId::random();
-        let prefix = format!("{}/samples/{id}/{generation}/", m.region_id.as_u64());
+        let prefix = format!("{}/samples/{generation}/", m.region_id.as_u64());
         let mut writer = format
             .writer(
                 m.clone(),
