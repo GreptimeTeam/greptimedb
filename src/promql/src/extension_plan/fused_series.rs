@@ -117,6 +117,13 @@ const POLL_BUDGET: usize = 64;
 /// [`FusedSeries::deserialize`] so a serialized node is always one this version can rebuild.
 const MAX_TAG_COUNT: usize = 1024;
 
+/// The shape of [`FusedSeries::serialize`]'s payload.
+///
+/// Bumped from 1 when the payload stopped carrying a partial fold. A reader accepts this version and
+/// no other, so a payload written under the older shape is refused rather than reinterpreted with
+/// the field boundaries of the newer one.
+const ENVELOPE_VERSION: u32 = 2;
+
 /// The statement grid and output naming that travel with a compiled tree.
 ///
 /// Source schemas belong to the tree's input nodes. This binding supplies the grid that addresses
@@ -313,15 +320,19 @@ pub struct FusedSeries {
     children: Vec<LogicalPlan>,
     /// The columns this node produces.
     output_schema: DFSchemaRef,
-    /// Fixed output representation; partial state export always remains PlainRows.
+    /// Fixed output representation, chosen when the node is built.
     format: FusedOutputFormat,
 }
 
 impl FusedSeries {
     /// Serializes the native tree and the binding required to reconstruct this plan node.
     /// The PromQL text is included for diagnostics only and never drives execution; children
-    /// remain ordinary Substrait inputs. Version 1 supports only SeriesFrame without partial folds:
-    /// decoding must rebuild its output schema, and only SeriesFrame derives that schema from the tree.
+    /// remain ordinary Substrait inputs. Only SeriesFrame is carried: decoding must rebuild its
+    /// output schema, and only SeriesFrame derives that schema from the tree.
+    ///
+    /// The leading version is [`ENVELOPE_VERSION`]. It changed when the payload stopped carrying a
+    /// partial fold, so a payload written under the older shape is refused before its body is
+    /// decoded: reading it would reinterpret the absence of that field as the next field's bytes.
     pub fn serialize(&self) -> DataFusionResult<Vec<u8>> {
         if self.format != FusedOutputFormat::SeriesFrame {
             return Err(DataFusionError::NotImplemented(
@@ -338,7 +349,7 @@ impl FusedSeries {
         let tree = crate::native::wire::encode_prefix(&self.tree)
             .map_err(|e| DataFusionError::Plan(format!("cannot encode FusedSeries tree: {e}")))?;
         let mut out = Vec::new();
-        out.extend(1u32.to_le_bytes());
+        out.extend(ENVELOPE_VERSION.to_le_bytes());
         out.extend(
             u32::try_from(tree.len())
                 .map_err(|_| DataFusionError::Plan("FusedSeries tree too large".into()))?
@@ -425,8 +436,11 @@ impl FusedSeries {
             }
         }
         let mut r = Reader { b: bytes, p: 0 };
+        // Read and check the version before anything else touches the body: a payload written under
+        // another shape has different fields, so decoding it first would read the wrong bytes as the
+        // wrong field instead of reporting what actually disagreed.
         let version = r.u32()?;
-        if version != 1 {
+        if version != ENVELOPE_VERSION {
             return Err(DataFusionError::Plan(format!(
                 "unsupported FusedSeries envelope version {version}"
             )));
@@ -599,6 +613,17 @@ impl FusedSeries {
         format: FusedOutputFormat,
     ) -> DataFusionResult<Self> {
         validate_binding(&tree, &binding, children.len())?;
+        // State is a frame, not a row table: a `Partial` root has no row layout to publish, so the
+        // mismatch is refused where the format is chosen rather than where the exec is built.
+        if matches!(
+            &tree.root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+        ) && format != FusedOutputFormat::SeriesFrame
+        {
+            return Err(DataFusionError::Plan(
+                "FusedSeries Partial stage requires SeriesFrame output".into(),
+            ));
+        }
         if format == FusedOutputFormat::SeriesFrame {
             let expected = output_frame_schema(
                 &tree,
@@ -1346,6 +1371,16 @@ fn matching_site(node: &NativeNode) -> Option<(&NativeNode, &NativeNode, &Matchi
 }
 
 pub fn input_locality(root: &NativeNode) -> InputLocality {
+    // A `Partial` aggregate folds only the rows its own partition reads and exports the state it
+    // folded; the `Final` half above the exchange is what needs every contribution in one place.
+    // Reading it as a global fold instead would gather the scan into one partition and throw away
+    // the parallelism the split exists to keep.
+    if matches!(
+        &root.expr,
+        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+    ) {
+        return InputLocality::PartitionLocal;
+    }
     if let Some(index) = same_source(root) {
         let raw = root.output.samples().is_some_and(|_| {
             // The root's grid does not reliably indicate source content after windowing; inspect its bound inputs.

@@ -65,7 +65,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::SessionContext;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
+use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent, StateSeries};
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
     LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, pack_raw_series_chunk,
@@ -1377,6 +1377,46 @@ fn fused_series_envelope_round_trip_and_rejects_unsupported_payloads() {
             .contains("version")
     );
     assert!(FusedSeries::deserialize(&bytes[..5]).is_err());
+}
+
+/// A payload written under the shape that still carried a partial fold is refused by its version,
+/// before its body is read.
+///
+/// The body here is the current payload's body with the version field set back to 1: it decodes
+/// cleanly under the current reader, which is exactly what makes it a control. A reader that checked
+/// the version only after decoding would accept it and hand back a node whose fields were read at the
+/// wrong offsets; this asserts the version is what answers, by name.
+#[test]
+fn fused_series_envelope_refuses_the_older_payload_version_before_reading_it() {
+    let tree = rate_tree();
+    let declared = canonical_frame_schema(&tree);
+    let bound = binding(&tree);
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree,
+        bound,
+        vec![input_plan(frame_schema())],
+        declared,
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let bytes = node.serialize().unwrap();
+    assert_eq!(
+        super::ENVELOPE_VERSION.to_le_bytes(),
+        bytes[..4],
+        "the version is the payload's first field"
+    );
+
+    // The control: the same body under the accepted version decodes.
+    assert!(FusedSeries::deserialize(&bytes).is_ok());
+
+    let mut old = bytes.clone();
+    old[..4].copy_from_slice(&1u32.to_le_bytes());
+    let message = FusedSeries::deserialize(&old).unwrap_err().to_string();
+    assert!(
+        message.contains("version") && message.contains('1'),
+        "the version must be what is reported, not a field read at the wrong offset: {message}"
+    );
 }
 
 /// The `SeriesFrame` node of [`rate_tree`] declaring `tags` as its labels.
@@ -4424,6 +4464,38 @@ async fn state_batches(exec: &Arc<dyn ExecutionPlan>, partition: usize) -> Vec<R
         .unwrap()
 }
 
+/// Decodes state-frame batches into per-series states, checking their declaration on the way.
+///
+/// A state frame has no flat accumulator column - each aggregate field is one
+/// `List<Struct<component...>>` - so a reader of its values goes through the decoder, which is the
+/// same path the `Final` half takes.
+async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateSeries> {
+    let schema = batches
+        .first()
+        .expect("a state-exporting node answers at least one batch")
+        .schema();
+    let declaration = SeriesFrameDeclaration::parse(schema.as_ref()).unwrap();
+    assert_eq!(FrameContent::AggregateState, declaration.content());
+    let series = Arc::new(declaration.series().clone());
+    let state = Arc::new(declaration.aggregate_state().unwrap().to_owned());
+    let decoded = unpack_aggregate_state(
+        Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::iter(batches.into_iter().map(Ok)),
+        )),
+        Some(state),
+        Some(series),
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    decoded
+        .iter()
+        .map(|batch| batch.to_state_series().unwrap())
+        .collect()
+}
+
 /// A Partial root exports state-frame batches per partition, and two partitions may fold one group.
 ///
 /// The two partitions hold series whose *prefix* labels differ (`host="web-0"` and `host="web-1"`)
@@ -4478,7 +4550,7 @@ async fn a_partial_root_exports_state_frames_from_every_partition() {
         let binding = Arc::new(
             datatypes::series::aggregate_state::AggregateStateSchema::try_new(
                 AggregateStateKind::Count,
-                vec![StateComponent::Value],
+                vec![StateComponent::Count],
             )
             .unwrap(),
         );
@@ -4509,7 +4581,7 @@ async fn a_partial_root_exports_state_frames_from_every_partition() {
         assert_eq!(1, batch.states.len());
         assert!(batch.states[0].iter().all(Option::is_some));
         assert_eq!(AggregateStateKind::Count, binding.kind);
-        assert_eq!(vec![StateComponent::Value], binding.components.as_ref());
+        assert_eq!(vec![StateComponent::Count], binding.components.as_ref());
     }
 }
 
@@ -4569,23 +4641,6 @@ fn a_partial_tree_survives_rebuilding_and_compares_by_tree() {
     assert_ne!(Some(std::cmp::Ordering::Equal), node.partial_cmp(&counted));
 }
 
-/// A Partial root cannot be represented as rows; the error identifies its stage.
-#[test]
-fn a_prefix_that_reads_across_series_is_refused() {
-    let prefix = rate_tree();
-    let tree = partial_tree(prefix, AggregateKind::Sum, &[HOST]);
-    let error = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
-        tree.clone(),
-        binding(&tree),
-        vec![input_plan(frame_schema())],
-        canonical_state_frame_schema(&tree),
-        FusedOutputFormat::PlainRows,
-    )
-    .expect_err("rows format cannot publish Partial state");
-    assert!(error.to_string().contains("Partial stage"), "{error}");
-}
-
 /// `constant <op> vector`, bound the way the compiler binds a scalar broadcast: the constant on the
 /// left, and the vector side's samples as the operation's output.
 fn broadcast_left(constant: f64, vector: NativeNode, op: BinaryOp) -> NativeNode {
@@ -4636,15 +4691,25 @@ async fn a_constant_broadcast_prefix_exports_the_values_the_constant_computes() 
     )
     .expect("a per-series broadcast is a prefix one partition evaluates on its own");
 
+    // The state is a frame whose fields are `List<Struct<component...>>`, so its values are read
+    // through the decoder rather than off a flat column.
     let batches = state_batches(&exec, 0).await;
-    let batch = &batches[0];
-    let values = batch
-        .column_by_name("value")
-        .expect("the state carries the accumulator")
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("an accumulator is Float64");
-    let values: Vec<Option<f64>> = values.iter().collect();
+    let decoded = decode_state_batches(batches).await;
+    let values: Vec<Option<f64>> = decoded
+        .iter()
+        .flat_map(|batch| {
+            let mut values = vec![None; batch.time.len()];
+            for position in 0..batch.time.len() {
+                values[position] = batch
+                    .states
+                    .first()
+                    .and_then(|field| field.get(position).copied().flatten())
+                    .map(|state| state.value);
+            }
+            values
+        })
+        .collect();
+    assert_eq!(GRID_LEN as usize, values.len());
     assert_eq!(
         vec![Some(9.0); GRID_LEN as usize],
         values,
@@ -5295,9 +5360,10 @@ fn a_series_frame_refuses_a_root_it_cannot_carry() {
         "the refusal says what the root is: {error}"
     );
 
-    // The partial mode is a different output entirely, so a frame format cannot even be asked for.
+    // The partial half of a split is a frame, not a row table: the state it exports has no row
+    // layout, so the node that runs it is built with the frame format.
     assert_eq!(
-        FusedOutputFormat::PlainRows,
+        FusedOutputFormat::SeriesFrame,
         partial_node(AggregateKind::Sum).format
     );
 }
