@@ -63,6 +63,7 @@ use datatypes::series::raw::RawTimestamps;
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use futures::TryStreamExt;
+use store_api::region_engine::RawLabelSource;
 
 use super::*;
 use crate::extension_plan::test_util::prepare_test_data;
@@ -1738,6 +1739,113 @@ async fn complete_disjoint_publishes_before_gated_input_contributes_or_eof() {
         "the other input has neither contributed nor reached EOF"
     );
     gate.open();
+}
+
+/// A Sample Fused node passes a final identity to CompleteDisjoint before a gated partition EOF.
+#[tokio::test]
+async fn fused_instant_complete_disjoint_publishes_before_other_input_eof() {
+    use crate::extension_plan::{FusedOutputFormat, FusedSeries, FusedSeriesBinding};
+    use crate::native::plan::{
+        BoundInput, BoundInstant, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+    };
+
+    let grid = grid();
+    let raw_schema = raw_schema();
+    let raw = NativeType::Samples(Arc::clone(&raw_schema));
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: Arc::clone(&raw_schema.fields),
+        eval_grid: Some(Arc::clone(&grid)),
+    }));
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
+                    output: raw.clone(),
+                    ordering: datatypes::series::SeriesOrdering::Contiguous,
+                }),
+                output: raw,
+            }),
+            op: BoundInstant {
+                lookback_ms: 0,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::Sample,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: output.clone(),
+    })
+    .unwrap();
+    let frame_schema = common_query::series_frame::raw_series_frame_schema_with_ordering(
+        &raw_schema,
+        &RawLabelSource::Explicit,
+        datatypes::series::SeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let output_frame_schema = FusedSeries::series_frame_schema(&tree).unwrap();
+    let logical = FusedSeries::try_new_with_format(
+        Arc::from("m"),
+        tree,
+        FusedSeriesBinding {
+            grid: Arc::clone(&grid),
+            metric_name: Some(Arc::from("cpu")),
+            time_index: "time".into(),
+            tags: vec!["host".into()],
+        },
+        vec![datafusion::logical_expr::LogicalPlan::EmptyRelation(
+            datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(
+                    datafusion::common::DFSchema::try_from(frame_schema.clone()).unwrap(),
+                ),
+            },
+        )],
+        Arc::new(datafusion::common::DFSchema::try_from(output_frame_schema).unwrap()),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let open = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "instant",
+                Some(labels("instant")),
+                &[0],
+                vec![Some(1.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: Vec::new(),
+            gate: Some(Arc::clone(&open)),
+            gate_chunks: false,
+        },
+    ]);
+    let fused = logical
+        .to_execution_plan(vec![(
+            child,
+            RawLabelSource::Explicit,
+            datatypes::series::SeriesOrdering::Contiguous,
+        )])
+        .unwrap();
+    let routed = Arc::new(SeriesRepartitionExec::try_new_complete_disjoint(fused, 1).unwrap());
+    let context = SessionContext::default().task_ctx();
+    let mut stream = output_of(&routed, 0, &context);
+    let first = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::poll_fn(|cx| stream.as_mut().poll_next(cx)),
+    )
+    .await
+    .expect("sample output appears before the other input EOF")
+    .expect("one identity is published")
+    .expect("identity succeeds");
+    assert!(first.1, "the fused chain is final on publication");
+    assert_eq!(labels("instant"), first.0.metric);
+    assert!(!open.is_open(), "the other partition remains gated");
+    open.open();
 }
 
 /// MergeInputs keeps the same identity behind the missing-input barrier.

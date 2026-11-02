@@ -75,7 +75,9 @@ use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, Serie
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
-use store_api::region_engine::RawLabelSource;
+use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+use store_api::region_engine::{BoundTag, RawLabelSource};
+use store_api::storage::RegionId;
 
 mod frame_output;
 
@@ -559,6 +561,82 @@ fn timestamp_match_tree() -> NativeTree {
     NativeTree::try_new(root).unwrap()
 }
 
+fn partition_disjoint(tree: NativeTree, input: Arc<dyn ExecutionPlan>) -> bool {
+    let node = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        if matches!(tree.root().expr, NativeExpr::Binary { .. }) {
+            binary_output_schema().to_dfschema_ref().unwrap()
+        } else {
+            output_schema().to_dfschema_ref().unwrap()
+        },
+    )
+    .unwrap();
+    let exec = node
+        .to_execution_plan(vec![(
+            input,
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )])
+        .unwrap();
+    exec.downcast_ref::<super::FusedSeriesExec>()
+        .unwrap()
+        .has_partition_disjoint_identities()
+}
+
+#[test]
+fn partition_disjoint_rejects_non_identity_trees() {
+    let grid = grid();
+    let sample = NativeTree::try_new(instant_of(0, &grid)).unwrap();
+    let mut timestamp = sample.root().clone();
+    let NativeExpr::Instant { op, .. } = &mut timestamp.expr else {
+        unreachable!();
+    };
+    op.value = InstantValue::Timestamp;
+    let timestamp = NativeTree::try_new(timestamp).unwrap();
+    let mut mapped = sample.root().clone();
+    let output = mapped.output.clone();
+    mapped = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(mapped),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Math(crate::map::MathOp::Abs)]),
+            },
+        },
+        output,
+    };
+    let mapped = NativeTree::try_new(mapped).unwrap();
+    let trees = [
+        timestamp,
+        rate_tree(),
+        mapped,
+        aggregate_tree(),
+        binary_tree(raw_schema(), raw_schema()),
+    ];
+    for tree in trees {
+        assert!(
+            !partition_disjoint(tree, memory_exec(vec![])),
+            "non-identity tree must not prove disjoint identities"
+        );
+    }
+    assert!(
+        !super::preserves_partition_identity(binary_tree(raw_schema(), raw_schema()).root()),
+        "two Input leaves sharing source 0 are still a Binary tree"
+    );
+}
+
+#[test]
+fn partition_disjoint_requires_proven_input() {
+    let sample = NativeTree::try_new(instant_of(0, &grid())).unwrap();
+    assert!(!partition_disjoint(sample.clone(), memory_exec(vec![])));
+    assert!(super::preserves_partition_identity(sample.root()));
+
+    let scalar = scalar_tree(grid(), 1.0);
+    assert!(!super::preserves_partition_identity(scalar.root()));
+}
+
 #[test]
 fn scalar_binaries_only_preserve_routable_keys_when_they_keep_them() {
     for scalar_left in [false, true] {
@@ -648,9 +726,9 @@ async fn scalar_binary_matching_key_is_not_routed_by_dropped_names() {
             ),
         ])
         .expect("the scalar binary executes");
-    // With the old unconditional scalar recursion this is MatchingLocal, inserting the router;
-    // `left_name` and `right_name` hash to the different partitions above and the match is lost.
-    // The fix instead makes placement SinglePartition, so routing never sees their raw names.
+    // A bare tree is conservatively classified as SinglePartition because its computed operands
+    // dropped the requested key. Planner segmentation cuts those per-series prefixes and routes
+    // their evaluated outputs by the actual labels; see the planner and integration regressions.
     let batches = collect(exec, SessionContext::default().task_ctx())
         .await
         .expect("the scalar binary completes");
@@ -1289,6 +1367,58 @@ fn fused_series_envelope_rejects_excess_tag_count() {
         message.contains(&(MAX_TAG_COUNT + 1).to_string()),
         "{message}"
     );
+}
+
+#[test]
+fn bound_tags_cover_primary_key_checks_all_primary_key_columns() {
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(9, 9));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "host",
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Tag,
+            column_id: 1,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "zone",
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Tag,
+            column_id: 2,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Timestamp,
+            column_id: 3,
+        });
+    builder.primary_key(vec![1, 2]);
+    let metadata = Arc::new(builder.build().unwrap());
+    let source = |ids: &[u32]| RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("m"),
+        physical_metadata: Arc::clone(&metadata),
+        logical_tags: ids
+            .iter()
+            .map(|id| BoundTag {
+                column_id: *id,
+                name: Arc::from(if *id == 1 { "host" } else { "zone" }),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    };
+    assert!(!super::bound_tags_cover_primary_key(&source(&[1])));
+    assert!(super::bound_tags_cover_primary_key(&source(&[1, 2])));
+    assert!(!super::bound_tags_cover_primary_key(
+        &RawLabelSource::Explicit
+    ));
 }
 
 fn fused(tree: NativeTree) -> FusedSeries {

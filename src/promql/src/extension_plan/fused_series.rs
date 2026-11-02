@@ -1671,28 +1671,53 @@ pub struct FusedSeriesExec {
     properties: Arc<PlanProperties>,
 }
 
+fn preserves_partition_identity(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) => true,
+        NativeExpr::Instant { input, op } => {
+            op.value == InstantValue::Sample && preserves_partition_identity(input)
+        }
+        _ => false,
+    }
+}
+
+/// Returns whether the scan's bound logical tags cover every primary-key column.
+///
+/// A label source that decodes only part of the primary key can map two stored series onto one
+/// output identity, so the early-publication guarantee cannot be taken from the scan's type.
+fn bound_tags_cover_primary_key(label_source: &RawLabelSource) -> bool {
+    let RawLabelSource::PrimaryKey {
+        physical_metadata,
+        logical_tags,
+        ..
+    } = label_source
+    else {
+        return false;
+    };
+    let bound_ids = logical_tags
+        .iter()
+        .map(|tag| tag.column_id)
+        .collect::<std::collections::HashSet<_>>();
+    physical_metadata
+        .primary_key_columns()
+        .all(|column| bound_ids.contains(&column.column_id))
+}
+
 impl FusedSeriesExec {
     /// Returns whether each output series identity is confined to one input partition.
     ///
-    /// This is true only for a single per-series scan (or another proven fused chain) whose
-    /// native tree consists solely of identity-preserving instant selections and inputs.
+    /// This is true only for a single per-series scan with every primary-key tag bound (or another
+    /// proven fused chain) whose native tree consists solely of identity-preserving instant
+    /// selections and inputs.
     pub fn has_partition_disjoint_identities(&self) -> bool {
-        fn preserves_identity(node: &NativeNode) -> bool {
-            match &node.expr {
-                NativeExpr::Input(_) => true,
-                NativeExpr::Instant { input, op } => {
-                    op.value == InstantValue::Sample && preserves_identity(input)
-                }
-                _ => false,
-            }
-        }
-
-        if self.inputs.len() != 1 || !preserves_identity(self.tree.root()) {
+        if self.inputs.len() != 1 || !preserves_partition_identity(self.tree.root()) {
             return false;
         }
 
         let input = &self.inputs[0].0;
-        input.downcast_ref::<SeriesScanExec>().is_some()
+        input
+            .downcast_ref::<SeriesScanExec>()
+            .is_some_and(|scan| bound_tags_cover_primary_key(scan.label_source()))
             || input
                 .downcast_ref::<FusedSeriesExec>()
                 .is_some_and(FusedSeriesExec::has_partition_disjoint_identities)
