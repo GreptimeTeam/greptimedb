@@ -234,6 +234,8 @@ async fn remote_write_v1(
     let query_ctx = if exemplars.is_empty() {
         query_ctx
     } else {
+        // Covers retained exemplars and subsequent shared-schema row construction.
+        // shortcut: V1 decoding allocates first, reserve earlier if decoding peaks must be bounded.
         let bytes = crate::exemplar::estimated_row_bytes(&exemplars)
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or_else(|| {

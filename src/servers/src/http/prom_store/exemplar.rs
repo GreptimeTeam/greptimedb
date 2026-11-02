@@ -16,9 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
-use api::v1::value::ValueData;
 use common_error::ext::BoxedError;
-use common_query::prelude::EXEMPLAR_METRIC_COLUMN;
 use futures::future::ready;
 use operator::insert::PreparedMetricInserts;
 use session::context::QueryContextRef;
@@ -55,33 +53,7 @@ pub(super) async fn write(
     ctx: QueryContextRef,
 ) -> Outcome {
     match prepare(&handler, samples, histograms, exemplars, ctx).await {
-        Ok(writes) => {
-            let mut targets = HashSet::new();
-            for (_, ctx, request) in writes.iter().filter(|(kind, _, _)| *kind == 2) {
-                for rows in request
-                    .inserts
-                    .iter()
-                    .filter_map(|request| request.rows.as_ref())
-                {
-                    if let Some(index) = rows
-                        .schema
-                        .iter()
-                        .position(|c| c.column_name == EXEMPLAR_METRIC_COLUMN)
-                    {
-                        for row in &rows.rows {
-                            if let Some(ValueData::StringValue(name)) =
-                                &row.values[index].value_data
-                            {
-                                targets.insert((
-                                    ctx.current_catalog().to_string(),
-                                    ctx.current_schema(),
-                                    name.clone(),
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
+        Ok((writes, targets)) => {
             let mut sources = Vec::new();
             let mut prepared = Vec::new();
             let mut source_preparation_failed = false;
@@ -225,9 +197,13 @@ async fn prepare(
     histograms: Vec<PromWriteBatch>,
     exemplars: ExemplarRequests,
     ctx: QueryContextRef,
-) -> Result<Vec<(usize, QueryContextRef, RowInsertRequests)>> {
+) -> Result<(
+    Vec<(usize, QueryContextRef, RowInsertRequests)>,
+    HashSet<(String, String, String)>,
+)> {
     let mut kinds = Vec::new();
     let mut prepared = Vec::new();
+    let mut targets = HashSet::new();
     for (kind, batches) in [samples, histograms].into_iter().enumerate() {
         for (ctx, request) in batches {
             handler.pre_write(&request, ctx.clone()).await?;
@@ -250,6 +226,13 @@ async fn prepare(
                 .check_exemplar_sources(&sources, target.clone())
                 .await?;
         }
+        targets.extend(sources.into_iter().map(|name| {
+            (
+                target.current_catalog().to_string(),
+                target.current_schema(),
+                name,
+            )
+        }));
         kinds.push(2);
         prepared.push((target, request));
     }
@@ -257,11 +240,12 @@ async fn prepare(
         .await
         .map_err(BoxedError::new)
         .context(error::ExecuteGrpcQuerySnafu)?;
-    Ok(kinds
+    let writes = kinds
         .into_iter()
         .zip(prepared)
         .map(|(kind, (ctx, request))| (kind, ctx, request))
-        .collect())
+        .collect();
+    Ok((writes, targets))
 }
 
 #[cfg(test)]
@@ -527,7 +511,7 @@ mod tests {
                 value: 1.0,
             }],
         )]);
-        let writes = prepare(
+        let (writes, targets) = prepare(
             &handler,
             vec![
                 batch(Some("physical_a")),
@@ -540,6 +524,10 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            targets,
+            HashSet::from([("greptime".into(), "tenant".into(), "metric".into())])
+        );
         let expected = [
             (0, Some("physical_a")),
             (0, Some("physical_b")),
