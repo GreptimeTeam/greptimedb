@@ -1449,20 +1449,13 @@ fn binary_metric_name_side<'a>(
 fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
     match expr {
         PromqlExpr::Aggregate(AggregateExpr { modifier, expr, .. }) => {
-            match modifier {
+            if !matches!(
+                modifier,
                 Some(LabelModifier::Include(labels))
-                    if !labels.labels.contains(&METRIC_NAME.to_string()) =>
-                {
-                    metric_names.clear();
-                    return;
-                }
-                Some(LabelModifier::Exclude(labels))
-                    if labels.labels.contains(&METRIC_NAME.to_string()) =>
-                {
-                    metric_names.clear();
-                    return;
-                }
-                _ => {}
+                    if labels.labels.contains(&METRIC_NAME.to_string())
+            ) {
+                metric_names.clear();
+                return;
             }
             collect_metric_names(expr, metric_names)
         }
@@ -3252,9 +3245,72 @@ mod tests {
             },
             // Aggregation and function cases
             TestCase {
-                name: "metric with aggregation",
+                name: "ungrouped aggregate drops metric name",
                 promql: "sum(cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate by non-name label drops metric name",
+                promql: "sum by (job) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without non-name label drops metric name",
+                promql: "sum without (host) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without empty label list drops metric name",
+                promql: "sum without () (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without nonexistent label drops metric name",
+                promql: "sum without (nonexistent) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate by name and job keeps metric name",
+                promql: "sum by (__name__, job) (cpu_usage)",
                 expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "minimum without host drops metric name",
+                promql: "min without (host) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without name drops metric name",
+                promql: "sum without (__name__) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "ungrouped average drops metric name",
+                promql: "avg(cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "nested ungrouped aggregate drops metric name",
+                promql: "sum(sum by (job) (cpu_usage))",
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -3273,9 +3329,16 @@ mod tests {
                 should_error: false,
             },
             TestCase {
-                name: "complex aggregation",
+                name: "grouping by name preserves equality metric name",
+                promql: r#"sum by (__name__) ({__name__="alpha_total"})"#,
+                expected_metric: Some("alpha_total"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without instance drops metric name",
                 promql: r#"sum without (instance) (cpu_usage{job="node"})"#,
-                expected_metric: Some("cpu_usage"),
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
