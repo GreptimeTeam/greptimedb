@@ -4747,16 +4747,20 @@ async fn test_exemplar_unpinned_batches(#[case] kind: &str, #[values(false, true
 }
 
 #[rstest]
-#[case::lowercase("sparse", true, true)]
-#[case::uppercase("SPARSE", true, true)]
-#[case::mixed_case("SpArSe", true, true)]
-#[case::dense("dense", true, false)]
-#[case::not_append_only("sparse", false, false)]
+#[case::lowercase("sparse", true, true, 9)]
+#[case::uppercase("SPARSE", true, true, 9)]
+#[case::mixed_case("SpArSe", true, true, 9)]
+#[case::dense("dense", true, false, 9)]
+#[case::not_append_only("sparse", false, false, 9)]
+#[case::seconds("sparse", true, true, 0)]
+#[case::milliseconds("sparse", true, true, 3)]
+#[case::microseconds("sparse", true, true, 6)]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_exemplar_precreated_table_options(
     #[case] encoding: &str,
     #[case] append_mode: bool,
     #[case] accepted: bool,
+    #[case] precision: u32,
 ) {
     use std::collections::BTreeMap;
 
@@ -4770,14 +4774,14 @@ async fn test_exemplar_precreated_table_options(
         .await;
     let frontend = instance.fe_instance();
     execute_sql(&frontend, "CREATE TABLE source_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
-    execute_sql(&frontend, "CREATE TABLE metric_source (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('on_physical_table'='source_physical')").await;
+    execute_sql(&frontend, "CREATE TABLE metric_source (job STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('on_physical_table'='source_physical')").await;
     execute_sql(&frontend, &format!(
-        "CREATE TABLE metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) ENGINE=mito WITH ('append_mode'='{append_mode}', 'primary_key_encoding'='{encoding}', 'compaction.type'='twcs')"
+        "CREATE TABLE metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) ENGINE=mito WITH ('append_mode'='{append_mode}', 'primary_key_encoding'='{encoding}', 'compaction.type'='twcs')"
     )).await;
     let (request, _) = into_rows(vec![Exemplar {
         metric: "metric_source".into(),
-        series_labels: BTreeMap::new(),
-        timestamp: 1,
+        series_labels: BTreeMap::from([("job".into(), "api".into())]),
+        timestamp: 1_234_567_890,
         value: 2.0,
         labels: BTreeMap::new(),
     }])
@@ -4797,7 +4801,26 @@ async fn test_exemplar_precreated_table_options(
             "{error:?}"
         );
     }
-    let output = execute_sql(&frontend, "SELECT count(*) FROM metrics_exemplars").await;
+    let table = frontend
+        .catalog_manager()
+        .table("greptime", "public", "metrics_exemplars", None)
+        .await
+        .unwrap()
+        .unwrap();
+    // Invalid destinations must fail before auto-ALTER adds the inherited label.
+    assert_eq!(
+        table.schema().column_schema_by_name("job").is_some(),
+        accepted
+    );
+    let sql = if accepted {
+        let timestamp = 1_234_567_890 / 10_i64.pow(9 - precision);
+        format!(
+            "SELECT count(*) FROM metrics_exemplars WHERE job = 'api' AND greptime_value = 2.0 AND CAST(greptime_timestamp AS BIGINT) = {timestamp}"
+        )
+    } else {
+        "SELECT count(*) FROM metrics_exemplars".into()
+    };
+    let output = execute_sql(&frontend, &sql).await;
     check_output_stream(
         output.data,
         &format!(
@@ -4890,6 +4913,31 @@ async fn test_exemplar_source_identity_policy() {
         .write_exemplars_prepared(request("metric_source"), QueryContext::arc())
         .await
         .unwrap();
+    let table = frontend
+        .catalog_manager()
+        .table("greptime", "public", "metrics_exemplars", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let info = table.table_info();
+    assert_eq!(
+        info.meta
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "__table_id",
+            "__tsid",
+            "greptime_metric",
+            "job",
+            "greptime_value",
+            "greptime_timestamp",
+            "exemplar_labels",
+        ]
+    );
+    assert_eq!(info.meta.primary_key_indices, [0, 1, 2, 3]);
     let output = execute_sql(
         &frontend,
         "SELECT __table_id FROM metrics_exemplars ORDER BY __table_id",

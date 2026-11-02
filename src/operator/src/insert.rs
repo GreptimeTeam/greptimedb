@@ -497,16 +497,12 @@ impl Inserter {
                         ),
                     }
                 );
-                row.values
-                    .insert(0, ValueData::U32Value(info.table_id()).into());
+                row.values.push(ValueData::U32Value(info.table_id()).into());
             }
-            rows.schema.insert(
-                0,
-                api::v1::helper::tag_column_schema(
-                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-                    ColumnDataType::Uint32,
-                ),
-            );
+            rows.schema.push(api::v1::helper::tag_column_schema(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ColumnDataType::Uint32,
+            ));
         }
         Ok(())
     }
@@ -1510,11 +1506,6 @@ impl Inserter {
                             .iter_mut()
                             .find(|r| r.table_name == table.table_info().name)
                         {
-                            if let Some(rows) = req.rows.as_mut()
-                                && let Some(unit) = table_time_index_unit(&table)
-                            {
-                                convert_rows_time_unit(rows, unit)?;
-                            }
                             if let Some(alter) = self.get_alter_table_expr_on_demand(
                                 req, &table, ctx, false, false, true,
                             )? {
@@ -1697,12 +1688,14 @@ impl Inserter {
                     ),
                 })?;
             let table_info = table.table_info();
+            if is_exemplar {
+                validate_exemplar_table(&table_info)?;
+            }
             table_infos.insert(table_info.table_id(), table.table_info());
         }
 
         if is_exemplar {
             for info in table_infos.values() {
-                validate_exemplar_table(info)?;
                 if let Some(unit) = info
                     .meta
                     .schema
@@ -1846,6 +1839,13 @@ impl Inserter {
             build_create_table_expr(&table_ref, request_schema, engine_name)?;
 
         if matches!(create_type, AutoCreateTableType::Exemplar) {
+            // Preserve the stored schema order without shifting every incoming row.
+            create_table_expr
+                .column_defs
+                .sort_by_key(|column| column.name != DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+            create_table_expr
+                .primary_keys
+                .sort_by_key(|name| name != DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
             for column in &mut create_table_expr.column_defs {
                 if [
                     DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
