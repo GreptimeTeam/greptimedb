@@ -2987,6 +2987,7 @@ async fn physical_plan_accepts_scalar_root_without_sources() {
         binding,
         vec![],
         partial_op(AggregateKind::Sum, &[]),
+        &[],
     )
     .expect_err("scalar roots cannot be partial folds");
     assert!(partial_error.to_string().contains("one raw child"));
@@ -4298,6 +4299,7 @@ fn partial_node(kind: AggregateKind) -> FusedSeries {
         binding,
         vec![input_plan(frame_schema())],
         partial_op(kind, &[HOST]),
+        &[HOST.to_string()],
     )
     .expect("the binding matches the prefix tree")
 }
@@ -4318,6 +4320,10 @@ fn partial_plan(
         binding,
         vec![input_plan(frame_schema())],
         op,
+        &tags
+            .iter()
+            .map(|tag| (*tag).to_string())
+            .collect::<Vec<_>>(),
     )?
     .to_execution_plan(vec![(
         input,
@@ -4418,6 +4424,38 @@ async fn a_partial_fold_exports_state_from_every_partition() {
             "the exported rows name the group they were folded into"
         );
     }
+}
+
+/// Partial state encodes the aggregate grouping label, not the scan-side tag list.
+#[tokio::test]
+async fn partial_fold_exports_grouping_tags_instead_of_scan_tags() {
+    let tree = rate_tree();
+    let binding = partial_binding_of(&tree, &[HOST]);
+    let rows = series_samples(1.0);
+    let labels = [(HOST, "web"), (JOB, "shared")];
+    let node = FusedSeries::try_new_partial(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        vec![input_plan(frame_schema())],
+        partial_op(AggregateKind::Sum, &[JOB]),
+        &[JOB.to_string()],
+    )
+    .expect("grouping tags need not equal scan tags");
+    let exec = node
+        .to_execution_plan(vec![(
+            memory_exec(vec![frame(&labelled_chunk("web-0", &labels, &rows, true))]),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )])
+        .expect("the partial plan is executable");
+    let state = state_schema(&[JOB.to_string()]);
+    let batch = state_of(&exec, 0, &state).await;
+    assert_eq!(
+        vec![Some("shared".to_string()); GRID_LEN as usize],
+        group_label(&state, &batch),
+        "encoded state rows carry the grouping tag value"
+    );
 }
 
 /// Prefix series of one label set on disjoint grid points are legal in state mode.
@@ -4547,6 +4585,7 @@ fn a_prefix_that_reads_across_series_is_refused() {
         binding,
         vec![input_plan(frame_schema())],
         partial_op(AggregateKind::Sum, &[HOST]),
+        &[HOST.to_string()],
     )
     .expect_err("a prefix that folds a group per partition is not a per-series prefix");
     assert!(error.to_string().contains("reads across"), "{error}");

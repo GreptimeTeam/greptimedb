@@ -241,6 +241,8 @@ pub struct FusedSeries {
     /// This row-state bridge is temporary: native final aggregation will consume series frames
     /// directly, removing state-row encoding and reconstruction.
     partial_fold: Option<BoundAggregate>,
+    /// Grouping labels encoded into partial state; absent for ordinary row/frame output.
+    grouping_tags: Option<Vec<String>>,
     /// Fixed output representation; partial state export always remains PlainRows.
     format: FusedOutputFormat,
 }
@@ -486,6 +488,7 @@ impl FusedSeries {
             children,
             output_schema,
             partial_fold: None,
+            grouping_tags: None,
             format,
         })
     }
@@ -497,6 +500,7 @@ impl FusedSeries {
         binding: FusedSeriesBinding,
         children: Vec<LogicalPlan>,
         op: BoundAggregate,
+        grouping_tags: &[String],
     ) -> DataFusionResult<Self> {
         validate_binding(&tree, &binding, children.len())?;
         if children.len() != 1 {
@@ -511,7 +515,7 @@ impl FusedSeries {
         }
         aggregate_op(&op)?;
         let output_schema = Arc::new(datafusion::common::DFSchema::try_from(state_schema(
-            &binding.tags,
+            grouping_tags,
         ))?);
         Ok(Self {
             promql,
@@ -520,6 +524,7 @@ impl FusedSeries {
             children,
             output_schema,
             partial_fold: Some(op),
+            grouping_tags: Some(grouping_tags.to_vec()),
             format: FusedOutputFormat::PlainRows,
         })
     }
@@ -748,6 +753,9 @@ impl FusedSeries {
             self.binding.time_index.clone(),
             tags,
             self.partial_fold.clone(),
+            self.grouping_tags
+                .as_ref()
+                .map(|tags| Arc::from(tags.clone())),
             self.format,
             target_partitions,
         )?))
@@ -825,6 +833,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
             children: inputs,
             output_schema: Arc::clone(&self.output_schema),
             partial_fold: self.partial_fold.clone(),
+            grouping_tags: self.grouping_tags.clone(),
             format: self.format,
         })
     }
@@ -843,6 +852,7 @@ impl PartialEq for FusedSeries {
             && self.children == other.children
             && self.output_schema == other.output_schema
             && partial_key(self.partial_fold.as_ref()) == partial_key(other.partial_fold.as_ref())
+            && self.grouping_tags == other.grouping_tags
             && self.format == other.format
     }
 }
@@ -856,6 +866,7 @@ impl Hash for FusedSeries {
         self.children.hash(state);
         self.output_schema.hash(state);
         partial_key(self.partial_fold.as_ref()).hash(state);
+        self.grouping_tags.hash(state);
         self.format.hash(state);
     }
 }
@@ -883,6 +894,10 @@ impl PartialOrd for FusedSeries {
         {
             Some(Ordering::Equal) => {}
             ord => return ord,
+        }
+        match self.grouping_tags.cmp(&other.grouping_tags) {
+            Ordering::Equal => {}
+            ord => return Some(ord),
         }
         match self.format.cmp(&other.format) {
             Ordering::Equal => {}
@@ -1727,6 +1742,7 @@ pub struct FusedSeriesExec {
     metric: ExecutionPlanMetricsSet,
     /// Aggregate state exported by each partition, when this is the partial mode.
     partial_fold: Option<BoundAggregate>,
+    grouping_tags: Option<Arc<[String]>>,
     format: FusedOutputFormat,
     matching_parallelism: Option<usize>,
     /// This node's partitioning, emission and boundedness.
@@ -1826,6 +1842,7 @@ impl FusedSeriesExec {
             time_column,
             tags,
             None,
+            None,
             FusedOutputFormat::PlainRows,
             None,
         )
@@ -1840,6 +1857,7 @@ impl FusedSeriesExec {
         time_column: String,
         tags: Vec<String>,
         partial_fold: Option<BoundAggregate>,
+        grouping_tags: Option<Arc<[String]>>,
         format: FusedOutputFormat,
         matching_parallelism: Option<usize>,
     ) -> DataFusionResult<Self> {
@@ -2048,6 +2066,7 @@ impl FusedSeriesExec {
             metric: ExecutionPlanMetricsSet::new(),
             properties,
             partial_fold,
+            grouping_tags,
             format,
             matching_parallelism,
         })
@@ -2149,6 +2168,7 @@ impl ExecutionPlan for FusedSeriesExec {
             self.time_column.clone(),
             self.tags.to_vec(),
             self.partial_fold.clone(),
+            self.grouping_tags.clone(),
             self.format,
             self.matching_parallelism,
         )?))
@@ -2247,7 +2267,14 @@ impl ExecutionPlan for FusedSeriesExec {
                             DataFusionError::Plan("FusedSeries output is not samples".into())
                         })?
                         .clone(),
-                    Arc::clone(&self.tags),
+                    Arc::from(
+                        self.grouping_tags
+                            .as_ref()
+                            .ok_or_else(|| {
+                                DataFusionError::Plan("partial fold has no grouping tags".into())
+                            })?
+                            .clone(),
+                    ),
                     Arc::clone(&export_budget),
                     &context.runtime_env().memory_pool,
                 )

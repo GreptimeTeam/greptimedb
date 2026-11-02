@@ -612,6 +612,10 @@ impl PromPlanner {
             .iter()
             .map(|(_, _, _, _, tags)| tags.clone())
             .collect::<Vec<_>>();
+        let rewrite_input_tags = source_tags.iter().flatten().cloned().collect::<Vec<_>>();
+        if !label_rewrites_have_fresh_destinations(prom_expr, &rewrite_input_tags) {
+            return Ok(None);
+        }
         // A segment carries one source's identity. Keeping each occurrence's scan and metadata
         // aligned here lets the cutting step name that source independently of selector count.
         let bare_scans = prepared
@@ -2031,7 +2035,7 @@ fn collect_selectors<'a>(
                 let arity_valid = if call.func.name == "label_replace" {
                     call.args.args.len() == 5
                 } else {
-                    call.args.args.len() >= 4
+                    call.args.args.len() >= 3
                 };
                 return arity_valid
                     && matches!(call.args.args.first(), Some(arg) if matches!(arg.value_type(), ValueType::Vector | ValueType::Matrix))
@@ -2048,6 +2052,43 @@ fn collect_selectors<'a>(
         _ => {}
     }
     true
+}
+
+/// Whether every label rewrite in `expr` writes a destination fresh for its input.
+fn label_rewrites_have_fresh_destinations(expr: &PromExpr, input_tags: &[String]) -> bool {
+    fn check(expr: &PromExpr, tags: &mut std::collections::HashSet<String>) -> bool {
+        match expr {
+            PromExpr::Paren(paren) => check(&paren.expr, tags),
+            PromExpr::Call(call) if matches!(call.func.name, "label_replace" | "label_join") => {
+                let Some(vector) = call.args.args.first() else {
+                    return false;
+                };
+                if !check(vector, tags) {
+                    return false;
+                }
+                let Some(PromExpr::StringLiteral(destination)) =
+                    call.args.args.get(1).map(|arg| arg.as_ref())
+                else {
+                    return false;
+                };
+                let destination = destination.val.as_str();
+                if destination == "__name__" || !tags.insert(destination.to_string()) {
+                    return false;
+                }
+                true
+            }
+            PromExpr::Unary(unary) => check(&unary.expr, tags),
+            PromExpr::Aggregate(aggregate) => check(&aggregate.expr, tags),
+            PromExpr::Binary(binary) => check(&binary.lhs, tags) && check(&binary.rhs, tags),
+            PromExpr::Call(call) => call.args.args.iter().all(|arg| check(arg, tags)),
+            _ => true,
+        }
+    }
+
+    // A rewrite collision is observable only when every contribution for a label set executes
+    // together, but this route does not place rewrite outputs that way. Keep such shapes on the
+    // existing plan until rewrite outputs are routed by canonical label set.
+    check(expr, &mut input_tags.iter().cloned().collect())
 }
 
 /// Whether `engine` can serve raw series frames to the fused-series node.

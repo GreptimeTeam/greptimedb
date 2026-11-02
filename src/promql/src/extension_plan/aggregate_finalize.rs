@@ -100,6 +100,8 @@ pub struct AggregateFinalize {
     output_schema: DFSchemaRef,
     /// The field layout the split aggregate folds, on the grid its input is evaluated on.
     series_schema: Arc<SeriesSchema>,
+    /// The labels declared by the output schema, shared with the partition-local state producer.
+    grouping_tags: Vec<String>,
 }
 
 impl AggregateFinalize {
@@ -144,12 +146,19 @@ impl AggregateFinalize {
                 split.schema.fields.len()
             )));
         }
+        let grouping_tags = output_schema
+            .fields()
+            .iter()
+            .filter(|field| field.data_type() == &DataType::Utf8)
+            .map(|field| field.name().to_string())
+            .collect::<Vec<_>>();
         let partial = FusedSeries::try_new_partial(
             Arc::clone(&promql),
             NativeTree::try_new(split.prefix)?,
             binding.clone(),
             vec![rawinput],
             split.op.clone(),
+            &grouping_tags,
         )?;
         Ok(Self {
             promql,
@@ -161,6 +170,7 @@ impl AggregateFinalize {
             }),
             output_schema,
             series_schema: split.schema,
+            grouping_tags,
         })
     }
 
@@ -219,7 +229,7 @@ impl AggregateFinalize {
             Arc::clone(&self.suffix),
             Arc::clone(&self.series_schema),
             op,
-            self.binding.tags.clone(),
+            self.grouping_tags.clone(),
             tags,
             classification,
             output_schema,
@@ -231,7 +241,10 @@ impl AggregateFinalize {
     /// [`BoundAggregate`] carries no `Eq`/`Hash` - a quantile's parameter is an `f64` - so its
     /// `Debug` rendering stands in, the way [`FusedSeries`] renders the tree it runs.
     fn key(&self) -> String {
-        format!("{:?} {:?} {:?}", self.op.kind, self.op.group, self.op.stage)
+        format!(
+            "{:?} {:?} {:?} {:?}",
+            self.op.kind, self.op.group, self.op.stage, self.grouping_tags
+        )
     }
 }
 
@@ -278,6 +291,7 @@ impl UserDefinedLogicalNodeCore for AggregateFinalize {
             input: inputs.swap_remove(0),
             output_schema: Arc::clone(&self.output_schema),
             series_schema: Arc::clone(&self.series_schema),
+            grouping_tags: self.grouping_tags.clone(),
         })
     }
 }

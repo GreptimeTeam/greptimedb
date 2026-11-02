@@ -2376,9 +2376,67 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         "a fresh-destination rewrite answers every series it read"
     );
 
-    // Rewriting the only tag of every series folds all sixteen into one label set at one point.
-    // Prometheus refuses that, and so must this route: the rewrite is no longer safe to spread, and
-    // the refusal has to survive whether or not a consumer would have folded the series anyway.
+    // The aggregate boundary must carry the label created by the prefix, not only scan tags.
+    observer.clear();
+    let grouped = run(
+        r#"sum by (dst) (label_replace(probe{host=~"a|b"}, "dst", "$1", "host", "(.*)"))"#,
+        "(0, 0, '1s')",
+    )
+    .await
+    .unwrap();
+    // `native_result_rows` reads a `host` column, which this grouping does not emit: read the
+    // declared labels instead, so the assertion is about the `dst` the prefix created.
+    let (_, grouped_rows) = native_labelled_rows(grouped).await;
+    assert_eq!(observer.fused().unwrap().name(), "FusedSeriesExec");
+    let mut grouped = grouped_rows
+        .iter()
+        .map(|(at, labels, value)| (*at, labels.get("dst").cloned(), *value))
+        .collect::<Vec<_>>();
+    grouped.sort_by(|left, right| left.1.cmp(&right.1));
+    assert_eq!(
+        grouped,
+        vec![
+            (0, Some("a".to_string()), 1.0),
+            (0, Some("b".to_string()), 2.0)
+        ],
+        "the aggregate boundary must carry the label the prefix created"
+    );
+
+    // Two series rewritten to one label set can only collide across execution partitions when each
+    // partition holds one of them: a route that keeps per-partition duplicate state then sees no
+    // collision at all. Prove the two series really are split first, on the fresh-destination form
+    // the route does admit, so this is not a test that would pass because they landed together.
+    observer.clear();
+    let split_parts = run(
+        r#"label_replace(probe{host=~"a|b"}, "dst", "$1", "host", "(.*)")"#,
+        "(0, 0, '1s')",
+    )
+    .await
+    .unwrap();
+    let split_rows = native_result_rows(split_parts).await;
+    assert_eq!(split_rows.len(), 2, "{split_rows:?}");
+    let split_plan = observer.take();
+    let nonempty = split_plan
+        .metrics()
+        .expect("fused plan metrics")
+        .iter()
+        .filter(|metric| metric.value().name() == "native.root.output_values")
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { count, .. } => {
+                Some((metric.partition(), count.value()))
+            }
+            _ => None,
+        })
+        .filter(|(_, count)| *count > 0)
+        .map(|(partition, _)| partition)
+        .collect::<Vec<_>>();
+    assert!(
+        nonempty.len() > 1,
+        "the two colliding series must occupy different execution partitions, got {nonempty:?}"
+    );
+
+    // Rewriting an existing distinguishing tag can collapse distinct label sets. This route does
+    // not route rewrite outputs by canonical label set, so it must preserve the legacy refusal.
     for (shape, expr) in [
         (
             "at the root",
@@ -2394,14 +2452,29 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         ),
     ] {
         observer.clear();
-        let error = match run(expr, "(0, 0, '1s')").await {
+        let native = run(expr, "(0, 0, '1s')").await;
+        assert!(
+            observer.fused().is_none(),
+            "{shape}: unsafe rewrite must decline native"
+        );
+        let legacy = instance
+            .do_query(
+                &format!("TQL EVAL (0, 0, '1s') {expr}"),
+                native_query_context(false, 4),
+            )
+            .await
+            .remove(0);
+        let native_error = match native {
             Ok(output) => collect_error(output).await,
             Err(error) => error.to_string(),
         };
-        assert!(
-            error.contains("the node produces two series under the label set")
-                || error.contains("vector cannot contain metrics with the same labelset"),
-            "{shape}: the collapse must be refused, got: {error}"
+        let legacy_error = match legacy {
+            Ok(output) => collect_error(output).await,
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(
+            native_error, legacy_error,
+            "{shape}: native must preserve legacy outcome"
         );
     }
 
@@ -2457,13 +2530,23 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         }
         values.sort();
         assert_eq!(values, expected, "{shape}");
-        // A deletion and a metric-name rewrite leave the two series distinct, so the answer keeps
-        // both of them; the join adds a label without changing that.
-        assert_eq!(
-            observer.take().output_partitioning().partition_count(),
-            4,
-            "{shape}: a rewrite that cannot make two series equal stays spread"
-        );
+        if shape == "join two tags into one" {
+            // A fresh destination cannot make two series equal, so the route runs it natively and
+            // keeps the scan's partitions.
+            assert_eq!(
+                observer.take().output_partitioning().partition_count(),
+                4,
+                "{shape}: a rewrite that cannot make two series equal stays spread"
+            );
+        } else {
+            // Deleting a tag that distinguishes series can fold them together, and a per-partition
+            // duplicate check cannot see that across partitions, so the route keeps the existing
+            // plan for this shape until rewrite outputs are routed by canonical label set.
+            assert!(
+                observer.fused().is_none(),
+                "{shape}: a deletion that may collapse series must not run natively"
+            );
+        }
     }
 
     // A `__name__` destination is not covered here on purpose: the existing planner refuses that

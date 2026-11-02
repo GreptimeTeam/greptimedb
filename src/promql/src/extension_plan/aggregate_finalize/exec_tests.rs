@@ -459,6 +459,29 @@ fn task_context(pool: &Arc<GreedyMemoryPool>) -> Arc<TaskContext> {
     Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
 }
 
+/// State uses the output grouping labels, even when the scan binding names different labels.
+#[tokio::test]
+async fn state_round_trip_reads_grouping_tags_instead_of_scan_tags() {
+    let kind = AggregateKind::Avg;
+    let node = finalize_with(
+        binding_of(&["host"], GRID_LEN),
+        avg_tree(kind),
+        output_schema(VALUE, &[K0]),
+    );
+    let partitions = two_producers(kind);
+    let input = state_input_with(&[K0], partitions);
+    let plan = node
+        .to_execution_plan(input)
+        .expect("the merge reads the producer's grouping-tag state");
+    let batches = collect(plan, SessionContext::default().task_ctx())
+        .await
+        .expect("the producer state round-trips through the merge");
+    assert_eq!(
+        rows(&batches),
+        [(POINT_TS, Some(6.0), Some(LABEL.to_string()))]
+    );
+}
+
 /// Two producers fold the same group, and the merge answers their sum rather than their parts.
 #[tokio::test]
 async fn the_state_of_two_producers_merges_into_one_series() {
@@ -606,12 +629,25 @@ async fn the_tree_above_the_cut_runs_over_the_merged_series() {
     let kind = AggregateKind::Avg;
     // `abs` is what turns the merged `-6` into the `6` the outer `sum` answers.
     let state = vec![
-        state_of(cut_op(kind), &[-2.0]),
-        state_of(cut_op(kind), &[-6.0, -10.0]),
+        state_of_series(
+            &cut_schema(),
+            cut_op(kind),
+            &[],
+            vec![series_at(&cut_schema(), -2.0)],
+        ),
+        state_of_series(
+            &cut_schema(),
+            cut_op(kind),
+            &[],
+            vec![
+                series_at(&cut_schema(), -6.0),
+                series_at(&cut_schema(), -10.0),
+            ],
+        ),
     ];
     let root = complete(AggregateKind::Sum, by(&[]))(map_over(avg_tree(kind), vec![MathOp::Abs]));
     let plan = finalize(root, output_schema("sum(abs(avg(v0)))", &[]))
-        .to_execution_plan(state_input(state))
+        .to_execution_plan(state_input_with(&[], state))
         .expect("the suffix runs over merged values");
     let batches = collect(plan, SessionContext::default().task_ctx())
         .await
