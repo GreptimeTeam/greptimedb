@@ -416,6 +416,8 @@ impl NativeNode {
         let kind_of = |node: &NativeNode| node.output_sample_kind(input);
         match &self.expr {
             NativeExpr::Input(_) => Some(input),
+            // `timestamp()` replaces each input sample with its evaluation timestamp as a float.
+            NativeExpr::Timestamp { .. } => Some(SampleKind::Float),
             // The window functions that answer with a histogram are the ones the range kernel says
             // yield one; every other range function reduces its window to a float.
             NativeExpr::Window { input, op } => {

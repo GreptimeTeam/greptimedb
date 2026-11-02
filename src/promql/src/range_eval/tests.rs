@@ -1164,6 +1164,239 @@ fn a_single_histogram_with_a_start_timestamp_answers_a_rate() {
     }
 }
 
+#[test]
+fn multi_sample_histogram_increase_includes_synthetic_zero() {
+    let schema = raw_schema(1);
+    let make_chunk = |ts, count, start_timestamp, is_last| {
+        let offsets = [0];
+        let lengths = [2];
+        let buckets = [count / 2.0; 2];
+        let mut builder = HistogramBatchBuilder::new();
+        let index = builder
+            .push(HistogramView {
+                schema: 0,
+                zero_threshold: 0.0,
+                zero_count: 0.0,
+                count,
+                sum: count,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp,
+                custom_values: &[],
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: &buckets,
+                },
+                negative: BucketSideView {
+                    span_offsets: &[],
+                    span_lengths: &[],
+                    buckets: &[],
+                },
+            })
+            .unwrap();
+        let samples = Samples::try_from_histogram(
+            UInt32Array::from(vec![Some(index)]),
+            builder.finish().unwrap(),
+        )
+        .unwrap();
+        RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(0u64.to_le_bytes().to_vec()),
+            Some(metric(0)),
+            RawTimestamps::try_new(ScalarBuffer::from(vec![ts])).unwrap(),
+            SeriesFields::try_from_vec(vec![samples]).unwrap(),
+            is_last,
+        )
+        .unwrap()
+    };
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(3_000, 3_000, 1),
+        RangeWindow {
+            range_ms: 3_000,
+            offset_ms: 0,
+            anchor_ms: None,
+            modifier: None,
+        },
+        RangeFunction::Increase,
+    )
+    .unwrap();
+    let chunks = collect_chunks(
+        &mut evaluator,
+        &[
+            make_chunk(2_000, 2.0, Some(1_000), false),
+            make_chunk(3_000, 4.0, None, true),
+        ],
+    );
+    let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+    match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+        SampleRef::Histogram(histogram) => assert!((histogram.count - 4.0).abs() < 1e-12),
+        other => panic!(
+            "expected histogram increase, got {}",
+            describe_sample(Some(other))
+        ),
+    }
+}
+
+#[test]
+fn synthetic_zero_still_extrapolates_to_the_window_end() {
+    let schema = raw_schema(1);
+    let make_chunk = |ts, count, start_timestamp, is_last| {
+        let offsets = [0];
+        let lengths = [2];
+        let buckets = [count / 2.0; 2];
+        let mut builder = HistogramBatchBuilder::new();
+        let index = builder
+            .push(HistogramView {
+                schema: 0,
+                zero_threshold: 0.0,
+                zero_count: 0.0,
+                count,
+                sum: count,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp,
+                custom_values: &[],
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: &buckets,
+                },
+                negative: BucketSideView {
+                    span_offsets: &[],
+                    span_lengths: &[],
+                    buckets: &[],
+                },
+            })
+            .unwrap();
+        let samples = Samples::try_from_histogram(
+            UInt32Array::from(vec![Some(index)]),
+            builder.finish().unwrap(),
+        )
+        .unwrap();
+        RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(0u64.to_le_bytes().to_vec()),
+            Some(metric(0)),
+            RawTimestamps::try_new(ScalarBuffer::from(vec![ts])).unwrap(),
+            SeriesFields::try_from_vec(vec![samples]).unwrap(),
+            is_last,
+        )
+        .unwrap()
+    };
+
+    for (function, expected) in [(RangeFunction::Increase, 6.0), (RangeFunction::Rate, 1.5)] {
+        let mut evaluator = RangeEvaluator::try_new(
+            &schema,
+            grid(4_000, 3_000, 1),
+            RangeWindow {
+                range_ms: 4_000,
+                offset_ms: 0,
+                anchor_ms: None,
+                modifier: None,
+            },
+            function,
+        )
+        .unwrap();
+        let chunks = collect_chunks(
+            &mut evaluator,
+            &[
+                make_chunk(2_000, 2.0, Some(1_000), false),
+                make_chunk(3_000, 4.0, None, true),
+            ],
+        );
+        let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+        match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+            SampleRef::Histogram(histogram) => assert!(
+                (histogram.count - expected).abs() < 1e-12,
+                "{function:?}: {} vs {expected}",
+                histogram.count
+            ),
+            other => panic!(
+                "expected histogram for {function:?}, got {}",
+                describe_sample(Some(other))
+            ),
+        }
+    }
+
+    // Three real samples, where the two spans finally differ: the sampled interval runs from the
+    // synthetic zero (5000 - 1000) while the average interval is measured between the real samples
+    // (5000 - 2000 over two steps). Both are 4000 against 1500 here, so an average taken from the
+    // sampled interval instead divides by three and under-reports the increase. Prometheus answers
+    // 9 * 1.375 = 12.375.
+    for (function, expected) in [
+        (RangeFunction::Increase, 12.375),
+        (RangeFunction::Rate, 2.0625),
+    ] {
+        let mut evaluator = RangeEvaluator::try_new(
+            &schema,
+            grid(6_500, 3_000, 1),
+            RangeWindow {
+                range_ms: 6_000,
+                offset_ms: 0,
+                anchor_ms: None,
+                modifier: None,
+            },
+            function,
+        )
+        .unwrap();
+        let chunks = collect_chunks(
+            &mut evaluator,
+            &[
+                make_chunk(2_000, 2.0, Some(1_000), false),
+                make_chunk(3_500, 5.0, None, false),
+                make_chunk(5_000, 9.0, None, true),
+            ],
+        );
+        let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+        match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+            SampleRef::Histogram(histogram) => assert!(
+                (histogram.count - expected).abs() < 1e-12,
+                "{function:?} over three samples: {} vs {expected}",
+                histogram.count
+            ),
+            other => panic!(
+                "expected histogram for {function:?} over three samples, got {}",
+                describe_sample(Some(other))
+            ),
+        }
+    }
+}
+
+#[test]
+fn single_histogram_start_timestamp_is_compared_on_shifted_axis() {
+    let schema = raw_schema(1);
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(123_000, 123_000, 1),
+        RangeWindow {
+            range_ms: 3_000,
+            offset_ms: 120_000,
+            anchor_ms: None,
+            modifier: None,
+        },
+        RangeFunction::Rate,
+    )
+    .unwrap();
+    let chunks = collect_chunks(
+        &mut evaluator,
+        &[histogram_chunk_from(&schema, 2, 2_000, Some(1_000), true)],
+    );
+    let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+    match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+        // A computed rate carries no start timestamp of its own, so the shifted comparison is
+        // pinned by the value alone: this sample answers only if its start timestamp was compared
+        // after the offset moved the window, and an empty position otherwise.
+        SampleRef::Histogram(histogram) => {
+            assert!((histogram.count - 2.0 / 3.0).abs() < 1e-12);
+            assert_eq!(histogram.start_timestamp, None);
+        }
+        other => panic!(
+            "expected histogram rate, got {}",
+            describe_sample(Some(other))
+        ),
+    }
+}
+
 /// What a sample is, for a failure message: `SampleRef` carries a borrowed histogram payload and
 /// cannot be printed itself.
 fn describe_sample(sample: Option<SampleRef<'_>>) -> String {
@@ -4846,4 +5079,88 @@ fn a_histogram_outside_every_smoothed_window_is_accepted() {
     for one_chunk in [true, false] {
         smoothed_delta_with_histogram(65_000, one_chunk).unwrap();
     }
+}
+
+/// A `rate` over gauge histograms reports the flavor warning into the collector the evaluator was
+/// given.
+///
+/// This is the warning the HTTP response is supposed to carry, checked at the point that decides
+/// it rather than end to end: the kernel recording nothing and the channel losing it look the same
+/// from an HTTP assertion, and only this test separates them.
+#[test]
+fn rate_over_gauge_histograms_records_the_flavor_warning() {
+    let schema = raw_schema(1);
+    let gauge_chunk = |ts: i64, count: f64, is_last: bool| {
+        let offsets = [0];
+        let lengths = [2];
+        let buckets = [count / 2.0; 2];
+        let mut builder = HistogramBatchBuilder::new();
+        let index = builder
+            .push(HistogramView {
+                schema: 0,
+                zero_threshold: 0.0,
+                zero_count: 0.0,
+                count,
+                sum: count,
+                reset_hint: CounterResetHint::Gauge,
+                start_timestamp: None,
+                custom_values: &[],
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: &buckets,
+                },
+                negative: BucketSideView {
+                    span_offsets: &[],
+                    span_lengths: &[],
+                    buckets: &[],
+                },
+            })
+            .unwrap();
+        let samples = Samples::try_from_histogram(
+            UInt32Array::from(vec![Some(index)]),
+            builder.finish().unwrap(),
+        )
+        .unwrap();
+        RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(0u64.to_le_bytes().to_vec()),
+            Some(metric(0)),
+            RawTimestamps::try_new(ScalarBuffer::from(vec![ts])).unwrap(),
+            SeriesFields::try_from_vec(vec![samples]).unwrap(),
+            is_last,
+        )
+        .unwrap()
+    };
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(3_000, 3_000, 1),
+        RangeWindow {
+            range_ms: 3_000,
+            offset_ms: 0,
+            anchor_ms: None,
+            modifier: None,
+        },
+        RangeFunction::Rate,
+    )
+    .unwrap();
+    let collector = common_query::promql_annotations::PromqlAnnotationCollector::default();
+    evaluator.set_annotations(Some(collector.clone()));
+
+    let _ = collect_chunks(
+        &mut evaluator,
+        &[
+            gauge_chunk(2_000, 2.0, false),
+            gauge_chunk(3_000, 4.0, true),
+        ],
+    );
+
+    let mut warnings = Vec::new();
+    collector.append_to(&mut warnings, &mut Vec::new());
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("should be a counter histogram")),
+        "rate over gauge histograms recorded no flavor warning: {warnings:?}"
+    );
 }

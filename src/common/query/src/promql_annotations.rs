@@ -113,17 +113,6 @@ pub fn promql_annotation_collector(query_id: &str) -> PromqlAnnotationCollector 
     collector
 }
 
-pub fn get_promql_annotation_collector(query_id: &str) -> Option<PromqlAnnotationCollector> {
-    let mut registry = PROMQL_ANNOTATION_REGISTRY
-        .lock()
-        .expect("promql annotation registry poisoned");
-    registry.retain(|_, collector| collector.strong_count() > 0);
-    registry
-        .get(query_id)
-        .and_then(Weak::upgrade)
-        .map(|inner| PromqlAnnotationCollector { inner })
-}
-
 fn append_unique(target: &mut Vec<String>, values: impl Iterator<Item = String>) {
     let mut seen = target.iter().cloned().collect::<BTreeSet<_>>();
     for value in values {
@@ -156,15 +145,30 @@ mod tests {
     }
 
     #[test]
-    fn registry_prunes_dead_collectors() {
-        let key = "registry_prunes_dead_collectors";
+    fn collector_is_shared_while_a_strong_reference_lives() {
+        let key = "collector_is_shared_while_a_strong_reference_lives";
+        let first = promql_annotation_collector(key);
+        first.record_warning("shared");
+        let second = promql_annotation_collector(key);
+
+        let mut warnings = vec![];
+        let mut infos = vec![];
+        second.append_to(&mut warnings, &mut infos);
+        assert_eq!(warnings, vec!["shared"]);
+    }
+
+    #[test]
+    fn a_dropped_collector_is_not_reused() {
+        let key = "a_dropped_collector_is_not_reused";
         {
-            let collector = promql_annotation_collector(key);
-            assert!(get_promql_annotation_collector(key).is_some());
-            drop(collector);
+            let stale = promql_annotation_collector(key);
+            stale.record_warning("stale");
         }
 
-        assert!(get_promql_annotation_collector(key).is_none());
-        assert!(!PROMQL_ANNOTATION_REGISTRY.lock().unwrap().contains_key(key));
+        let current = promql_annotation_collector(key);
+        let mut warnings = vec![];
+        let mut infos = vec![];
+        current.append_to(&mut warnings, &mut infos);
+        assert!(warnings.is_empty());
     }
 }

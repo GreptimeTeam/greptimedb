@@ -609,6 +609,46 @@ impl FloatHistogram {
     }
 
     /// Go `DetectReset`: whether `self` cannot follow `previous` without a counter reset.
+    /// A counter reset the start timestamps witness, in Prometheus's rule: a current sample whose
+    /// start lies between the previous sample and itself began counting again, so the counts need
+    /// not have dropped for this to be a reset.
+    ///
+    /// The native path reuses it so a restarted counter that happens to be above the previous
+    /// value is not read as an increase.
+    pub(crate) fn detect_start_timestamp_reset(
+        &self,
+        previous: &Self,
+        previous_ts: i64,
+        current_ts: i64,
+    ) -> bool {
+        let current_start = self.start_timestamp.unwrap_or_default();
+        if current_start == 0 || current_start >= current_ts || current_start < previous_ts {
+            return false;
+        }
+        if current_start > previous_ts {
+            return true;
+        }
+
+        // Prometheus reads this as `prevStart > 0 && prevStart != prevTs`, which also fires for a
+        // previous start timestamp later than its own sample. That is not a counter the sender can
+        // have observed, so requiring it to be at or before `previous_ts` keeps such a payload from
+        // being reported as a reset.
+        let previous_start = previous.start_timestamp.unwrap_or_default();
+        previous_start <= previous_ts && previous_start != 0 && previous_start != previous_ts
+    }
+
+    /// Detects a counter reset the way the existing planner does, over start timestamps and then
+    /// the payload.
+    pub(crate) fn detect_counter_reset(
+        &self,
+        previous: &Self,
+        previous_ts: i64,
+        current_ts: i64,
+    ) -> bool {
+        self.detect_start_timestamp_reset(previous, previous_ts, current_ts)
+            || self.detect_reset(previous).unwrap_or(false)
+    }
+
     pub(crate) fn detect_reset(&self, previous: &Self) -> Result<bool> {
         match self.reset_hint {
             CounterResetHint::CounterReset => return Ok(true),

@@ -34,12 +34,15 @@ use std::f64::consts::PI;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::arrow::array::Float64Array;
+use datatypes::arrow::array::{Float64Array, Float64Builder, UInt32Builder};
 use datatypes::series::SeriesLabels;
+use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{
-    DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{GridRange, TimeAxis};
+
+use crate::histogram_eval::float_histogram::FloatHistogram;
 
 use crate::functions::Round;
 use crate::grid_series::GridSeriesBuilder;
@@ -189,6 +192,99 @@ pub fn map_arithmetic(
     let mut output = map_float_fields(schema, series, |floats| op.apply(floats, scalar))?;
     output.metric = drop_metric_name(&output.metric)?;
     Ok(output)
+}
+
+/// Applies literal scalar arithmetic to float and histogram samples. Float-only series retain the
+/// original kernel unchanged; histogram-capable fields are traversed sample-by-sample.
+pub(crate) fn map_arithmetic_literal(
+    schema: &SeriesSchema,
+    series: &Series,
+    op: ArithmeticOp,
+    scalar: ScalarOperand,
+) -> Result<Series> {
+    validate_grid_series(schema, series)?;
+    if is_float_series(series) {
+        return map_arithmetic(schema, series, op, scalar);
+    }
+
+    let fields = series
+        .fields
+        .iter()
+        .map(|samples| {
+            let segments = samples
+                .segments()
+                .iter()
+                .map(|segment| map_arithmetic_segment(segment, op, scalar))
+                .collect::<Result<Vec<_>>>()?;
+            Samples::try_from_chunks(segments).map_err(series_error)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut output = Series::try_new(
+        schema,
+        series.metric.clone(),
+        series.time.clone(),
+        SeriesFields::try_from_vec(fields).map_err(series_error)?,
+    )
+    .map_err(series_error)?;
+    output.metric = drop_metric_name(&output.metric)?;
+    Ok(output)
+}
+
+fn map_arithmetic_segment(
+    samples: &Samples,
+    op: ArithmeticOp,
+    scalar: ScalarOperand,
+) -> Result<Samples> {
+    let mut floats = Float64Builder::with_capacity(samples.len());
+    let mut indices = UInt32Builder::with_capacity(samples.len());
+    let mut histograms = HistogramBatchBuilder::new();
+
+    for index in 0..samples.len() {
+        match samples.sample(index) {
+            SampleRef::Missing => {
+                floats.append_null();
+                indices.append_null();
+            }
+            SampleRef::Float(value) => {
+                let result = match scalar {
+                    ScalarOperand::Left(left) => op.calculate(left, value),
+                    ScalarOperand::Right(right) => op.calculate(value, right),
+                };
+                floats.append_value(result);
+                indices.append_null();
+            }
+            SampleRef::Histogram(view) => {
+                floats.append_null();
+                let histogram_result = match (op, scalar) {
+                    (ArithmeticOp::Multiply, ScalarOperand::Left(factor))
+                    | (ArithmeticOp::Multiply, ScalarOperand::Right(factor)) => {
+                        let mut histogram = FloatHistogram::try_from_view(&view)?;
+                        histogram.mul(factor);
+                        Some(histogram)
+                    }
+                    (ArithmeticOp::Divide, ScalarOperand::Right(divisor)) => {
+                        let mut histogram = FloatHistogram::try_from_view(&view)?;
+                        histogram.div(divisor);
+                        Some(histogram)
+                    }
+                    // Scalar / histogram and all other histogram operators drop this position.
+                    _ => None,
+                };
+                if let Some(mut histogram) = histogram_result {
+                    histogram.compact();
+                    let index = histogram.push_to(&mut histograms)?;
+                    indices.append_value(index);
+                } else {
+                    indices.append_null();
+                }
+            }
+        }
+    }
+
+    let histogram_samples =
+        HistogramSamples::try_new(indices.finish(), histograms.finish().map_err(series_error)?)
+            .map_err(series_error)?;
+    Samples::try_from_mixed(floats.finish(), histogram_samples).map_err(series_error)
 }
 
 /// Produces an unlabelled scalar over exactly the requested evaluated range.

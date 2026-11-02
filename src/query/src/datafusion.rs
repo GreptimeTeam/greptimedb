@@ -623,6 +623,21 @@ impl QueryEngine for DatafusionQueryEngine {
                 state: self.engine_state().function_state(),
             });
 
+        // The PromQL planner registers the query's annotation collector in the session state it
+        // planned with. Execution builds its task context from a fresh state, so the same
+        // collector is looked up again by query id here; without it a native kernel's warnings
+        // and infos would be recorded into an object nobody reads.
+        if let Some(collector) = query_ctx
+            .remote_query_id()
+            .map(common_query::promql_annotations::promql_annotation_collector)
+        {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(collector);
+        }
+
         // Carry scheduled Flow time through ConfigOptions.extensions so that
         // the distributed plan analyzer can read it during expression
         // simplification (preventing wall-clock constant-folding of `now()`).

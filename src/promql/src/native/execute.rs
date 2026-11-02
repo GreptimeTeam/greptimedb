@@ -52,7 +52,7 @@ use crate::instant_eval::{
 };
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
-    drop_metric_name, is_float_series, map_arithmetic, map_arithmetic_series, map_compare,
+    drop_metric_name, is_float_series, map_arithmetic_literal, map_arithmetic_series, map_compare,
     map_compare_series, map_math, map_math_with_parameters,
 };
 use crate::map_time::{self, DateFunction};
@@ -2160,7 +2160,7 @@ impl BroadcastRuntime {
     fn apply(&self, chunk: &EvaluatedChunk) -> Result<Option<Series>> {
         let output = match &self.scalar {
             BroadcastScalar::Literal(operand) => match self.op {
-                BroadcastOp::Arithmetic(op) => Some(map_arithmetic(
+                BroadcastOp::Arithmetic(op) => Some(map_arithmetic_literal(
                     &self.sample_schema,
                     &chunk.series,
                     op,
@@ -2183,6 +2183,12 @@ impl BroadcastRuntime {
                 };
                 match self.op {
                     BroadcastOp::Arithmetic(op) => {
+                        if !is_float_series(&chunk.series) {
+                            return Err(DataFusionError::NotImplemented(
+                                "dynamic scalar arithmetic does not support histogram or mixed samples"
+                                    .into(),
+                            ));
+                        }
                         map_arithmetic_series(&self.sample_schema, &chunk.series, op, operand)?
                     }
                     BroadcastOp::Compare(comparison) => {

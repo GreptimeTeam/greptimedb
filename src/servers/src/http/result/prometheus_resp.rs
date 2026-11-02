@@ -32,9 +32,7 @@ use common_query::native_histogram::{
     NativeHistogram, is_native_histogram_value_type, read_histogram,
 };
 use common_query::prometheus::{format_prometheus_float, is_prometheus_stale_nan};
-use common_query::promql_annotations::{
-    PromqlAnnotationCollector, get_promql_annotation_collector,
-};
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use datatypes::arrow_array::string_array_value_at_index;
@@ -227,10 +225,9 @@ impl PrometheusJsonResponse {
         result: Result<Output>,
         metric_name: Option<String>,
         result_type: ValueType,
-        query_id: Option<&str>,
+        collector: Option<PromqlAnnotationCollector>,
     ) -> Self {
         // Hold the collector while a streaming result is consumed.
-        let collector = query_id.and_then(get_promql_annotation_collector);
         let response: Result<Self> = async {
             let result = result?;
             let mut resp =
@@ -1082,7 +1079,7 @@ mod tests {
             Ok(Output::new_with_record_batches(RecordBatches::empty())),
             None,
             ValueType::Vector,
-            Some(query_id),
+            Some(left),
         )
         .await;
 

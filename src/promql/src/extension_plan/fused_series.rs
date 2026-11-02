@@ -2738,16 +2738,18 @@ impl ExecutionPlan for FusedSeriesExec {
                 return Err(error);
             }
         };
-        // PromQL warnings and infos of the native kernels land in the query's collector, which the
-        // planner put in the session config; the HTTP response reads it back by query id. A query
-        // without one - an internal execution, or a caller that never asked for them - simply
-        // records nothing.
+        // The planner registers the query's collector in the session's `ConfigOptions.extensions`
+        // rather than the separate `SessionConfig` container, so it is read from where it was
+        // written. The HTTP entry point holds a strong reference to that same collector for the life
+        // of the response; a query without one - an internal execution, or a caller that never
+        // asked for annotations - simply records nothing.
         if let Some(collector) = context
             .session_config()
-            .get_extension::<PromqlAnnotationCollector>()
+            .options()
+            .extensions
+            .get::<PromqlAnnotationCollector>()
         {
-            // `get_extension` hands back the shared collector; the executor keeps its own handle.
-            state.set_annotations(Some((*collector).clone()));
+            state.set_annotations(Some(collector.clone()));
         }
         state.register_metrics(&self.metric, partition);
         let mut streams: Vec<futures::stream::BoxStream<'static, Result<FusedFeed, BoxedError>>> =

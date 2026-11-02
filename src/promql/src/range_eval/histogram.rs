@@ -197,10 +197,12 @@ pub(super) fn evaluate(
         Rate | Increase if floats.is_none() && histograms.len() == 1 => {
             let (first_ts, first) = &histograms[0];
             let range_start = eval_ts - range_ms;
-            if first
-                .start_timestamp
-                .is_some_and(|start| start != 0 && range_start < start && start < *first_ts)
-            {
+            if first.start_timestamp.is_some_and(|start| {
+                start != 0
+                    && start.checked_add(offset_ms).is_some_and(|shifted_start| {
+                        range_start < shifted_start && shifted_start < *first_ts
+                    })
+            }) {
                 record_histogram_flavor_warning(collector, function, histograms);
                 let mut result = first.clone();
                 let factor = if function == Rate {
@@ -219,6 +221,15 @@ pub(super) fn evaluate(
             let is_counter = function != Delta;
             record_histogram_flavor_warning(collector, function, histograms);
             record_histogram_pair_annotations(collector, function, histograms);
+            let range_start = eval_ts - range_ms;
+            let synthetic_zero = is_counter
+                .then_some(first.start_timestamp)
+                .flatten()
+                .and_then(|start| start.checked_add(offset_ms).map(|shifted| (start, shifted)))
+                .filter(|(start, shifted)| {
+                    *start != 0 && range_start < *shifted && *shifted < *first_ts
+                })
+                .map(|(_, shifted)| shifted);
             let Some(mut result) = histogram_rate(histograms, is_counter)? else {
                 record_warning(
                     collector,
@@ -229,17 +240,64 @@ pub(super) fn evaluate(
                 );
                 return Ok(None);
             };
-            let zero_point = (is_counter && result.count > 0.0 && first.count >= 0.0)
+            let effective_first_ts = synthetic_zero.unwrap_or(*first_ts);
+            let sample_count_minus_one =
+                histograms.len() - 1 + usize::from(synthetic_zero.is_some());
+            if *last_ts <= effective_first_ts {
+                return Ok(None);
+            }
+            let zero_point = (is_counter && synthetic_zero.is_none() && result.count > 0.0)
                 .then(|| first.count / result.count);
-            result.mul(extrapolation_factor(
-                (*first_ts, *last_ts),
-                histograms.len() - 1,
-                eval_ts,
-                range_ms,
-                is_counter,
-                function == Rate,
-                zero_point,
-            ));
+            let factor = if let Some(synthetic_zero_start) = synthetic_zero {
+                // The sampled interval runs from the synthetic zero while the average interval is
+                // measured between the real samples, as `native_extrapolated_rate` does: they are
+                // two different spans, and taking one for the other shifts the average by a whole
+                // sample interval.
+                let sampled_interval = (*last_ts - synthetic_zero_start) as f64;
+                let average_interval =
+                    (*last_ts - *first_ts) as f64 / (histograms.len() - 1) as f64;
+                let duration_to_start = 0.0;
+                let duration_to_end = (eval_ts - *last_ts) as f64;
+                let threshold = average_interval * 1.1;
+                let extrapolated = sampled_interval
+                    + if duration_to_start < threshold {
+                        duration_to_start
+                    } else {
+                        average_interval / 2.0
+                    }
+                    + if duration_to_end < threshold {
+                        duration_to_end
+                    } else {
+                        average_interval / 2.0
+                    };
+                let factor = extrapolated / sampled_interval;
+                if function == Rate {
+                    factor / (range_ms as f64 / 1000.0)
+                } else {
+                    factor
+                }
+            } else {
+                extrapolation_factor(
+                    (effective_first_ts, *last_ts),
+                    sample_count_minus_one,
+                    eval_ts,
+                    range_ms,
+                    is_counter,
+                    function == Rate,
+                    zero_point,
+                )
+            };
+            if synthetic_zero.is_some() && result.add(first).is_err() {
+                record_warning(
+                    collector,
+                    format!(
+                        "{}: dropped native histogram range with incompatible schemas",
+                        function_name(function)
+                    ),
+                );
+                return Ok(None);
+            }
+            result.mul(factor);
             Some(GridSample::Histogram(Box::new(result)))
         }
         Irate | Idelta => {
@@ -546,9 +604,11 @@ fn histogram_rate(points: &Histograms, is_counter: bool) -> Result<Option<FloatH
     let mut prev = Cow::Borrowed(&points[0].1);
     let mut uses_custom_buckets = prev.uses_custom_buckets();
     // A reset between the first two samples makes the first one irrelevant, layout included.
+    // The start timestamps witness a reset the counts alone do not, which is what a restarted
+    // counter looks like when it is already above the previous value.
     if is_counter {
-        let second = &points[1].1;
-        if second.detect_reset(&prev)? {
+        let (second_ts, second) = &points[1];
+        if second.detect_counter_reset(&prev, points[0].0, *second_ts) {
             prev = Cow::Owned(second.empty_like());
             uses_custom_buckets = second.uses_custom_buckets();
         }
@@ -568,8 +628,8 @@ fn histogram_rate(points: &Histograms, is_counter: bool) -> Result<Option<FloatH
     let mut result = last.copy_to_schema(min_schema)?;
     result.sub(&prev)?;
     if is_counter {
-        for (_, current) in &points[1..] {
-            if current.detect_reset(&prev)? {
+        for (index, (current_ts, current)) in points.iter().enumerate().skip(1) {
+            if current.detect_counter_reset(&prev, points[index - 1].0, *current_ts) {
                 result.add(&prev)?;
             }
             prev = Cow::Borrowed(current);

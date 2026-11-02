@@ -196,6 +196,8 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_v2_native_histogram,
                 test_remote_write_v2_histogram_prometheus_native_route,
+                test_remote_write_v2_histogram_native_annotations,
+                test_remote_write_v2_histogram_native_arithmetic,
                 test_remote_write_v2_histogram_flush_native_consistency,
                 test_remote_write_v2_histogram_native_partitions,
                 test_remote_write_v2_histogram_native_range_function,
@@ -5489,6 +5491,223 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
     assert_eq!(
         observer.take("histogram sum_over_time").name(),
         "FusedSeriesExec"
+    );
+}
+
+/// Scalar arithmetic over native histograms stays on the native route and scales the payload.
+///
+/// `h * 2` and `h / 2` scale every bucket. `-h` is the same multiply by a negative factor, which
+/// also turns the counter into a gauge, as Prometheus' own `Histogram.Mul` does. `2 / h` has no
+/// histogram answer, so that position is dropped rather than failing the query - the scalar
+/// division arithmetic of Prometheus returns a float only for a float input.
+///
+/// None of these reach the float-only arithmetic the range kernels use, so a query that passed
+/// admission could still fail at execution; these results are what proves it does not.
+pub async fn test_remote_write_v2_histogram_native_arithmetic(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_native_arithmetic",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    write_native_histogram(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_arithmetic"),
+            ("job", "api"),
+        ],
+        1000,
+        10,
+        20.0,
+    )
+    .await;
+
+    // `count` and `sum` of the one returned histogram, as the response writes them.
+    let histogram_of = |body: &Value| -> (String, String) {
+        (
+            body["data"]["result"][0]["histogram"][1]["count"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no histogram count in {body}"))
+                .to_string(),
+            body["data"]["result"][0]["histogram"][1]["sum"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no histogram sum in {body}"))
+                .to_string(),
+        )
+    };
+
+    for (query, expected_count, expected_sum) in [
+        ("native_histogram_arithmetic%20%2A%202", "20", "40"),
+        ("native_histogram_arithmetic%20%2F%202", "5", "10"),
+        ("-native_histogram_arithmetic", "-10", "-20"),
+    ] {
+        observer.clear();
+        let response = client
+            .get(&format!("/v1/prometheus/api/v1/query?query={query}&time=1"))
+            .header("x-greptime-hints", "query.experimental_native_promql=true")
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        let body: Value = response.json().await;
+        assert_eq!(body["data"]["resultType"], "vector", "{query}: {body}");
+        assert_eq!(
+            histogram_of(&body),
+            (expected_count.to_string(), expected_sum.to_string()),
+            "{query}: {body}"
+        );
+        assert_eq!(
+            observer.take("histogram arithmetic").name(),
+            "FusedSeriesExec",
+            "{query} left the native route"
+        );
+    }
+
+    // `2 / h` admits but has no histogram answer: the position is dropped, so the query succeeds
+    // with an empty result rather than failing at execution or falling back to the float path.
+    observer.clear();
+    let response = client
+        .get("/v1/prometheus/api/v1/query?query=2%20%2F%20native_histogram_arithmetic&time=1")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(
+        body["data"]["result"].as_array().map(Vec::len),
+        Some(0),
+        "`2 / h` should drop the histogram position: {body}"
+    );
+    assert_eq!(
+        observer
+            .take("histogram arithmetic: scalar over histogram")
+            .name(),
+        "FusedSeriesExec",
+        "`2 / h` left the native route"
+    );
+}
+
+/// A native histogram query that has something to warn about puts it in the response.
+///
+/// `rate` over a gauge histogram is the case: the kernel drops nothing but reports that the input
+/// was the wrong flavor. The warning has to travel from the kernel through the executor and the
+/// query's collector to the HTTP response, which is the whole channel this checks - a collector
+/// the execution never reaches would leave `warnings` absent.
+pub async fn test_remote_write_v2_histogram_native_annotations(store_type: StorageType) {
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "native_histogram_annotations",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    // A gauge histogram, which `rate` reports as the wrong flavor.
+    let mut request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (
+                prom_store::METRIC_NAME_LABEL,
+                "native_histogram_annotations",
+            ),
+            ("job", "api"),
+        ],
+        vec![],
+    );
+    let name_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let metric_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == "native_histogram_annotations")
+        .unwrap() as u32;
+    let job_ref = request.symbols.iter().position(|s| s == "job").unwrap() as u32;
+    let api_ref = request.symbols.iter().position(|s| s == "api").unwrap() as u32;
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![name_ref, metric_ref, job_ref, api_ref],
+        histograms: vec![
+            Histogram {
+                count: Some(Count::CountInt(4)),
+                sum: 8.0,
+                schema: 1,
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 2,
+                }],
+                // Increments: the two buckets hold 2 and 2, which sums to the count of 4.
+                positive_deltas: vec![2, 0],
+                // `CounterResetHint::Gauge`
+                reset_hint: 3,
+                timestamp: 2000,
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountInt(8)),
+                sum: 16.0,
+                schema: 1,
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 2,
+                }],
+                positive_deltas: vec![4, 0],
+                reset_hint: 3,
+                timestamp: 3000,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let response = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = response.status();
+    let body = response.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
+    let response = client
+        .get("/v1/prometheus/api/v1/query?query=rate(native_histogram_annotations%5B1m%5D)&time=3")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    let warnings = body["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings in {body}"));
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("should be a counter histogram"))),
+        "the flavor warning did not reach the response: {body}"
     );
 }
 
