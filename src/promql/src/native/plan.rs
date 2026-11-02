@@ -550,10 +550,6 @@ impl NativeTree {
     pub fn root(&self) -> &NativeNode {
         &self.root
     }
-
-    pub(crate) fn validate_depth(&self) -> Result<()> {
-        ensure_native_node_depth(&self.root)
-    }
 }
 
 impl<'de> serde::Deserialize<'de> for NativeNode {

@@ -1051,69 +1051,32 @@ fn mutate_envelope_payload(
     result
 }
 
-fn plain_envelope(
-    tree: NativeTree,
-    binding_tags: Vec<String>,
-    output_tags: Vec<String>,
-) -> Vec<u8> {
-    let output_columns = [TIME.to_string(), VALUE.to_string()]
-        .into_iter()
-        .chain(output_tags.iter().cloned())
-        .collect::<Vec<_>>();
-    plain_envelope_in_order(tree, binding_tags, output_tags, output_columns)
+fn mutate_schema(bytes: &[u8], schema: Schema) -> Vec<u8> {
+    mutate_envelope_payload(bytes, |payload| payload.output_schema = schema)
 }
 
-/// The same envelope with the output columns in a caller-chosen order.
-///
-/// The planner happens to emit time-then-values-then-tags, so an assertion made only
-/// against that order cannot notice if decoding reorders. This lets a test pin a legal
-/// schema the planner would not produce.
-fn plain_envelope_in_order(
-    tree: NativeTree,
-    binding_tags: Vec<String>,
-    output_tags: Vec<String>,
-    output_columns: Vec<String>,
-) -> Vec<u8> {
-    let binding = binding_of(&tree, raw_schema(), binding_tags);
-    let schema = super::plain_rows_schema(&tree, &output_tags, &output_columns, TIME).unwrap();
-    let node = FusedSeries::try_new(
+fn scalar_node(tree: NativeTree, value_name: &str) -> FusedSeries {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new(value_name, DataType::Float64, true),
+    ]));
+    FusedSeries::try_new(
         Arc::from(PROMQL),
         tree,
-        binding,
-        vec![input_plan(frame_schema())],
+        FusedSeriesBinding {
+            grid: grid(),
+            time_index: TIME.into(),
+            tags: Vec::new(),
+            metric_name: None,
+        },
+        Vec::new(),
         Arc::new(datafusion::common::DFSchema::try_from(schema.as_ref().clone()).unwrap()),
     )
-    .unwrap();
-    let mut bytes = node.serialize().unwrap();
-    let (mut payload, remainder) =
-        postcard::take_from_bytes::<super::FusedSeriesPayload>(&bytes[8..]).unwrap();
-    assert!(remainder.is_empty());
-    payload.output_tags = output_tags;
-    let changed = postcard::to_stdvec(&payload).unwrap();
-    bytes.truncate(8);
-    bytes[4..8].copy_from_slice(&(changed.len() as u32).to_le_bytes());
-    bytes.extend(changed);
-    bytes
-}
-
-fn scalar_envelope(tree: NativeTree) -> Vec<u8> {
-    let payload = super::FusedSeriesPayload {
-        tree,
-        grid: GridSpec::try_new(GRID_START, GRID_STEP, GRID_LEN).unwrap(),
-        metric_name: None,
-        time_index: TIME.into(),
-        tags: Vec::new(),
-        format: FusedOutputFormat::PlainRows,
-        promql: Arc::from(PROMQL),
-        partial_fold: None,
-        output_tags: Vec::new(),
-        output_columns: vec![TIME.into(), "value".into()],
-    };
-    let encoded = postcard::to_stdvec(&payload).unwrap();
-    let mut bytes = 3u32.to_le_bytes().to_vec();
-    bytes.extend((encoded.len() as u32).to_le_bytes());
-    bytes.extend(encoded);
-    bytes
+    .unwrap()
 }
 
 fn assert_decode_error(bytes: &[u8], expected: &str) {
@@ -1126,87 +1089,131 @@ fn assert_decode_error(bytes: &[u8], expected: &str) {
 
 #[test]
 fn plain_rows_decode_rejects_invalid_schemas() {
-    let tree = rate_tree();
-    for (output_tags, expected) in [
-        (vec![HOST.into(), HOST.into()], "duplicate tag column"),
-        (vec![TIME.into()], "duplicate time column"),
-        (vec![VALUE.into()], "clashes with a series field"),
-    ] {
-        let bytes = plain_envelope(tree.clone(), vec![HOST.into(), NAME.into()], output_tags);
-        assert_decode_error(&bytes, expected);
+    let node = fused(rate_tree());
+    let bytes = node.serialize().unwrap();
+    let scalar = scalar_node(scalar_tree(grid(), 1.0), "clock_value");
+    let scalar_bytes = scalar.serialize().unwrap();
+    let scalar_with_tag = mutate_envelope_payload(&scalar_bytes, |payload| {
+        let mut fields = payload.output_schema.fields().to_vec();
+        fields.push(Arc::new(Field::new(HOST, DataType::Utf8, true)));
+        payload.output_schema = Schema::new(fields);
+    });
+    assert_decode_error(&scalar_with_tag, "cannot produce 1 tag columns");
+
+    let malformed_schemas = [
+        (
+            Schema::new(vec![Field::new(TIME, DataType::Utf8, false)]),
+            "must be Timestamp",
+        ),
+        (
+            Schema::new(vec![
+                Field::new(
+                    TIME,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new(VALUE, DataType::Float64, true),
+                Field::new(VALUE, DataType::Float64, true),
+            ]),
+            "duplicate",
+        ),
+        (
+            Schema::new(vec![
+                Field::new(
+                    TIME,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new(HOST, DataType::Utf8, true),
+                Field::new(NAME, DataType::Utf8, true),
+            ]),
+            "missing field column",
+        ),
+        (
+            Schema::new(vec![
+                Field::new(
+                    TIME,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new(VALUE, DataType::Float64, true),
+                Field::new(HOST, DataType::Float64, true),
+                Field::new(NAME, DataType::Utf8, true),
+            ]),
+            "must be Utf8",
+        ),
+    ];
+    for (schema, expected) in malformed_schemas {
+        assert_decode_error(&mutate_schema(&bytes, schema), expected);
     }
 
-    // A table may contribute an output label absent from the binding.
-    let cross_table = plain_envelope(tree.clone(), Vec::new(), vec![HOST.into()]);
-    let decoded = FusedSeries::deserialize(&cross_table).unwrap();
-    assert!(decoded.binding().tags.is_empty());
-    assert_eq!(decoded.schema().fields().len(), 3);
-    assert_eq!(decoded.schema().field(0).name(), TIME);
-    assert_eq!(decoded.schema().field(1).name(), VALUE);
-    assert_eq!(decoded.schema().field(2).name(), HOST);
+    let scalar_decoded = FusedSeries::deserialize(&scalar_bytes).unwrap();
+    assert_eq!(scalar_decoded.schema(), scalar.schema());
 
-    let scalar = scalar_tree(grid(), 1.0);
-    let scalar_bytes = scalar_envelope(scalar);
-    let scalar_with_tag = mutate_envelope_payload(&scalar_bytes, |payload| {
-        payload.output_tags.push(HOST.into());
-    });
-    assert_decode_error(&scalar_with_tag, "scalar root cannot produce 1 tag columns");
+    // Binding tags describe the source; the carried schema independently describes outputs.
+    let empty_binding = binding_of(node.tree(), raw_schema(), Vec::new());
+    let cross_table = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        node.tree().clone(),
+        empty_binding,
+        node.children().to_vec(),
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let decoded = FusedSeries::deserialize(&cross_table.serialize().unwrap()).unwrap();
+    assert_eq!(decoded.schema(), cross_table.schema());
+    assert!(decoded.binding().tags.is_empty());
 }
 
-/// A legal column order the planner does not emit must survive the round trip.
-///
-/// The planner happens to write time, then values, then tags, so a test that only ever
-/// uses that order cannot notice decoding reordering the columns — and `MergeScan`
-/// compares schemas by position, so a reordered schema is a different schema.
 #[test]
 fn a_non_default_column_order_survives_the_round_trip() {
     let tree = rate_tree();
-    // value first, then the time index, then the label: the reverse of the emitted order.
-    let output_columns = vec![VALUE.to_string(), TIME.to_string(), HOST.to_string()];
-    let bytes = plain_envelope_in_order(
-        tree.clone(),
-        vec![HOST.into()],
-        vec![HOST.into()],
-        output_columns.clone(),
+    let binding = binding(&tree);
+    let reordered = Schema::new_with_metadata(
+        vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(HOST, DataType::Utf8, true)
+                .with_metadata([("origin".to_string(), "carried".to_string())].into()),
+            Field::new(NAME, DataType::Utf8, true),
+        ],
+        [("schema-origin".to_string(), "carried".to_string())].into(),
     );
-
-    let decoded = FusedSeries::deserialize(&bytes).unwrap();
-    let names: Vec<&str> = decoded
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| field.name().as_str())
-        .collect();
+    let node = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        vec![input_plan(frame_schema())],
+        Arc::new(datafusion::common::DFSchema::try_from(reordered.clone()).unwrap()),
+    )
+    .unwrap();
+    let decoded = FusedSeries::deserialize(&node.serialize().unwrap()).unwrap();
+    assert_eq!(decoded.schema(), node.schema());
+    assert_eq!(decoded.schema().as_arrow().metadata(), reordered.metadata());
     assert_eq!(
-        names, output_columns,
-        "the carried order must be the decoded order, not the reconstruction default"
-    );
-    // The types are derived, so they must still follow the role each name plays.
-    assert_eq!(
-        decoded.schema().field(0).data_type(),
-        &DataType::Float64,
-        "{VALUE} is a value field"
-    );
-    assert_eq!(
-        decoded.schema().field(1).data_type(),
-        &DataType::Timestamp(TimeUnit::Millisecond, None),
-        "{TIME} is the time index"
-    );
-    assert_eq!(
-        decoded.schema().field(2).data_type(),
-        &DataType::Utf8,
-        "{HOST} is a label"
+        decoded
+            .schema()
+            .field_with_name(None, HOST)
+            .unwrap()
+            .metadata(),
+        reordered.field_with_name(HOST).unwrap().metadata()
     );
 }
 
 #[test]
-fn series_frame_decode_rejects_carried_output_tags() {
+fn series_frame_decode_rejects_schema_mismatch() {
     let node = envelope_node_with_tags(vec![HOST.into(), NAME.into()]);
     let bytes = node.serialize().unwrap();
     let wrong = mutate_envelope_payload(&bytes, |payload| {
-        payload.output_tags.push(HOST.into());
+        let mut fields = payload.output_schema.fields().to_vec();
+        fields.push(Arc::new(Field::new("extra", DataType::Utf8, true)));
+        payload.output_schema = Schema::new(fields);
     });
-    assert_decode_error(&wrong, "must not carry output tags or columns");
+    assert_decode_error(&wrong, "does not match the evaluated frame layout");
 }
 
 #[test]
@@ -1221,23 +1228,16 @@ fn partial_decode_rejects_format_schema_and_tag_order_mismatch() {
     )
     .unwrap();
     let bytes = node.serialize().unwrap();
-    let wrong_tags = mutate_envelope_payload(&bytes, |payload| {
-        payload.output_tags.push("extra".into());
+    let wrong_schema = mutate_envelope_payload(&bytes, |payload| {
+        let mut fields = payload.output_schema.fields().to_vec();
+        fields.swap(0, 1);
+        payload.output_schema = Schema::new(fields);
     });
-    assert_decode_error(&wrong_tags, "output tags must match binding.tags in order");
+    assert_decode_error(&wrong_schema, "does not match state schema");
 
-    let reversed = mutate_envelope_payload(&bytes, |payload| payload.output_tags.swap(0, 1));
-    assert_decode_error(&reversed, "output tags must match binding.tags in order");
-
-    let mut wrong_format = bytes.clone();
-    let (mut payload, remainder) =
-        postcard::take_from_bytes::<super::FusedSeriesPayload>(&bytes[8..]).unwrap();
-    assert!(remainder.is_empty());
-    payload.format = FusedOutputFormat::SeriesFrame;
-    let changed = postcard::to_stdvec(&payload).unwrap();
-    wrong_format.truncate(8);
-    wrong_format[4..8].copy_from_slice(&(changed.len() as u32).to_le_bytes());
-    wrong_format.extend(changed);
+    let wrong_format = mutate_envelope_payload(&bytes, |payload| {
+        payload.format = FusedOutputFormat::SeriesFrame;
+    });
     assert_decode_error(&wrong_format, "partial FusedSeries must use PlainRows");
 }
 

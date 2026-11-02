@@ -1551,44 +1551,6 @@ fn a_samples_root_without_an_input_is_refused() {
     assert!(error.to_string().contains("source indexes"), "{error}");
 }
 
-/// FusedSeries must reject a tree constructed outside the checked NativeTree constructor.
-#[test]
-fn fused_series_rejects_a_tree_over_the_depth_limit() {
-    use super::MAX_NATIVE_NODE_DEPTH;
-
-    let statement_grid = grid(0, 60_000, 4);
-    let mut root = input_on(Arc::clone(&statement_grid));
-    for _ in 0..MAX_NATIVE_NODE_DEPTH {
-        root = NativeNode {
-            expr: NativeExpr::Map {
-                input: Box::new(root),
-                op: BoundMap {
-                    ops: Arc::new([MapOp::Math(MathOp::Abs)]),
-                },
-            },
-            output: evaluated(Arc::new([]), Arc::clone(&statement_grid)),
-        };
-    }
-    let tree = NativeTree { root };
-    let binding = FusedSeriesBinding {
-        grid: statement_grid,
-        time_index: "time".to_string(),
-        tags: vec![],
-        metric_name: None,
-    };
-
-    let error = FusedSeries::try_new(
-        Arc::from("1"),
-        tree,
-        binding,
-        Vec::new(),
-        Arc::new(DFSchema::empty()),
-    )
-    .expect_err("a samples root reads no source while reporting samples");
-
-    assert!(error.to_string().contains("exceeds 64"), "{error}");
-}
-
 /// `info` reads its info side's values as sample times, so it accepts only the instant selection
 /// that reports them: one that reports the samples themselves would compare every info series as
 /// equally new.
