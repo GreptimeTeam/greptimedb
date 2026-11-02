@@ -703,16 +703,10 @@ impl PromPlanner {
         let per_partition =
             !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
         let locality = input_locality(root);
-        let needs_nested_match_segmentation = cross_table
-            && !multi_input
-            && matches!(locality, InputLocality::SinglePartition)
-            && has_nested_vector_match(root);
-        // A vector match whose operands changed a requested key is conservatively single-partition
-        // as a bare tree. Cut those computed operands first: the parent can then route their actual
-        // output labels with the unchanged matching key (missing labels naturally drop out).
-        let needs_matching_key_segmentation =
+        let computed_key_case =
             matches!(locality, InputLocality::SinglePartition) && matching_operands_drop_key(root);
-        if !per_partition || needs_nested_match_segmentation || needs_matching_key_segmentation {
+        let required_placement = !per_partition || computed_key_case;
+        if required_placement {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather
             // than whole samples, so it moves less between the two halves than a sample boundary
             // would. The general segmentation below is the fallback for the trees it declines,
@@ -751,12 +745,13 @@ impl PromPlanner {
                     single_input_context,
                 )));
             }
-            // Same-table repeated selectors normally retain their established planner route; only
-            // the computed matching-key case needs separate source segments for safe routing.
-            // `build_inner_segment` binds each cut's sources, including multiple raw sources.
-            if selectors.len() != 1 && !cross_table && !needs_matching_key_segmentation {
+            // Preserve the established refusal for repeated same-table operands unless
+            // segmentation is needed to preserve a computed matching key.
+            if selectors.len() != 1 && !cross_table && !computed_key_case {
                 return Ok(None);
             }
+        }
+        if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = Box::pin(segment_tree(
                 self,
@@ -776,7 +771,7 @@ impl PromPlanner {
             if let Some(plan) = plan {
                 return Ok(Some((plan, single_input_context)));
             }
-            if !multi_input {
+            if required_placement && !multi_input {
                 return Ok(None);
             }
         }
@@ -1057,42 +1052,6 @@ fn exportable(node: &NativeNode) -> bool {
         .is_some_and(|schema| schema.eval_grid.is_some())
 }
 
-/// Whether `node` contains a per-series prefix that a boundary could carry.
-///
-/// The cut is only ever between a node that must gather and a subtree that does not need to: that
-/// subtree is the prefix the gather would otherwise swallow. Without one, a tree that reads across
-/// series has nothing to hand over, and splitting it would only move the same work up a level.
-fn carries_prefix(node: &NativeNode) -> bool {
-    let expr = &node.expr;
-    node_children(expr)
-        .into_iter()
-        .any(|child| cut_as_segment(child) || carries_prefix(child))
-}
-
-/// Whether a tree contains a vector match with an independently matched vector operand.
-///
-/// Point-wise wrappers and scalar broadcasts are transparent: they may surround the outer match,
-/// but do not change the locality of its vector operands.
-fn has_nested_vector_match(node: &NativeNode) -> bool {
-    let nested_match_here = match &node.expr {
-        NativeExpr::Binary { left, right, .. }
-            if matches!(left.output, NativeType::Samples(_))
-                && matches!(right.output, NativeType::Samples(_)) =>
-        {
-            [left.as_ref(), right.as_ref()].into_iter().any(|operand| {
-                matches!(operand.expr, NativeExpr::Binary { .. })
-                    && matches!(operand.output, NativeType::Samples(_))
-                    && independent_scan_pair(operand)
-            })
-        }
-        _ => false,
-    };
-    nested_match_here
-        || node_children(&node.expr)
-            .into_iter()
-            .any(has_nested_vector_match)
-}
-
 /// Whether `node` becomes a segment of its own under a parent that must gather.
 ///
 /// The parent reads across series, so it answers one partition and gathers whatever it reads. A
@@ -1103,7 +1062,9 @@ fn has_nested_vector_match(node: &NativeNode) -> bool {
 /// Both ends of the comparison come from the classification the physical planner applies to the
 /// tree it builds, so a cut here is a tree the physical planner would also have had to gather.
 fn cut_as_segment(node: &NativeNode) -> bool {
-    exportable(node) && !matches!(input_locality(node), InputLocality::SinglePartition)
+    exportable(node)
+        && !matches!(node.expr, NativeExpr::Input(_))
+        && !matches!(input_locality(node), InputLocality::SinglePartition)
 }
 
 /// One segment: its tree rewritten to read only its own inputs, the scans it reads, and the
@@ -1246,6 +1207,104 @@ fn cut_segments(node: &NativeNode) -> Segment {
 ///
 /// Returns the plan and the output columns the segment reports, which its parent names its own
 /// columns by. `None` when any part cannot be built, so the statement keeps the plan it had.
+fn is_raw_series_source(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Extension(extension) => extension.node.as_any().is::<RawSeriesSource>(),
+        _ => false,
+    }
+}
+
+fn find_input_node(node: &NativeNode, source_index: usize) -> Option<&BoundInput> {
+    match &node.expr {
+        NativeExpr::Input(input) if input.source_index == source_index => Some(input),
+        expr => node_children(expr)
+            .into_iter()
+            .find_map(|child| find_input_node(child, source_index)),
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn build_evaluated_segment(
+    node: &NativeNode,
+    children: &[LogicalPlan],
+    source_tags: &[Vec<String>],
+    source_ids: &[Option<usize>],
+    per_source: &[(Option<Arc<str>>, String, Vec<String>)],
+    grid: &Arc<EvalGrid>,
+    time_index: &str,
+) -> Option<(LogicalPlan, Vec<String>)> {
+    let mut sources = Vec::new();
+    collect_segment_inputs(node, &mut sources);
+    if sources.is_empty() {
+        return None;
+    }
+    let mut inputs = Vec::with_capacity(sources.len());
+    let mut local_tags = Vec::with_capacity(sources.len());
+    let source_fields =
+        tree_source_fields(&NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?)
+            .ok()?;
+    for (local_index, &index) in sources.iter().enumerate() {
+        let child = children.get(index)?.clone();
+        let input = find_input_node(node, index)?;
+        if input
+            .output
+            .samples()
+            .is_some_and(|schema| schema.eval_grid.is_some())
+            || is_raw_series_source(&child)
+        {
+            inputs.push(child);
+            local_tags.push(source_tags.get(index)?.clone());
+        } else {
+            let original_index = *source_ids.get(index)?.as_ref()?;
+            let (Some((Some(metric), _, tags)), Some(fields)) = (
+                per_source.get(original_index),
+                source_fields.get(local_index),
+            ) else {
+                return None;
+            };
+            inputs.push(LogicalPlan::Extension(Extension {
+                node: Arc::new(
+                    RawSeriesSource::try_new(
+                        Arc::clone(metric),
+                        tags.clone(),
+                        fields.clone(),
+                        child,
+                    )
+                    .ok()?,
+                ),
+            }));
+            local_tags.push(tags.clone());
+        }
+    }
+    let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
+    let output_tags = fused_output_tags(tree.root(), &local_tags)?;
+    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default())).is_err() {
+        return None;
+    }
+    let frame = FusedSeries::series_frame_schema(&tree).ok()?;
+    let frame = DFSchema::try_from(frame.as_ref().clone()).ok()?;
+    let plan = FusedSeries::try_new_with_format(
+        Arc::from("segment"),
+        tree,
+        FusedSeriesBinding {
+            grid: Arc::clone(grid),
+            time_index: time_index.to_string(),
+            tags: output_tags.clone(),
+            metric_name: None,
+        },
+        inputs,
+        Arc::new(frame),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .ok()?;
+    Some((
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(plan),
+        }),
+        output_tags,
+    ))
+}
+
 #[allow(clippy::type_complexity)]
 fn build_inner_segment(
     node: &NativeNode,
@@ -1358,9 +1417,6 @@ async fn segment_tree(
     // such subtree inside it has nothing to cut, and cutting anything else - an aggregate's own
     // state, a constant - is either impossible or a plain recomputation of the same work in one
     // more node. Cutting on locality alone would accept one here.
-    if !carries_prefix(tree.root()) {
-        return Ok(None);
-    }
     // A grouping by `__name__` keeps that label while the fused node's declared columns cannot
     // name it. With multiple sources, groups differing only by metric name would therefore be
     // reported under one label set. A single-source tree cannot merge distinct metric-name groups
@@ -1368,43 +1424,77 @@ async fn segment_tree(
     if children.len() > 1 && groups_by_metric_name(tree.root()) {
         return Ok(None);
     }
-    // A statement the existing planner refuses is not one this route may answer: that refusal is
-    // the product's answer for the statement today, and answering it here would turn an error into
-    // a value. What is inherited is the *existing planner's* coverage, which is not the same thing
-    // as what this route can execute - `clamp` has a kernel here and none there, and the existing
-    // tests pin its refusal on both routes. Reading the existing plan's columns is how the rest of
-    // this route inherits that refusal; this call is the same check for a shape whose columns the
-    // derivation can name on its own.
-    if planner
-        .legacy_output_columns(prom_expr, query_engine_state)
-        .await
-        .is_err()
-    {
-        return Ok(None);
-    }
-    let segment = cut_segments(tree.root());
-    if segment.cut.is_empty() {
-        return Ok(None);
-    }
-    let mut inputs = Vec::with_capacity(segment.sources.len() + segment.cut.len());
-    let mut child_tags = Vec::with_capacity(inputs.capacity());
-    for &index in &segment.sources {
-        let Some(child) = children.get(index) else {
+    let mut current_tree = tree.clone();
+    let mut current_children = children.to_vec();
+    let mut current_tags = source_tags.to_vec();
+    let mut current_source_ids = (0..children.len()).map(Some).collect::<Vec<_>>();
+    let mut first_iteration = true;
+    let mut changed = false;
+    loop {
+        if !matches!(
+            input_locality(current_tree.root()),
+            InputLocality::SinglePartition
+        ) {
+            break;
+        }
+        let segment = cut_segments(current_tree.root());
+        if segment.cut.is_empty() {
+            break;
+        }
+        let mut inputs = Vec::with_capacity(segment.sources.len() + segment.cut.len());
+        let mut child_tags = Vec::with_capacity(inputs.capacity());
+        for &index in &segment.sources {
+            let Some(child) = current_children.get(index) else {
+                return Ok(None);
+            };
+            inputs.push(child.clone());
+            child_tags.push(current_tags.get(index).cloned().unwrap_or_default());
+        }
+        let mut child_source_ids = segment
+            .sources
+            .iter()
+            .map(|&index| current_source_ids.get(index).copied().flatten())
+            .collect::<Vec<_>>();
+        for cut in &segment.cut {
+            let built = if first_iteration {
+                build_inner_segment(cut, bare_scans, per_source, grid)
+            } else {
+                None
+            }
+            .or_else(|| {
+                build_evaluated_segment(
+                    cut,
+                    &current_children,
+                    &current_tags,
+                    &current_source_ids,
+                    per_source,
+                    grid,
+                    time_index,
+                )
+            });
+            let Some((plan, cut_tags)) = built else {
+                return Ok(None);
+            };
+            inputs.push(plan);
+            child_tags.push(cut_tags);
+            child_source_ids.push(None);
+        }
+        let Some(parent) = NativeTree::try_new(segment.node).ok() else {
             return Ok(None);
         };
-        inputs.push(child.clone());
-        child_tags.push(source_tags.get(index).cloned().unwrap_or_default());
+        first_iteration = false;
+        current_tree = parent;
+        current_children = inputs;
+        current_tags = child_tags;
+        current_source_ids = child_source_ids;
+        changed = true;
     }
-    for cut in &segment.cut {
-        let Some((plan, cut_tags)) = build_inner_segment(cut, bare_scans, per_source, grid) else {
-            return Ok(None);
-        };
-        inputs.push(plan);
-        child_tags.push(cut_tags);
-    }
-    let Some(parent) = NativeTree::try_new(segment.node).ok() else {
+    if !changed {
         return Ok(None);
-    };
+    }
+    let parent = current_tree;
+    let inputs = current_children;
+    let child_tags = current_tags;
     // Nothing below can fall back once physical planning starts, so every tree this route commits
     // to has to be one the runtime executes. A shape the runtime refuses - a grouping by a value
     // field, an operation with no kernel - therefore keeps the plan it had.
@@ -2019,8 +2109,8 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, fused_output_tags, hybrid_binary_admitted,
-        independent_scan_pair, native_promql_requested, scan_time_filter,
+        NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, cut_segments, fused_output_tags,
+        hybrid_binary_admitted, independent_scan_pair, native_promql_requested, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -2288,7 +2378,15 @@ mod tests {
         }
     }
 
-    /// A map that only computes values passes its input's labels through unchanged.
+    #[test]
+    fn recursive_segmentation_rewrites_nested_cuts_with_dense_inputs() {
+        let tree = compiled_test_tree("sum(abs(rate(x[1m])))");
+        let segment = cut_segments(tree.root());
+        assert!(!segment.cut.is_empty());
+        assert_eq!(segment.cut.len(), 1);
+        assert_eq!(vec![0], input_sources(&segment.cut[0]));
+    }
+
     #[test]
     fn match_output_tags_pass_through_pointwise_math() {
         let sources = [vec!["host".to_string(), "kind".to_string()]];

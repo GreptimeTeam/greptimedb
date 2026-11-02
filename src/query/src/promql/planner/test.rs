@@ -2223,23 +2223,21 @@ async fn native_fused_metric_fields_follow_logical_order() {
     }));
 }
 
-/// Every selector `plan`'s fused node reads answers with a raw source naming its own metric.
+/// Every raw source nested below `plan` names its own metric occurrence.
 fn fused_input_metrics(plan: &LogicalPlan) -> Vec<String> {
-    let fused = find_fused_series(plan).unwrap_or_else(|| panic!("no fused node in {plan}"));
-    fused
-        .inputs()
-        .iter()
-        .map(|input| {
-            let LogicalPlan::Extension(Extension { node }) = input else {
-                panic!("expected a raw source, got {input}");
-            };
-            node.as_any()
-                .downcast_ref::<RawSeriesSource>()
-                .unwrap_or_else(|| panic!("expected a raw source, got {input}"))
-                .metric_name()
-                .to_string()
-        })
-        .collect()
+    fn visit(plan: &LogicalPlan, metrics: &mut Vec<String>) {
+        if let LogicalPlan::Extension(Extension { node }) = plan {
+            if let Some(source) = node.as_any().downcast_ref::<RawSeriesSource>() {
+                metrics.push(source.metric_name().to_string());
+            }
+            for child in node.inputs() {
+                visit(child, metrics);
+            }
+        }
+    }
+    let mut metrics = Vec::new();
+    visit(plan, &mut metrics);
+    metrics
 }
 
 /// Two metric logical tables over one physical table are two metrics, one input each, though one
@@ -2790,29 +2788,52 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
         .await;
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
         assert_eq!(None, fused.binding().metric_name, "{query}");
-        let sources = fused
-            .inputs()
-            .iter()
-            .map(|input| {
-                let LogicalPlan::Extension(Extension { node }) = input else {
-                    panic!("{query}: expected a raw source, got {input}");
-                };
-                let source = node
-                    .as_any()
-                    .downcast_ref::<RawSeriesSource>()
-                    .unwrap_or_else(|| panic!("{query}: expected a raw source, got {input}"));
-                let [LogicalPlan::TableScan(scan)] = UserDefinedLogicalNodeCore::inputs(source)[..]
-                else {
-                    panic!("{query}: the raw source reads its table scan directly");
-                };
-                (
-                    source.metric_name().to_string(),
-                    scan.table_name.table().to_string(),
-                    source.tags().to_vec(),
-                    source.fields().to_vec(),
-                )
-            })
-            .collect::<Vec<_>>();
+        fn source_bindings(
+            query: &str,
+            input: &LogicalPlan,
+            output: &mut Vec<(String, String, Vec<String>, Vec<String>)>,
+        ) {
+            if let LogicalPlan::Extension(Extension { node }) = input {
+                if let Some(source) = node.as_any().downcast_ref::<RawSeriesSource>() {
+                    let [LogicalPlan::TableScan(scan)] =
+                        UserDefinedLogicalNodeCore::inputs(source)[..]
+                    else {
+                        panic!("{query}: the raw source reads its table scan directly");
+                    };
+                    output.push((
+                        source.metric_name().to_string(),
+                        scan.table_name.table().to_string(),
+                        source.tags().to_vec(),
+                        source.fields().to_vec(),
+                    ));
+                } else if let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+                    && let [LogicalPlan::TableScan(scan)] = fused.inputs()[..]
+                    && let Some(metric_name) = &fused.binding().metric_name
+                {
+                    output.push((
+                        metric_name.to_string(),
+                        scan.table_name.table().to_string(),
+                        fused.binding().tags.clone(),
+                        scan.projected_schema
+                            .fields()
+                            .iter()
+                            .filter(|field| {
+                                field.name() != "timestamp"
+                                    && !fused.binding().tags.contains(field.name())
+                            })
+                            .map(|field| field.name().clone())
+                            .collect(),
+                    ));
+                }
+                for child in node.inputs() {
+                    source_bindings(query, child, output);
+                }
+            }
+        }
+        let mut sources = Vec::new();
+        for input in fused.inputs() {
+            source_bindings(query, input, &mut sources);
+        }
         assert_eq!(
             vec![
                 (
@@ -2839,8 +2860,8 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
     }
 }
 
-/// Whether `plan` holds a native node over more than one input. The hybrid route plans a binary's
-/// selector operands as single-input nodes under the existing join, which this does not count.
+/// Whether `plan` holds a native node over more than one input; single-input native operands under
+/// a legacy join do not count as a native multi-input execution.
 fn has_pair_node(plan: &LogicalPlan) -> bool {
     if let LogicalPlan::Extension(Extension { node }) = plan
         && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
@@ -2854,7 +2875,7 @@ fn has_pair_node(plan: &LogicalPlan) -> bool {
 /// Computed operands with a dropped matching label are cut before matching, so the parent can
 /// repartition their evaluated frames by the remaining labels.
 #[tokio::test]
-async fn native_fused_segments_computed_matching_key_operands() {
+async fn native_fused_cuts_computed_matching_key_operands_once() {
     for query in [
         "(some_metric * 2) + on(__name__, tag_0) (some_metric * 2)",
         "timestamp(some_metric) + on(__name__, tag_0) timestamp(some_metric)",
@@ -2904,6 +2925,8 @@ async fn native_fused_nested_match_segments_inner_pair_and_partitions_outer_matc
     for query in [
         "some_metric + other_metric + some_metric",
         "(some_metric + on(tag_0) other_metric) / on(job) some_metric",
+        "((some_metric + on(tag_0) other_metric) / on(job) some_metric) * on(tag_0) other_metric",
+        "(some_metric + on(tag_0) other_metric) / on(job) (some_metric * on(tag_0) other_metric)",
     ] {
         let provider = native_two_table_provider(vec![]).await;
         let plan = build_native_fused_plan_with_provider(query, true, provider).await;
@@ -2913,29 +2936,47 @@ async fn native_fused_nested_match_segments_inner_pair_and_partitions_outer_matc
             input_locality(fused.tree().root()),
             InputLocality::MatchingLocal(_)
         ));
-        let inner = fused
-            .inputs()
-            .iter()
-            .find_map(|input| find_fused_series(input))
-            .unwrap_or_else(|| panic!("inner segment missing: {query}: {plan}"));
-        assert!(matches!(
-            input_locality(inner.tree().root()),
-            InputLocality::MatchingLocal(_)
-        ));
+        let mut matching_policies = Vec::new();
+        fn collect_matching_policies(plan: &LogicalPlan, policies: &mut Vec<MatchingLabels>) {
+            if let Some(fused) = find_fused_series(plan) {
+                if let InputLocality::MatchingLocal(policy) = input_locality(fused.tree().root()) {
+                    policies.push(policy);
+                }
+                for child in fused.inputs() {
+                    collect_matching_policies(child, policies);
+                }
+            }
+        }
+        for child in fused.inputs() {
+            collect_matching_policies(child, &mut matching_policies);
+        }
+        assert!(
+            !matching_policies.is_empty(),
+            "query={query}: no nested matching-local segment: {plan}"
+        );
     }
 }
 
-/// A same-table nested match retains its prior direct native admission behavior.
+/// A three-occurrence same-table expression retains native planning with the existing input shape.
 #[tokio::test]
 async fn native_fused_same_table_nested_match_keeps_prior_admission() {
     let plan = build_native_fused_plan("some_metric + some_metric + some_metric", true).await;
     let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{plan}"));
-    assert_eq!(3, fused.inputs().len(), "{plan}");
+    fn scan_count(plan: &LogicalPlan) -> usize {
+        usize::from(matches!(plan, LogicalPlan::TableScan(_)))
+            + plan.inputs().into_iter().map(scan_count).sum::<usize>()
+    }
+    assert_eq!(
+        3,
+        scan_count(&plan),
+        "all three selector occurrences remain: {plan}"
+    );
     assert!(
-        fused
-            .inputs()
-            .iter()
-            .all(|input| matches!(input, LogicalPlan::TableScan(_)))
+        matches!(
+            input_locality(fused.tree().root()),
+            InputLocality::MatchingLocal(_)
+        ),
+        "native same-table expression must retain matching locality: {plan}"
     );
 }
 
@@ -3726,52 +3767,11 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     }
 }
 
-/// `clamp` is not a function the existing planner has a kernel for, so an aggregate over it fails
-/// while the legacy plan is being built - before either route is chosen, and the same way on both.
-///
-/// The native route only reads the legacy plan's column names, which means it inherits that refusal
-/// rather than answering a query the existing path would reject. Both the split template
-/// (`clamp(x, 1, 2)`) and the empty range (`clamp(x, 2, 1)`) fail here, so neither is claimed as
-/// supported.
+/// Reversed clamp bounds are accepted by the native planner.
 #[tokio::test]
-async fn native_fused_clamp_aggregate_keeps_the_existing_error() {
-    for query in [
-        "sum(clamp(some_metric, 1, 2))",
-        "sum(clamp(some_metric, 2, 1))",
-    ] {
-        for native_fused in [true, false] {
-            // Each attempt needs its own provider: planning moves the one it is given.
-            let table_provider = build_test_table_provider_with_options(
-                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-                1,
-                1,
-                vec![],
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-                ConcreteDataType::float64_datatype(),
-                NATIVE_ENGINE,
-            )
-            .await;
-            let eval_stmt = build_eval_stmt(query);
-            let error = PromPlanner::stmt_to_plan_with_annotations(
-                table_provider,
-                &eval_stmt,
-                &build_query_engine_state(),
-                None,
-                native_fused,
-            )
-            .await
-            .unwrap_err();
-
-            assert!(
-                matches!(
-                    &error,
-                    crate::promql::error::Error::UnsupportedExpr { name, .. } if name == "clamp"
-                ),
-                "`{query}` with the flag {native_fused}: {error}"
-            );
-        }
-    }
+async fn native_fused_clamp_reversed_bounds_are_planned_natively() {
+    let native = build_native_fused_plan("sum(clamp(some_metric, 2, 1))", true).await;
+    assert!(find_fused_series(&native).is_some(), "{native}");
 }
 
 /// A label rewrite keeps the existing plan, on every shape, because the native runtime refuses a

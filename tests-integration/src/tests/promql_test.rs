@@ -6681,6 +6681,205 @@ async fn native_promql_multi_source_segments_match_legacy_values() {
     assert_eq!(legacy, native, "native/legacy mismatch");
 }
 
+/// Recursive native vector matching retains parallel execution and legacy results at nested sites.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_recursive_matching_segments_match_legacy() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_recursive_matching",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE rec_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         CREATE TABLE rec_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         CREATE TABLE rec_c (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         CREATE TABLE rec_d (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO rec_a VALUES ('a', 0, 2), ('b', 0, 4); \
+         INSERT INTO rec_b VALUES ('a', 0, 3), ('b', 0, 5); \
+         INSERT INTO rec_c VALUES ('a', 0, 7), ('b', 0, 11); \
+         INSERT INTO rec_d VALUES ('a', 0, 13), ('b', 0, 17)",
+        QueryContext::arc(),
+    )
+    .await;
+    for (query, expected_values) in [
+        (
+            "(rec_a + on(host) rec_b) + on(host) (rec_c + on(host) rec_d)",
+            vec![("a", 25.0), ("b", 37.0)],
+        ),
+        (
+            "rec_a + on(host) (rec_b + on(host) (rec_c + on(host) rec_d))",
+            vec![("a", 25.0), ("b", 37.0)],
+        ),
+        (
+            "(rec_a + on(host) rec_b) / on(host) (rec_c + on(host) rec_d)",
+            vec![("a", 0.25), ("b", 9.0 / 28.0)],
+        ),
+        (
+            "rec_a + on(host) rec_a + on(host) rec_a + on(host) rec_a",
+            vec![("a", 8.0), ("b", 16.0)],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let output = native_tql_output(&instance, &sql, true).await;
+        let native = native_result_rows(output).await;
+        let physical = observer.root_plan();
+        assert_eq!(
+            4,
+            physical.output_partitioning().partition_count(),
+            "{query}: {physical:?}"
+        );
+        let mut stack = vec![physical.clone()];
+        let mut matching_sites = Vec::new();
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec"
+                && node.children().len() == 2
+                && node.children().iter().all(|child| {
+                    child
+                        .downcast_ref::<promql::extension_plan::SeriesRepartitionExec>()
+                        .is_some_and(|router| {
+                            matches!(
+                                router.routing_policy(),
+                                promql::extension_plan::SeriesRouting::Matching(_)
+                            )
+                        })
+                })
+            {
+                matching_sites.push(node.clone());
+            }
+            assert!(
+                !node.name().contains("HashJoin") && !node.name().contains("JoinExec"),
+                "{query}: legacy join remains in native plan: {physical:?}"
+            );
+            stack.extend(node.children().into_iter().cloned());
+        }
+        assert_eq!(3, matching_sites.len(), "{query}: {physical:?}");
+        for site in &matching_sites {
+            assert_eq!(
+                4,
+                site.output_partitioning().partition_count(),
+                "each native matching stage must run in four partitions: {site:?}"
+            );
+        }
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native, legacy, "{query}");
+        let expected = expected_values
+            .iter()
+            .map(|(host, value)| (0, (*host).to_string(), *value))
+            .collect::<Vec<_>>();
+        assert_eq!(expected, native, "{query}: expected populated host rows");
+    }
+
+    execute_all(
+        &instance,
+        "CREATE TABLE rec_key_a (host STRING, job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, job)); \
+         CREATE TABLE rec_key_b (host STRING, job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, job)); \
+         CREATE TABLE rec_key_c (host STRING, job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, job)); \
+         CREATE TABLE rec_key_d (host STRING, job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, job)); \
+         INSERT INTO rec_key_a VALUES ('a', 'ja', 0, 2), ('b', 'jb', 0, 4); \
+         INSERT INTO rec_key_b VALUES ('a', 'ja', 0, 3), ('b', 'jb', 0, 5); \
+         INSERT INTO rec_key_c VALUES ('a', 'ja', 0, 7), ('b', 'jb', 0, 11); \
+         INSERT INTO rec_key_d VALUES ('a', 'ja', 0, 13), ('b', 'jb', 0, 17)",
+        QueryContext::arc(),
+    )
+    .await;
+    let query = "(rec_key_a + on(host, job) rec_key_b) + on(host) rec_key_c + on(host) rec_key_d";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let (columns, native) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    let physical = observer.root_plan();
+    assert_eq!(
+        4,
+        physical.output_partitioning().partition_count(),
+        "{physical:?}"
+    );
+    let mut stack = vec![physical.clone()];
+    let mut matching_sites = Vec::new();
+    while let Some(node) = stack.pop() {
+        if node.name() == "FusedSeriesExec"
+            && node.children().len() == 2
+            && node.children().iter().all(|child| {
+                child
+                    .downcast_ref::<promql::extension_plan::SeriesRepartitionExec>()
+                    .is_some_and(|router| {
+                        matches!(
+                            router.routing_policy(),
+                            promql::extension_plan::SeriesRouting::Matching(_)
+                        )
+                    })
+            })
+        {
+            let policies = node
+                .children()
+                .iter()
+                .map(|child| {
+                    let router = child
+                        .downcast_ref::<promql::extension_plan::SeriesRepartitionExec>()
+                        .unwrap();
+                    router.routing_policy().clone()
+                })
+                .collect::<Vec<_>>();
+            matching_sites.push((node.clone(), policies));
+        }
+        assert!(
+            !node.name().contains("HashJoin") && !node.name().contains("JoinExec"),
+            "legacy join remains for different matching keys: {physical:?}"
+        );
+        stack.extend(node.children().into_iter().cloned());
+    }
+    assert_eq!(3, matching_sites.len(), "{physical:?}");
+    let policy_on = |labels: &[&str]| {
+        promql::extension_plan::SeriesRouting::Matching(promql::vector_match::MatchingLabels::On(
+            labels.iter().map(|label| Arc::from(*label)).collect(),
+        ))
+    };
+    // The plan walk is root-first: the outer host match, its middle host match, then the
+    // innermost host/job match.
+    let expected_policies = vec![
+        vec![policy_on(&["host"]), policy_on(&["host"])],
+        vec![policy_on(&["host"]), policy_on(&["host"])],
+        vec![policy_on(&["host", "job"]), policy_on(&["host", "job"])],
+    ];
+    let actual_policies = matching_sites
+        .iter()
+        .map(|(_, policies)| policies.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(expected_policies, actual_policies, "{physical:?}");
+    for (site, _) in &matching_sites {
+        assert_eq!(4, site.output_partitioning().partition_count(), "{site:?}");
+    }
+
+    let legacy = native_labelled_rows(native_tql_output(&instance, &sql, false).await)
+        .await
+        .1;
+    assert_eq!(
+        native, legacy,
+        "different matching keys must preserve legacy output"
+    );
+    let expected = vec![
+        (
+            0,
+            std::collections::BTreeMap::from([("host".to_string(), "a".to_string())]),
+            25.0,
+        ),
+        (
+            0,
+            std::collections::BTreeMap::from([("host".to_string(), "b".to_string())]),
+            37.0,
+        ),
+    ];
+    assert_eq!(
+        expected, native,
+        "matching on host drops job from output labels"
+    );
+    assert_eq!(
+        vec!["host", "ts", "val"],
+        columns.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+}
+
 /// Segments are cut where the physical planner would otherwise have to gather a per-series prefix.
 ///
 /// One statement per shape the cut can meet, each asserting only what the rule says: a tree that
