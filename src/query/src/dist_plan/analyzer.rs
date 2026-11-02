@@ -618,16 +618,14 @@ impl PlanRewriter {
             _ => plan,
         };
         let in_process_fused_root = in_process_region_transport && is_in_process_plan(native_root);
-        let skip_in_process_encodability = in_process_fused_root
-            && DFLogicalSubstraitConvertor
-                .encode(plan, DefaultSerializer)
-                .is_err();
+        let whole_plan_encodable = DFLogicalSubstraitConvertor
+            .encode(plan, DefaultSerializer)
+            .is_ok();
+        let skip_in_process_encodability = in_process_fused_root && !whole_plan_encodable;
         Self {
             in_process_fused_root,
             skip_in_process_encodability,
-            whole_plan_encodable: DFLogicalSubstraitConvertor
-                .encode(plan, DefaultSerializer)
-                .is_ok(),
+            whole_plan_encodable,
             ..Default::default()
         }
     }
