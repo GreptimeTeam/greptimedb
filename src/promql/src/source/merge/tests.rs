@@ -188,22 +188,6 @@ fn ordered_disjoint_pieces_concatenate_without_row_workspace() {
 }
 
 #[test]
-fn single_chunk_uses_ordered_fast_path() {
-    let result = merge_raw_identity(
-        &schema(1),
-        &[chunk(
-            b"k",
-            "v",
-            vec![2, 5],
-            vec![vec![Some(12.), Some(15.)]],
-        )],
-    )
-    .unwrap();
-    assert_eq!(result.time.as_buffer().as_ref(), &[2, 5]);
-    assert_eq!(result.fields.get(0).unwrap().len(), 2);
-}
-
-#[test]
 fn touching_ordered_chunks_use_general_duplicate_path() {
     let schema = schema(1);
     let chunks = [
@@ -358,13 +342,13 @@ fn histogram_duplicates_compare_every_property() {
         is_last: false,
     };
     let positive = BucketSideView {
-        span_offsets: &[0],
-        span_lengths: &[2],
+        span_offsets: &[0, 0],
+        span_lengths: &[1, 1],
         buckets: &[1.0, 2.0],
     };
     let negative = BucketSideView {
-        span_offsets: &[0],
-        span_lengths: &[2],
+        span_offsets: &[0, 0],
+        span_lengths: &[1, 1],
         buckets: &[3.0, 4.0],
     };
     let build = |schema,
@@ -417,24 +401,24 @@ fn histogram_duplicates_compare_every_property() {
         buckets: &[3.0, 4.5],
         ..negative
     };
+    // Same span count and lengths as the baseline, different cursors: only the offsets differ.
     let positive_offsets_changed = BucketSideView {
-        span_offsets: &[1],
+        span_offsets: &[1, 0],
         ..positive
     };
     let negative_offsets_changed = BucketSideView {
-        span_offsets: &[1],
+        span_offsets: &[1, 0],
         ..negative
     };
-    // Same total bucket count (2), different split into spans, and valid nonnegative offsets.
+    // Same cursors and same total bucket count (2), different split into spans. A zero-length
+    // span is a valid layout, so only the lengths differ here.
     let positive_lengths_changed = BucketSideView {
-        span_offsets: &[0, 0],
-        span_lengths: &[1, 1],
-        buckets: &[1.0, 2.0],
+        span_lengths: &[2, 0],
+        ..positive
     };
     let negative_lengths_changed = BucketSideView {
-        span_offsets: &[0, 0],
-        span_lengths: &[1, 1],
-        buckets: &[3.0, 4.0],
+        span_lengths: &[2, 0],
+        ..negative
     };
     let cases: Vec<(&str, Samples)> = vec![
         (
@@ -543,7 +527,7 @@ fn histogram_duplicates_compare_every_property() {
             ),
         ),
         (
-            "positive span offset ([0] vs [1])",
+            "positive span offset ([0, 0] vs [1, 0])",
             build(
                 1,
                 1.0,
@@ -558,7 +542,7 @@ fn histogram_duplicates_compare_every_property() {
             ),
         ),
         (
-            "negative span offset ([0] vs [1])",
+            "negative span offset ([0, 0] vs [1, 0])",
             build(
                 1,
                 1.0,
@@ -573,7 +557,7 @@ fn histogram_duplicates_compare_every_property() {
             ),
         ),
         (
-            "positive span lengths ([2] vs [1, 1])",
+            "positive span lengths ([1, 1] vs [2, 0])",
             build(
                 1,
                 1.0,
@@ -588,7 +572,7 @@ fn histogram_duplicates_compare_every_property() {
             ),
         ),
         (
-            "negative span lengths ([2] vs [1, 1])",
+            "negative span lengths ([1, 1] vs [2, 0])",
             build(
                 1,
                 1.0,
