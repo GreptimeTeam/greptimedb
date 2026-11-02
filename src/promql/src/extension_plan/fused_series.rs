@@ -85,8 +85,8 @@ use crate::extension_plan::aggregate_exchange::{PartialFold, aggregate_op, state
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
-    reads_across_series,
+    AggregateKind, BoundAggregate, Grouping, InstantValue, NativeExpr, NativeNode, NativeTree,
+    NativeType, reads_across_series,
 };
 use crate::source::materialize_raw_labels;
 use crate::vector_match::MatchingLabels;
@@ -1075,7 +1075,10 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
 
     match &node.expr {
         NativeExpr::Input(_) => true,
-        NativeExpr::Instant { input, .. } => preserves_matching_key(input, matching),
+        NativeExpr::Instant { input, op } => {
+            (op.value != InstantValue::Timestamp || !labels_removed(&COMPUTED_LABELS))
+                && preserves_matching_key(input, matching)
+        }
         NativeExpr::Map { input, op } => {
             op.ops.iter().all(|op| match op {
                 crate::native::plan::MapOp::Math(_) => !labels_removed(&COMPUTED_LABELS),
@@ -1104,11 +1107,41 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
             (!op.function.drops_metric_name() || !labels_removed(&COMPUTED_LABELS))
                 && preserves_matching_key(input, matching)
         }
-        NativeExpr::Binary { left, right, .. } if matches!(left.output, NativeType::Scalar(_)) => {
-            preserves_matching_key(right, matching)
+        NativeExpr::Binary {
+            left,
+            right,
+            matching: binary,
+        } if matches!(left.output, NativeType::Scalar(_)) => {
+            let drops_labels = binary.return_bool
+                || !matches!(
+                    binary.op,
+                    crate::vector_match::BinaryOp::Eq
+                        | crate::vector_match::BinaryOp::Ne
+                        | crate::vector_match::BinaryOp::Gt
+                        | crate::vector_match::BinaryOp::Lt
+                        | crate::vector_match::BinaryOp::Ge
+                        | crate::vector_match::BinaryOp::Le
+                );
+            (!drops_labels || !labels_removed(&COMPUTED_LABELS))
+                && preserves_matching_key(right, matching)
         }
-        NativeExpr::Binary { left, right, .. } if matches!(right.output, NativeType::Scalar(_)) => {
-            preserves_matching_key(left, matching)
+        NativeExpr::Binary {
+            left,
+            right,
+            matching: binary,
+        } if matches!(right.output, NativeType::Scalar(_)) => {
+            let drops_labels = binary.return_bool
+                || !matches!(
+                    binary.op,
+                    crate::vector_match::BinaryOp::Eq
+                        | crate::vector_match::BinaryOp::Ne
+                        | crate::vector_match::BinaryOp::Gt
+                        | crate::vector_match::BinaryOp::Lt
+                        | crate::vector_match::BinaryOp::Ge
+                        | crate::vector_match::BinaryOp::Le
+                );
+            (!drops_labels || !labels_removed(&COMPUTED_LABELS))
+                && preserves_matching_key(left, matching)
         }
         // These operations can change labels or select/merge series; absent a node-specific
         // proof, do not claim that the routed key survives.

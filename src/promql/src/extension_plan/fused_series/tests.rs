@@ -482,6 +482,190 @@ fn binary_with_abs_and_matching_key(key: &str) -> NativeTree {
     NativeTree::try_new(root).unwrap()
 }
 
+fn scalar_operation_tree(key: &str, scalar_left: bool, op: BinaryOp) -> NativeTree {
+    scalar_operation_tree_over_sources(key, scalar_left, op, 0, 0)
+}
+
+fn scalar_operation_tree_over_sources(
+    key: &str,
+    scalar_left: bool,
+    op: BinaryOp,
+    left_source: usize,
+    right_source: usize,
+) -> NativeTree {
+    let tree = binary_tree_over_sources(
+        BinaryOp::Add,
+        raw_schema(),
+        raw_schema(),
+        left_source,
+        right_source,
+    );
+    let mut root = tree.root().clone();
+    let NativeExpr::Binary {
+        left,
+        right,
+        matching,
+    } = &mut root.expr
+    else {
+        unreachable!()
+    };
+    for side in [left, right] {
+        let vector = (**side).clone();
+        let scalar = NativeNode {
+            expr: NativeExpr::Scalar(BoundScalar { value: 2.0 }),
+            output: NativeType::Scalar(grid()),
+        };
+        **side = NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(if scalar_left {
+                    scalar.clone()
+                } else {
+                    vector.clone()
+                }),
+                right: Box::new(if scalar_left { vector } else { scalar }),
+                matching: BinaryMatching {
+                    op,
+                    return_bool: false,
+                    labels: MatchingLabels::Ignoring(Vec::new()),
+                    cardinality: Cardinality::OneToOne,
+                    fill: FillValues::default(),
+                },
+            },
+            output: side.output.clone(),
+        };
+    }
+    matching.labels = MatchingLabels::On(vec![Arc::from(key)]);
+    NativeTree::try_new(root).unwrap()
+}
+
+fn timestamp_match_tree() -> NativeTree {
+    let tree = binary_tree(raw_schema(), raw_schema());
+    let mut root = tree.root().clone();
+    let NativeExpr::Binary {
+        left,
+        right,
+        matching,
+    } = &mut root.expr
+    else {
+        unreachable!()
+    };
+    for side in [left, right] {
+        let NativeExpr::Instant { op, .. } = &mut side.expr else {
+            unreachable!()
+        };
+        op.value = InstantValue::Timestamp;
+    }
+    matching.labels = MatchingLabels::On(vec![Arc::from("__name__")]);
+    NativeTree::try_new(root).unwrap()
+}
+
+#[test]
+fn scalar_binaries_only_preserve_routable_keys_when_they_keep_them() {
+    for scalar_left in [false, true] {
+        let name_tree = scalar_operation_tree("__name__", scalar_left, BinaryOp::Mul);
+        assert!(matches!(
+            super::input_locality(name_tree.root()),
+            super::InputLocality::SinglePartition
+        ));
+        let host_tree = scalar_operation_tree(HOST, scalar_left, BinaryOp::Mul);
+        assert!(matches!(
+            super::input_locality(host_tree.root()),
+            super::InputLocality::MatchingLocal(_)
+        ));
+        let filter_tree = scalar_operation_tree("__name__", scalar_left, BinaryOp::Gt);
+        // Filtering comparisons retain labels; the output can still be routed by the name.
+        assert!(matches!(
+            super::input_locality(filter_tree.root()),
+            super::InputLocality::MatchingLocal(_)
+        ));
+    }
+}
+
+fn matching_name_partition(name: &str, partition_count: usize) -> usize {
+    use std::hash::{Hash, Hasher};
+    use twox_hash::XxHash64;
+
+    let mut hasher = XxHash64::with_seed(0x517c_c1b7_2722_0a95);
+    crate::vector_match::group_key(
+        &metric(&[], Some(name)),
+        &MatchingLabels::On(vec![Arc::from("__name__")]),
+    )
+    .hash(&mut hasher);
+    (hasher.finish() % partition_count as u64) as usize
+}
+
+#[tokio::test]
+async fn scalar_binary_matching_key_is_not_routed_by_dropped_names() {
+    let tree = scalar_operation_tree_over_sources("__name__", false, BinaryOp::Mul, 0, 1);
+    // The routing uses xxHash64 with ROUTING_SEED and hashes vector_match::group_key.
+    // Find two metric names whose `on(__name__)` group keys separate into two outputs.
+    let partition_count = 2;
+    // Select names deterministically and verify their destinations below rather than assuming
+    // the seeded hash separates them.
+    let (left_name, right_name) = (0..100)
+        .flat_map(|left| (0..100).map(move |right| (format!("x{left}"), format!("y{right}"))))
+        .find(|(left, right)| {
+            let left_partition = matching_name_partition(left, partition_count);
+            let right_partition = matching_name_partition(right, partition_count);
+            left_partition != right_partition
+        })
+        .expect("some name pair separates with two output partitions");
+    let left_partition = matching_name_partition(&left_name, partition_count);
+    let right_partition = matching_name_partition(&right_name, partition_count);
+    assert_ne!(left_partition, right_partition);
+    assert_eq!(("x0", "y0"), (left_name.as_str(), right_name.as_str()));
+    assert_eq!((0, 1), (left_partition, right_partition));
+
+    let mut left = series_chunk("left", &[(GRID_START, 2.0)], true);
+    left.metric = Some(metric(&[], Some(&left_name)));
+    let mut right = series_chunk("right", &[(GRID_START, 3.0)], true);
+    right.metric = Some(metric(&[], Some(&right_name)));
+    let left_input = memory_exec_partitioned(vec![vec![frame(&left)], vec![]]);
+    let right_input = memory_exec_partitioned(vec![vec![], vec![frame(&right)]]);
+    let node = FusedSeries::try_new(
+        Arc::from("(x * 2) + on(__name__) (y * 2)"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        super::input_locality(tree.root()),
+        super::InputLocality::SinglePartition
+    ));
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                left_input,
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                right_input,
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect("the scalar binary executes");
+    // With the old unconditional scalar recursion this is MatchingLocal, inserting the router;
+    // `left_name` and `right_name` hash to the different partitions above and the match is lost.
+    // The fix instead makes placement SinglePartition, so routing never sees their raw names.
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("the scalar binary completes");
+    assert_eq!(vec![10.0], binary_values(&batches));
+}
+
+#[test]
+fn timestamp_selection_does_not_preserve_computed_matching_labels() {
+    let tree = timestamp_match_tree();
+    assert!(matches!(
+        super::input_locality(tree.root()),
+        super::InputLocality::SinglePartition
+    ));
+}
+
 #[test]
 fn math_map_matching_key_preservation_controls_locality() {
     let name_tree = binary_with_abs_and_matching_key("__name__");
