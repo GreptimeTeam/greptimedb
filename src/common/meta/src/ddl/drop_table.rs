@@ -360,7 +360,7 @@ impl Procedure for DropTableProcedure {
         Self::TYPE_NAME
     }
 
-    fn recover(&mut self, _procedure_id: common_procedure::ProcedureId) -> ProcedureResult<()> {
+    fn recover(&mut self) -> ProcedureResult<()> {
         // Only registers regions if the metadata is deleted.
         let register_operating_regions = matches!(
             self.data.state,

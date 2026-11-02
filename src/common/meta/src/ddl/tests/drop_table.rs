@@ -1968,9 +1968,7 @@ async fn test_legacy_undrop_replays_restore_metadata() {
         }
 
         let mut replayed = UndropTableProcedure::from_json(&persisted, context.clone()).unwrap();
-        replayed
-            .recover(common_procedure::ProcedureId::random())
-            .unwrap();
+        replayed.recover().unwrap();
         execute_procedure_until_done(&mut replayed).await;
 
         let (table_info, table_route) = context
@@ -2189,9 +2187,7 @@ async fn test_recovered_automatic_purge_rechecks_unexpired_tombstone() {
 
     let mut recovered =
         PurgeDroppedTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
-    recovered
-        .recover(common_procedure::ProcedureId::random())
-        .unwrap();
+    recovered.recover().unwrap();
     execute_procedure_until_done(&mut recovered).await;
 
     assert!(
@@ -2241,9 +2237,7 @@ async fn test_recovered_automatic_purge_obeys_runtime_disable() {
     let mut recovered =
         PurgeDroppedTableProcedure::from_json(&procedure.dump().unwrap(), ddl_context.clone())
             .unwrap();
-    recovered
-        .recover(common_procedure::ProcedureId::random())
-        .unwrap();
+    recovered.recover().unwrap();
     execute_procedure_until_done(&mut recovered).await;
 
     assert!(
@@ -2292,9 +2286,7 @@ async fn test_recovered_automatic_purge_finishes_after_cleanup_is_claimed() {
     let mut recovered =
         PurgeDroppedTableProcedure::from_json(&persisted_before_cleanup, disabled_context.clone())
             .unwrap();
-    recovered
-        .recover(common_procedure::ProcedureId::random())
-        .unwrap();
+    recovered.recover().unwrap();
     execute_procedure_until_done(&mut recovered).await;
 
     assert!(
@@ -2835,9 +2827,7 @@ async fn test_from_json() {
         // Cleans up the keeper.
         ddl_context.memory_region_keeper.clear();
         let mut procedure = DropTableProcedure::from_json(&data, ddl_context.clone()).unwrap();
-        procedure
-            .recover(common_procedure::ProcedureId::random())
-            .unwrap();
+        procedure.recover().unwrap();
         assert_eq!(
             ddl_context.memory_region_keeper.len(),
             num_operating_regions_after_recovery
@@ -2866,9 +2856,7 @@ async fn test_from_json() {
     // Cleans up the keeper.
     ddl_context.memory_region_keeper.clear();
     let mut procedure = DropTableProcedure::from_json(&data, ddl_context.clone()).unwrap();
-    procedure
-        .recover(common_procedure::ProcedureId::random())
-        .unwrap();
+    procedure.recover().unwrap();
     assert_eq!(
         ddl_context.memory_region_keeper.len(),
         num_operating_regions_after_recovery

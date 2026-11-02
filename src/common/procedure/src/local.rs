@@ -2491,7 +2491,7 @@ mod tests {
             self.lock_key.clone()
         }
 
-        fn recover(&mut self, _procedure_id: ProcedureId) -> Result<()> {
+        fn recover(&mut self) -> Result<()> {
             self.notify.as_ref().unwrap().notify_one();
             Ok(())
         }

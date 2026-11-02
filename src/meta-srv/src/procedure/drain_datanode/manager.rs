@@ -38,35 +38,13 @@ pub type DrainDatanodeManagerRef = Arc<DrainDatanodeManager>;
 
 /// Tracks the running drains, indexed by the drained datanode.
 ///
-/// Reserves each datanode for one drain. The manager reuses matching submissions
-/// and rejects conflicting ones instead of queuing them behind the procedure lock.
+/// Reserves each datanode for one drain and rejects concurrent submissions.
 #[derive(Default, Clone)]
 pub struct DrainDatanodeProcedureTracker {
-    running_procedures: Arc<RwLock<HashMap<DatanodeId, RunningDrain>>>,
-}
-
-struct RunningDrain {
-    task: DrainDatanodeProcedureTask,
-    procedure_id: ProcedureId,
+    running_procedures: Arc<RwLock<HashMap<DatanodeId, DrainDatanodeProcedureTask>>>,
 }
 
 impl DrainDatanodeProcedureTracker {
-    fn find(&self, task: &DrainDatanodeProcedureTask) -> Result<Option<ProcedureId>> {
-        let procedures = self.running_procedures.read().unwrap();
-        let Some(running) = procedures.get(&task.node_id) else {
-            return Ok(None);
-        };
-        ensure!(
-            running.task.target_node_id == task.target_node_id
-                && running.task.parallelism == task.parallelism
-                && running.task.strategy == task.strategy,
-            error::DrainDatanodeRunningSnafu {
-                node_id: task.node_id
-            }
-        );
-        Ok(Some(running.procedure_id))
-    }
-
     fn contains(&self, node_id: DatanodeId) -> bool {
         self.running_procedures
             .read()
@@ -79,16 +57,12 @@ impl DrainDatanodeProcedureTracker {
     pub(crate) fn insert_running_procedure(
         &self,
         task: &DrainDatanodeProcedureTask,
-        procedure_id: ProcedureId,
     ) -> Option<DrainDatanodeProcedureGuard> {
         let mut procedures = self.running_procedures.write().unwrap();
         match procedures.entry(task.node_id) {
             Entry::Occupied(_) => None,
             Entry::Vacant(v) => {
-                v.insert(RunningDrain {
-                    task: task.clone(),
-                    procedure_id,
-                });
+                v.insert(task.clone());
                 Some(DrainDatanodeProcedureGuard {
                     node_id: task.node_id,
                     running_procedures: self.running_procedures.clone(),
@@ -101,7 +75,7 @@ impl DrainDatanodeProcedureTracker {
 /// Removes the drained datanode from [`DrainDatanodeProcedureTracker`] when dropped.
 pub(crate) struct DrainDatanodeProcedureGuard {
     node_id: DatanodeId,
-    running_procedures: Arc<RwLock<HashMap<DatanodeId, RunningDrain>>>,
+    running_procedures: Arc<RwLock<HashMap<DatanodeId, DrainDatanodeProcedureTask>>>,
 }
 
 impl Drop for DrainDatanodeProcedureGuard {
@@ -116,7 +90,6 @@ impl Drop for DrainDatanodeProcedureGuard {
 /// Manages the [`DrainDatanodeProcedure`]s.
 ///
 /// Registers the procedure loader and serializes submissions with restoring scheduling.
-/// Matching retries reuse the ID recorded by submission or recovery in the tracker.
 pub struct DrainDatanodeManager {
     procedure_manager: ProcedureManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
@@ -161,9 +134,7 @@ impl DrainDatanodeManager {
         )
     }
 
-    /// Submits a drain or returns the ID of an identical running drain.
-    ///
-    /// Retries do not extend the original deadline. Completion is decided by the procedure.
+    /// Submits a drain, rejecting the task if the datanode is already being drained.
     pub async fn submit_procedure(
         &self,
         procedure_context: ProcedureContext,
@@ -191,12 +162,7 @@ impl DrainDatanodeManager {
         }
 
         self.ensure_ready()?;
-        if let Some(procedure_id) = self.tracker.find(&task)? {
-            return Ok(procedure_id);
-        }
-        let procedure_id = ProcedureId::random();
-
-        let Some(guard) = self.tracker.insert_running_procedure(&task, procedure_id) else {
+        let Some(guard) = self.tracker.insert_running_procedure(&task) else {
             return error::DrainDatanodeRunningSnafu {
                 node_id: task.node_id,
             }
@@ -213,11 +179,9 @@ impl DrainDatanodeManager {
             deadline_ms: current_time_millis() + timeout.as_millis() as i64,
         };
         let procedure = DrainDatanodeProcedure::new(self.context(persistent_ctx), vec![guard]);
-        let procedure_with_id = ProcedureWithId {
-            id: procedure_id,
-            procedure: Box::new(procedure),
-            context: procedure_context,
-        };
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
+        let procedure_id = procedure_with_id.id;
         info!(
             "Starting drain datanode procedure {procedure_id} for datanode {}, timeout: {:?}",
             task.node_id, timeout
@@ -364,7 +328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_submit_drain_concurrent_retries_and_scheduling_conflict() {
+    async fn test_submit_drain_rejects_concurrent_tasks_and_scheduling() {
         let env = TestEnv::new().await;
         env.procedure_manager().start().await.unwrap();
         let release = hold_drain_lock(env.procedure_manager()).await;
@@ -373,8 +337,11 @@ mod tests {
             manager.submit_procedure(Default::default(), task()),
             manager.submit_procedure(Default::default(), task()),
         );
-        let first = first.unwrap();
-        assert_eq!(first, second.unwrap());
+        assert!(matches!(
+            (first, second),
+            (Ok(_), Err(error::Error::DrainDatanodeRunning { .. }))
+                | (Err(error::Error::DrainDatanodeRunning { .. }), Ok(_))
+        ));
         assert_eq!(
             2,
             env.procedure_manager()
@@ -451,7 +418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drain_admission_waits_for_recovery_and_reuses_persisted_id() {
+    async fn test_drain_admission_waits_for_recovery_and_rejects_running_task() {
         use crate::procedure::region_migration::test_util::TestingEnv;
         use common_procedure::local::{LocalManager, ManagerConfig};
         use common_procedure::store::ProcedureMessage;
@@ -533,7 +500,7 @@ mod tests {
                 .unwrap()
         );
 
-        // Hold execution while the real loader restores the checkpoint and its ID.
+        // Hold execution while the real loader restores the checkpoint and tracker.
         let release = hold_drain_lock(&procedure_manager).await;
         store.release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), start)
@@ -543,13 +510,10 @@ mod tests {
             .unwrap();
         assert!(procedure_manager.is_ready());
         for _ in 0..2 {
-            assert_eq!(
-                id,
-                manager
-                    .submit_procedure(Default::default(), task())
-                    .await
-                    .unwrap()
-            );
+            assert!(matches!(
+                manager.submit_procedure(Default::default(), task()).await,
+                Err(error::Error::DrainDatanodeRunning { .. })
+            ));
         }
         let mut conflicting = task();
         conflicting.target_node_id = Some(3);
@@ -751,7 +715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drain_recovery_reserves_original_id_until_drop() {
+    async fn test_drain_recovery_reserves_node_until_drop() {
         let env = TestEnv::new().await;
         let context = env.context(new_persistent_context(
             Some(2),
@@ -761,8 +725,8 @@ mod tests {
         let json = procedure.dump().unwrap();
         let tracker = DrainDatanodeProcedureTracker::default();
 
-        // Recovery reserves the original identity before any runner starts.
-        let mut reloaded = DrainDatanodeProcedure::from_json(&json, &tracker, |persistent_ctx| {
+        // Loading reserves the datanode before any runner starts.
+        let reloaded = DrainDatanodeProcedure::from_json(&json, &tracker, |persistent_ctx| {
             env.context(persistent_ctx)
         })
         .unwrap();
@@ -773,21 +737,11 @@ mod tests {
             strategy: DrainDatanodeStrategy::FailFast,
             timeout: None,
         };
-        let id = ProcedureId::random();
-        reloaded.recover(id).unwrap();
-        assert_eq!(Some(id), tracker.find(&task).unwrap());
-        assert!(
-            tracker
-                .insert_running_procedure(&task, ProcedureId::random())
-                .is_none()
-        );
+        assert!(tracker.contains(task.node_id));
+        assert!(tracker.insert_running_procedure(&task).is_none());
 
         // Dropping the reloaded procedure releases the place.
         drop(reloaded);
-        assert!(
-            tracker
-                .insert_running_procedure(&task, ProcedureId::random())
-                .is_some()
-        );
+        assert!(tracker.insert_running_procedure(&task).is_some());
     }
 }

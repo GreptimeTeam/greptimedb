@@ -51,7 +51,8 @@ pub(crate) struct DatanodeSchedulingResponse {
     schedulable: bool,
 }
 
-/// Submits an asynchronous leader-region drain. Retries reuse the running procedure.
+/// Submits an asynchronous leader-region drain.
+/// Rejects requests for a datanode already being drained.
 #[axum_macros::debug_handler]
 pub(crate) async fn drain(
     State(metasrv): State<Arc<Metasrv>>,

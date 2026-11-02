@@ -102,7 +102,7 @@ impl LocalManager {
                 ),
             },
         };
-        if let Err(e) = loaded.procedure.recover(procedure_id) {
+        if let Err(e) = loaded.procedure.recover() {
             error!(e; "Failed to recover procedure {}", procedure_id);
         }
         Some(RecoveredProcedure {
@@ -203,7 +203,7 @@ mod tests {
             Ok(Status::done())
         }
 
-        fn recover(&mut self, _procedure_id: ProcedureId) -> Result<()> {
+        fn recover(&mut self) -> Result<()> {
             self.recoveries.fetch_add(1, Ordering::Relaxed);
             // The next execution checkpoint must persist the detached root identity.
             self.checkpointed = false;

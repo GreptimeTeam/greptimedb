@@ -163,9 +163,7 @@ async fn test_drop_database_recover() {
     let data = procedure.dump().unwrap();
     assert_eq!(ddl_context.memory_region_keeper.len(), 0);
     let mut procedure = DropDatabaseProcedure::from_json(&data, ddl_context.clone()).unwrap();
-    procedure
-        .recover(common_procedure::ProcedureId::random())
-        .unwrap();
+    procedure.recover().unwrap();
     assert_eq!(
         ddl_context.memory_region_keeper.len(),
         num_operating_regions
@@ -183,9 +181,7 @@ async fn test_drop_database_recover() {
     let data = procedure.dump().unwrap();
     assert_eq!(ddl_context.memory_region_keeper.len(), 0);
     let mut procedure = DropDatabaseProcedure::from_json(&data, ddl_context.clone()).unwrap();
-    procedure
-        .recover(common_procedure::ProcedureId::random())
-        .unwrap();
+    procedure.recover().unwrap();
     assert_eq!(
         ddl_context.memory_region_keeper.len(),
         num_operating_regions

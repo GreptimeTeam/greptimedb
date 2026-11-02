@@ -272,10 +272,8 @@ pub trait Procedure: Send {
     /// Dump the state of the procedure to a string.
     fn dump(&self) -> Result<String>;
 
-    /// Restores runtime state using the original persisted procedure ID.
-    ///
-    /// Called before any recovered procedure starts executing.
-    fn recover(&mut self, _procedure_id: ProcedureId) -> Result<()> {
+    /// The hook is called after the procedure recovery.
+    fn recover(&mut self) -> Result<()> {
         Ok(())
     }
 
