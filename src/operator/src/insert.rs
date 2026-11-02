@@ -1505,17 +1505,16 @@ impl Inserter {
                             .inserts
                             .iter_mut()
                             .find(|r| r.table_name == table.table_info().name)
-                        {
-                            if let Some(alter) = self.get_alter_table_expr_on_demand(
+                            && let Some(alter) = self.get_alter_table_expr_on_demand(
                                 req, &table, ctx, false, false, true,
-                            )? {
-                                alter_tables.push(alter);
-                                need_refresh_table_infos.insert((
-                                    catalog.to_string(),
-                                    schema.clone(),
-                                    req.table_name.clone(),
-                                ));
-                            }
+                            )?
+                        {
+                            alter_tables.push(alter);
+                            need_refresh_table_infos.insert((
+                                catalog.to_string(),
+                                schema.clone(),
+                                req.table_name.clone(),
+                            ));
                         }
                     }
                     let table_info = table.table_info();

@@ -4573,7 +4573,7 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
                 format!("physical_{suffix}")
             );
         }
-        let output = execute_sql(&frontend, &format!(
+        let output = execute_sql(frontend, &format!(
             "SELECT count(*) FROM metrics_exemplars e JOIN physical_a m ON e.__table_id = m.__table_id AND e.__tsid = m.__tsid WHERE e.greptime_metric = 'routed_{version}_a'"
         )).await;
         check_output_stream(
@@ -4677,7 +4677,7 @@ async fn test_exemplar_unpinned_batches(#[case] kind: &str, #[values(false, true
         }
         "physical_conflict" => {
             for (physical, job) in [("physical_a", "one"), ("physical_b", "two")] {
-                execute_sql(&frontend, &format!(
+                execute_sql(frontend, &format!(
                     "CREATE TABLE {physical} (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE, job STRING PRIMARY KEY) ENGINE=metric WITH ('physical_metric_table'='')"
                 )).await;
                 add(
@@ -4732,7 +4732,7 @@ async fn test_exemplar_unpinned_batches(#[case] kind: &str, #[values(false, true
         _ => unreachable!(),
     };
     let output = execute_sql(
-        &frontend,
+        frontend,
         &format!("SELECT count(*) FROM unpinned WHERE {filter}"),
     )
     .await;
@@ -4773,9 +4773,9 @@ async fn test_exemplar_precreated_table_options(
         .build()
         .await;
     let frontend = instance.fe_instance();
-    execute_sql(&frontend, "CREATE TABLE source_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
-    execute_sql(&frontend, "CREATE TABLE metric_source (job STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('on_physical_table'='source_physical')").await;
-    execute_sql(&frontend, &format!(
+    execute_sql(frontend, "CREATE TABLE source_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
+    execute_sql(frontend, "CREATE TABLE metric_source (job STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('on_physical_table'='source_physical')").await;
+    execute_sql(frontend, &format!(
         "CREATE TABLE metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) ENGINE=mito WITH ('append_mode'='{append_mode}', 'primary_key_encoding'='{encoding}', 'compaction.type'='twcs')"
     )).await;
     let (request, _) = into_rows(vec![Exemplar {
@@ -4820,7 +4820,7 @@ async fn test_exemplar_precreated_table_options(
     } else {
         "SELECT count(*) FROM metrics_exemplars".into()
     };
-    let output = execute_sql(&frontend, &sql).await;
+    let output = execute_sql(frontend, &sql).await;
     check_output_stream(
         output.data,
         &format!(
@@ -4856,7 +4856,7 @@ async fn test_exemplar_source_identity_policy() {
         .0
     };
     execute_sql(
-        &frontend,
+        frontend,
         "CREATE TABLE ordinary_source (ts TIMESTAMP TIME INDEX, val DOUBLE)",
     )
     .await;
@@ -4880,9 +4880,9 @@ async fn test_exemplar_source_identity_policy() {
             .unwrap()
             .is_none()
     );
-    execute_sql(&frontend, "CREATE TABLE source_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
+    execute_sql(frontend, "CREATE TABLE source_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
     let create = "CREATE TABLE metric_source (job STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('on_physical_table'='source_physical')";
-    execute_sql(&frontend, create).await;
+    execute_sql(frontend, create).await;
     let source = frontend
         .catalog_manager()
         .table("greptime", "public", "metric_source", None)
@@ -4891,8 +4891,8 @@ async fn test_exemplar_source_identity_policy() {
         .unwrap()
         .table_info();
     // A metric write's captured table ID must not be replaced by a later name lookup.
-    execute_sql(&frontend, "DROP TABLE metric_source").await;
-    execute_sql(&frontend, create).await;
+    execute_sql(frontend, "DROP TABLE metric_source").await;
+    execute_sql(frontend, create).await;
     let replacement = frontend
         .catalog_manager()
         .table("greptime", "public", "metric_source", None)
@@ -4905,7 +4905,7 @@ async fn test_exemplar_source_identity_policy() {
         .write_exemplars_with_sources(
             request("metric_source"),
             QueryContext::arc(),
-            &[source.clone()],
+            std::slice::from_ref(&source),
         )
         .await
         .unwrap();
@@ -4939,7 +4939,7 @@ async fn test_exemplar_source_identity_policy() {
     );
     assert_eq!(info.meta.primary_key_indices, [0, 1, 2, 3]);
     let output = execute_sql(
-        &frontend,
+        frontend,
         "SELECT __table_id FROM metrics_exemplars ORDER BY __table_id",
     )
     .await;
