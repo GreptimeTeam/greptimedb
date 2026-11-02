@@ -416,7 +416,7 @@ impl Procedure for UndropTableProcedure {
         Self::TYPE_NAME
     }
 
-    fn recover(&mut self) -> ProcedureResult<()> {
+    fn recover(&mut self, _procedure_id: common_procedure::ProcedureId) -> ProcedureResult<()> {
         if self.data.state == UndropTableState::OpenRegions && !self.data.tombstone_identity_loaded
         {
             self.data.state = UndropTableState::Prepare;
@@ -718,7 +718,9 @@ mod tests {
         let mut recovered =
             UndropTableProcedure::from_json(&serde_json::to_string(data).unwrap(), context)
                 .unwrap();
-        recovered.recover().unwrap();
+        recovered
+            .recover(common_procedure::ProcedureId::random())
+            .unwrap();
 
         assert_eq!(UndropTableState::Prepare, recovered.data.state);
     }

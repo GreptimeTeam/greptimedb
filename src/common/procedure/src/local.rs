@@ -683,6 +683,7 @@ pub struct LocalManager {
     config: ManagerConfig,
     pause_aware: Option<PauseAwareRef>,
     event_recorder: EventRecorderHandle,
+    recovery_complete: AtomicBool,
 }
 
 impl LocalManager {
@@ -705,6 +706,7 @@ impl LocalManager {
             config,
             pause_aware,
             event_recorder: EventRecorderHandle::new(event_recorder),
+            recovery_complete: AtomicBool::new(false),
         }
     }
 
@@ -894,12 +896,19 @@ impl ProcedureManager for LocalManager {
 
         *task = Some(task_inner);
 
+        self.recovery_complete.store(false, Ordering::Release);
         self.manager_ctx.reset_runtime_state();
         self.manager_ctx.start();
 
         info!("LocalManager is start.");
 
-        self.recover().await
+        self.recover().await?;
+        self.recovery_complete.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn is_ready(&self) -> bool {
+        self.recovery_complete.load(Ordering::Acquire) && self.manager_ctx.running()
     }
 
     async fn stop(&self) -> Result<()> {
@@ -2482,7 +2491,7 @@ mod tests {
             self.lock_key.clone()
         }
 
-        fn recover(&mut self) -> Result<()> {
+        fn recover(&mut self, _procedure_id: ProcedureId) -> Result<()> {
             self.notify.as_ref().unwrap().notify_one();
             Ok(())
         }

@@ -278,6 +278,7 @@ pub(crate) struct DrainDatanodeProcedure {
     /// Keeps the drained datanode in the running set of the manager until the procedure ends,
     /// so matching requests reuse this drain and conflicting requests cannot be queued.
     _guards: Vec<DrainDatanodeProcedureGuard>,
+    recovery_tracker: Option<DrainDatanodeProcedureTracker>,
 }
 
 impl DrainDatanodeProcedure {
@@ -289,13 +290,13 @@ impl DrainDatanodeProcedure {
             state: Box::new(DrainDatanodeStart),
             context,
             _guards: guards,
+            recovery_tracker: None,
         }
     }
 
     /// Returns a new [`DrainDatanodeProcedure`] from the given serialized data.
     ///
-    /// Restores the reservation in `tracker`, allowing the manager to recognize retries
-    /// and reject conflicting drains after recovery.
+    /// The recovery hook registers the original procedure ID in `tracker` before execution.
     pub fn from_json<F>(
         json: &str,
         tracker: &DrainDatanodeProcedureTracker,
@@ -308,22 +309,12 @@ impl DrainDatanodeProcedure {
             persistent_ctx,
             state,
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
-        let guards = tracker
-            .insert_running_procedure(&DrainDatanodeProcedureTask {
-                node_id: persistent_ctx.node_id,
-                target_node_id: persistent_ctx.target_node_id,
-                parallelism: persistent_ctx.parallelism,
-                strategy: persistent_ctx.strategy,
-                timeout: None,
-            })
-            .into_iter()
-            .collect();
-
         let context = ctx_factory(persistent_ctx);
         Ok(Self {
             state,
             context,
-            _guards: guards,
+            _guards: vec![],
+            recovery_tracker: Some(tracker.clone()),
         })
     }
 }
@@ -362,6 +353,31 @@ impl Procedure for DrainDatanodeProcedure {
                 }
             }
         }
+    }
+
+    fn recover(&mut self, procedure_id: ProcedureId) -> ProcedureResult<()> {
+        if let Some(tracker) = self.recovery_tracker.take() {
+            let ctx = &self.context.persistent_ctx;
+            let task = DrainDatanodeProcedureTask {
+                node_id: ctx.node_id,
+                target_node_id: ctx.target_node_id,
+                parallelism: ctx.parallelism,
+                strategy: ctx.strategy,
+                timeout: None,
+            };
+            let guard = tracker
+                .insert_running_procedure(&task, procedure_id)
+                .ok_or_else(|| {
+                    ProcedureError::external(
+                        error::DrainDatanodeRunningSnafu {
+                            node_id: ctx.node_id,
+                        }
+                        .build(),
+                    )
+                })?;
+            self._guards.push(guard);
+        }
+        Ok(())
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -787,7 +803,7 @@ mod tests {
             .await
             .unwrap();
 
-        let state = wait_for_terminal_state(env.procedure_manager(), procedure_id.unwrap()).await;
+        let state = wait_for_terminal_state(env.procedure_manager(), procedure_id).await;
         assert!(
             matches!(state, ProcedureState::Done { .. }),
             "the drain procedure did not complete successfully: {state:?}"

@@ -341,7 +341,7 @@ impl Procedure for CreateTableProcedure {
         Self::TYPE_NAME
     }
 
-    fn recover(&mut self) -> ProcedureResult<()> {
+    fn recover(&mut self, _procedure_id: common_procedure::ProcedureId) -> ProcedureResult<()> {
         // Only registers regions if the table route is allocated.
         if let Some(x) = &self.data.table_route {
             self.opening_regions = self

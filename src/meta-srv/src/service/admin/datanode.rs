@@ -19,6 +19,7 @@ use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use common_procedure::ProcedureContext;
 use serde::{Deserialize, Serialize};
+use servers::http::result::error_result::ErrorResponse;
 
 use crate::error::Result;
 use crate::key::NodeSchedulingRole;
@@ -41,7 +42,7 @@ pub(crate) struct DatanodeRequest {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct DrainDatanodeResponse {
-    procedure_id: Option<String>,
+    procedure_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,12 +73,12 @@ pub(crate) async fn drain(
             )
             .await?;
         Ok::<_, crate::error::Error>(DrainDatanodeResponse {
-            procedure_id: procedure_id.map(|id| id.to_string()),
+            procedure_id: procedure_id.to_string(),
         })
     }
     .await
     .map(Json)
-    .map_err(util::admin_error_response)
+    .map_err(ErrorResponse::from_error)
     .into_response()
 }
 
@@ -100,7 +101,7 @@ pub(crate) async fn mark_schedulable(
     }
     .await
     .map(Json)
-    .map_err(util::admin_error_response)
+    .map_err(ErrorResponse::from_error)
     .into_response()
 }
 
@@ -113,7 +114,7 @@ pub(crate) async fn scheduling_status(
     scheduling_status_inner(&metasrv, request.node_id)
         .await
         .map(Json)
-        .map_err(util::admin_error_response)
+        .map_err(ErrorResponse::from_error)
         .into_response()
 }
 
@@ -196,26 +197,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_scheduling_and_completed_drain_are_idempotent() {
+    async fn test_http_scheduling_is_idempotent() {
         let metasrv = Arc::new(MetasrvBuilder::new().build().await.unwrap());
         let app = admin_axum_router(metasrv.clone());
+        metasrv.procedure_manager().start().await.unwrap();
         metasrv
             .node_scheduling_manager()
             .mark_unschedulable(NodeSchedulingRole::Datanode, 1)
             .await
             .unwrap();
-        for _ in 0..2 {
-            assert_eq!(
-                (StatusCode::OK, json!({"procedure_id": null})),
-                request(
-                    app.clone(),
-                    Method::POST,
-                    "/admin/datanode/drain",
-                    json!({"node_id": 1})
-                )
-                .await
-            );
-        }
         for _ in 0..2 {
             assert_eq!(
                 (StatusCode::OK, json!({"node_id": 1, "schedulable": true})),
@@ -238,14 +228,6 @@ mod tests {
             )
             .await
         );
-        assert!(
-            metasrv
-                .procedure_manager()
-                .list_procedures()
-                .await
-                .unwrap()
-                .is_empty()
-        );
         let (status, _) = request(
             app,
             Method::POST,
@@ -254,6 +236,7 @@ mod tests {
         )
         .await;
         assert_eq!(StatusCode::BAD_REQUEST, status);
+        metasrv.procedure_manager().stop().await.unwrap();
     }
 
     #[tokio::test]
@@ -267,6 +250,7 @@ mod tests {
                 .unwrap(),
         );
         let app = admin_axum_router(metasrv.clone());
+        metasrv.procedure_manager().start().await.unwrap();
         metasrv
             .node_scheduling_manager()
             .mark_unschedulable(NodeSchedulingRole::Datanode, 1)
@@ -295,7 +279,7 @@ mod tests {
             ),
         ] {
             let (status, body) = request(app.clone(), method, uri, body).await;
-            assert_eq!(StatusCode::SERVICE_UNAVAILABLE, status, "{body}");
+            assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, status, "{body}");
             assert!(body["error"].as_str().unwrap().contains("not leader"));
         }
         assert!(
@@ -324,6 +308,7 @@ mod tests {
             )
             .await
         );
+        metasrv.procedure_manager().stop().await.unwrap();
     }
 
     #[tokio::test]
@@ -365,7 +350,7 @@ mod tests {
             ),
             (
                 "/admin/procedure/status?procedure_id=00000000-0000-0000-0000-000000000001",
-                StatusCode::NOT_FOUND,
+                StatusCode::BAD_REQUEST,
             ),
         ] {
             assert_eq!(

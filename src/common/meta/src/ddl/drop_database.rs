@@ -132,7 +132,7 @@ impl Procedure for DropDatabaseProcedure {
         Self::TYPE_NAME
     }
 
-    fn recover(&mut self) -> ProcedureResult<()> {
+    fn recover(&mut self, _procedure_id: common_procedure::ProcedureId) -> ProcedureResult<()> {
         self.state
             .recover(&self.runtime_context)
             .map_err(BoxedError::new)

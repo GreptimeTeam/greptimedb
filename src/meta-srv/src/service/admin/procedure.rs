@@ -23,6 +23,7 @@ use common_meta::rpc::procedure;
 use common_procedure::ProcedureId;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
+use servers::http::result::error_result::ErrorResponse;
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
@@ -195,22 +196,18 @@ pub(crate) async fn procedure_status(
             .procedure_state(pid)
             .await
             .context(error::QueryProcedureSnafu)?
-            .context(error::ProcedureNotFoundSnafu {
-                pid: request.procedure_id.clone(),
+            .with_context(|| error::ProcedureNotFoundSnafu {
+                pid: request.procedure_id,
             })?;
-        let response = procedure::procedure_state_to_pb_response(&state);
+        let (_, error) = procedure::procedure_state_to_pb_state(&state);
         Ok::<_, error::Error>(ProcedureStatusResponse {
             procedure_id: pid.to_string(),
             status: state.as_str_name().to_string(),
-            error: if response.error.is_empty() {
-                None
-            } else {
-                Some(response.error)
-            },
+            error: (!error.is_empty()).then_some(error),
         })
     }
     .await
     .map(Json)
-    .map_err(util::admin_error_response)
+    .map_err(ErrorResponse::from_error)
     .into_response()
 }

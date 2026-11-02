@@ -272,8 +272,10 @@ pub trait Procedure: Send {
     /// Dump the state of the procedure to a string.
     fn dump(&self) -> Result<String>;
 
-    /// The hook is called after the procedure recovery.
-    fn recover(&mut self) -> Result<()> {
+    /// Restores runtime state using the original persisted procedure ID.
+    ///
+    /// Called before any recovered procedure starts executing.
+    fn recover(&mut self, _procedure_id: ProcedureId) -> Result<()> {
         Ok(())
     }
 
@@ -712,6 +714,9 @@ pub trait ProcedureManager: Send + Sync + 'static {
     ///
     /// Callers should ensure all loaders are registered.
     async fn start(&self) -> Result<()>;
+
+    /// Returns whether startup recovery has completed and the manager is running.
+    fn is_ready(&self) -> bool;
 
     /// Stops the background GC task.
     async fn stop(&self) -> Result<()>;

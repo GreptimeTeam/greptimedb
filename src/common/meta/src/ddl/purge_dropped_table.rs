@@ -244,7 +244,7 @@ impl Procedure for PurgeDroppedTableProcedure {
         }
     }
 
-    fn recover(&mut self) -> ProcedureResult<()> {
+    fn recover(&mut self, _procedure_id: common_procedure::ProcedureId) -> ProcedureResult<()> {
         if self.data.state == PurgeDroppedTableState::DropRegions
             && !self.data.drop_generation_loaded
         {

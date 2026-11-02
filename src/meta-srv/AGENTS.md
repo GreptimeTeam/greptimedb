@@ -57,7 +57,7 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   files; triggered by failover or an explicit command.
 - **HTTP drain administration**: `service/admin/datanode.rs` checks the same leader
   predicate as gRPC procedure submission. Drain retries and restoring scheduling
-  share admission control in `procedure/drain_datanode/manager.rs`; retain both
+  wait for procedure recovery and share admission control in `procedure/drain_datanode/manager.rs`; retain both
   the recovered-procedure and concurrent-submission tests when changing this boundary.
 - **Leader election**: via `common-meta`'s election; transitions in `state.rs`.
 
