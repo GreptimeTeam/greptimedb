@@ -810,16 +810,149 @@ impl IndexSource {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::SemanticType;
     use common_function::scalars::matches_term::MatchesTermFinder;
     use datatypes::arrow::array::{Scalar, StringArray};
     use datatypes::arrow::compute::kernels::comparison::like;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint};
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer};
     use index::fulltext_index::Analyzer;
     use index::fulltext_index::tokenizer::{self, ScriptTokenizer};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
 
     use super::*;
+    use crate::cache::index::result_cache::PredicateKey;
     use crate::sst::index::fulltext_index::applier::builder::{FulltextLike, FulltextTerm};
+
+    #[test]
+    fn test_json_fulltext_sst_compatibility() {
+        let (_dir, factory) = PuffinManagerFactory::new_for_test_block("json_fulltext_plan");
+        let ordinary = IndexTarget::ColumnId(1);
+        let path = IndexTarget::new_json_path(3, vec!["message".into()]).unwrap();
+        let other = IndexTarget::new_json_path(3, vec!["other".into()]).unwrap();
+        let missing = IndexTarget::new_json_path(3, vec!["missing".into()]).unwrap();
+        for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
+            let options = FulltextOptions {
+                enable: true,
+                backend: backend.clone(),
+                ..Default::default()
+            };
+            let metadata = json_metadata(Some(options.clone()));
+            let requests = BTreeMap::from([
+                (ordinary.clone(), FulltextRequest::default()),
+                (path.clone(), FulltextRequest::default()),
+                (other.clone(), FulltextRequest::default()),
+            ]);
+            let applier = FulltextIndexApplier::new(
+                "test".into(),
+                PathType::Bare,
+                object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+                requests,
+                factory.clone(),
+                &metadata,
+            );
+            let unchanged = applier.compatible_requests_for_sst(&metadata).unwrap();
+            assert!(Arc::ptr_eq(&unchanged, &applier.requests));
+            for name in [
+                "granularity",
+                "FPR",
+                "analyzer",
+                "case_sensitive",
+                "backend",
+                "disabled",
+                "missing",
+            ] {
+                let mut changed = options.clone();
+                match name {
+                    "granularity" => changed.granularity += 1,
+                    "FPR" => changed.false_positive_rate_in_10000 += 1,
+                    "analyzer" => changed.analyzer = FulltextAnalyzer::Chinese,
+                    "case_sensitive" => changed.case_sensitive = true,
+                    "backend" => {
+                        changed.backend = if backend == FulltextBackend::Bloom {
+                            FulltextBackend::Tantivy
+                        } else {
+                            FulltextBackend::Bloom
+                        };
+                    }
+                    "disabled" => changed.enable = false,
+                    "missing" => {}
+                    _ => unreachable!(),
+                }
+                let compatible = matches!(name, "granularity" | "FPR")
+                    || (name == "analyzer" && backend == FulltextBackend::Bloom);
+                let sst = json_metadata((name != "missing").then_some(changed));
+                let requests = applier.compatible_requests_for_sst(&sst).unwrap();
+                assert!(requests.contains_key(&ordinary));
+                assert!(requests.contains_key(&other));
+                assert_eq!(
+                    requests.contains_key(&path),
+                    compatible,
+                    "{backend:?}, {name}"
+                );
+                assert_eq!(Arc::ptr_eq(&requests, &applier.requests), compatible);
+                assert_eq!(
+                    PredicateKey::new_fulltext(requests)
+                        == PredicateKey::new_fulltext(applier.requests.clone()),
+                    compatible,
+                );
+            }
+            // An unresolved query-side target must not become compatible merely
+            // because the expected options map has no entry for it.
+            let applier = FulltextIndexApplier::new(
+                "test".into(),
+                PathType::Bare,
+                object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+                BTreeMap::from([(missing.clone(), FulltextRequest::default())]),
+                factory.clone(),
+                &metadata,
+            );
+            assert!(applier.compatible_requests_for_sst(&metadata).is_none());
+            // Missing current options are also fail-closed even if the SST has them.
+            let applier = FulltextIndexApplier::new(
+                "test".into(),
+                PathType::Bare,
+                object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+                BTreeMap::from([(path.clone(), FulltextRequest::default())]),
+                factory.clone(),
+                &json_metadata(None),
+            );
+            assert!(applier.compatible_requests_for_sst(&metadata).is_none());
+        }
+    }
+
+    #[test]
+    fn test_ordinary_fulltext_sst_compatibility() {
+        let (_dir, factory) = PuffinManagerFactory::new_for_test_block("ordinary_fulltext_plan");
+        let metadata = mock_metadata_with_fulltext(FulltextBackend::Bloom);
+        let applier = FulltextIndexApplier::new(
+            "test".into(),
+            PathType::Bare,
+            object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+            BTreeMap::from([(IndexTarget::ColumnId(1), FulltextRequest::default())]),
+            factory,
+            &metadata,
+        );
+        assert!(applier.compatible_requests_for_sst(&metadata).is_some());
+        assert!(
+            applier
+                .compatible_requests_for_sst(&mock_metadata_with_fulltext(FulltextBackend::Tantivy))
+                .is_none()
+        );
+        let mut non_string = metadata.clone();
+        non_string.column_metadatas[0].column_schema.data_type = ConcreteDataType::int64_datatype();
+        assert!(applier.compatible_requests_for_sst(&non_string).is_none());
+        assert!(
+            applier
+                .compatible_requests_for_sst(&mock_metadata_without_fulltext())
+                .is_none()
+        );
+    }
 
     /// A `matches_term` or `LIKE` predicate on `col`, or on `lower(col)` when `lowered`.
     enum Predicate<'a> {
@@ -1049,5 +1182,79 @@ mod tests {
                 }
             }
         }
+    }
+    pub(crate) fn json_metadata(options: Option<FulltextOptions>) -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::from_existing(mock_metadata_with_fulltext(
+            FulltextBackend::Bloom,
+        ));
+        let mut column =
+            ColumnSchema::new("attrs", ConcreteDataType::json2(Default::default()), true);
+        column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::try_new(
+                vec![
+                    JsonTypeHint {
+                        path: vec!["message".into()],
+                        data_type: ConcreteDataType::string_datatype(),
+                        inverted_index: false,
+                        skipping_index: None,
+                        fulltext_index: options,
+                    },
+                    JsonTypeHint {
+                        path: vec!["other".into()],
+                        data_type: ConcreteDataType::string_datatype(),
+                        inverted_index: false,
+                        skipping_index: None,
+                        fulltext_index: Some(FulltextOptions {
+                            enable: true,
+                            ..Default::default()
+                        }),
+                    },
+                ],
+                Some(0),
+            )
+            .unwrap(),
+        ))));
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: column,
+            semantic_type: SemanticType::Field,
+            column_id: 3,
+        });
+        builder.build().unwrap()
+    }
+
+    pub(crate) fn mock_metadata_without_fulltext() -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            });
+
+        builder.build().unwrap()
+    }
+
+    pub(crate) fn mock_metadata_with_fulltext(backend: FulltextBackend) -> RegionMetadata {
+        let mut metadata = mock_metadata_without_fulltext();
+        metadata.column_metadatas[0]
+            .column_schema
+            .set_fulltext_options(&FulltextOptions {
+                enable: true,
+                backend,
+                ..Default::default()
+            })
+            .unwrap();
+        RegionMetadataBuilder::from_existing(metadata)
+            .build()
+            .unwrap()
     }
 }
