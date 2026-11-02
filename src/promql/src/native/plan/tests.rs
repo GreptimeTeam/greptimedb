@@ -149,6 +149,11 @@ fn partial_aggregate(inner: NativeNode) -> NativeNode {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: Arc::new([]),
             grid,
         })),
@@ -999,6 +1004,11 @@ fn an_aggregate_output_matches_its_stage() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: Arc::new([]),
             grid: value_grid,
         })),
@@ -1072,6 +1082,11 @@ fn a_partial_aggregate_cannot_change_the_accumulator_count() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: fields(1),
             grid: out,
         })),
@@ -1116,6 +1131,11 @@ fn a_partial_aggregate_indexes_its_state_on_the_inputs_grid() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: Arc::new([]),
             grid: grid(0, 30_000, 8),
         })),
@@ -1202,6 +1222,11 @@ fn a_final_aggregate_cannot_change_the_field_count() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: fields(2),
             grid: Arc::clone(&out),
         })),

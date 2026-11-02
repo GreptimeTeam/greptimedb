@@ -229,6 +229,12 @@ impl SeriesRepartitionExec {
         let policy = match declaration.content() {
             FrameContent::Evaluated => SeriesRouting::CanonicalLabels,
             FrameContent::Raw => SeriesRouting::RawPrimaryKey,
+            FrameContent::AggregateState => {
+                return Err(DataFusionError::NotImplemented(
+                    "SeriesRepartition does not route aggregate state; use StateRepartitionExec"
+                        .into(),
+                ));
+            }
         };
         Self::try_new_with_routing(input, outputs, policy)
     }
@@ -249,6 +255,12 @@ impl SeriesRepartitionExec {
         let policy = match declaration.content() {
             FrameContent::Evaluated => SeriesRouting::CanonicalLabels,
             FrameContent::Raw => SeriesRouting::RawPrimaryKey,
+            FrameContent::AggregateState => {
+                return Err(DataFusionError::NotImplemented(
+                    "SeriesRepartition does not route aggregate state; use StateRepartitionExec"
+                        .into(),
+                ));
+            }
         };
         Self::try_new_with_completion(input, outputs, policy, IdentityCompletion::CompleteDisjoint)
     }
@@ -321,6 +333,12 @@ impl SeriesRepartitionExec {
                 &store_api::region_engine::NO_BOUND_LABEL_SOURCE,
                 ordering,
             )?,
+            FrameContent::AggregateState => {
+                return Err(DataFusionError::NotImplemented(
+                    "SeriesRepartition does not route aggregate state; use StateRepartitionExec"
+                        .into(),
+                ));
+            }
         };
         // The input is re-declared from what it says about itself, not from what this node
         // publishes: the two differ whenever the child carries its labels in its keys.
@@ -513,6 +531,12 @@ impl ExecutionPlan for SeriesRepartitionExec {
                 };
                 pack_raw_series(Box::pin(raw))?
             }
+            FrameContent::AggregateState => {
+                return Err(DataFusionError::NotImplemented(
+                    "SeriesRepartition does not route aggregate state; use StateRepartitionExec"
+                        .into(),
+                ));
+            }
         };
         let schema = output.schema();
         let output = Box::pin(PackedHandoffStream {
@@ -610,6 +634,11 @@ impl SharedExecution {
                     let stream = crate::source::materialize_raw_labels(stream)
                         .map_err(|error| DataFusionError::External(Box::new(error)))?;
                     RoutedInput::Raw(stream)
+                }
+                FrameContent::AggregateState => {
+                    return Err(DataFusionError::NotImplemented(
+                        "SeriesRepartition aggregate-state input is not implemented yet".into(),
+                    ));
                 }
             });
         }

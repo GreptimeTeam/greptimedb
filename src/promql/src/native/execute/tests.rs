@@ -558,7 +558,7 @@ fn raw_shared_histogram_chunk(
 fn source_runtime(pool: &Arc<dyn MemoryPool>) -> InputSlot {
     InputSlot {
         source_index: 0,
-        schema: raw_schema(),
+        kind: super::LeafKind::Raw,
         open_source_series: false,
         state: NodeState::new(
             "native.input at root (source_index=0)",
@@ -10057,9 +10057,9 @@ fn aggregate_fold_state_is_released_after_input() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// An aggregate kind or stage this runtime does not compute is refused, naming what was found.
+/// An aggregate kind this runtime does not compute is refused, naming what was found.
 #[test]
-fn an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named() {
+fn an_aggregate_kind_the_runtime_does_not_compute_is_named() {
     let grid = || grid(0, 60_000, 4);
     let kind_tree = NativeTree::try_new(aggregate(
         evaluated_input(grid()),
@@ -10070,44 +10070,45 @@ fn an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named() {
         },
     ))
     .unwrap();
-    let partial_tree = {
-        let out = grid();
-        let group = Grouping::By(Arc::new(["job".into()]));
-        let state = Arc::new(AggregateStateSchema {
-            group: group.clone(),
-            accumulators: fields(),
-            grid: Arc::clone(&out),
-        });
-        NativeTree::try_new(NativeNode {
-            expr: NativeExpr::Aggregate {
-                input: Box::new(evaluated_input(Arc::clone(&out))),
-                op: BoundAggregate {
-                    kind: AggregateKind::Sum,
-                    group,
-                    stage: AggregateStage::Partial,
-                },
-            },
-            output: NativeType::AggregateState(state),
-        })
-        .unwrap()
+    let error = match NativeExecutionState::try_new(&kind_tree, pool(), None) {
+        Ok(_) => panic!("the runtime accepted a Quantile aggregate"),
+        Err(error) => error,
     };
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "Quantile: {error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("Quantile"), "Quantile: {message}");
 
-    for (found, tree) in [("Quantile", kind_tree), ("Partial", partial_tree)] {
-        let error = match NativeExecutionState::try_new(&tree, pool(), None) {
-            Ok(_) => panic!("the runtime accepted a {found} aggregate"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "{found}: {error}"
-        );
-        let message = error.to_string();
-        assert!(message.contains(found), "{found}: {message}");
-        // A `Partial` rejection has to say why it is not computed: the stages it would need.
-        if found == "Partial" {
-            assert!(message.contains("Final"), "{message}");
-        }
-    }
+    let out = grid();
+    let group = Grouping::By(Arc::new(["job".into()]));
+    let state = Arc::new(AggregateStateSchema {
+        group: group.clone(),
+        kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+        components: Arc::from([
+            datatypes::series::aggregate_state::StateComponent::Value,
+            datatypes::series::aggregate_state::StateComponent::Compensation,
+        ]),
+        accumulators: fields(),
+        grid: Arc::clone(&out),
+    });
+    let partial_tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(evaluated_input(Arc::clone(&out))),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group,
+                stage: AggregateStage::Partial,
+            },
+        },
+        output: NativeType::AggregateState(state),
+    })
+    .unwrap();
+    assert!(
+        NativeExecutionState::try_new(&partial_tree, pool(), None).is_ok(),
+        "the runtime rejected a Partial aggregate"
+    );
 }
 
 /// An aggregate above a window that collects and merges its input waits for that merge.
@@ -10980,14 +10981,11 @@ fn a_label_change_admits_the_label_it_writes_before_building_it() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// An ended execution keeps its tree and its registered counters, and nothing the input was read
-/// with: the schema the leaf was bound to and the grid that schema is addressed on go with it.
-///
-/// The leaf itself stays -- the root still says which routing slot it is, and the handles the caller
-/// registered before the run still read what the nodes recorded -- but the slot that fed it is
-/// taken, so an executor kept alive past the execution holds no input schema and no materialized
-/// grid. Both ways an execution ends are covered: the answer is drained, and a rejected push stops
-/// it first.
+/// An ended execution keeps its tree and its registered counters, but neither the input schema nor
+/// the grid it is addressed on. The leaf itself stays -- the root still says which routing slot it
+/// is, and the handles the caller registered before the run still read what the nodes recorded --
+/// but the slot that fed it is taken. Both ways an execution ends are covered: the answer is drained,
+/// and a rejected push stops it first.
 #[test]
 fn an_ended_execution_keeps_no_input_schema_or_grid() {
     for fails in [false, true] {
@@ -11011,16 +11009,6 @@ fn an_ended_execution_keeps_no_input_schema_or_grid() {
         drop(tree);
         drop(schema);
         drop(out_grid);
-        // A chunk addresses its grid but holds no schema, so what still holds either of them is the
-        // slot the input leaf reads through: that is what the terminal checks below ask about.
-        assert!(
-            schema_weak.upgrade().is_some(),
-            "the queued input is not what holds the schema it was bound to"
-        );
-        assert!(
-            grid_weak.upgrade().is_some(),
-            "the queued input is not what holds the grid it is addressed on"
-        );
         assert!(
             root_holds(&execution, holds_input),
             "the root is not the input leaf the tree built"
@@ -11055,6 +11043,15 @@ fn an_ended_execution_keeps_no_input_schema_or_grid() {
             drop(refused);
         }
 
+        // The chunks still queued on the execution must not retain either input allocation.
+        assert!(
+            schema_weak.upgrade().is_none(),
+            "queued chunks retained the schema they were built with"
+        );
+        assert!(
+            grid_weak.upgrade().is_none(),
+            "queued chunks retained the grid they are addressed on"
+        );
         // What the caller registered before the run sees is what the nodes recorded.
         assert!(
             schema_weak.upgrade().is_none(),
