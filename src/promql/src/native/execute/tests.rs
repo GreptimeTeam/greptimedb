@@ -11286,3 +11286,128 @@ fn point_wise_nodes_reserve_the_series_their_kernel_builds() {
         }
     }
 }
+
+fn aggregate_with_output(input: NativeNode, op: BoundAggregate, output: NativeType) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(input),
+            op,
+        },
+        output,
+    }
+}
+
+#[test]
+fn partial_final_matches_complete_over_concatenated_input() {
+    for kind in [
+        AggregateKind::Sum,
+        AggregateKind::Count,
+        AggregateKind::Group,
+    ] {
+        let grid = grid(0, 60_000, 2);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let (state_kind, components) = crate::native::plan::aggregate_state_binding(kind).unwrap();
+        let state_schema = Arc::new(AggregateStateSchema {
+            group: Grouping::By(Arc::new([])),
+            kind: state_kind,
+            components: components.into(),
+            accumulators: schema.fields.clone(),
+            grid: Arc::clone(&grid),
+        });
+        let aggregate_tree = |stage| {
+            let output = if stage == AggregateStage::Partial {
+                NativeType::AggregateState(Arc::clone(&state_schema))
+            } else {
+                evaluated(Arc::clone(&grid))
+            };
+            let input = if stage == AggregateStage::Final {
+                NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        output: NativeType::AggregateState(Arc::clone(&state_schema)),
+                        source_index: 0,
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: NativeType::AggregateState(Arc::clone(&state_schema)),
+                }
+            } else {
+                evaluated_input(Arc::clone(&grid))
+            };
+            NativeTree::try_new(aggregate_with_output(
+                input,
+                BoundAggregate {
+                    kind,
+                    group: Grouping::By(Arc::new([])),
+                    stage,
+                },
+                output,
+            ))
+            .unwrap()
+        };
+        let mut partial_states = Vec::new();
+        for vals in [vec![1.0, 2.0], vec![3.0, 4.0]] {
+            let tree = aggregate_tree(AggregateStage::Partial);
+            let mut exec = executor(&tree, pool());
+            exec.push_evaluated(InputId::new(0), evaluated_chunk(&schema, 0, vals, true))
+                .unwrap();
+            exec.end_of_input().unwrap();
+            while let Some(chunk) = exec.next_state().unwrap() {
+                partial_states.extend(chunk.series);
+            }
+        }
+        let tree_final = aggregate_tree(AggregateStage::Final);
+        let mut final_exec = executor(&tree_final, pool());
+        for series in partial_states {
+            final_exec
+                .push_state(
+                    InputId::new(0),
+                    crate::native::state::StateChunk {
+                        series: vec![series],
+                        state_schema: Arc::clone(&state_schema),
+                    },
+                )
+                .unwrap();
+        }
+        final_exec.end_of_input().unwrap();
+        let mut merged = Vec::new();
+        while let Some(chunk) = final_exec.next_chunk().unwrap() {
+            merged.push(chunk);
+        }
+        let mut complete = executor(&aggregate_tree(AggregateStage::Complete), pool());
+        for vals in [vec![1.0, 2.0], vec![3.0, 4.0]] {
+            complete
+                .push_evaluated(InputId::new(0), evaluated_chunk(&schema, 0, vals, true))
+                .unwrap();
+        }
+        complete.end_of_input().unwrap();
+        let mut serial = Vec::new();
+        while let Some(chunk) = complete.next_chunk().unwrap() {
+            serial.push(chunk);
+        }
+        let (merged, serial) = (groups_of(&merged), groups_of(&serial));
+        assert_eq!(
+            merged
+                .iter()
+                .map(|g| (&g.0, &g.1, g.2.iter().map(|p| p.0).collect::<Vec<_>>()))
+                .collect::<Vec<_>>(),
+            serial
+                .iter()
+                .map(|g| (&g.0, &g.1, g.2.iter().map(|p| p.0).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        );
+        // The 1e-10 tolerance follows `partials_merge_to_the_serial_result` in
+        // `aggregate/tests.rs`; reassociation may change finite sum rounding, so use both
+        // absolute and relative bounds (with a unit floor for values near zero).
+        for (actual, expected) in merged
+            .iter()
+            .flat_map(|g| &g.2)
+            .zip(serial.iter().flat_map(|g| &g.2))
+        {
+            if kind != AggregateKind::Sum {
+                assert_eq!(actual.1, expected.1);
+            } else {
+                let (a, e) = (actual.1.unwrap(), expected.1.unwrap());
+                assert!((a - e).abs() <= 1e-10 * e.abs().max(1.0));
+            }
+        }
+    }
+}
