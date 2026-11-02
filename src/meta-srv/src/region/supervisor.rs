@@ -649,7 +649,7 @@ impl RegionSupervisor {
                         if tasks.is_empty() {
                             continue;
                         }
-                        let task = RegionMigrationTaskBatch::from_tasks(tasks);
+                        let task = build_failover_batch(tasks);
                         let region_ids = task.region_ids.clone();
                         if let Err(err) = self.do_failover_tasks(task).await {
                             error!(err; "Failed to execute region failover for regions: {:?}, from_peer: {}, to_peer: {}", region_ids, from_peer_id, to_peer_id);
@@ -992,6 +992,25 @@ impl RegionSupervisor {
 
     fn clear(&self) {
         self.failure_detector.clear();
+    }
+}
+
+/// Builds a failover batch with the longest retry timeout in its group.
+fn build_failover_batch(
+    tasks: Vec<(RegionMigrationProcedureTask, u32)>,
+) -> RegionMigrationTaskBatch {
+    let max_count = tasks.iter().map(|(_, count)| *count).max().unwrap_or(1);
+    let region_ids = tasks.iter().map(|(r, _)| r.region_id).collect::<Vec<_>>();
+    let from_peer = tasks[0].0.from_peer.clone();
+    let to_peer = tasks[0].0.to_peer.clone();
+    let timeout = DEFAULT_REGION_MIGRATION_TIMEOUT * max_count;
+    let trigger_reason = RegionMigrationTriggerReason::Failover;
+    RegionMigrationTaskBatch {
+        region_ids,
+        from_peer,
+        to_peer,
+        timeout,
+        trigger_reason,
     }
 }
 

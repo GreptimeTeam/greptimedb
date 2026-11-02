@@ -24,9 +24,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
 
 use crate::error::{self, Result};
-use crate::procedure::region_migration::{
-    DEFAULT_REGION_MIGRATION_TIMEOUT, RegionMigrationProcedureTask, RegionMigrationTriggerReason,
-};
+use crate::procedure::region_migration::RegionMigrationTriggerReason;
 
 /// A migration task describing how regions are intended to move between peers.
 #[derive(Debug, Clone)]
@@ -41,31 +39,6 @@ pub struct RegionMigrationTaskBatch {
     pub timeout: Duration,
     /// Reason why this migration was triggered.
     pub trigger_reason: RegionMigrationTriggerReason,
-}
-
-impl RegionMigrationTaskBatch {
-    /// Constructs a [`RegionMigrationTaskBatch`] from a vector of region migration procedure tasks.
-    ///
-    /// Aggregates region IDs, determines source and destination peers, sets an appropriate timeout,
-    /// and assigns the trigger reason for the migration batch.
-    ///
-    /// # Panic
-    /// if the `tasks` are empty.
-    pub fn from_tasks(tasks: Vec<(RegionMigrationProcedureTask, u32)>) -> Self {
-        let max_count = tasks.iter().map(|(_, count)| *count).max().unwrap_or(1);
-        let region_ids = tasks.iter().map(|(r, _)| r.region_id).collect::<Vec<_>>();
-        let from_peer = tasks[0].0.from_peer.clone();
-        let to_peer = tasks[0].0.to_peer.clone();
-        let timeout = DEFAULT_REGION_MIGRATION_TIMEOUT * max_count;
-        let trigger_reason = RegionMigrationTriggerReason::Failover;
-        Self {
-            region_ids,
-            from_peer,
-            to_peer,
-            timeout,
-            trigger_reason,
-        }
-    }
 }
 
 impl Display for RegionMigrationTaskBatch {
