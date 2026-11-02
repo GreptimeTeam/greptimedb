@@ -3379,9 +3379,8 @@ fn sorted_column_names(plan: &LogicalPlan) -> Vec<String> {
 }
 
 /// An aggregate is split: the merge stays on the frontend and the per-series prefix runs in the
-/// producer, which is the one shape a region can evaluate on its own. The rows carry the columns the
-/// existing plan carries - names, tags and time - which is what keeps the result readable whichever
-/// route answered it.
+/// producer, which is the one shape a region can evaluate on its own. The rows carry the native
+/// tree's output columns - names, tags and time - which is what keeps the result readable.
 #[tokio::test]
 async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
     for query in [
@@ -3413,7 +3412,6 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
         "abs(sum(some_metric)) * 2",
     ] {
         let plan = build_native_fused_plan(query, true).await;
-        let legacy = build_native_fused_plan(query, false).await;
         let display = plan.display_indent().to_string();
         assert!(
             display.contains("AggregateFinalize: "),
@@ -3430,10 +3428,15 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
             "`{query}`: {}",
             producer.tree()
         );
+        let mut expected_columns = vec!["field_0".to_string(), "timestamp".to_string()];
+        if query == "sum by (tag_0) (rate(some_metric[5m]))" {
+            expected_columns.push("tag_0".to_string());
+        }
+        expected_columns.sort();
         assert_eq!(
-            sorted_column_names(&legacy),
             sorted_column_names(&plan),
-            "`{query}` must report the columns the existing plan reports"
+            expected_columns,
+            "`{query}` native output schema"
         );
     }
 }
@@ -3600,9 +3603,10 @@ async fn native_fused_multi_source_segments_bind_their_own_table_scan() {
 async fn native_fused_nested_aggregate_keeps_the_outer_names() {
     let query = "sum(avg(some_metric) by (tag_0))";
     let plan = build_native_fused_plan(query, true).await;
-    let legacy = build_native_fused_plan(query, false).await;
-
-    assert_eq!(sorted_column_names(&legacy), sorted_column_names(&plan));
+    assert_eq!(
+        sorted_column_names(&plan),
+        vec!["field_0".to_string(), "timestamp".to_string()]
+    );
     // The merged value enters the suffix, so no column is named after the inner aggregate.
     assert!(
         plan.schema()
@@ -3612,6 +3616,29 @@ async fn native_fused_nested_aggregate_keeps_the_outer_names() {
         "{:?}",
         sorted_column_names(&plan)
     );
+}
+
+#[tokio::test]
+async fn native_fused_clamp_aggregate_is_admitted_without_legacy_registration() {
+    for query in [
+        "sum(clamp(some_metric, 1, 2))",
+        "sum(topk(1, clamp(some_metric, 1, 2)))",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert!(
+            find_aggregate_finalize(&plan).is_some() || find_fused_series(&plan).is_some(),
+            "`{query}` should be accepted by native: {}",
+            plan.display_indent()
+        );
+        assert!(
+            !plan
+                .display_indent()
+                .to_string()
+                .contains("PromSeriesDivide"),
+            "`{query}` fell back to legacy: {}",
+            plan.display_indent()
+        );
+    }
 }
 
 /// One-row-layout classic histogram fixture with the bucket label the histogram planner folds.

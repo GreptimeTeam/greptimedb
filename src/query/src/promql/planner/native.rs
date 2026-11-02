@@ -23,12 +23,11 @@
 //! compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps the
 //! plan the existing planner builds.
 //!
-//! What the node needs from here is three things the existing planner already resolves: the raw
-//! series schema the tree's input was compiled against (the selector's selected field columns), the
-//! statement's evaluation grid, and the logical tag names the output carries. The output schema is
-//! built to the shape the existing unary pipeline produces — the time index, then the series
-//! fields, then the tags — so a node planned here can be consumed by the same code that consumes a
-//! `SeriesNormalize` output.
+//! What the node needs from here is the raw series schema the tree's input was compiled against
+//! (the selector's selected field columns), the statement's evaluation grid, and output tag names
+//! derived from the native tree. The output schema is built to the shape the existing unary pipeline
+//! produces — the time index, then the series fields, then the tags — so a node planned here can be
+//! consumed by the same code that consumes a `SeriesNormalize` output.
 //!
 //! A statement that reads no data - a constant, `time()`, `vector(time())` - is planned with no
 //! scan: one node, no child, the time index and value.
@@ -207,11 +206,9 @@ impl PromPlanner {
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
-    /// `query_engine_state` is only read to build the *existing* plan of the same statement, for the
-    /// column names the existing path gives it: they are what the rows of a split aggregate are named
-    /// after, and what names the tags of a tree whose labels the walk below does not derive. That
-    /// plan is built for its schema, its names are copied, and it is dropped: it is never executed
-    /// and never stored, so the batch that answers the query is the native route's own.
+    /// Output columns are derived from the compiled native tree and resolved selector context;
+    /// when the tree's labels cannot be derived, this route declines rather than consulting the
+    /// existing planner.
     ///
     /// The route is offered a whole expression because the compiler folds a range function and the
     /// math functions over it into one tree: offering a sub-expression instead would compile a tree
@@ -238,7 +235,7 @@ impl PromPlanner {
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
+        _query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, Option<super::PromPlannerContext>)>> {
         if !self.native_fused {
             return Ok(None);
@@ -715,10 +712,20 @@ impl PromPlanner {
                 && selectors.len() == 1
                 && AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {
-                let (legacy_fields, legacy_tags) = self
-                    .legacy_output_columns(prom_expr, query_engine_state)
-                    .await?;
-                let output_schema = fused_output_schema(&legacy_fields, &legacy_tags, &time)?;
+                let output_fields = match &compiled.tree.root().output {
+                    NativeType::Samples(schema) => schema
+                        .fields
+                        .iter()
+                        .map(|field| field.name.to_string())
+                        .collect(),
+                    NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
+                    NativeType::AggregateState(_) => return Ok(None),
+                };
+                let Some(output_tags) = fused_output_tags(compiled.tree.root(), &source_tags)
+                else {
+                    return Ok(None);
+                };
+                let output_schema = fused_output_schema(&output_fields, &output_tags, &time)?;
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
@@ -754,9 +761,7 @@ impl PromPlanner {
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = Box::pin(segment_tree(
-                self,
                 prom_expr,
-                query_engine_state,
                 &compiled.tree,
                 &children,
                 &source_tags,
@@ -778,26 +783,16 @@ impl PromPlanner {
         let tree = compiled.tree;
         // The tags are asked for before the fields, because the walk answers for a tree the
         // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
-        // the walk derives or - where it derives none - the ones the existing planner names.
+        // the walk derives; an unknown set declines the native plan.
         let output_tags = match &tree.root().output {
             // A scalar has no labels, and its value is named as a bare literal's is.
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => match fused_output_tags(tree.root(), &source_tags) {
-                Some(output_tags) => output_tags,
-                None => {
-                    // The walk cannot name this tree's labels, so the columns the existing planner
-                    // names for the same statement are the answer rather than a decline.
-                    let (_, legacy_tags) = self
-                        .legacy_output_columns(prom_expr, query_engine_state)
-                        .await?;
-                    // Only the tag columns are copied: the node names its field columns after the
-                    // tree's own root schema, while the existing planner can name a computed column
-                    // after its expression, so its field names are not this node's. A tag that
-                    // collides with a field or the time index is still rejected by the uniqueness
-                    // check below.
-                    legacy_tags
-                }
-            },
+            NativeType::Samples(_) => {
+                let Some(output_tags) = fused_output_tags(tree.root(), &source_tags) else {
+                    return Ok(None);
+                };
+                output_tags
+            }
             NativeType::AggregateState(_) => return Ok(None),
         };
         let root_fields = match &tree.root().output {
@@ -856,62 +851,21 @@ impl PromPlanner {
         )))
     }
 
-    /// The field and tag columns the *existing* planner names for `prom_expr`.
-    ///
-    /// The names are read off the plan the existing path builds for the same statement, and that
-    /// plan is then dropped: it is never executed and never stored, so the batch that answers the
-    /// query is the native route's own. A statement the existing planner cannot plan fails here the
-    /// same way it fails there, because the existing plan is the answer for this statement: an error
-    /// planning it is the error the statement has, whichever route asked.
-    ///
-    /// Only the planner context is saved and restored: the table provider's resolved-table cache
-    /// keeps the entries this speculative planning resolved, exactly as the aggregate-split branch,
-    /// which planned the same way before this helper existed, always did.
-    async fn legacy_output_columns(
-        &mut self,
-        prom_expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
-    ) -> Result<(Vec<String>, Vec<String>)> {
-        let saved = self.ctx.clone();
-        let planned = self
-            .prom_root_expr_to_plan(prom_expr, query_engine_state)
-            .await;
-        let legacy_fields = self.ctx.field_columns.clone();
-        let legacy_tags = self.ctx.tag_columns.clone();
-        self.ctx = saved;
-        drop(planned?);
-        Ok((legacy_fields, legacy_tags))
-    }
-
     /// The columns a [`FusedSeries`] node over `tree` produces.
     ///
-    /// The field names are the compiled root's own, and the tag names are the ones the tree
-    /// derives. Where the tree cannot name them - a node this walk does not model - the existing
-    /// planner's tag list is the answer rather than a decline, because the statement is still
-    /// answerable and its tags are the ones that plan reports.
+    /// Field and tag names are derived from the native tree. If this walk cannot derive a tag
+    /// set, the native route declines rather than consulting the legacy planner.
     ///
     /// `None` when the root is not a value the node can publish, or when a field would share a
     /// name with a tag or the time index: the output names each column once.
-    async fn fused_root_schema(
-        &mut self,
-        prom_expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
+    fn fused_root_schema(
         tree: &NativeTree,
         source_tags: &[Vec<String>],
         time: &str,
     ) -> Option<DFSchemaRef> {
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => match fused_output_tags(tree.root(), source_tags) {
-                Some(output_tags) => output_tags,
-                None => {
-                    let (_, legacy_tags) = self
-                        .legacy_output_columns(prom_expr, query_engine_state)
-                        .await
-                        .ok()?;
-                    legacy_tags
-                }
-            },
+            NativeType::Samples(_) => fused_output_tags(tree.root(), source_tags)?,
             NativeType::AggregateState(_) => return None,
         };
         let root_fields = match &tree.root().output {
@@ -1396,9 +1350,7 @@ fn build_inner_segment(
 /// produces is one the physical planner would otherwise have had to gather as a whole.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 async fn segment_tree(
-    planner: &mut PromPlanner,
     prom_expr: &PromExpr,
-    query_engine_state: &QueryEngineState,
     tree: &NativeTree,
     children: &[LogicalPlan],
     source_tags: &[Vec<String>],
@@ -1501,15 +1453,7 @@ async fn segment_tree(
     if NativeExecutionState::try_new(&parent, Arc::new(UnboundedMemoryPool::default())).is_err() {
         return Ok(None);
     }
-    let Some(output_schema) = planner
-        .fused_root_schema(
-            prom_expr,
-            query_engine_state,
-            &parent,
-            &child_tags,
-            time_index,
-        )
-        .await
+    let Some(output_schema) = PromPlanner::fused_root_schema(&parent, &child_tags, time_index)
     else {
         return Ok(None);
     };
@@ -1642,6 +1586,11 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
     })
 }
 
+/// Metadata labels the runtime removes from histogram result label sets.
+fn promql_metadata_labels() -> [&'static str; 3] {
+    [METRIC_NAME, "__type__", "__unit__"]
+}
+
 /// The label columns `node` reports, from the tags of the scan each input reads.
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
@@ -1650,8 +1599,7 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
 /// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
 /// labels this walk does not derive - an aggregate's groups, a whole-vector operation, or a label
 /// rewrite, which renames the labels below it - so a tree holding one reports no label set here.
-/// `None` is not the query's answer: the caller asks the existing planner for the columns the node is
-/// named after instead of declining the query.
+/// A node whose labels cannot be derived is declined by the native planner.
 fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
@@ -1728,7 +1676,12 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
                         .collect(),
                 )
             }
-            BoundVectorOp::CountValues { .. } | BoundVectorOp::Histogram(_) => None,
+            BoundVectorOp::CountValues { .. } => None,
+            BoundVectorOp::Histogram(_) => {
+                let mut tags = fused_output_tags(input, source_tags)?;
+                tags.retain(|tag| tag != "le" && !promql_metadata_labels().contains(&tag.as_str()));
+                Some(tags)
+            }
         },
         NativeExpr::Merge { .. } => None,
         NativeExpr::Binary {

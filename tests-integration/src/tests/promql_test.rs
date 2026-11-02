@@ -1936,6 +1936,89 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
     rows
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_clamp_aggregates_execute_on_native_segments() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_clamp_aggregates").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE m (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); INSERT INTO m (host, ts, val) VALUES ('a', 0, 0.5), ('b', 0, 1.5), ('c', 0, 3.0)",
+        QueryContext::arc(),
+    )
+    .await;
+    for (query, expected, split) in [
+        ("sum(clamp(m, 1, 2))", 4.5, true),
+        ("sum(topk(1, clamp(m, 1, 2)))", 2.0, false),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let output = native_tql_output(&instance, &sql, true).await;
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("TQL EVAL returns record batches"),
+        };
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            1
+        );
+        let batch = batches.iter().find(|batch| batch.num_rows() > 0).unwrap();
+        assert!(batch.column_by_name("host").is_none());
+        assert_eq!(
+            batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .value(0),
+            0
+        );
+        let values = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+            .unwrap();
+        assert_eq!(values.value(0), expected);
+        let root = observer.root_plan();
+        let display = datafusion::physical_plan::displayable(root.as_ref())
+            .indent(true)
+            .to_string();
+        if split {
+            assert!(
+                display.contains("AggregateFinalizeExec"),
+                "{query}: {display}"
+            );
+            let producer = observer.fused().expect("native partial producer");
+            let producer_display = datafusion::physical_plan::displayable(producer.as_ref())
+                .indent(true)
+                .to_string();
+            assert!(
+                producer_display.contains("clamp"),
+                "{query}: {producer_display}"
+            );
+        } else {
+            assert!(display.contains("FusedSeriesExec"), "{query}: {display}");
+            assert!(
+                display.contains("Vector topk 1 by []"),
+                "{query}: {display}"
+            );
+            assert!(
+                display.contains("Aggregate sum by [] complete"),
+                "{query}: {display}"
+            );
+        }
+    }
+}
+
 /// [`native_result_rows`] plus each row's OTLP temporality marker, sorted by label then time.
 async fn native_marker_rows(output: Output) -> Vec<(i64, String, String, f64)> {
     let batches = match output.data {
@@ -5038,8 +5121,7 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // both. The value column's *name* is not equal, and that is this route's existing naming for
         // a computed value column rather than anything this shape introduces: the node names its
         // fields after the tree's own root schema, while the existing planner names a computed column
-        // after its expression (see the comment above `legacy_output_columns` in
-        // `src/query/src/promql/planner/native.rs`; the same difference is pinned for a cross-table
+        // after its expression; the same difference is pinned for a cross-table
         // pair by `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
         // shape is asserted, and the value column's name is pinned as the raw field it comes from.
         assert_eq!(
