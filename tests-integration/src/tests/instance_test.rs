@@ -50,7 +50,7 @@ async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstanc
         "host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE",
         "host BIGINT PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE",
         "ts TIMESTAMP TIME INDEX, val DOUBLE",
-        "__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, ts TIMESTAMP TIME INDEX, PRIMARY KEY (__table_id, __tsid)",
+        "__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, ts TIMESTAMP TIME INDEX, PRIMARY KEY (__tsid, __table_id)",
     ] {
         let error = try_execute_sql(
             &instance,
@@ -77,6 +77,26 @@ async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstanc
     assert_eq!(
         output.data.pretty_print().await,
         "+----------+\n| count(*) |\n+----------+\n| 1        |\n+----------+"
+    );
+
+    execute_sql(
+        &instance,
+        "CREATE TABLE sparse_reserved (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (__table_id, __tsid)) WITH ('primary_key_encoding'='sparse')",
+    )
+    .await;
+    execute_sql(
+        &instance,
+        "INSERT INTO sparse_reserved VALUES (1, 2, 1000, 3.0)",
+    )
+    .await;
+    let output = execute_sql(
+        &instance,
+        "SELECT __table_id, __tsid, val FROM sparse_reserved",
+    )
+    .await;
+    assert_eq!(
+        output.data.pretty_print().await,
+        "+------------+--------+-----+\n| __table_id | __tsid | val |\n+------------+--------+-----+\n| 1          | 2      | 3.0 |\n+------------+--------+-----+"
     );
 }
 
@@ -4494,6 +4514,16 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
                     ..Default::default()
                 });
             }
+            let reserved = converted.symbols.len() as u32;
+            converted.symbols.extend([
+                datatypes::json::JSON2_REMAINDER_FIELD_NAME.into(),
+                "abc".into(),
+            ]);
+            converted.timeseries[0].exemplars.push(v2::Exemplar {
+                labels_refs: vec![reserved, reserved + 1],
+                timestamp: 1000,
+                value: 0.75,
+            });
             (
                 "application/x-protobuf;proto=io.prometheus.write.v2.Request",
                 converted.encode_to_vec(),
@@ -4516,6 +4546,16 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
             "{:?}",
             to_bytes(response.into_body(), usize::MAX).await.unwrap()
         );
+        if version == 2 {
+            assert_eq!(
+                response.headers()["x-prometheus-remote-write-samples-written"],
+                "2"
+            );
+            assert_eq!(
+                response.headers()["x-prometheus-remote-write-exemplars-written"],
+                "1"
+            );
+        }
         for suffix in ["a", "b"] {
             let table = frontend
                 .catalog_manager()

@@ -35,6 +35,7 @@ use prometheus::HistogramTimer;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext, QueryContextRef};
+use snafu::IntoError;
 use snafu::prelude::*;
 use table::requests::{
     METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_PER_TABLE_INDEX_KEY,
@@ -53,7 +54,7 @@ use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::v2::decode_remote_write_v2;
 use crate::prom_remote_write::validation::PromValidationMode;
 use crate::prom_remote_write::{
-    REMOTE_WRITE_V1_VERSION, REMOTE_WRITE_V2_VERSION, decode_remote_write_request,
+    self, REMOTE_WRITE_V1_VERSION, REMOTE_WRITE_V2_VERSION, decode_remote_write_request,
 };
 use crate::prom_store::{MAX_DECOMPRESSED_REQUEST_SIZE, snappy_decompress_limited};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -119,20 +120,29 @@ pub async fn remote_write(
     body: Bytes,
 ) -> Result<axum::response::Response> {
     let is_zstd = content_encoding.contains(VM_ENCODING);
+    // Read after Bytes has collected every frame, including chunked-body reservations.
+    let body_reserved_bytes = extensions
+        .get::<BodyMemoryAccounting>()
+        .map_or(0, BodyMemoryAccounting::reserved_bytes);
 
     match remote_write_proto(content_type) {
         RemoteWriteProto::V1 => {
-            remote_write_v1(state, params, query_ctx, pipeline_info, is_zstd, body).await
+            remote_write_v1(
+                state,
+                params,
+                query_ctx,
+                pipeline_info,
+                is_zstd,
+                body,
+                body_reserved_bytes,
+            )
+            .await
         }
         RemoteWriteProto::V2 => {
             if let Some(response) = unsupported_remote_write_v2_encoding_response(&content_encoding)
             {
                 return Ok(response);
             }
-            // Read after Bytes has collected every frame, including chunked-body reservations.
-            let body_reserved_bytes = extensions
-                .get::<BodyMemoryAccounting>()
-                .map_or(0, BodyMemoryAccounting::reserved_bytes);
             remote_write_v2(
                 state,
                 params,
@@ -159,6 +169,7 @@ async fn remote_write_v1(
     pipeline_info: PipelineInfo,
     is_zstd: bool,
     body: Bytes,
+    body_reserved_bytes: u64,
 ) -> Result<axum::response::Response> {
     let PromStoreState {
         prom_store_handler,
@@ -220,6 +231,32 @@ async fn remote_write_v1(
         req
     };
     drop(decode_guards);
+    let query_ctx = if exemplars.is_empty() {
+        query_ctx
+    } else {
+        let bytes = crate::exemplar::estimated_row_bytes(&exemplars)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| {
+                error::MemoryLimitExceededSnafu.into_error(
+                    common_memory_manager::Error::MemoryLimitExceeded {
+                        requested_bytes: u64::MAX,
+                        limit_bytes: memory_limiter.limit_bytes(),
+                    },
+                )
+            })?;
+        memory_limiter.check_request_fits(bytes, body_reserved_bytes)?;
+        let reservation = Arc::new(
+            memory_limiter
+                .acquire(bytes)
+                .await
+                .map_err(prom_remote_write::map_memory_acquire_timeout)?,
+        );
+        let mut ctx = query_ctx.fork();
+        ctx.set_write_progress(Arc::new(
+            session::write_progress::WriteProgress::with_reservation(reservation),
+        ));
+        Arc::new(ctx)
+    };
     let batches = into_prom_write_batches(req, query_ctx.clone());
     if !exemplars.is_empty() {
         let outcome = exemplar::write(
@@ -1282,6 +1319,213 @@ mod tests {
         }
     }
 
+    struct ExemplarMemoryHandler {
+        limiter: ServerMemoryLimiter,
+        progress: Mutex<Option<Arc<session::write_progress::WriteProgress>>>,
+    }
+
+    #[async_trait]
+    impl PromStoreProtocolHandler for ExemplarMemoryHandler {
+        async fn pre_write(&self, request: &RowInsertRequests, _: QueryContextRef) -> Result<()> {
+            let capacity: usize = request
+                .inserts
+                .iter()
+                .flat_map(|request| &request.rows.as_ref().unwrap().rows)
+                .map(|row| row.values.capacity() * std::mem::size_of::<api::v1::Value>())
+                .sum();
+            assert!(self.limiter.used_bytes() >= capacity as u64);
+            Ok(())
+        }
+
+        async fn check_exemplar_sources(
+            &self,
+            _: &std::collections::BTreeSet<String>,
+            _: QueryContextRef,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write_exemplars_prepared(
+            &self,
+            request: RowInsertRequests,
+            ctx: QueryContextRef,
+        ) -> Result<Output> {
+            *self.progress.lock().unwrap() = Some(ctx.write_progress().unwrap().clone());
+            Ok(Output::new_with_affected_rows(
+                prom_write_row_count(&request) as usize,
+            ))
+        }
+
+        async fn write_prepared(
+            &self,
+            _: RowInsertRequests,
+            _: QueryContextRef,
+            _: bool,
+        ) -> Result<Output> {
+            unreachable!()
+        }
+
+        async fn write(&self, _: RowInsertRequests, _: QueryContextRef, _: bool) -> Result<Output> {
+            unreachable!()
+        }
+
+        async fn write_all(&self, _: Vec<PromWriteBatch>, _: bool) -> Result<Vec<Result<Output>>> {
+            unreachable!()
+        }
+
+        async fn read(&self, _: ReadRequest, _: QueryContextRef) -> Result<PromStoreResponse> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_exemplar_row_memory_is_charged_and_retained() {
+        use api::greptime_proto::io::prometheus::write::v2;
+        use api::prom_store::remote;
+
+        use crate::http::{HttpOptions, HttpServerBuilder};
+
+        for version in [1, 2] {
+            for policy in [OnExhaustedPolicy::Fail, OnExhaustedPolicy::default()] {
+                for (distinct_tags, contended, expire) in [
+                    (true, false, false),
+                    (false, false, false),
+                    (false, true, false),
+                    (false, true, true),
+                ] {
+                    let mut v1 = remote::WriteRequest::default();
+                    let mut v2 = v2::Request {
+                        symbols: vec![String::new()],
+                        timeseries: vec![],
+                    };
+                    for index in 0..1024 {
+                        let labels = vec![
+                            remote::Label {
+                                name: "__name__".into(),
+                                value: format!("metric_{index}"),
+                            },
+                            remote::Label {
+                                name: format!("tag_{}", if distinct_tags { index } else { 0 }),
+                                value: "value".into(),
+                            },
+                        ];
+                        let mut labels_refs = Vec::new();
+                        for label in &labels {
+                            labels_refs
+                                .extend([v2.symbols.len() as u32, v2.symbols.len() as u32 + 1]);
+                            v2.symbols.extend([label.name.clone(), label.value.clone()]);
+                        }
+                        v1.timeseries.push(remote::TimeSeries {
+                            labels,
+                            samples: if expire {
+                                vec![remote::Sample::default()]
+                            } else {
+                                vec![]
+                            },
+                            exemplars: vec![remote::Exemplar::default()],
+                            ..Default::default()
+                        });
+                        v2.timeseries.push(v2::TimeSeries {
+                            labels_refs,
+                            samples: if expire {
+                                vec![v2::Sample::default()]
+                            } else {
+                                vec![]
+                            },
+                            exemplars: vec![v2::Exemplar::default()],
+                            ..Default::default()
+                        });
+                    }
+                    let (content_type, wire) = if version == 1 {
+                        ("application/x-protobuf", v1.encode_to_vec())
+                    } else {
+                        (
+                            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                            v2.encode_to_vec(),
+                        )
+                    };
+                    let limiter = ServerMemoryLimiter::new(16 * 1024 * 1024, policy);
+                    let mut occupied = contended
+                        .then(|| limiter.try_acquire(16 * 1024 * 1024 - 256 * 1024).unwrap());
+                    let handler = Arc::new(ExemplarMemoryHandler {
+                        limiter: limiter.clone(),
+                        progress: Mutex::new(None),
+                    });
+                    let server = HttpServerBuilder::new(HttpOptions::default())
+                        .with_memory_limiter(limiter.clone())
+                        .with_prom_handler(
+                            handler.clone(),
+                            None,
+                            true,
+                            PromValidationMode::Strict,
+                            None,
+                        )
+                        .build();
+                    let response = server.build(server.make_app()).unwrap().oneshot(
+                        Request::post("/v1/prometheus/write")
+                            .header(header::CONTENT_TYPE, content_type)
+                            .header(header::CONTENT_ENCODING, DEFAULT_ENCODING)
+                            .body(Body::from(
+                                crate::prom_store::snappy_compress(&wire).unwrap(),
+                            ))
+                            .unwrap(),
+                    );
+                    let started = tokio::time::Instant::now();
+                    tokio::pin!(response);
+                    if contended && matches!(policy, OnExhaustedPolicy::Wait { .. }) {
+                        assert!(futures::poll!(response.as_mut()).is_pending());
+                        if !expire {
+                            drop(occupied.take());
+                        }
+                    }
+                    let response = response.await.unwrap();
+                    let timed_out = expire && matches!(policy, OnExhaustedPolicy::Wait { .. });
+                    let rejected = distinct_tags
+                        || timed_out
+                        || (contended && matches!(policy, OnExhaustedPolicy::Fail));
+                    assert_eq!(
+                        response.status(),
+                        if timed_out {
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        } else if rejected {
+                            StatusCode::TOO_MANY_REQUESTS
+                        } else {
+                            StatusCode::NO_CONTENT
+                        },
+                        "version={version}, distinct={distinct_tags}, contended={contended}, expire={expire}, policy={policy:?}"
+                    );
+                    if let OnExhaustedPolicy::Wait { timeout } = policy
+                        && timed_out
+                    {
+                        assert_eq!(started.elapsed(), timeout);
+                    } else {
+                        assert_eq!(started.elapsed(), Duration::ZERO);
+                    }
+                    let progress = handler.progress.lock().unwrap().take();
+                    if !rejected {
+                        assert!(progress.is_some());
+                        assert!(limiter.used_bytes() > 0);
+                        if version == 2 {
+                            assert_eq!(
+                                response.headers()[REMOTE_WRITE_V2_EXEMPLARS_WRITTEN_HEADER],
+                                "1024"
+                            );
+                        }
+                    } else {
+                        assert!(progress.is_none());
+                    }
+                    drop(progress);
+                    assert_eq!(
+                        limiter.used_bytes(),
+                        occupied.as_ref().map_or(0, |guard| guard.granted_bytes())
+                    );
+                    drop(occupied);
+                    assert_eq!(limiter.used_bytes(), 0);
+                }
+            }
+        }
+    }
+
     fn memory_limited_prom_write_app(limiter: ServerMemoryLimiter) -> Router {
         let mut state = test_state();
         state.memory_limiter = limiter.clone();
@@ -1293,6 +1537,54 @@ mod tests {
                 limiter,
                 memory_limit_middleware,
             ))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_exemplar_v1_reservation_accounts_for_chunked_body() {
+        use api::prom_store::remote;
+
+        let wire = remote::WriteRequest {
+            timeseries: vec![remote::TimeSeries {
+                labels: vec![
+                    remote::Label {
+                        name: "__name__".into(),
+                        value: "metric".into(),
+                    },
+                    remote::Label {
+                        name: "job".into(),
+                        value: "api".into(),
+                    },
+                ],
+                exemplars: vec![remote::Exemplar::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let body = crate::prom_store::snappy_compress(&wire).unwrap();
+        // Each frame retains a 1 KiB body permit. The rows fit alone, but not alongside both.
+        let frames = body
+            .chunks(body.len().div_ceil(2))
+            .map(Bytes::copy_from_slice)
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 2);
+        let limiter = ServerMemoryLimiter::new(5 * 1024, OnExhaustedPolicy::default());
+        let started = tokio::time::Instant::now();
+        let response = memory_limited_prom_write_app(limiter.clone())
+            .oneshot(
+                Request::post("/write")
+                    .header(header::CONTENT_TYPE, "application/x-protobuf")
+                    .header(header::CONTENT_ENCODING, DEFAULT_ENCODING)
+                    .body(Body::from_stream(futures::stream::iter(
+                        frames.into_iter().map(Ok::<_, std::io::Error>),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(limiter.used_bytes(), 0);
     }
 
     #[tokio::test(start_paused = true)]

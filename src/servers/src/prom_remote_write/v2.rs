@@ -30,7 +30,6 @@ use api::v1::ColumnSchema;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequest, Rows, SemanticType, Value};
 use bytes::{Buf, Bytes};
-use common_error::ext::BoxedError;
 use common_memory_manager::{MemoryGuard, OnExhaustedPolicy};
 #[cfg(test)]
 use common_query::native_histogram::*;
@@ -51,7 +50,7 @@ use table::requests::{
 
 use crate::error::{self, Result};
 use crate::prom_remote_write::row_builder::PromCtx;
-use crate::prom_remote_write::{REMOTE_WRITE_V2_VERSION, decompress_remote_write_body};
+use crate::prom_remote_write::{self, REMOTE_WRITE_V2_VERSION, decompress_remote_write_body};
 #[allow(deprecated)]
 use crate::prom_store::{
     DATABASE_LABEL, DATABASE_LABEL_ALT, METRIC_NAME_LABEL, PHYSICAL_TABLE_LABEL,
@@ -239,16 +238,7 @@ pub(crate) async fn decode_remote_write_v2(
         }
         OnExhaustedPolicy::Fail => decode.await,
     };
-    result.map_err(|error| match error {
-        error::Error::MemoryLimitExceeded {
-            source: source @ common_memory_manager::Error::MemoryAcquireTimeout { .. },
-            ..
-        } => {
-            // Prometheus retries 5xx; 429 may discard a request delayed by other writes.
-            error::OtherSnafu.into_error(BoxedError::new(source))
-        }
-        error => error,
-    })
+    result.map_err(prom_remote_write::map_memory_acquire_timeout)
 }
 
 async fn decode_remote_write_v2_once(
@@ -566,6 +556,8 @@ fn convert_remote_write_v2(
         histogram_count_total =
             checked_total(histogram_count_total, counts.histograms, "histogram")?;
     }
+
+    budget.reserve(crate::exemplar::estimated_row_bytes(&exemplars))?;
 
     Ok(RemoteWriteV2WriteRequests {
         samples: into_context_req(sample_tables),
@@ -1499,6 +1491,10 @@ mod tests {
                 timestamp: i64::MAX,
                 ..valid.clone()
             },
+            Exemplar {
+                labels_refs: vec![6, 4],
+                ..valid.clone()
+            },
         ] {
             for retain_valid in [false, true] {
                 let mut observations = vec![invalid.clone()];
@@ -1513,6 +1509,7 @@ mod tests {
                         "trace_id".into(),
                         "abc".into(),
                         "x".repeat(128),
+                        datatypes::json::JSON2_REMAINDER_FIELD_NAME.into(),
                     ],
                     timeseries: vec![TimeSeries {
                         labels_refs: vec![1, 2],

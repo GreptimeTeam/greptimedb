@@ -17,12 +17,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, RowInsertRequests};
+use api::v1::{ColumnDataType, Row, RowInsertRequests, Value};
 use common_grpc::precision::Precision;
 use common_query::prelude::{
     EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, METRICS_EXEMPLARS_TABLE, greptime_timestamp,
     greptime_value,
 };
+use datatypes::json;
 use metric_engine::row_modifier::TsidGenerator;
 use snafu::{OptionExt, ensure};
 use store_api::metric_engine_consts::{
@@ -46,6 +47,41 @@ pub struct Exemplar {
 /// Exemplars grouped by the source series' optional database routing control.
 pub type ExemplarRequests = BTreeMap<Option<String>, Vec<Exemplar>>;
 
+/// Bounds row capacity after each database's metrics share one exemplar schema.
+pub(crate) fn estimated_row_bytes(requests: &ExemplarRequests) -> Option<usize> {
+    requests.values().try_fold(0usize, |total, exemplars| {
+        let mut tags = BTreeSet::new();
+        let mut payload = 0usize;
+        for exemplar in exemplars {
+            tags.extend(exemplar.series_labels.keys());
+            payload = payload.checked_add(exemplar.metric.len().checked_mul(4)?)?;
+            for (name, value) in exemplar.series_labels.iter().chain(&exemplar.labels) {
+                // Include owned strings, label-map entries and JSON2 encoding scratch.
+                payload = payload.checked_add(
+                    name.len()
+                        .checked_add(value.len())?
+                        .checked_mul(4)?
+                        .checked_add(256)?,
+                )?;
+            }
+        }
+        // Include the source table ID attached after conversion, and Vec growth.
+        let columns = tags.len().checked_add(6)?;
+        let values = exemplars
+            .len()
+            .checked_mul(columns)?
+            .checked_mul(2 * std::mem::size_of::<Value>())?;
+        let rows = exemplars
+            .len()
+            .checked_mul(2 * std::mem::size_of::<Row>() + std::mem::size_of::<Exemplar>())?;
+        total
+            .checked_add(values)?
+            .checked_add(rows)?
+            .checked_add(columns.checked_mul(512)?)?
+            .checked_add(payload)
+    })
+}
+
 /// Validates labels with the protocol's name policy, preserving duplicates as errors.
 pub fn labels<I>(
     labels: I,
@@ -64,7 +100,14 @@ where
                 msg: format!("invalid exemplar label name: {name}"),
             }
         );
-        if !exemplar_owned {
+        if exemplar_owned {
+            ensure!(
+                name != json::JSON2_REMAINDER_FIELD_NAME,
+                InvalidPromRemoteRequestSnafu {
+                    msg: "exemplar label name is reserved by JSON2",
+                }
+            );
+        } else {
             ensure!(
                 ![
                     greptime_timestamp(),
