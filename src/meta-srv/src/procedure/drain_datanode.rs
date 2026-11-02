@@ -276,7 +276,7 @@ pub(crate) struct DrainDatanodeProcedure {
     state: Box<dyn State>,
     context: Context,
     /// Keeps the drained datanode in the running set of the manager until the procedure ends,
-    /// so a second drain of the datanode is rejected at submission instead of being queued.
+    /// so matching requests reuse this drain and conflicting requests cannot be queued.
     _guards: Vec<DrainDatanodeProcedureGuard>,
 }
 
@@ -294,8 +294,8 @@ impl DrainDatanodeProcedure {
 
     /// Returns a new [`DrainDatanodeProcedure`] from the given serialized data.
     ///
-    /// The procedure takes its place back in `tracker`, so a reloaded drain still rejects a
-    /// second drain of the same datanode.
+    /// Restores the reservation in `tracker`, allowing the manager to recognize retries
+    /// and reject conflicting drains after recovery.
     pub fn from_json<F>(
         json: &str,
         tracker: &DrainDatanodeProcedureTracker,
@@ -787,7 +787,7 @@ mod tests {
             .await
             .unwrap();
 
-        let state = wait_for_terminal_state(env.procedure_manager(), procedure_id).await;
+        let state = wait_for_terminal_state(env.procedure_manager(), procedure_id.unwrap()).await;
         assert!(
             matches!(state, ProcedureState::Done { .. }),
             "the drain procedure did not complete successfully: {state:?}"

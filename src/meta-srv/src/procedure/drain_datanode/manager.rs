@@ -22,6 +22,10 @@ use common_procedure::{ProcedureContext, ProcedureId, ProcedureManagerRef, Proce
 use common_telemetry::info;
 use common_time::util::current_time_millis;
 use snafu::ResultExt;
+use tokio::sync::Mutex;
+
+use crate::key::NodeSchedulingRole;
+use crate::procedure::drain_datanode::utils;
 
 use crate::error::{self, Result};
 use crate::metasrv::SelectorContext;
@@ -36,8 +40,8 @@ pub type DrainDatanodeManagerRef = Arc<DrainDatanodeManager>;
 
 /// Tracks the running drains, indexed by the drained datanode.
 ///
-/// Mirrors `RegionMigrationProcedureTracker`: a drain of a datanode that is already being
-/// drained is rejected at submission instead of waiting for the procedure lock.
+/// Reserves each datanode for one drain. The manager reuses matching submissions
+/// and rejects conflicting ones instead of queuing them behind the procedure lock.
 #[derive(Default, Clone)]
 pub struct DrainDatanodeProcedureTracker {
     running_procedures: Arc<RwLock<HashMap<DatanodeId, DrainDatanodeProcedureTask>>>,
@@ -81,9 +85,9 @@ impl Drop for DrainDatanodeProcedureGuard {
 
 /// Manages the [`DrainDatanodeProcedure`]s.
 ///
-/// It registers the procedure loader and submits drain tasks. Procedures of the same
-/// datanode are serialized by the procedure lock declared in
-/// [`DrainDatanodeProcedure::lock_key`].
+/// Registers the procedure loader and serializes submissions with restoring scheduling.
+/// Matching retries resolve their id through the procedure manager, which also owns
+/// recovered procedures.
 pub struct DrainDatanodeManager {
     procedure_manager: ProcedureManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
@@ -92,6 +96,8 @@ pub struct DrainDatanodeManager {
     selector_ctx: SelectorContext,
 
     tracker: DrainDatanodeProcedureTracker,
+    /// Serializes submissions with restoring scheduling, including their KV operations.
+    admission: Mutex<()>,
 }
 
 impl DrainDatanodeManager {
@@ -111,6 +117,7 @@ impl DrainDatanodeManager {
             selector_ctx,
 
             tracker: DrainDatanodeProcedureTracker::default(),
+            admission: Mutex::new(()),
         }
     }
 
@@ -131,12 +138,16 @@ impl DrainDatanodeManager {
         )
     }
 
-    /// Submits a [`DrainDatanodeProcedure`] and returns its id.
+    /// Submits a drain, reuses an identical running drain, or returns `None` when drained.
+    ///
+    /// Retries do not extend the original deadline. The running procedure manager owns
+    /// the id, including after recovery; no separate persistent request index is needed.
     pub async fn submit_procedure(
         &self,
         procedure_context: ProcedureContext,
         task: DrainDatanodeProcedureTask,
-    ) -> Result<ProcedureId> {
+    ) -> Result<Option<ProcedureId>> {
+        let _admission = self.admission.lock().await;
         if task.target_node_id == Some(task.node_id) {
             return error::InvalidArgumentsSnafu {
                 err_msg: "the target datanode must differ from the drained datanode",
@@ -155,6 +166,60 @@ impl DrainDatanodeManager {
                 err_msg: "the timeout must be greater than zero",
             }
             .fail();
+        }
+
+        let running = self
+            .tracker
+            .running_procedures
+            .read()
+            .unwrap()
+            .get(&task.node_id)
+            .cloned();
+        if let Some(running) = running {
+            if running.target_node_id == task.target_node_id
+                && running.parallelism == task.parallelism
+                && running.strategy == task.strategy
+            {
+                let lock_keys = common_procedure::LockKey::single_exclusive(format!(
+                    "__drain_datanode/{}",
+                    task.node_id
+                ))
+                .get_keys();
+                let procedures = self
+                    .procedure_manager
+                    .list_procedures()
+                    .await
+                    .context(error::QueryProcedureSnafu)?;
+                if let Some(procedure) = procedures.into_iter().find(|procedure| {
+                    procedure.type_name == DrainDatanodeProcedure::TYPE_NAME
+                        && procedure.lock_keys == lock_keys
+                        && !procedure.state.is_done()
+                        && !procedure.state.is_failed()
+                }) {
+                    return Ok(Some(procedure.id));
+                }
+            } else {
+                return error::DrainDatanodeRunningSnafu {
+                    node_id: task.node_id,
+                }
+                .fail();
+            }
+            // The runner may have completed between reading the tracker and querying
+            // its state. Check the authoritative route before reporting a conflict.
+        }
+
+        // Drain removes leaders; follower replicas are deliberately retained by the
+        // existing drain procedure. Match that completion contract here.
+        if !self
+            .node_scheduling_manager
+            .is_schedulable(NodeSchedulingRole::Datanode, task.node_id)
+            .await?
+            && utils::build_datanode_plan(&self.table_metadata_manager, task.node_id)
+                .await?
+                .leader_regions
+                .is_empty()
+        {
+            return Ok(None);
         }
 
         let Some(guard) = self.tracker.insert_running_procedure(&task) else {
@@ -186,7 +251,25 @@ impl DrainDatanodeManager {
             .await
             .context(error::SubmitProcedureSnafu)?;
 
-        Ok(procedure_id)
+        Ok(Some(procedure_id))
+    }
+
+    /// Restores scheduling only when no drain owns the node.
+    pub async fn mark_schedulable(&self, node_id: DatanodeId) -> Result<()> {
+        let _admission = self.admission.lock().await;
+        if self
+            .tracker
+            .running_procedures
+            .read()
+            .unwrap()
+            .contains_key(&node_id)
+        {
+            return error::DrainDatanodeRunningSnafu { node_id }.fail();
+        }
+        self.node_scheduling_manager
+            .mark_schedulable(NodeSchedulingRole::Datanode, node_id)
+            .await?;
+        Ok(())
     }
 
     /// Registers the loader of [`DrainDatanodeProcedure`].
@@ -236,6 +319,260 @@ mod tests {
         DEFAULT_PARALLELISM, DrainDatanodeProcedure, DrainDatanodeProcedureTask,
         DrainDatanodeStrategy,
     };
+
+    struct HoldDrainLock {
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl common_procedure::Procedure for HoldDrainLock {
+        fn type_name(&self) -> &str {
+            "test-hold-drain-lock"
+        }
+        async fn execute(
+            &mut self,
+            _: &common_procedure::Context,
+        ) -> common_procedure::Result<common_procedure::Status> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(common_procedure::Status::done())
+        }
+        fn dump(&self) -> common_procedure::Result<String> {
+            Ok(String::new())
+        }
+        fn lock_key(&self) -> common_procedure::LockKey {
+            common_procedure::LockKey::single_exclusive("__drain_datanode/1")
+        }
+    }
+
+    fn task() -> DrainDatanodeProcedureTask {
+        DrainDatanodeProcedureTask {
+            node_id: 1,
+            target_node_id: Some(2),
+            parallelism: DEFAULT_PARALLELISM,
+            strategy: DrainDatanodeStrategy::FailFast,
+            timeout: None,
+        }
+    }
+
+    async fn hold_drain_lock(env: &TestEnv) -> std::sync::Arc<tokio::sync::Notify> {
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        env.procedure_manager()
+            .submit(common_procedure::ProcedureWithId::with_random_id(Box::new(
+                HoldDrainLock {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                },
+            )))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        release
+    }
+
+    #[tokio::test]
+    async fn test_submit_drain_concurrent_retries_and_scheduling_conflict() {
+        let env = TestEnv::new().await;
+        env.procedure_manager().start().await.unwrap();
+        let release = hold_drain_lock(&env).await;
+        let manager = env.drain_manager();
+        let (first, second) = tokio::join!(
+            manager.submit_procedure(Default::default(), task()),
+            manager.submit_procedure(Default::default(), task()),
+        );
+        let first = first.unwrap().unwrap();
+        assert_eq!(Some(first), second.unwrap());
+        assert_eq!(
+            2,
+            env.procedure_manager()
+                .list_procedures()
+                .await
+                .unwrap()
+                .len()
+        );
+        let mut conflicting = task();
+        conflicting.target_node_id = Some(3);
+        assert!(matches!(
+            manager
+                .submit_procedure(Default::default(), conflicting)
+                .await,
+            Err(error::Error::DrainDatanodeRunning { .. })
+        ));
+        assert!(matches!(
+            manager.mark_schedulable(1).await,
+            Err(error::Error::DrainDatanodeRunning { .. })
+        ));
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !manager
+                    .tracker
+                    .running_procedures
+                    .read()
+                    .unwrap()
+                    .contains_key(&1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            None,
+            manager
+                .submit_procedure(Default::default(), task())
+                .await
+                .unwrap()
+        );
+        manager.mark_schedulable(1).await.unwrap();
+        manager.mark_schedulable(1).await.unwrap();
+        env.procedure_manager().stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_submit_drain_retry_reuses_recovered_procedure_id() {
+        let env = TestEnv::new().await;
+        env.procedure_manager().start().await.unwrap();
+        let release = hold_drain_lock(&env).await;
+        let manager = env.drain_manager();
+        let original = DrainDatanodeProcedure::new(
+            env.context(new_persistent_context(
+                Some(2),
+                DrainDatanodeStrategy::FailFast,
+            )),
+            vec![],
+        );
+        let checkpoint = original.dump().unwrap();
+        let recovered =
+            DrainDatanodeProcedure::from_json(&checkpoint, &manager.tracker(), |context| {
+                env.context(context)
+            })
+            .unwrap();
+        let procedure = common_procedure::ProcedureWithId::with_random_id(Box::new(recovered));
+        let id = procedure.id;
+        env.procedure_manager().submit(procedure).await.unwrap();
+        assert_eq!(
+            Some(id),
+            manager
+                .submit_procedure(Default::default(), task())
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            manager.mark_schedulable(1).await,
+            Err(error::Error::DrainDatanodeRunning { .. })
+        ));
+        release.notify_one();
+        env.procedure_manager().stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_completed_drain_retry_before_guard_release() {
+        let env = TestEnv::new().await;
+        let manager = env.drain_manager();
+        let _guard = manager.tracker().insert_running_procedure(&task()).unwrap();
+        env.node_scheduling_manager
+            .mark_unschedulable(crate::key::NodeSchedulingRole::Datanode, 1)
+            .await
+            .unwrap();
+        // Completion is visible before the runner releases its tracker reservation.
+        assert_eq!(
+            None,
+            manager
+                .submit_procedure(Default::default(), task())
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_drain_can_be_submitted_again() {
+        use crate::key::NodeSchedulingRole;
+        use crate::procedure::drain_datanode::test_util::leader_region;
+        let env = TestEnv::new().await;
+        env.create_table(vec![leader_region(
+            store_api::storage::RegionId::new(1024, 1),
+            1,
+        )])
+        .await;
+        env.node_scheduling_manager
+            .mark_unschedulable(NodeSchedulingRole::Datanode, 2)
+            .await
+            .unwrap();
+        env.procedure_manager().start().await.unwrap();
+        let manager = env.drain_manager();
+        let first = manager
+            .submit_procedure(Default::default(), task())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if env
+                    .procedure_manager()
+                    .procedure_state(first)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_failed()
+                    && !manager
+                        .tracker
+                        .running_procedures
+                        .read()
+                        .unwrap()
+                        .contains_key(&1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let second = manager
+            .submit_procedure(Default::default(), task())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(first, second);
+        env.procedure_manager().stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_failed_submission_releases_drain_admission() {
+        let env = TestEnv::new().await;
+        let manager = env.drain_manager();
+        assert!(
+            manager
+                .submit_procedure(Default::default(), task())
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .tracker
+                .running_procedures
+                .read()
+                .unwrap()
+                .is_empty()
+        );
+        manager.mark_schedulable(1).await.unwrap();
+        env.procedure_manager().start().await.unwrap();
+        assert!(
+            manager
+                .submit_procedure(Default::default(), task())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        env.procedure_manager().stop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_submit_procedure_rejects_invalid_task() {

@@ -13,18 +13,23 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
+use common_meta::rpc::procedure;
+use common_procedure::ProcedureId;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
-use crate::error::RuntimeSwitchManagerSnafu;
+use crate::error::{self, RuntimeSwitchManagerSnafu};
+use crate::metasrv::Metasrv;
 use crate::service::admin::HttpHandler;
+use crate::service::admin::util;
 use crate::service::admin::util::{ErrorHandler, to_json_response, to_not_found_response};
 
 #[derive(Clone)]
@@ -157,4 +162,55 @@ impl HttpHandler for ProcedureManagerHandler {
             _ => to_not_found_response(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProcedureStatusRequest {
+    procedure_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ProcedureStatusResponse {
+    procedure_id: String,
+    status: String,
+    error: Option<String>,
+}
+
+/// Queries a submitted procedure, independently of the procedure-manager switch.
+#[axum_macros::debug_handler]
+pub(crate) async fn procedure_status(
+    State(metasrv): State<Arc<Metasrv>>,
+    Query(request): Query<ProcedureStatusRequest>,
+) -> Response {
+    async {
+        util::ensure_leader(&metasrv)?;
+        let pid = request.procedure_id.parse::<ProcedureId>().map_err(|_| {
+            error::InvalidArgumentsSnafu {
+                err_msg: "invalid procedure id",
+            }
+            .build()
+        })?;
+        let state = metasrv
+            .procedure_manager()
+            .procedure_state(pid)
+            .await
+            .context(error::QueryProcedureSnafu)?
+            .context(error::ProcedureNotFoundSnafu {
+                pid: request.procedure_id.clone(),
+            })?;
+        let response = procedure::procedure_state_to_pb_response(&state);
+        Ok::<_, error::Error>(ProcedureStatusResponse {
+            procedure_id: pid.to_string(),
+            status: state.as_str_name().to_string(),
+            error: if response.error.is_empty() {
+                None
+            } else {
+                Some(response.error)
+            },
+        })
+    }
+    .await
+    .map(Json)
+    .map_err(util::admin_error_response)
+    .into_response()
 }
