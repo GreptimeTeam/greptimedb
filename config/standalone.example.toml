@@ -949,6 +949,10 @@ default_flat_format = true
 ## Whether to enable the experimental two-phase mode for eligible metric series scans.
 experimental_series_scan_v2 = false
 
+## Answers eligible scalar COUNT queries from manifest row counts instead of scanning SST data.
+## May read Parquet footers to rule out deletions; ingestion does no extra work.
+experimental_metadata_aggr = false
+
 ## The options for index in Mito engine.
 [region_engine.mito.index]
 

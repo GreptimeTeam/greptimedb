@@ -363,11 +363,7 @@ fn extract_from_binary_expr(
             let (ts, reverse) = get_timestamp_filter(ts_col_name, left, right)?;
             if reverse {
                 // [lit] < ts_col
-                let ts_val = ts.convert_to(ts_col_unit)?.value();
-                Some(TimestampRange::from_start(Timestamp::new(
-                    ts_val + 1,
-                    ts_col_unit,
-                )))
+                strictly_after(ts, ts_col_unit)
             } else {
                 // ts_col < [lit]
                 ts.convert_to_ceil(ts_col_unit)
@@ -394,11 +390,7 @@ fn extract_from_binary_expr(
                     .map(|t| TimestampRange::until_end(t, false))
             } else {
                 // ts_col > [lit]
-                let ts_val = ts.convert_to(ts_col_unit)?.value();
-                Some(TimestampRange::from_start(Timestamp::new(
-                    ts_val + 1,
-                    ts_col_unit,
-                )))
+                strictly_after(ts, ts_col_unit)
             }
         }
         Operator::GtEq => {
@@ -429,6 +421,16 @@ fn extract_from_binary_expr(
         }
         _ => None,
     }
+}
+
+/// Returns the timestamps after `ts` in `unit`. The range is empty when `ts`
+/// is the largest representable timestamp, rather than wrapping around.
+fn strictly_after(ts: Timestamp, unit: TimeUnit) -> Option<TimestampRange> {
+    let ts_val = ts.convert_to(unit)?.value();
+    Some(match ts_val.checked_add(1) {
+        Some(next) => TimestampRange::from_start(Timestamp::new(next, unit)),
+        None => TimestampRange::empty(),
+    })
 }
 
 fn get_timestamp_filter(ts_col_name: &str, left: &Expr, right: &Expr) -> Option<(Timestamp, bool)> {
@@ -576,6 +578,14 @@ mod tests {
             col("ts").gt(lit(ScalarValue::TimestampSecond(Some(1), None))),
             TimestampRange::from_start(Timestamp::new_millisecond(1001)),
         );
+
+        // No timestamp is after the maximum, in either operand order. The
+        // successor must not wrap around to the minimum.
+        let max = || lit(ScalarValue::TimestampMillisecond(Some(i64::MAX), None));
+        for expr in [col("ts").gt(max()), max().lt(col("ts"))] {
+            let range = build_time_range_predicate("ts", TimeUnit::Millisecond, &[expr]);
+            assert!(range.is_empty(), "{range:?}");
+        }
     }
 
     #[test]

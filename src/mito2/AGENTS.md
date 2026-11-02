@@ -86,6 +86,11 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   `tests/compatibility/manifest/table_compaction/` and
   `tests/compatibility/manifest/pending_tails/`.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
+  Metadata COUNT (`read/scan_region/aggr.rs`) trusts a non-append SST's
+  `num_rows` only when its `__op_type` statistics show no deletes, which assumes
+  every SST of a non-append region is deduplicated within itself. Mito's flush,
+  bulk-part merge and compaction writers guarantee this; SSTs imported by region
+  edits or `sst_replace` must too.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may

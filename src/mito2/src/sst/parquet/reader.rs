@@ -808,6 +808,19 @@ impl ParquetReaderBuilder {
         }))
     }
 
+    /// Reads the file's Parquet metadata for callers that only need file and
+    /// row group statistics. Uses the same metadata caches as scans and skips
+    /// the page index.
+    pub(crate) async fn read_statistics(&self) -> Result<Arc<ParquetMetaData>> {
+        let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
+        let file_size = self.file_handle.meta_ref().file_size;
+        let mut metrics = MetadataCacheMetrics::default();
+        let (metadata, _) = self
+            .read_parquet_metadata(&file_path, file_size, &mut metrics, PageIndexPolicy::Skip)
+            .await?;
+        Ok(metadata.parquet_metadata())
+    }
+
     /// Reads parquet metadata of specific file.
     /// Returns (fused metadata, cache_miss_flag).
     pub(crate) async fn read_parquet_metadata(

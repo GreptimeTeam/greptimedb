@@ -3597,6 +3597,7 @@ min_compaction_interval = "0s"
 schedule_compaction_after_edit = true
 default_flat_format = true
 experimental_series_scan_v2 = false
+experimental_metadata_aggr = false
 
 [region_engine.mito.index]
 aux_path = ""
