@@ -22,6 +22,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -41,7 +42,9 @@ use crate::grid_series::{
     series_bytes, table_bytes,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
-use crate::histogram_eval::{evaluate_histograms, map_native_histogram};
+use crate::histogram_eval::{
+    evaluate_histograms_with_annotations, map_native_histogram_with_annotations,
+};
 use crate::info::{InfoSelector, info_with_reservation};
 use crate::instant_eval::{
     info_sample_times, select_instant_at, select_instants, timestamp_of_evaluated,
@@ -756,6 +759,7 @@ fn misaligned_field(index: usize, time: &TimeAxis, field: &Samples) -> DataFusio
 /// What a map node applies.
 struct MapRuntime {
     ops: Arc<[MapOp]>,
+    annotations: Option<PromqlAnnotationCollector>,
     /// The schema of what the map produces, which is what its input is checked against.
     schema: Arc<SeriesSchema>,
 }
@@ -1767,6 +1771,7 @@ struct VectorRuntime {
     merge_input: bool,
     /// Whether the kernel has run. It runs at most once: the input it read is gone afterwards.
     computed: bool,
+    annotations: Option<PromqlAnnotationCollector>,
 }
 
 impl VectorRuntime {
@@ -1804,6 +1809,7 @@ impl VectorRuntime {
             input: RetainedInput::default(),
             merge_input: false,
             computed: false,
+            annotations: None,
         })
     }
 
@@ -1851,7 +1857,7 @@ impl VectorRuntime {
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             let _timer = metrics.timer();
-            vector_series(&self.op, &self.schema, assembled)?
+            vector_series(&self.op, &self.schema, assembled, self.annotations.as_ref())?
         };
         self.input.release();
         self.computed = true;
@@ -1873,6 +1879,7 @@ fn vector_series(
     op: &BoundVectorOp,
     schema: &Arc<SeriesSchema>,
     series: Vec<Series>,
+    collector: Option<&PromqlAnnotationCollector>,
 ) -> Result<Vec<Series>> {
     let grouping = |group: &Grouping| match group {
         Grouping::By(labels) => select::Grouping::By(labels.to_vec()),
@@ -1890,9 +1897,12 @@ fn vector_series(
         // The kernel groups bucket series by label set and takes one native histogram series per
         // set, so pieces of one label set -- an empty tag and an absent one, or what a map folded
         // -- are merged first, and two of them holding one point fail as they do elsewhere.
-        BoundVectorOp::Histogram(function) => {
-            evaluate_histograms(*function, schema, &merge_same_labelset(schema, series)?)
-        }
+        BoundVectorOp::Histogram(function) => evaluate_histograms_with_annotations(
+            *function,
+            schema,
+            &merge_same_labelset(schema, series)?,
+            collector,
+        ),
         BoundVectorOp::CountValues { label, group } => {
             let (by, labels) = match group {
                 Grouping::By(labels) => (true, labels),
@@ -2756,6 +2766,7 @@ pub struct NativeExecutionState {
     inputs: Vec<InputSlot>,
     /// A constant root waiting for its only pull; operand scalars remain chunkless.
     scalar_root: Option<(Arc<EvalGrid>, f64, NodeState)>,
+    annotations: Option<PromqlAnnotationCollector>,
 }
 
 impl NodeState {
@@ -2947,12 +2958,16 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Window {
                         input: Box::new(child),
-                        window: Some(RangeEvaluator::try_new(
-                            &input_schema,
-                            Arc::clone(&op.output_grid),
-                            op.window,
-                            op.function,
-                        )?),
+                        window: Some({
+                            let mut evaluator = RangeEvaluator::try_new(
+                                &input_schema,
+                                Arc::clone(&op.output_grid),
+                                op.window,
+                                op.function,
+                            )?;
+                            evaluator.set_annotations(None);
+                            evaluator
+                        }),
                         merge,
                         state,
                     },
@@ -2982,6 +2997,7 @@ impl RuntimeNode {
                         input: Box::new(child),
                         map: Some(MapRuntime {
                             ops: Arc::clone(&op.ops),
+                            annotations: None,
                             schema,
                         }),
                         state,
@@ -3432,6 +3448,46 @@ impl RuntimeNode {
 /// is what makes the whole descent exclusive. No node therefore has to know where in the tree it
 /// sits, and the topology stays the one the tree was built with.
 impl RuntimeNode {
+    fn set_annotations(&mut self, collector: PromqlAnnotationCollector) {
+        match &mut self.op {
+            RuntimeOp::Window { input, window, .. } => {
+                if let Some(window) = window {
+                    window.set_annotations(Some(collector.clone()));
+                }
+                input.set_annotations(collector);
+            }
+            RuntimeOp::Map { input, map, .. } => {
+                if let Some(map) = map {
+                    map.annotations = Some(collector.clone());
+                }
+                input.set_annotations(collector);
+            }
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                input.set_annotations(collector.clone());
+                for parameter in parameters {
+                    parameter.set_annotations(collector.clone());
+                }
+            }
+            RuntimeOp::VectorOf { input, .. }
+            | RuntimeOp::Instant { input, .. }
+            | RuntimeOp::Merge { input, .. } => input.set_annotations(collector),
+            RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
+                left.set_annotations(collector.clone());
+                right.set_annotations(collector);
+            }
+            RuntimeOp::Aggregate { input, .. } => input.set_annotations(collector),
+            RuntimeOp::Vector { input, vector, .. } => {
+                if let Some(vector) = vector {
+                    vector.annotations = Some(collector.clone());
+                }
+                input.set_annotations(collector);
+            }
+            _ => {}
+        }
+    }
+
     /// Pulls the next chunk this node hands over, taking what its children owe it.
     ///
     /// `inputs_finished` is the caller's word that no more source chunks will arrive. A node that
@@ -4301,7 +4357,15 @@ impl NativeExecutionState {
             root,
             inputs,
             scalar_root,
+            annotations: None,
         })
+    }
+
+    pub fn set_annotations(&mut self, collector: Option<PromqlAnnotationCollector>) {
+        self.annotations = collector.clone();
+        if let Some(collector) = collector {
+            self.root.set_annotations(collector);
+        }
     }
 
     /// Registers the metric handles of every node of this execution's tree with `set`.
@@ -4516,9 +4580,13 @@ impl NodeState {
             // The timer covers this node's own work only: it is dropped before the driver polls
             // the input again.
             let _timer = metrics.timer();
-            map_chunk(&map.schema, &chunk, &map.ops, &mut |bytes| {
-                self.buffer.grow(bytes)
-            })
+            map_chunk(
+                &map.schema,
+                &chunk,
+                &map.ops,
+                map.annotations.as_ref(),
+                &mut |bytes| self.buffer.grow(bytes),
+            )
         };
         metrics.record_input(1, positions);
         if closing {
@@ -5828,6 +5896,7 @@ fn map_chunk(
     schema: &Arc<SeriesSchema>,
     chunk: &EvaluatedChunk,
     ops: &[MapOp],
+    collector: Option<&PromqlAnnotationCollector>,
     admit: &mut dyn FnMut(usize) -> Result<()>,
 ) -> Result<Option<EvaluatedChunk>> {
     let mut series = chunk.series.clone();
@@ -5839,7 +5908,9 @@ fn map_chunk(
                 continue;
             }
             MapOp::Math(math) => map_math(schema, &series, *math)?,
-            MapOp::Histogram(function) => map_native_histogram(*function, schema, &series)?,
+            MapOp::Histogram(function) => {
+                map_native_histogram_with_annotations(*function, schema, &series, collector)?
+            }
         };
         if let Some(mapped) = mapped {
             series = mapped;

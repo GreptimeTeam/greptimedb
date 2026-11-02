@@ -1425,6 +1425,9 @@ async fn build_test_native_histogram_table_provider_with_marker(
     let schema = Arc::new(Schema::new(columns));
     let table_meta = TableMetaBuilder::empty()
         .schema(schema)
+        // A real native-histogram table is served by Mito, which is what the native raw-series
+        // admission checks before offering this route.
+        .engine(MITO_ENGINE.to_string())
         .primary_key_indices((0..tag_count).collect())
         .value_indices(vec![tag_count + 1])
         .next_column_id(1024)
@@ -2995,12 +2998,13 @@ async fn native_fused_engine_without_raw_series_falls_back() {
     );
 }
 
-/// A value field the raw-series readers cannot both serve keeps the existing plan.
+/// A value field the raw-series readers cannot serve keeps the existing plan.
 ///
-/// The region's preflight serves numeric columns and native histograms, while the columnar
-/// series-index samples the scan may be read through store `Float64` fields only, and the logical
-/// plan cannot tell which reader the region prepares. So only `Float64` is admitted; a bare
-/// selector over any other field type answered normally before this route existed.
+/// The route admits two kinds: a `Float64`, which every reader serves, and the canonical native
+/// histogram struct, which the ordinary scan reads while the columnar samples - `Float64` only -
+/// are skipped for that selection. Everything else, including numeric types the columnar samples
+/// do not store, has no raw representation and keeps the existing plan; a bare selector over such
+/// a field answered normally before this route existed.
 #[tokio::test]
 async fn native_fused_unsupported_field_type_falls_back() {
     for field_type in [
@@ -7689,6 +7693,48 @@ async fn native_histogram_plan(query: &str) -> String {
     .await
     .unwrap();
     plan.display_indent_schema().to_string()
+}
+
+/// A native histogram statement runs on the native route: the producer exports the canonical
+/// histogram struct column, not a float column, and the plan names no legacy histogram fold.
+#[tokio::test]
+async fn native_histogram_selector_plans_a_native_producer() {
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider("some_metric", true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    assert!(display.contains("FusedSeries: "), "{display}");
+    assert!(!display.contains("HistogramFold:"), "{display}");
+    let fused = find_fused_series(&plan).expect("the statement plans to a native producer");
+    // The output field column is the canonical native histogram struct.
+    let field = fused
+        .schema()
+        .field_with_unqualified_name(greptime_native_histogram())
+        .expect("the producer reports the histogram field");
+    assert_eq!(
+        &native_histogram_value_type().as_arrow_type(),
+        field.data_type(),
+        "{display}"
+    );
+}
+
+/// An instant selection over a native histogram keeps the histogram, so its output column stays the
+/// canonical struct rather than becoming a float.
+#[tokio::test]
+async fn native_histogram_instant_selection_keeps_the_histogram_column() {
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan =
+        build_native_fused_plan_with_provider("some_metric offset 1m", true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan).expect("the statement plans to a native producer");
+    let field = fused
+        .schema()
+        .field_with_unqualified_name(greptime_native_histogram())
+        .expect("the producer reports the histogram field");
+    assert_eq!(
+        &native_histogram_value_type().as_arrow_type(),
+        field.data_type(),
+        "{display}"
+    );
 }
 
 #[tokio::test]

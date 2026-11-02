@@ -381,6 +381,90 @@ impl NativeType {
     }
 }
 
+/// The sample kind a series field carries.
+///
+/// This is a property of the samples, not of the frame: one field holds either floats or native
+/// histograms, and the frame's payload branches keep them apart. Consumers that must name an Arrow
+/// column for a field - the physical output conversion, for one - need the kind before the first
+/// batch arrives, which is why the compiled tree can answer it from the kinds its inputs carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleKind {
+    /// One `f64` per sample.
+    Float,
+    /// One canonical native histogram per sample.
+    Histogram,
+}
+
+impl SampleKind {
+    /// The kind of a scan whose selected fields are all `float64`, all native histograms, or -
+    /// `None` - a mixture this model does not describe.
+    pub fn uniform(kinds: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut kinds = kinds.into_iter();
+        let first = kinds.next()?;
+        kinds.all(|kind| kind == first).then_some(first)
+    }
+}
+
+impl NativeNode {
+    /// What kind of sample this node answers with, given the kind its input leaves carry.
+    ///
+    /// `None` means this compiler cannot name the kind for the shape: either the operation changes
+    /// the kind without this walk knowing the rule, or it combines several kinds. A caller that
+    /// must declare an output column treats `None` as "not this route", because guessing the kind
+    /// would declare a column the first batch could not fill.
+    pub fn output_sample_kind(&self, input: SampleKind) -> Option<SampleKind> {
+        let kind_of = |node: &NativeNode| node.output_sample_kind(input);
+        match &self.expr {
+            NativeExpr::Input(_) => Some(input),
+            // The window functions that answer with a histogram are the ones the range kernel says
+            // yield one; every other range function reduces its window to a float.
+            NativeExpr::Window { input, op } => {
+                let inner = kind_of(input)?;
+                (!op.function.yields_histograms())
+                    .then_some(SampleKind::Float)
+                    .or(Some(inner))
+            }
+            // An instant selection reads one sample of the field, so it keeps the kind; the two
+            // timestamp forms replace the sample with a float of its own time.
+            NativeExpr::Instant { input, op } => match op.value {
+                InstantValue::Sample => kind_of(input),
+                InstantValue::Timestamp | InstantValue::InfoTimestamp => Some(SampleKind::Float),
+            },
+            // `histogram_count` and the other native-histogram readers answer with one float per
+            // sample; the map kernels that keep the samples keep their kind as well.
+            NativeExpr::Map { input, op } => {
+                let mut kind = kind_of(input)?;
+                for op in op.ops.iter() {
+                    kind = match op {
+                        MapOp::Histogram(_) => SampleKind::Float,
+                        // `histogram_count` of a float is not a value, and no math function keeps
+                        // a histogram: a mixed map is a shape this walk does not name.
+                        MapOp::Math(_) | MapOp::Label(_) if kind == SampleKind::Histogram => {
+                            return None;
+                        }
+                        MapOp::Math(_) | MapOp::Label(_) => SampleKind::Float,
+                    };
+                }
+                Some(kind)
+            }
+            // A constant beside a vector is broadcast over it, so the operation answers with the
+            // vector's own samples: a histogram times a float is still a histogram. Two vectors are
+            // only one column if both sides carry the same kind; a mixed result needs two columns
+            // per field, which this route does not declare.
+            NativeExpr::Binary { left, right, .. } => match (&left.expr, &right.expr) {
+                (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => Some(SampleKind::Float),
+                (NativeExpr::Scalar(_), _) => kind_of(right),
+                (_, NativeExpr::Scalar(_)) => kind_of(left),
+                (_, _) => {
+                    let left_kind = kind_of(left)?;
+                    (left_kind == kind_of(right)?).then_some(left_kind)
+                }
+            },
+            _ => None,
+        }
+    }
+}
+
 /// The layout of intermediate aggregate state.
 ///
 /// State is indexed by `(group labels, absolute grid index)`, so it carries the grid it was

@@ -195,6 +195,7 @@ macro_rules! http_tests {
                 test_prometheus_remote_write,
                 test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_v2_native_histogram,
+                test_remote_write_v2_histogram_prometheus_native_route,
                 test_prometheus_remote_write_batched,
                 test_prometheus_remote_write_batched_mixed_time_index_units,
                 test_prometheus_remote_write_batched_interceptor_time_index_units,
@@ -5175,6 +5176,89 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     );
 
     guard.remove_all().await;
+}
+
+pub async fn test_remote_write_v2_histogram_prometheus_native_route(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_native_route",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let mut request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_e2e"),
+            ("job", "api"),
+        ],
+        vec![],
+    );
+    let name_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let metric_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == "native_histogram_e2e")
+        .unwrap() as u32;
+    let job_ref = request.symbols.iter().position(|s| s == "job").unwrap() as u32;
+    let api_ref = request.symbols.iter().position(|s| s == "api").unwrap() as u32;
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![name_ref, metric_ref, job_ref, api_ref],
+        histograms: vec![Histogram {
+            count: Some(Count::CountInt(5)),
+            sum: 10.0,
+            schema: 1,
+            positive_spans: vec![BucketSpan { offset: 0, length: 2 }],
+            positive_deltas: vec![2, 1],
+            reset_hint: 2,
+            timestamp: 3000,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let written = client.post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header("Content-Type", "application/x-protobuf;proto=io.prometheus.write.v2.Request")
+        .body(payload).send().await;
+    assert_eq!(written.status(), StatusCode::NO_CONTENT);
+
+    let response = client.get("/v1/prometheus/api/v1/query?query=native_histogram_e2e&time=3")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send().await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(body["data"]["resultType"], "vector");
+    assert_eq!(body["data"]["result"][0]["metric"]["job"], "api");
+    assert_eq!(body["data"]["result"][0]["histogram"][0], 3.0);
+    assert_eq!(body["data"]["result"][0]["histogram"][1]["count"], "5");
+    assert_eq!(body["data"]["result"][0]["histogram"][1]["sum"], "10");
+    let bucket_counts = body["data"]["result"][0]["histogram"][1]["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|bucket| bucket[3].as_str())
+        .collect::<Vec<_>>();
+    assert!(bucket_counts.contains(&"2"), "bucket counts: {bucket_counts:?}");
+    assert!(bucket_counts.contains(&"3"), "bucket counts: {bucket_counts:?}");
+    let fused = observer.take("remote-write native histogram selector");
+    assert_eq!(fused.name(), "FusedSeriesExec");
 }
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {

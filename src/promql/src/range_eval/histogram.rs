@@ -17,6 +17,7 @@
 
 use std::borrow::Cow;
 
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::error::Result;
 use datatypes::series::histogram::CounterResetHint;
 
@@ -41,8 +42,68 @@ pub(super) fn evaluate(
     range_ms: i64,
     offset_ms: i64,
     kernel: &mut WindowKernel,
+    collector: Option<&PromqlAnnotationCollector>,
 ) -> Result<Option<GridSample>> {
     use RangeFunction::*;
+    if floats.is_some()
+        && !matches!(
+            function,
+            MinOverTime
+                | MaxOverTime
+                | StddevOverTime
+                | StdvarOverTime
+                | QuantileOverTime(_)
+                | Deriv
+                | PredictLinear(_)
+                | DoubleExponentialSmoothing { .. }
+                | MadOverTime
+                | TsOfMinOverTime
+                | TsOfMaxOverTime
+                | CountOverTime
+                | PresentOverTime
+                | LastOverTime
+                | FirstOverTime
+                | TsOfFirstOverTime
+                | TsOfLastOverTime
+                | Resets
+                | Changes
+                | Irate
+                | Idelta
+        )
+    {
+        record_warning(
+            collector,
+            format!(
+                "{}: encountered a mix of float and native histogram samples",
+                function_name(function)
+            ),
+        );
+    }
+    // The functions that read only the floats of a mixed window ignore its histograms, which is
+    // what the existing planner tells the client with an info. The set is the one that path lists
+    // as `FloatOnly`; the experimental functions this crate also has carry no message there, so
+    // they stay silent rather than inventing one.
+    if floats.is_some()
+        && matches!(
+            function,
+            MinOverTime
+                | MaxOverTime
+                | StddevOverTime
+                | StdvarOverTime
+                | QuantileOverTime(_)
+                | Deriv
+                | PredictLinear(_)
+                | DoubleExponentialSmoothing { .. }
+        )
+    {
+        record_info(
+            collector,
+            format!(
+                "{}: ignored native histogram samples",
+                function_name(function)
+            ),
+        );
+    }
     let float = |value: f64| Some(GridSample::Float(value));
     let (last_ts, last) = &histograms[histograms.len() - 1];
     let (first_ts, first) = &histograms[0];
@@ -96,12 +157,53 @@ pub(super) fn evaluate(
             } else {
                 HistogramAggregate::Avg
             };
-            sum_or_avg(op, histograms.iter().map(|(_, h)| Ok(h.clone())))?
-                .map(|h| GridSample::Histogram(Box::new(h)))
+            // The hints are read from the window's own histograms, so nothing is cloned for the
+            // check; the fold below clones one sample at a time as it consumes them.
+            if has_contradictory_reset_hints(histograms.iter().map(|(_, h)| h)) {
+                record_warning(
+                    collector,
+                    format!(
+                        "{}: native histogram counter reset hints contradict",
+                        function_name(function)
+                    ),
+                );
+            }
+            // The fold reports both answers itself: a `None` is the mixed-bucket drop, and the
+            // flag is the reconciliation its own adds already observed. Re-walking the pairs to
+            // learn either would double the histogram work of every window.
+            let (result, custom_reconciled) =
+                sum_or_avg(op, histograms.iter().map(|(_, h)| Ok(h.clone())))?;
+            if result.is_none() {
+                record_warning(
+                    collector,
+                    format!(
+                        "{}: dropped native histogram range with incompatible schemas",
+                        function_name(function)
+                    ),
+                );
+            }
+            if custom_reconciled {
+                record_info(
+                    collector,
+                    format!(
+                        "{}: reconciled native histograms with different custom buckets",
+                        function_name(function)
+                    ),
+                );
+            }
+            result.map(|h| GridSample::Histogram(Box::new(h)))
         }
         Rate | Increase | Delta if floats.is_none() && histograms.len() > 1 => {
             let is_counter = function != Delta;
+            record_histogram_pair_annotations(collector, function, histograms);
             let Some(mut result) = histogram_rate(histograms, is_counter)? else {
+                record_warning(
+                    collector,
+                    format!(
+                        "{}: dropped native histogram range with incompatible schemas",
+                        function_name(function)
+                    ),
+                );
                 return Ok(None);
             };
             let zero_point = (is_counter && result.count > 0.0 && first.count >= 0.0)
@@ -117,11 +219,144 @@ pub(super) fn evaluate(
             ));
             Some(GridSample::Histogram(Box::new(result)))
         }
-        Irate => last_two::<true>(floats, histograms)?,
-        Idelta => last_two::<false>(floats, histograms)?,
+        Irate => {
+            // The annotation reads the window before `last_two` consumes it.
+            record_mixed_last_two(collector, function, floats.as_ref(), histograms);
+            last_two::<true>(floats, histograms)?
+        }
+        Idelta => {
+            record_mixed_last_two(collector, function, floats.as_ref(), histograms);
+            last_two::<false>(floats, histograms)?
+        }
         // Mixed windows, and rates over fewer than two histograms.
-        SumOverTime | AvgOverTime | Rate | Increase | Delta => None,
+        SumOverTime | AvgOverTime | Rate | Increase | Delta => {
+            if floats.is_some() {
+                record_warning(
+                    collector,
+                    format!(
+                        "{}: encountered a mix of float and native histogram samples",
+                        function_name(function)
+                    ),
+                );
+            }
+            None
+        }
     })
+}
+
+fn function_name(function: RangeFunction) -> &'static str {
+    use RangeFunction::*;
+    match function {
+        Rate => "rate",
+        Increase => "increase",
+        Delta => "delta",
+        Irate => "irate",
+        Idelta => "idelta",
+        AvgOverTime => "avg_over_time",
+        MinOverTime => "min_over_time",
+        MaxOverTime => "max_over_time",
+        SumOverTime => "sum_over_time",
+        CountOverTime => "count_over_time",
+        LastOverTime => "last_over_time",
+        PresentOverTime => "present_over_time",
+        StddevOverTime => "stddev_over_time",
+        StdvarOverTime => "stdvar_over_time",
+        QuantileOverTime(_) => "quantile_over_time",
+        Resets => "resets",
+        Changes => "changes",
+        Deriv => "deriv",
+        PredictLinear(_) => "predict_linear",
+        DoubleExponentialSmoothing { .. } => "double_exponential_smoothing",
+        FirstOverTime => "first_over_time",
+        MadOverTime => "mad_over_time",
+        TsOfFirstOverTime => "ts_of_first_over_time",
+        TsOfLastOverTime => "ts_of_last_over_time",
+        TsOfMinOverTime => "ts_of_min_over_time",
+        TsOfMaxOverTime => "ts_of_max_over_time",
+    }
+}
+
+fn record_warning(collector: Option<&PromqlAnnotationCollector>, message: String) {
+    if let Some(collector) = collector {
+        collector.record_warning(message);
+    }
+}
+fn record_info(collector: Option<&PromqlAnnotationCollector>, message: String) {
+    if let Some(collector) = collector {
+        collector.record_info(message);
+    }
+}
+fn has_contradictory_reset_hints<'a>(
+    samples: impl IntoIterator<Item = &'a FloatHistogram>,
+) -> bool {
+    let mut saw_counter = false;
+    let mut saw_not_counter = false;
+    for histogram in samples {
+        saw_counter |= histogram.reset_hint == CounterResetHint::CounterReset;
+        saw_not_counter |= histogram.reset_hint == CounterResetHint::NotCounterReset;
+    }
+    saw_counter && saw_not_counter
+}
+
+/// The info a `rate`/`increase`/`delta` window owes when adjacent histograms carry different
+/// custom bucket bounds and the fold has to reconcile them.
+///
+/// The check compares bounds; it does not add the pair. The fold that follows does that work, and
+/// repeating it here would double the histogram arithmetic of every window. This is the same
+/// per-pair check the existing planner's counter UDF makes.
+fn record_histogram_pair_annotations(
+    collector: Option<&PromqlAnnotationCollector>,
+    function: RangeFunction,
+    histograms: &Histograms,
+) {
+    let reconciled = histograms.windows(2).any(|pair| {
+        pair[0].1.uses_custom_buckets()
+            && pair[1].1.uses_custom_buckets()
+            && pair[0].1.custom_values != pair[1].1.custom_values
+    });
+    if reconciled {
+        record_info(
+            collector,
+            format!(
+                "{}: reconciled native histograms with different custom buckets",
+                function_name(function)
+            ),
+        );
+    }
+}
+
+fn record_mixed_last_two(
+    collector: Option<&PromqlAnnotationCollector>,
+    function: RangeFunction,
+    floats: Option<&FloatWindow<'_>>,
+    histograms: &Histograms,
+) {
+    let Some(floats) = floats else {
+        return;
+    };
+    // The kernel that follows consumes the window, so this reads a borrowed copy of it.
+    let borrowed = FloatWindow {
+        timestamps: floats.timestamps,
+        values: floats.values,
+        counter_resets: floats.counter_resets,
+        eval_ts: floats.eval_ts,
+        range_ms: floats.range_ms,
+    };
+    let tail: Vec<_> = merged(Some(borrowed), histograms).collect();
+    if tail.len() >= 2
+        && matches!(
+            (tail[tail.len() - 2].1, tail[tail.len() - 1].1),
+            (Sample::Float(_), Sample::Histogram(_)) | (Sample::Histogram(_), Sample::Float(_))
+        )
+    {
+        record_warning(
+            collector,
+            format!(
+                "{}: encountered a mix of float and native histogram samples in the last two points",
+                function_name(function)
+            ),
+        );
+    }
 }
 
 /// One sample of a window, in the order Prometheus merges floats and histograms.
