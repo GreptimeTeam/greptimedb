@@ -194,8 +194,30 @@ pub(super) fn evaluate(
             }
             result.map(|h| GridSample::Histogram(Box::new(h)))
         }
+        Rate | Increase if floats.is_none() && histograms.len() == 1 => {
+            let (first_ts, first) = &histograms[0];
+            let range_start = eval_ts - range_ms;
+            if first
+                .start_timestamp
+                .is_some_and(|start| start != 0 && range_start < start && start < *first_ts)
+            {
+                record_histogram_flavor_warning(collector, function, histograms);
+                let mut result = first.clone();
+                let factor = if function == Rate {
+                    1.0 / seconds(range_ms)
+                } else {
+                    1.0
+                };
+                result.mul(factor);
+                result.reset_hint = CounterResetHint::Gauge;
+                Some(GridSample::Histogram(Box::new(result)))
+            } else {
+                None
+            }
+        }
         Rate | Increase | Delta if floats.is_none() && histograms.len() > 1 => {
             let is_counter = function != Delta;
+            record_histogram_flavor_warning(collector, function, histograms);
             record_histogram_pair_annotations(collector, function, histograms);
             let Some(mut result) = histogram_rate(histograms, is_counter)? else {
                 record_warning(
@@ -220,28 +242,36 @@ pub(super) fn evaluate(
             ));
             Some(GridSample::Histogram(Box::new(result)))
         }
-        Irate => {
-            // The annotation reads the window before `last_two` consumes it.
+        Irate | Idelta => {
+            // The annotations read the window before `last_two` consumes it.
+            let had_floats = floats.is_some();
             record_mixed_last_two(collector, function, floats.as_ref(), histograms);
-            last_two::<true>(floats, histograms)?
-        }
-        Idelta => {
-            record_mixed_last_two(collector, function, floats.as_ref(), histograms);
-            last_two::<false>(floats, histograms)?
-        }
-        // Mixed windows, and rates over fewer than two histograms.
-        SumOverTime | AvgOverTime | Rate | Increase | Delta => {
-            if floats.is_some() {
+            let tail_histograms = &histograms[histograms.len().saturating_sub(2)..];
+            if tail_histograms.len() == 2 {
+                record_histogram_flavor_warning(collector, function, tail_histograms);
+                if tail_histograms[1].0 > tail_histograms[0].0 {
+                    record_histogram_pair_annotations(collector, function, tail_histograms);
+                }
+            }
+            let result = if function == Irate {
+                last_two::<true>(floats, histograms)?
+            } else {
+                last_two::<false>(floats, histograms)?
+            };
+            if result.is_none() && !had_floats && tail_histograms.len() == 2 {
                 record_warning(
                     collector,
                     format!(
-                        "{}: encountered a mix of float and native histogram samples",
+                        "{}: dropped native histogram range with incompatible schemas",
                         function_name(function)
                     ),
                 );
             }
-            None
+            result
         }
+        // Mixed windows, and rates over fewer than two histograms. The mixed warning was already
+        // recorded above for every function that reaches here, so this branch only answers.
+        SumOverTime | AvgOverTime | Rate | Increase | Delta => None,
     })
 }
 
@@ -305,6 +335,39 @@ fn has_contradictory_reset_hints<'a>(
 /// The check compares bounds; it does not add the pair. The fold that follows does that work, and
 /// repeating it here would double the histogram arithmetic of every window. This is the same
 /// per-pair check the existing planner's counter UDF makes.
+fn record_histogram_flavor_warning(
+    collector: Option<&PromqlAnnotationCollector>,
+    function: RangeFunction,
+    histograms: &Histograms,
+) {
+    let is_counter = matches!(
+        function,
+        RangeFunction::Rate | RangeFunction::Increase | RangeFunction::Irate
+    );
+    let wrong_flavor = if is_counter {
+        histograms
+            .iter()
+            .any(|(_, histogram)| histogram.reset_hint == CounterResetHint::Gauge)
+    } else {
+        histograms
+            .first()
+            .is_some_and(|(_, histogram)| histogram.reset_hint != CounterResetHint::Gauge)
+            || histograms
+                .last()
+                .is_some_and(|(_, histogram)| histogram.reset_hint != CounterResetHint::Gauge)
+    };
+    if wrong_flavor {
+        let expected = if is_counter { "counter" } else { "gauge" };
+        record_warning(
+            collector,
+            format!(
+                "{}: native histogram input should be a {expected} histogram",
+                function_name(function)
+            ),
+        );
+    }
+}
+
 fn record_histogram_pair_annotations(
     collector: Option<&PromqlAnnotationCollector>,
     function: RangeFunction,
@@ -332,24 +395,47 @@ fn record_mixed_last_two(
     floats: Option<&FloatWindow<'_>>,
     histograms: &Histograms,
 ) {
+    // Nothing is recorded without a collector, and the walk below exists only to decide whether
+    // something would be.
+    if collector.is_none() {
+        return;
+    }
     let Some(floats) = floats else {
         return;
     };
-    // The kernel that follows consumes the window, so this reads a borrowed copy of it.
-    let borrowed = FloatWindow {
-        timestamps: floats.timestamps,
-        values: floats.values,
-        counter_resets: floats.counter_resets,
-        eval_ts: floats.eval_ts,
-        range_ms: floats.range_ms,
-    };
-    let tail: Vec<_> = merged(Some(borrowed), histograms).collect();
-    if tail.len() >= 2
-        && matches!(
-            (tail[tail.len() - 2].1, tail[tail.len() - 1].1),
-            (Sample::Float(_), Sample::Histogram(_)) | (Sample::Histogram(_), Sample::Float(_))
-        )
-    {
+    let mut float_index = floats.values.len();
+    let mut histogram_index = histograms.len();
+    let mut last = None;
+    let mut previous = None;
+    for _ in 0..2 {
+        let sample = match (float_index.checked_sub(1), histogram_index.checked_sub(1)) {
+            (Some(fi), Some(hi)) if floats.timestamps[fi] >= histograms[hi].0 => {
+                float_index = fi;
+                Some(Sample::Float(floats.values[fi]))
+            }
+            (Some(_), Some(hi)) => {
+                histogram_index = hi;
+                Some(Sample::Histogram(&histograms[hi].1))
+            }
+            (Some(fi), None) => {
+                float_index = fi;
+                Some(Sample::Float(floats.values[fi]))
+            }
+            (None, Some(hi)) => {
+                histogram_index = hi;
+                Some(Sample::Histogram(&histograms[hi].1))
+            }
+            (None, None) => None,
+        };
+        let Some(sample) = sample else { break };
+        previous = last;
+        last = Some(sample);
+    }
+    if matches!(
+        (previous, last),
+        (Some(Sample::Float(_)), Some(Sample::Histogram(_)))
+            | (Some(Sample::Histogram(_)), Some(Sample::Float(_)))
+    ) {
         record_warning(
             collector,
             format!(

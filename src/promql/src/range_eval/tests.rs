@@ -1092,6 +1092,89 @@ fn histogram_chunk_from(
     .unwrap()
 }
 
+/// A counter histogram whose only sample in the window carries a start timestamp answers a rate.
+///
+/// The existing planner allows this with a single sample: the start timestamp is a synthetic zero
+/// inside the window, so the increase since it is the sample itself and the rate is that over the
+/// range. A window too narrow to hold that start, or a sample without one, has nothing to measure
+/// against and answers nothing - which is what the second half checks.
+#[test]
+fn a_single_histogram_with_a_start_timestamp_answers_a_rate() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(60_000, 60_000, 1).unwrap()).unwrap());
+    let eval_ts = 60_000;
+    let range_ms = 300_000;
+    let window = RangeWindow {
+        range_ms,
+        offset_ms: 0,
+        anchor_ms: None,
+        modifier: None,
+    };
+    let schema = raw_schema(1);
+
+    // The window runs from `eval_ts - range_ms` to the sample, so a start strictly inside it is
+    // what permits the answer.
+    let range_start = eval_ts - range_ms;
+    let sample_ts = 50_000;
+    for (start, expects_value) in [
+        (Some(10), true),
+        // Before the window opens.
+        (Some(range_start - 1), false),
+        // At the window's edge, so not strictly inside it.
+        (Some(range_start), false),
+        // At the sample itself, so not before it.
+        (Some(sample_ts), false),
+        // Zero means "unknown start" in the stored payload.
+        (Some(0), false),
+        (None, false),
+    ] {
+        for function in [RangeFunction::Rate, RangeFunction::Increase] {
+            let mut evaluator =
+                RangeEvaluator::try_new(&schema, Arc::clone(&grid), window, function).unwrap();
+            let chunk = histogram_chunk_from(&schema, 2, sample_ts, start, true);
+            let chunks = collect_chunks(&mut evaluator, &[chunk]);
+            let series = fold_chunks(&chunks, evaluator.output_schema());
+            let sample = series
+                .as_ref()
+                .and_then(|series| series.fields.as_slice()[0].cursor().at(0));
+            match (expects_value, sample) {
+                (true, Some(SampleRef::Histogram(view))) => {
+                    // The increase since the synthetic zero is the whole sample, which is what
+                    // `increase` reports; `rate` divides that by the window's seconds.
+                    let expected = match function {
+                        RangeFunction::Rate => 2.0 / (range_ms as f64 / 1000.0),
+                        _ => 2.0,
+                    };
+                    assert!(
+                        (view.count - expected).abs() < 1e-12,
+                        "start {start:?}, {function:?}: {} vs {expected}",
+                        view.count
+                    );
+                    assert_eq!(view.reset_hint, CounterResetHint::Gauge);
+                }
+                (true, other) => panic!(
+                    "start {start:?}, {function:?}: expected a histogram, got {}",
+                    describe_sample(other)
+                ),
+                (false, Some(SampleRef::Histogram(_))) => {
+                    panic!("start {start:?}, {function:?}: answered without a synthetic zero")
+                }
+                (false, _) => {}
+            }
+        }
+    }
+}
+
+/// What a sample is, for a failure message: `SampleRef` carries a borrowed histogram payload and
+/// cannot be printed itself.
+fn describe_sample(sample: Option<SampleRef<'_>>) -> String {
+    match sample {
+        None => "no sample".to_string(),
+        Some(SampleRef::Missing) => "a missing sample".to_string(),
+        Some(SampleRef::Float(value)) => format!("the float {value}"),
+        Some(SampleRef::Histogram(view)) => format!("the histogram with count {}", view.count),
+    }
+}
+
 /// A function that hands back the sample it selected hands back that sample's payload.
 ///
 /// `last_over_time` and `first_over_time` select a sample instead of computing one, so the

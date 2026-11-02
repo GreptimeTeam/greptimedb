@@ -436,13 +436,15 @@ impl NativeNode {
                 let mut kind = kind_of(input)?;
                 for op in op.ops.iter() {
                     kind = match op {
+                        // The native-histogram readers answer one float per sample.
                         MapOp::Histogram(_) => SampleKind::Float,
-                        // `histogram_count` of a float is not a value, and no math function keeps
-                        // a histogram: a mixed map is a shape this walk does not name.
-                        MapOp::Math(_) | MapOp::Label(_) if kind == SampleKind::Histogram => {
-                            return None;
-                        }
-                        MapOp::Math(_) | MapOp::Label(_) => SampleKind::Float,
+                        // A label rewrite writes labels only, so the samples it passes on are the
+                        // ones it was given, kind included.
+                        MapOp::Label(_) => kind,
+                        // No math function keeps a histogram, so a histogram reaching one is a
+                        // shape this walk does not name rather than a silent float.
+                        MapOp::Math(_) if kind == SampleKind::Histogram => return None,
+                        MapOp::Math(_) => SampleKind::Float,
                     };
                 }
                 Some(kind)
@@ -451,15 +453,26 @@ impl NativeNode {
             // vector's own samples: a histogram times a float is still a histogram. Two vectors are
             // only one column if both sides carry the same kind; a mixed result needs two columns
             // per field, which this route does not declare.
-            NativeExpr::Binary { left, right, .. } => match (&left.expr, &right.expr) {
-                (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => Some(SampleKind::Float),
-                (NativeExpr::Scalar(_), _) => kind_of(right),
-                (_, NativeExpr::Scalar(_)) => kind_of(left),
-                (_, _) => {
-                    let left_kind = kind_of(left)?;
-                    (left_kind == kind_of(right)?).then_some(left_kind)
+            NativeExpr::Binary {
+                left,
+                right,
+                matching,
+            } => {
+                // `bool` makes a comparison answer 1 or 0 whatever its operands hold, which is
+                // what the kernel does before it looks at the kinds.
+                if matching.return_bool {
+                    return Some(SampleKind::Float);
                 }
-            },
+                match (&left.expr, &right.expr) {
+                    (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => Some(SampleKind::Float),
+                    (NativeExpr::Scalar(_), _) => kind_of(right),
+                    (_, NativeExpr::Scalar(_)) => kind_of(left),
+                    (_, _) => {
+                        let left_kind = kind_of(left)?;
+                        (left_kind == kind_of(right)?).then_some(left_kind)
+                    }
+                }
+            }
             _ => None,
         }
     }

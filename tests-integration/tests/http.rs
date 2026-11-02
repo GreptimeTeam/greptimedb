@@ -5389,7 +5389,22 @@ pub async fn test_remote_write_v2_histogram_native_partitions(store_type: Storag
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await;
-    assert_eq!(body["data"]["result"].as_array().unwrap().len(), 8);
+    let results = body["data"]["result"].as_array().unwrap();
+    assert_eq!(results.len(), 8);
+    // Every series has to come back carrying the histogram it was written with: the counts differ
+    // per series, so a route that dropped or reordered them would not reproduce this map.
+    let mut written: BTreeMap<String, String> = BTreeMap::new();
+    for index in 0..8u64 {
+        written.insert(format!("job{index}"), (5 + index).to_string());
+    }
+    for result in results {
+        let job = result["metric"]["job"].as_str().expect("a job label");
+        assert_eq!(
+            result["histogram"][1]["count"].as_str(),
+            written.get(job).map(String::as_str),
+            "the histogram of `{job}` as {PROMETHEUS_REFERENCE} renders it"
+        );
+    }
     let fused = observer.take("histogram partitions");
     assert_eq!(fused.name(), "FusedSeriesExec");
     let metrics = fused.metrics().expect("fused metrics");
