@@ -357,7 +357,10 @@ mod tests {
 
     use crate::procedure::drain_datanode::cursor::DrainDatanodeCursor;
     use crate::procedure::drain_datanode::dispatch::Dispatch;
-    use crate::procedure::drain_datanode::test_util::{leader_regions, set_leader_regions};
+    use crate::procedure::drain_datanode::test_util::{
+        create_kafka_table, leader_regions, set_leader_regions,
+    };
+    use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
     use api::v1::meta::heartbeat_request::NodeWorkloads;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
@@ -576,9 +579,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_datanode_recovered_migration_outlives_parent() {
-        let mut env = TestEnv::new().await;
+        let env = TestEnv::new().await;
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
+        assert_recovered_migration_outlives_parent(env, vec![region_id]).await;
+    }
+
+    #[tokio::test]
+    async fn test_drain_datanode_recovers_every_region_in_a_migration_batch() {
+        let env = TestEnv::new().await;
+        create_kafka_table(&env, 1024, 3, 1).await;
+        let regions = (0..3).map(|i| RegionId::new(1024, i)).collect();
+        assert_recovered_migration_outlives_parent(env, regions).await;
+    }
+
+    async fn assert_recovered_migration_outlives_parent(
+        mut env: TestEnv,
+        region_ids: Vec<RegionId>,
+    ) {
         let procedure_ctx = TestingEnv::procedure_context();
         let mut parent = DrainDatanodeProcedure::new(
             env.context(new_persistent_context(
@@ -588,6 +606,7 @@ mod tests {
             vec![],
         );
         assert!(parent.execute(&procedure_ctx).await.unwrap().need_persist());
+        assert_eq!("DrainDatanodeCursor", parent.state.name());
         let parent_checkpoint = parent.dump().unwrap();
         let Status::Suspended {
             subprocedures: mut children,
@@ -649,7 +668,11 @@ mod tests {
         }
         drop(child);
         drop(parent);
-        assert!(!env.region_migration_manager.tracker().contains(region_id));
+        assert!(
+            region_ids
+                .iter()
+                .all(|id| !env.region_migration_manager.tracker().contains(*id))
+        );
 
         // Queue mailbox requests without replying until the recovered parent has ended.
         let mailbox_ctx = env.env.mailbox_context();
@@ -671,7 +694,11 @@ mod tests {
                 .await
                 .is_done()
         );
-        assert!(env.region_migration_manager.tracker().contains(region_id));
+        assert!(
+            region_ids
+                .iter()
+                .all(|id| env.region_migration_manager.tracker().contains(*id))
+        );
         assert!(matches!(
             env.procedure_manager()
                 .procedure_state(child_id)
@@ -697,21 +724,25 @@ mod tests {
                 .await
                 .is_done()
         );
-        assert!(
-            !crate::procedure::drain_datanode::utils::leads_region(
-                &env.table_metadata_manager,
-                1,
-                region_id,
-            )
-            .await
-            .unwrap()
-        );
+        for &region_id in &region_ids {
+            assert!(
+                !crate::procedure::drain_datanode::utils::leads_region(
+                    &env.table_metadata_manager,
+                    1,
+                    region_id,
+                )
+                .await
+                .unwrap()
+            );
+        }
         // Completion must release the recovered guard and clean its own checkpoints.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let mut records = store.walk_top_down("procedure/").await.unwrap();
                 if records.try_next().await.unwrap().is_none()
-                    && !env.region_migration_manager.tracker().contains(region_id)
+                    && region_ids
+                        .iter()
+                        .all(|id| !env.region_migration_manager.tracker().contains(*id))
                 {
                     break;
                 }
@@ -798,6 +829,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_drain_drains_multiple_topic_windows_and_confirms_completion() {
+        use crate::procedure::drain_datanode::DrainDatanodeProcedureTask;
+        use crate::procedure::drain_datanode::test_util::{
+            create_kafka_table, wait_for_terminal_state,
+        };
+        use common_procedure::ProcedureState;
+
+        let mut env = TestEnv::new().await;
+        create_kafka_table(&env, 1024, 13, 3).await;
+        env.mock_datanodes().await;
+        env.procedure_manager().start().await.unwrap();
+        let id = env
+            .drain_manager()
+            .submit_procedure(
+                common_procedure::ProcedureContext::default(),
+                DrainDatanodeProcedureTask {
+                    node_id: 1,
+                    target_node_id: Some(2),
+                    parallelism: 2,
+                    strategy: DrainDatanodeStrategy::FailFast,
+                    timeout: None,
+                },
+            )
+            .await
+            .unwrap();
+        let state = wait_for_terminal_state(env.procedure_manager(), id).await;
+        assert!(matches!(state, ProcedureState::Done { .. }), "{state:?}");
+        let route = env
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .get(1024)
+            .await
+            .unwrap()
+            .unwrap();
+        let regions = route.region_routes().unwrap();
+        assert_eq!(13, regions.len());
+        assert!(
+            regions
+                .iter()
+                .all(|region| region.leader_peer.as_ref().is_some_and(|peer| peer.id == 2))
+        );
+        env.procedure_manager().stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_drain_skips_region_moved_or_dropped_during_discovery() {
         for strategy in [
             DrainDatanodeStrategy::FailFast,
@@ -833,6 +910,83 @@ mod tests {
                 assert!(ctx.volatile_ctx.failed_regions.is_empty());
                 assert_eq!(0, ctx.volatile_ctx.migrated);
                 assert!(!env.region_migration_manager.tracker().contains(region_id));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_grouped_migrations_reduce_child_count() {
+        common_telemetry::init_default_ut_logging();
+        let env = TestEnv::new().await;
+        create_kafka_table(&env, 1024, 8, 1).await;
+        for trial in 0..3 {
+            for grouped in [false, true] {
+                let mut persistent =
+                    new_persistent_context(Some(2), DrainDatanodeStrategy::FailFast);
+                persistent.parallelism = 8;
+                let mut ctx = env.context(persistent);
+                let (prepared, _) = DrainDatanodeCursor::default()
+                    .next(&mut ctx, &TestingEnv::procedure_context())
+                    .await
+                    .unwrap();
+                let batches = prepared
+                    .as_any()
+                    .downcast_ref::<Dispatch>()
+                    .unwrap()
+                    .batches
+                    .clone();
+                let batches = if grouped {
+                    batches
+                } else {
+                    batches
+                        .into_iter()
+                        .flat_map(|batch| {
+                            batch.region_ids.clone().into_iter().map(move |region_id| {
+                                RegionMigrationTaskBatch {
+                                    region_ids: vec![region_id],
+                                    ..batch.clone()
+                                }
+                            })
+                        })
+                        .collect()
+                };
+                let mut dispatch = Dispatch::new(batches);
+                let (next, status) = dispatch
+                    .next(&mut ctx, &TestingEnv::procedure_context())
+                    .await
+                    .unwrap();
+                let Status::Suspended { subprocedures, .. } = status else {
+                    panic!("expected children");
+                };
+                let count = subprocedures.len();
+                assert_eq!(if grouped { 1 } else { 8 }, count);
+                assert!(next.as_any().is::<Dispatch>());
+                let mut regions = subprocedures
+                    .iter()
+                    .flat_map(|child| {
+                        let data: serde_json::Value =
+                            serde_json::from_str(&child.procedure.dump().unwrap()).unwrap();
+                        serde_json::from_value::<Vec<RegionId>>(
+                            data["persistent_ctx"]["region_ids"].clone(),
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                regions.sort_unstable();
+                assert_eq!(
+                    (0..8).map(|i| RegionId::new(1024, i)).collect::<Vec<_>>(),
+                    regions
+                );
+                common_telemetry::info!(
+                    "trial={trial}, grouped={grouped}, regions={}, children={count}",
+                    regions.len()
+                );
+                drop(subprocedures);
+                assert!(
+                    regions
+                        .iter()
+                        .all(|id| !env.region_migration_manager.tracker().contains(*id))
+                );
             }
         }
     }
