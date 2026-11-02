@@ -157,6 +157,7 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
     let data_type = validate_json2_type_hint_type(data_type)?;
 
     let mut inverted_index = false;
+    let mut skipping_index = None;
 
     loop {
         if parser.parse_keywords(&[Keyword::NOT, Keyword::NULL])
@@ -208,10 +209,39 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
         } else if let Token::Word(word) = parser.peek_token().token
             && word.value.eq_ignore_ascii_case(SKIPPING)
         {
-            return InvalidSqlSnafu {
-                msg: "JSON2 type hint SKIPPING INDEX is not supported yet".to_string(),
+            parser.next_token();
+            ensure!(
+                parser.parse_keyword(Keyword::INDEX),
+                InvalidSqlSnafu {
+                    msg: "expect INDEX after SKIPPING keyword",
+                }
+            );
+            ensure!(
+                skipping_index.is_none(),
+                InvalidSqlSnafu {
+                    msg: "duplicated SKIPPING INDEX option for JSON2 type hint",
+                }
+            );
+            let options = parser
+                .parse_options(Keyword::WITH)
+                .context(SyntaxSnafu)?
+                .into_iter()
+                .map(crate::util::parse_option_string)
+                .collect::<Result<Vec<_>>>()?;
+            for (key, _) in &options {
+                ensure!(
+                    crate::parsers::utils::validate_column_skipping_index_create_option(key),
+                    InvalidSqlSnafu {
+                        msg: format!("invalid SKIPPING INDEX option: {key}"),
+                    }
+                );
             }
-            .fail();
+            skipping_index = Some(
+                datatypes::schema::SkippingIndexOptions::try_from(
+                    crate::statements::OptionMap::new(options).into_map(),
+                )
+                .context(crate::error::SetSkippingIndexOptionSnafu)?,
+            );
         } else if matches!(parser.peek_token().token, Token::Comma | Token::RParen) {
             break;
         } else {
@@ -225,6 +255,7 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
         path,
         data_type,
         inverted_index,
+        skipping_index,
     })
 }
 
@@ -308,6 +339,59 @@ mod tests {
         };
 
         create_table.columns.remove(0)
+    }
+
+    #[test]
+    fn test_json2_skipping_index() {
+        let column = parse_json2_column(
+            "CREATE TABLE logs (attrs JSON2 (service.name STRING SKIPPING INDEX WITH (granularity='8', false_positive_rate='0.05') INVERTED INDEX, status BIGINT SKIPPING INDEX), ts TIMESTAMP TIME INDEX)",
+        );
+        let options = column.extensions.json2_options.as_ref().unwrap();
+        let settings = options.build_json_settings().unwrap();
+        let hint = &settings.type_hints()[0];
+        assert!(hint.inverted_index);
+        assert_eq!(hint.skipping_index.as_ref().unwrap().granularity, 8);
+        assert_eq!(
+            hint.skipping_index.as_ref().unwrap().false_positive_rate(),
+            0.05
+        );
+        assert_eq!(
+            settings.type_hints()[1].skipping_index,
+            Some(datatypes::schema::SkippingIndexOptions::default())
+        );
+        let rebuilt = parse_json2_column(&format!(
+            "CREATE TABLE logs (attrs JSON2 {options}, ts TIMESTAMP TIME INDEX)"
+        ));
+        assert_eq!(
+            settings,
+            rebuilt
+                .extensions
+                .json2_options
+                .unwrap()
+                .build_json_settings()
+                .unwrap()
+        );
+        for option in [
+            "SKIPPING INDEX SKIPPING INDEX",
+            "SKIPPING",
+            "SKIPPING INDEX WITH (granularity='0')",
+            "SKIPPING INDEX WITH (false_positive_rate='0')",
+            "SKIPPING INDEX WITH (type='unknown')",
+            "SKIPPING INDEX WITH (unknown='1')",
+        ] {
+            let sql = format!(
+                "CREATE TABLE logs (attrs JSON2 (a STRING {option}), ts TIMESTAMP TIME INDEX)"
+            );
+            assert!(
+                ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default()
+                )
+                .is_err(),
+                "{sql}"
+            );
+        }
     }
 
     #[test]

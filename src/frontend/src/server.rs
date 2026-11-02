@@ -421,6 +421,7 @@ where
             let pg_server = Box::new(
                 PostgresServer::new(
                     instance.clone(),
+                    instance.clone(),
                     opts.tls.should_force_tls(),
                     tls_server_config,
                     opts.keep_alive.as_secs(),
@@ -428,6 +429,7 @@ where
                     user_provider.clone(),
                     Some(self.instance.process_manager().clone()),
                 )
+                .with_influxdb_handler(instance.clone())
                 .with_batching_enabled(postgres_batching),
             ) as Box<dyn Server>;
 

@@ -57,8 +57,12 @@ jobs:
         with:
           tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sqlness
         run: make sqlness-test
         env:
@@ -143,9 +147,12 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: false
           components: llvm-tools-preview
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install Cargo Nextest
         uses: taiki-e/install-action@nextest
       - name: Install WSL distribution

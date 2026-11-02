@@ -143,6 +143,7 @@ class ProvisionResourcesTest(unittest.TestCase):
                 expected = {
                     provision.MANAGED_BY_TAG_KEY: provision.MANAGED_BY_TAG_VALUE,
                     provision.RUN_TAG_KEY: "12345",
+                    "github-repository": "owner/repo",
                 }
                 if ttl is not None:
                     expected[provision.TTL_TAG_KEY] = ttl
@@ -423,7 +424,7 @@ class TeardownExpiryTest(unittest.TestCase):
             sys.modules, {"alibabacloud_ecs20140526": SimpleNamespace(models=models)}
         ):
             self.assertEqual(
-                teardown.list_managed_instances(client, "region"),
+                teardown.list_managed_instances(client, "region", "owner/repo"),
                 [
                     ("i-1", "one", "2026-08-17T01:00Z", "8"),
                     ("i-2", "two", "2026-08-17T02:00Z", None),
@@ -432,11 +433,49 @@ class TeardownExpiryTest(unittest.TestCase):
         self.assertEqual(
             client.describe_instances.call_args_list[1].args[0].next_token, "next"
         )
-        tag = client.describe_instances.call_args_list[0].args[0].tag[0]
-        self.assertEqual(
-            (tag.key, tag.value),
-            (provision.MANAGED_BY_TAG_KEY, provision.MANAGED_BY_TAG_VALUE),
+        for call in client.describe_instances.call_args_list:
+            self.assertEqual(
+                {tag.key: tag.value for tag in call.args[0].tag},
+                {"managed-by": "query-regression-ci", "github-repository": "owner/repo"},
+            )
+
+    def test_sweep_isolates_repositories_and_untagged_instances(self):
+        models = SimpleNamespace(
+            DescribeInstancesRequest=SimpleNamespace,
+            DescribeInstancesRequestTag=SimpleNamespace,
         )
+        instances = [
+            ("own", {"managed-by": "query-regression-ci", "github-repository": "owner/repo"}),
+            ("other", {"managed-by": "query-regression-ci", "github-repository": "owner/other"}),
+            ("legacy", {"managed-by": "query-regression-ci"}),
+            ("unmanaged", {"github-repository": "owner/repo"}),
+        ]
+
+        def describe(request):
+            # Model ECS tag intersection using the actual request filters.
+            selected = [
+                SimpleNamespace(instance_id=identity, instance_name=identity,
+                                creation_time="2020-01-01T00:00Z", tags=None)
+                for identity, tags in instances
+                if all(tags.get(tag.key) == tag.value for tag in request.tag)
+            ]
+            return SimpleNamespace(body=SimpleNamespace(
+                instances=SimpleNamespace(instance=selected), next_token=None))
+
+        with (
+            patch.dict(sys.modules, {"alibabacloud_ecs20140526": SimpleNamespace(models=models)}),
+            patch.object(teardown, "delete_instance", return_value=True) as delete,
+            patch.object(teardown, "deregister_runner", return_value=True) as deregister,
+        ):
+            client = Mock()
+            client.describe_instances.side_effect = describe
+            for repo, expected in (("owner/repo", "own"), ("owner/other", "other")):
+                with self.subTest(repo=repo):
+                    delete.reset_mock()
+                    deregister.reset_mock()
+                    self.assertEqual(teardown.sweep(client, "region", repo, "token", self.TTL), 0)
+                    delete.assert_called_once_with(client, expected, "region")
+                    deregister.assert_called_once_with("token", repo, expected)
 
 
 if __name__ == "__main__":

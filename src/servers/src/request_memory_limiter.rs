@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use common_memory_manager::{MemoryGuard, MemoryManager, OnExhaustedPolicy, PermitGranularity};
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 
 use crate::error::{MemoryLimitExceededSnafu, Result};
 use crate::request_memory_metrics::RequestMemoryMetrics;
@@ -67,6 +67,25 @@ impl ServerMemoryLimiter {
     /// Try to acquire memory without waiting.
     pub fn try_acquire(&self, bytes: u64) -> Option<MemoryGuard<RequestMemoryMetrics>> {
         self.manager.try_acquire(bytes)
+    }
+
+    /// Rejects requests whose additional bytes cannot fit alongside their own held permits.
+    pub(crate) fn check_request_fits(&self, bytes: u64, held_bytes: u64) -> Result<()> {
+        let requested_bytes = held_bytes.checked_add(bytes);
+        let limit_bytes = self.limit_bytes();
+        match requested_bytes {
+            Some(bytes) if limit_bytes == 0 || bytes <= limit_bytes => Ok(()),
+            _ => Err(MemoryLimitExceededSnafu.into_error(
+                common_memory_manager::Error::MemoryLimitExceeded {
+                    requested_bytes: requested_bytes.unwrap_or(u64::MAX),
+                    limit_bytes,
+                },
+            )),
+        }
+    }
+
+    pub(crate) fn policy(&self) -> OnExhaustedPolicy {
+        self.policy
     }
 
     /// Returns total memory limit in bytes (0 if unlimited).

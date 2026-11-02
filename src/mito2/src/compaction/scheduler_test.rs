@@ -1846,6 +1846,7 @@ async fn test_compaction_bypass_in_staging_mode() {
                 manifest_cache: None,
             },
             FormatType::PrimaryKey,
+            false,
             &Default::default(),
         )
         .await

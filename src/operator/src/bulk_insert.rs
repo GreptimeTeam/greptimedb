@@ -41,10 +41,43 @@ use crate::error::Result;
 use crate::insert::Inserter;
 use crate::req_convert::TablePartitioner;
 use crate::req_convert::insert;
-use crate::write_dispatcher::WriteAttempt;
+use crate::write_dispatcher::{WriteAttempt, WriteAttribution};
 use crate::{error, metrics};
 
 impl Inserter {
+    /// Writes a coalesced batch while retaining each original input's acknowledgements.
+    pub async fn flush_bulk_batch_tracked(
+        &self,
+        table_info: TableInfoRef,
+        batch: RecordBatch,
+        ctx: QueryContextRef,
+        owners: Vec<usize>,
+        inputs: usize,
+    ) -> Result<Vec<common_query::WriteProgress>> {
+        let requests = TablePartitioner::try_new(&self.partition_manager, &table_info)
+            .await
+            .context(error::InvalidPartitionSnafu)?
+            .partition_tracked_bulk_insert_requests(batch, owners, ctx.skip_wal())?;
+        let requests = requests
+            .into_iter()
+            .map(|(request, owners)| crate::write_dispatcher::TrackedWrite {
+                request: RegionRequest {
+                    header: Some(RegionRequestHeader {
+                        dbname: ctx.get_db_string(),
+                        tracing_context: TracingContext::from_current_span().to_w3c(),
+                        ..Default::default()
+                    }),
+                    body: Some(region_request::Body::BulkInsert(request)),
+                },
+                owners,
+            })
+            .collect();
+        Ok(self
+            .write_dispatcher
+            .dispatch_tracked(requests, inputs, None)
+            .await)
+    }
+
     /// Routes and writes a prepared table batch, returning the affected row count.
     ///
     /// Callers must exclude instant-TTL tables and handle Flow notifications after
@@ -54,26 +87,31 @@ impl Inserter {
         table_info: TableInfoRef,
         batch: RecordBatch,
         ctx: QueryContextRef,
+        attribution: WriteAttribution,
     ) -> Result<AffectedRows> {
         let requests = TablePartitioner::try_new(&self.partition_manager, &table_info)
             .await
             .context(error::InvalidPartitionSnafu)?
-            .partition_bulk_insert_requests(batch, None, ctx.skip_wal())?;
+            .partition_attributed_bulk_requests(batch, ctx.skip_wal(), attribution)?;
         let writes = requests
             .into_iter()
-            .map(|request| RegionRequest {
-                header: Some(RegionRequestHeader {
-                    dbname: ctx.get_db_string(),
-                    tracing_context: TracingContext::from_current_span().to_w3c(),
-                    ..Default::default()
-                }),
-                body: Some(region_request::Body::BulkInsert(request)),
+            .map(|(request, attribution)| {
+                (
+                    RegionRequest {
+                        header: Some(RegionRequestHeader {
+                            dbname: ctx.get_db_string(),
+                            tracing_context: TracingContext::from_current_span().to_w3c(),
+                            ..Default::default()
+                        }),
+                        body: Some(region_request::Body::BulkInsert(request)),
+                    },
+                    attribution,
+                )
             })
             .collect();
-        let writes = self.write_dispatcher.prepare(writes).await?;
         Ok(self
             .write_dispatcher
-            .execute(writes, None, None)
+            .dispatch_attributed(writes, None)
             .await
             .context(error::RequestInsertsSnafu)?
             .affected_rows)

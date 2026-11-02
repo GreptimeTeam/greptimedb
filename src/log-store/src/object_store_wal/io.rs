@@ -17,12 +17,14 @@
 
 use async_stream::try_stream;
 use bytes::Bytes;
+use common_telemetry::warn;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use object_store::{Entry, ErrorKind, ObjectStore};
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
+use uuid::Uuid;
 
 use crate::error::{
     CorruptedWalObjectSnafu, InvalidWalObjectStoreSnafu, Result, WalObjectConflictSnafu,
@@ -33,6 +35,7 @@ use crate::error::{
 /// [`u64::MAX`] so that lexicographic and numeric order agree.
 const OBJECT_SEQ_WIDTH: usize = 20;
 const OBJECT_SUFFIX: &str = ".wal";
+const PROBE_CONTENT: &[u8] = b"conditional create probe";
 /// Objects a listing may hold ahead of the reads that take them, four LIST
 /// pages of S3, so the listing stays pages ahead of the reads while what it
 /// holds is bounded.
@@ -61,6 +64,9 @@ pub(crate) struct ListedObject {
 pub(crate) struct ObjectStoreIo {
     store: ObjectStore,
     object_prefix: String,
+    /// Holds the keys of [`Self::probe_conditional_create`], outside
+    /// `object_prefix` so that no listing of the objects returns one.
+    probe_prefix: String,
 }
 
 impl ObjectStoreIo {
@@ -68,7 +74,7 @@ impl ObjectStoreIo {
     /// conditional creates, which is what keeps a retried write from
     /// overwriting a durable object.
     pub(crate) fn new(store: ObjectStore, prefix: impl AsRef<str>) -> Result<Self> {
-        let object_prefix = normalize_prefix(prefix.as_ref())?;
+        let prefix = normalize_prefix(prefix.as_ref())?;
         ensure!(
             store.info().capability().write_with_if_not_exists,
             InvalidWalObjectStoreSnafu {
@@ -77,19 +83,73 @@ impl ObjectStoreIo {
         );
         Ok(Self {
             store,
-            object_prefix,
+            object_prefix: format!("{prefix}/objects/"),
+            probe_prefix: format!("{prefix}/probes/"),
         })
     }
 
-    /// Creates the object `object_seq` unless it already exists. A retry with
-    /// the same content is accepted, different content is rejected.
+    /// Checks that the store refuses a conditional create of an object that
+    /// exists. The capability checked by [`Self::new`] is declared per
+    /// service, and a store behind the S3 service may accept the condition and
+    /// overwrite the object anyway, which would let a retried write replace a
+    /// durable object. The probe creates a key of its own, unique to this
+    /// call, twice, and then deletes it.
+    pub(crate) async fn probe_conditional_create(&self) -> Result<()> {
+        let path = format!("{}{}", self.probe_prefix, Uuid::new_v4());
+        self.put_path_if_absent(path.clone(), Bytes::from_static(PROBE_CONTENT))
+            .await?;
+        // Sent directly: only the store's own refusal shows that it honours
+        // the condition, and a read-back would find the first create's object.
+        let recreated = self
+            .store
+            .write_with(&path, PROBE_CONTENT)
+            .if_not_exists(true)
+            .await;
+        if let Err(error) = self.store.delete(&path).await {
+            warn!(error; "Failed to delete the conditional create probe {path} of the object store WAL");
+        }
+        match recreated {
+            // The first create stored this key, so `AlreadyExists` can only
+            // refer to it.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error).context(WalObjectStoreSnafu {
+                operation: "write",
+                path,
+            }),
+            Ok(_) => InvalidWalObjectStoreSnafu {
+                reason: format!(
+                    "the object store ({}) overwrote the existing object {path} on a conditional create, but the object store WAL requires conditional create support; a versioned bucket or the S3-compatible endpoint of GCS can cause this",
+                    self.storage()
+                ),
+            }
+            .fail(),
+        }
+    }
+
+    /// Creates the object `object_seq` unless it already exists, see
+    /// [`Self::put_path_if_absent`].
+    pub(crate) async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+        self.put_path_if_absent(self.object_path(object_seq), content)
+            .await
+    }
+
+    /// Creates `path` unless it already exists. A retry with the same content
+    /// is accepted, different content is rejected: a create the store stored
+    /// but whose response was lost can be retried, by the caller or by the
+    /// retry layer, and then finds its own object.
     ///
     /// When the store reports that the object exists but the read that
     /// compares its content fails, the read failure is returned, so that its
     /// retry hint says whether comparing again may settle the outcome. Any
     /// other create failure is returned as the write failure it is.
-    pub(crate) async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
-        let path = self.object_path(object_seq);
+    async fn put_path_if_absent(&self, path: String, content: Bytes) -> Result<PutResult> {
         let write_result = self
             .store
             .write_with(&path, content.clone())
@@ -309,7 +369,7 @@ fn normalize_prefix(prefix: &str) -> Result<String> {
             reason: format!("object prefix {prefix:?} has an empty or relative component"),
         }
     );
-    Ok(format!("{prefix}/objects/"))
+    Ok(prefix.to_string())
 }
 
 #[cfg(test)]

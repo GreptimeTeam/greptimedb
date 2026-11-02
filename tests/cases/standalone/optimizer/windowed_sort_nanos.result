@@ -66,7 +66,7 @@ EXPLAIN ANALYZE select to_timestamp_nanos(ts) as ts, status, value from `a_ms` w
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@0 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_ProjectionExec: expr=[to_timestamp_nanos(ts@2) as ts, status@1 as status, value@0 as value] REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["value", "status", "ts"], "filters": ["ts >= TimestampMillisecond(1773273600000, None)", "ts < TimestampMillisecond(1773273721000, None)"], "time_range":REDACTED
 |_|_|_|

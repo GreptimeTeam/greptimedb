@@ -60,11 +60,12 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
-    TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
-    TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM,
-    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM,
+    MAX_ROW_GROUP_ROW_COUNT, MAX_ROW_GROUP_ROW_COUNT_LIMIT, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY,
+    SST_FORMAT_KEY, TTL_KEY, TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
+    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER,
+    TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId};
@@ -1570,6 +1571,16 @@ fn json_settings_from_proto(settings: v1::JsonSettings) -> Result<JsonSettings> 
                 path: hint.path,
                 data_type,
                 inverted_index: hint.inverted_index,
+                skipping_index: hint
+                    .skipping_index
+                    .map(api::v1::column_def::json_skipping_options_from_proto)
+                    .transpose()
+                    .map_err(|err| {
+                        InvalidRawRegionRequestSnafu {
+                            err: err.to_string(),
+                        }
+                        .build()
+                    })?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1603,6 +1614,8 @@ pub enum SetRegionOption {
     PreserveRowSequence(bool),
     // Whether to skip writing new WAL entries.
     SkipWal(bool),
+    /// Overrides per-output compaction parallelism; None restores the engine default.
+    CompactionOutputParallelism(Option<usize>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1616,6 +1629,7 @@ enum SetRegionOptionSerde {
     MaxRowGroupRowCount(Option<usize>),
     PreserveRowSequence(bool),
     SkipWal(bool),
+    CompactionOutputParallelism(Option<usize>),
 }
 
 impl Serialize for SetRegionOption {
@@ -1638,6 +1652,9 @@ impl Serialize for SetRegionOption {
             Self::MaxRowGroupRowCount(value) => SetRegionOptionSerde::MaxRowGroupRowCount(*value),
             Self::PreserveRowSequence(value) => SetRegionOptionSerde::PreserveRowSequence(*value),
             Self::SkipWal(value) => SetRegionOptionSerde::SkipWal(*value),
+            Self::CompactionOutputParallelism(value) => {
+                SetRegionOptionSerde::CompactionOutputParallelism(*value)
+            }
         };
         option.serialize(serializer)
     }
@@ -1667,6 +1684,9 @@ impl From<SetRegionOptionSerde> for SetRegionOption {
             SetRegionOptionSerde::MaxRowGroupRowCount(value) => Self::MaxRowGroupRowCount(value),
             SetRegionOptionSerde::PreserveRowSequence(value) => Self::PreserveRowSequence(value),
             SetRegionOptionSerde::SkipWal(value) => Self::SkipWal(value),
+            SetRegionOptionSerde::CompactionOutputParallelism(value) => {
+                Self::CompactionOutputParallelism(value)
+            }
         }
     }
 }
@@ -1733,6 +1753,17 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 }
                 Ok(Self::AutoFlushInterval(Some(interval)))
             }
+            COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM => {
+                if value.is_empty() {
+                    return Ok(Self::CompactionOutputParallelism(None));
+                }
+                let parallelism = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|parallelism| *parallelism > 0)
+                    .ok_or_else(|| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::CompactionOutputParallelism(Some(parallelism)))
+            }
             MAX_ROW_GROUP_ROW_COUNT => {
                 if value.is_empty() {
                     return Ok(Self::MaxRowGroupRowCount(None));
@@ -1791,6 +1822,9 @@ impl From<&UnsetRegionOption> for SetRegionOption {
             UnsetRegionOption::MaxRowGroupRowCount => SetRegionOption::MaxRowGroupRowCount(None),
             UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
             UnsetRegionOption::PreserveRowSequence => SetRegionOption::PreserveRowSequence(false),
+            UnsetRegionOption::CompactionOutputParallelism => {
+                SetRegionOption::CompactionOutputParallelism(None)
+            }
         }
     }
 }
@@ -1811,6 +1845,7 @@ impl TryFrom<&str> for UnsetRegionOption {
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
             MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
             PRESERVE_ROW_SEQUENCE => Ok(Self::PreserveRowSequence),
+            COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM => Ok(Self::CompactionOutputParallelism),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1829,6 +1864,7 @@ pub enum UnsetRegionOption {
     WriteBufferSize,
     PreserveRowSequence,
     TwcsActiveWindowL1MergeTrigger,
+    CompactionOutputParallelism,
 }
 
 impl UnsetRegionOption {
@@ -1845,6 +1881,7 @@ impl UnsetRegionOption {
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
             Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
             Self::PreserveRowSequence => PRESERVE_ROW_SEQUENCE,
+            Self::CompactionOutputParallelism => COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM,
         }
     }
 }
@@ -2219,6 +2256,42 @@ mod tests {
     }
 
     #[test]
+    fn test_compaction_output_parallelism_set_unset_and_serde() {
+        for (raw, expected) in [("", None), ("1", Some(1)), ("4", Some(4))] {
+            let option = SetRegionOption::try_from(&PbOption {
+                key: COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM.to_string(),
+                value: raw.to_string(),
+            })
+            .unwrap();
+            assert_eq!(
+                SetRegionOption::CompactionOutputParallelism(expected),
+                option
+            );
+            let json = serde_json::to_string(&option).unwrap();
+            assert_eq!(
+                option,
+                serde_json::from_str::<SetRegionOption>(&json).unwrap()
+            );
+        }
+        for raw in ["0", "-1", "1.5", "invalid", "18446744073709551616"] {
+            assert!(
+                SetRegionOption::try_from(&PbOption {
+                    key: COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM.to_string(),
+                    value: raw.to_string(),
+                })
+                .is_err()
+            );
+        }
+        let unset =
+            UnsetRegionOption::try_from(COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM).unwrap();
+        assert_eq!(COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM, unset.as_str());
+        assert_eq!(
+            SetRegionOption::CompactionOutputParallelism(None),
+            (&unset).into()
+        );
+    }
+
+    #[test]
     fn test_set_region_option_auto_flush_interval_try_from() {
         use std::time::Duration;
 
@@ -2458,6 +2531,7 @@ mod tests {
                             path: path.iter().map(|part| (*part).to_string()).collect(),
                             data_type: ColumnDataType::String as i32,
                             inverted_index,
+                            skipping_index: None,
                             ..Default::default()
                         }],
                         max_auto_expanded_paths: Some(0),
@@ -2543,6 +2617,11 @@ mod tests {
                         data_type: ColumnDataType::String as i32,
                         datatype_extension: None,
                         inverted_index: true,
+                        skipping_index: Some(v1::JsonSkippingIndexOptions {
+                            granularity: 8,
+                            index_type: 0,
+                            false_positive_rate: 0.05,
+                        }),
                     }],
                     max_auto_expanded_paths: Some(10),
                 }),
@@ -2561,6 +2640,14 @@ mod tests {
         assert_eq!(Some(10), settings.max_auto_expanded_paths());
         assert_eq!(1, settings.type_hints().len());
         assert!(settings.type_hints()[0].inverted_index);
+        assert_eq!(
+            settings.type_hints()[0]
+                .skipping_index
+                .as_ref()
+                .unwrap()
+                .granularity,
+            8
+        );
     }
 
     #[test]

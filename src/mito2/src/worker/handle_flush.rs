@@ -417,6 +417,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
         }
 
+        // The flush has committed its manifest, including in staging mode. Count only
+        // its Parquet output, before WAL cleanup (which can fail after the commit).
+        let flushed_parquet_bytes = request
+            .edit
+            .files_to_add
+            .iter()
+            .map(|file| file.file_size)
+            .sum();
+        region
+            .region_stats
+            .flushed_parquet_bytes
+            .fetch_add(flushed_parquet_bytes, Ordering::Relaxed);
+
         region.update_flush_millis();
         // Update topic latest entry id as soon as possible after flush to make sure the prunable entry id is updated timely,
         // which is important for remote WAL pruning.
@@ -439,21 +452,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let flush_on_close = request.flush_reason == FlushReason::Closing;
 
-        let mut index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
-        if self.config.index.build_mode == IndexBuildMode::Sync {
-            // Sync flush builds indexes while writing SSTs, except for encoded bulk parts,
-            // which are uploaded as-is. Build the missing indexes for those files here.
-            let version = region.version();
-            index_build_file_metas.retain(|meta| {
-                request.unindexed_files.contains(&meta.file_id)
-                    && !meta.is_index_consistent_with_region(
-                        &version.metadata.column_metadatas,
-                        &version.options.index_options,
-                    )
-            });
-        }
+        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
-        if !index_build_file_metas.is_empty() {
+        // In async mode, create indexes after flush.
+        if self.config.index.build_mode == IndexBuildMode::Async {
             self.handle_rebuild_index(
                 BuildIndexRequest {
                     region_id,

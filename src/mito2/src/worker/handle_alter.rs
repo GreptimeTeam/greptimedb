@@ -311,6 +311,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         current_options.auto_flush_interval = new_interval;
                     }
                 }
+                SetRegionOption::CompactionOutputParallelism(parallelism) => {
+                    // New compactions use the updated options; running ones retain
+                    // their snapshot. No memtable flush is needed.
+                    current_options.compaction_output_parallelism = parallelism;
+                }
                 SetRegionOption::MaxRowGroupRowCount(new_row_count) => {
                     if let Some(row_count) = new_row_count {
                         ensure!(
@@ -431,6 +436,7 @@ fn new_region_options_on_empty_memtable(
             | SetRegionOption::Ttl(_)
             | SetRegionOption::Twsc(_, _)
             | SetRegionOption::AutoFlushInterval(_)
+            | SetRegionOption::CompactionOutputParallelism(_)
             | SetRegionOption::SkipWal(_) => (),
             SetRegionOption::Format(format_str) => {
                 // Safety: handle_alter_region_options_fast() has validated this.

@@ -16,16 +16,18 @@ pub mod bloom_filter_index;
 pub mod inverted_index;
 pub mod result_cache;
 
-use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::hash::Hash;
+use std::io;
 use std::ops::Range;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
-use object_store::Buffer;
+use common_base::range_read::{Metadata, RangeReader};
+use common_cache::paged::PagedCache;
 
-use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::metrics::CACHE_BYTES;
 
 /// Metrics for index metadata.
 const INDEX_METADATA_TYPE: &str = "index_metadata";
@@ -45,65 +47,18 @@ pub struct IndexCacheMetrics {
     pub page_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PageKey {
-    page_id: u64,
-}
-
-impl PageKey {
-    /// Converts an offset to a page ID based on the page size.
-    fn calculate_page_id(offset: u64, page_size: u64) -> u64 {
-        offset / page_size
-    }
-
-    /// Calculates the total number of pages that a given size spans, starting from a specific offset.
-    fn calculate_page_count(offset: u64, size: u32, page_size: u64) -> u32 {
-        let start_page = Self::calculate_page_id(offset, page_size);
-        let end_page = Self::calculate_page_id(offset + (size as u64) - 1, page_size);
-        (end_page + 1 - start_page) as u32
-    }
-
-    /// Calculates the byte range for data retrieval based on the specified offset and size.
-    ///
-    /// This function determines the starting and ending byte positions required for reading data.
-    /// For example, with an offset of 5000 and a size of 5000, using a PAGE_SIZE of 4096,
-    /// the resulting byte range will be 904..5904. This indicates that:
-    /// - The reader will first access fixed-size pages [4096, 8192) and [8192, 12288).
-    /// - To read the range [5000..10000), it only needs to fetch bytes within the range [904, 5904) across two pages.
-    fn calculate_range(offset: u64, size: u32, page_size: u64) -> Range<usize> {
-        let start = (offset % page_size) as usize;
-        let end = start + size as usize;
-        start..end
-    }
-
-    /// Generates a iterator of `IndexKey` for the pages that a given offset and size span.
-    fn generate_page_keys(offset: u64, size: u32, page_size: u64) -> impl Iterator<Item = Self> {
-        let start_page = Self::calculate_page_id(offset, page_size);
-        let total_pages = Self::calculate_page_count(offset, size, page_size);
-        (0..total_pages).map(move |i| Self {
-            page_id: start_page + i as u64,
-        })
-    }
-}
-
 /// Cache for index metadata and content.
 pub struct IndexCache<K, M> {
     /// Cache for index metadata
-    index_metadata: moka::sync::Cache<K, Arc<M>>,
+    index_metadata: common_cache::Cache<K, Arc<M>>,
     /// Cache for index content.
-    index: moka::sync::Cache<(K, PageKey), Bytes>,
-    // Page size for index content.
-    page_size: u64,
-
-    /// Weighter for metadata.
-    weight_of_metadata: fn(&K, &Arc<M>) -> u32,
-    /// Weighter for content.
-    weight_of_content: fn(&(K, PageKey), &Bytes) -> u32,
+    index: PagedCache<K>,
+    index_type: &'static str,
 }
 
 impl<K, M> IndexCache<K, M>
 where
-    K: Hash + Eq + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Send + Sync + 'static,
     M: Send + Sync + 'static,
 {
     pub fn new_with_weighter(
@@ -111,62 +66,68 @@ where
         index_content_cap: u64,
         page_size: u64,
         index_type: &'static str,
+        metadata_type: &'static str,
         weight_of_metadata: fn(&K, &Arc<M>) -> u32,
-        weight_of_content: fn(&(K, PageKey), &Bytes) -> u32,
+        weight_of_content: fn(&(K, u64), &Bytes) -> u32,
     ) -> Self {
         common_telemetry::debug!(
             "Building IndexCache with metadata size: {index_metadata_cap}, content size: {index_content_cap}, page size: {page_size}, index type: {index_type}"
         );
-        let index_metadata = moka::sync::CacheBuilder::new(index_metadata_cap)
-            .name(&format!("index_metadata_{}", index_type))
-            .weigher(weight_of_metadata)
-            .eviction_listener(move |k, v, _cause| {
-                let size = weight_of_metadata(&k, &v);
-                CACHE_BYTES
-                    .with_label_values(&[INDEX_METADATA_TYPE])
-                    .sub(size.into());
-            })
-            .support_invalidation_closures()
-            .build();
-        let index_cache = moka::sync::CacheBuilder::new(index_content_cap)
-            .name(&format!("index_content_{}", index_type))
-            .weigher(weight_of_content)
-            .eviction_listener(move |k, v, _cause| {
-                let size = weight_of_content(&k, &v);
-                CACHE_BYTES
-                    .with_label_values(&[INDEX_CONTENT_TYPE])
-                    .sub(size.into());
-            })
-            .support_invalidation_closures()
-            .build();
+        let index_metadata = common_cache::Cache::new(
+            &format!("index_metadata_{index_type}"),
+            index_metadata_cap,
+            weight_of_metadata,
+            |_, _, _| {},
+        )
+        .with_size_metric(CACHE_BYTES.bind(&[INDEX_METADATA_TYPE]))
+        .with_metrics(crate::metrics::cache_loading_metrics(metadata_type));
+        let index_cache = PagedCache::new(
+            &format!("index_content_{index_type}"),
+            index_content_cap,
+            page_size,
+            weight_of_content,
+            crate::metrics::cache_page_observer(index_type, INDEX_CONTENT_TYPE, |hits, misses| {
+                (hits, misses)
+            }),
+        );
         Self {
             index_metadata,
             index: index_cache,
-            page_size,
-            weight_of_content,
-            weight_of_metadata,
+            index_type,
         }
     }
 }
 
 impl<K, M> IndexCache<K, M>
 where
-    K: Hash + Eq + Clone + Copy + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Send + Sync + 'static,
     M: Send + Sync + 'static,
 {
-    pub fn get_metadata(&self, key: K) -> Option<Arc<M>> {
-        self.index_metadata.get(&key)
+    /// Looks up completed metadata without starting or waiting for a load.
+    pub async fn get_metadata(&self, key: K) -> Option<Arc<M>> {
+        self.index_metadata.get(&key).await
     }
 
-    pub fn put_metadata(&self, key: K, metadata: Arc<M>) {
-        CACHE_BYTES
-            .with_label_values(&[INDEX_METADATA_TYPE])
-            .add((self.weight_of_metadata)(&key, &metadata).into());
-        self.index_metadata.insert(key, metadata)
+    /// Inserts completed metadata for cache eviction and accounting tests.
+    #[cfg(test)]
+    pub async fn put_metadata(&self, key: K, metadata: Arc<M>) {
+        self.index_metadata.insert(key, metadata).await;
     }
 
-    /// Gets given range of index data from cache, and loads from source if the file
-    /// is not already cached.
+    /// Shares loads after the caller's initial lookup missed. Native request counts
+    /// describe these submissions, including waiters, rather than completed hits.
+    async fn get_or_load_metadata<F, E>(&self, key: K, load: F) -> Result<Arc<M>, Arc<E>>
+    where
+        F: Future<Output = Result<Arc<M>, E>>,
+        E: Send + Sync + 'static,
+    {
+        if self.index_metadata.capacity() == 0 {
+            return load.await.map_err(Arc::new);
+        }
+        self.index_metadata.try_get_with(&key, load).await
+    }
+
+    /// Fetches one byte range through fixed-size pages.
     async fn get_or_load<F, Fut, E>(
         &self,
         key: K,
@@ -174,156 +135,52 @@ where
         offset: u64,
         size: u32,
         load: F,
-    ) -> Result<(Vec<u8>, IndexCacheMetrics), E>
+    ) -> Result<(Bytes, IndexCacheMetrics), Arc<io::Error>>
     where
-        F: Fn(Vec<Range<u64>>) -> Fut,
-        Fut: Future<Output = Result<Vec<Bytes>, E>>,
-        E: std::error::Error,
+        F: Fn(Vec<Range<u64>>) -> Fut + Send + Sync,
+        Fut: Future<Output = Result<Vec<Bytes>, E>> + Send,
+        E: std::error::Error + Send + Sync + 'static,
     {
-        let mut metrics = IndexCacheMetrics::default();
-        let page_keys =
-            PageKey::generate_page_keys(offset, size, self.page_size).collect::<Vec<_>>();
-        // Size is 0, return empty data.
-        if page_keys.is_empty() {
-            return Ok((Vec::new(), metrics));
-        }
-        metrics.num_pages = page_keys.len();
-        let mut data = Vec::with_capacity(page_keys.len());
-        data.resize(page_keys.len(), Bytes::new());
-        let mut cache_miss_range = vec![];
-        let mut cache_miss_idx = vec![];
-        let last_index = page_keys.len() - 1;
-        // TODO: Avoid copy as much as possible.
-        for (i, page_key) in page_keys.iter().enumerate() {
-            match self.get_page(key, *page_key) {
-                Some(page) => {
-                    CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
-                    metrics.cache_hit += 1;
-                    metrics.page_bytes += page.len() as u64;
-                    data[i] = page;
-                }
-                None => {
-                    CACHE_MISS.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
-                    metrics.cache_miss += 1;
-                    let base_offset = page_key.page_id * self.page_size;
-                    let pruned_size = if i == last_index {
-                        prune_size(page_keys.iter(), file_size, self.page_size)
-                    } else {
-                        self.page_size
-                    };
-                    cache_miss_range.push(base_offset..base_offset + pruned_size);
-                    cache_miss_idx.push(i);
-                }
-            }
-        }
-        if !cache_miss_range.is_empty() {
-            let pages = load(cache_miss_range).await?;
-            for (i, page) in cache_miss_idx.into_iter().zip(pages) {
-                let page_key = page_keys[i];
-                metrics.page_bytes += page.len() as u64;
-                data[i] = page.clone();
-                self.put_page(key, page_key, page.clone());
-            }
-        }
-        let buffer = Buffer::from_iter(data);
-        Ok((
-            buffer
-                .slice(PageKey::calculate_range(offset, size, self.page_size))
-                .to_vec(),
-            metrics,
-        ))
+        let end = offset.checked_add(u64::from(size)).ok_or_else(|| {
+            Arc::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Index range overflow",
+            ))
+        })?;
+        let (pages, metrics) = self
+            .get_or_load_vec(key, file_size, std::slice::from_ref(&(offset..end)), load)
+            .await?;
+        Ok((pages.into_iter().next().unwrap_or_default(), metrics))
     }
 
-    /// Like [`IndexCache::get_or_load`] for several ranges, but loads the missing pages of
-    /// all ranges with a single `load` call so a cold read costs one round trip instead of
-    /// one per range.
+    /// Shares missing page loads while retaining legacy unique-page metrics.
     async fn get_or_load_vec<F, Fut, E>(
         &self,
         key: K,
         file_size: u64,
         ranges: &[Range<u64>],
         load: F,
-    ) -> Result<(Vec<Bytes>, IndexCacheMetrics), E>
+    ) -> Result<(Vec<Bytes>, IndexCacheMetrics), Arc<io::Error>>
     where
-        F: FnOnce(Vec<Range<u64>>) -> Fut,
-        Fut: Future<Output = Result<Vec<Bytes>, E>>,
-        E: std::error::Error,
+        F: Fn(Vec<Range<u64>>) -> Fut + Send + Sync,
+        Fut: Future<Output = Result<Vec<Bytes>, E>> + Send,
+        E: std::error::Error + Send + Sync + 'static,
     {
-        let mut metrics = IndexCacheMetrics::default();
-        let mut pages: HashMap<u64, Bytes> = HashMap::new();
-        let mut missing: Vec<u64> = Vec::new();
-        let mut seen = HashSet::new();
-        for range in ranges.iter().filter(|r| r.end > r.start) {
-            let size = (range.end - range.start) as u32;
-            for page_key in PageKey::generate_page_keys(range.start, size, self.page_size) {
-                if !seen.insert(page_key.page_id) {
-                    continue;
-                }
-                metrics.num_pages += 1;
-                match self.get_page(key, page_key) {
-                    Some(page) => {
-                        CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
-                        metrics.cache_hit += 1;
-                        metrics.page_bytes += page.len() as u64;
-                        pages.insert(page_key.page_id, page);
-                    }
-                    None => {
-                        CACHE_MISS.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
-                        metrics.cache_miss += 1;
-                        missing.push(page_key.page_id);
-                    }
-                }
-            }
-        }
-
-        if !missing.is_empty() {
-            missing.sort_unstable();
-            let load_ranges = missing
-                .iter()
-                .map(|page_id| {
-                    let start = page_id * self.page_size;
-                    start..(start + self.page_size).min(file_size)
-                })
-                .collect();
-            let loaded = load(load_ranges).await?;
-            debug_assert_eq!(loaded.len(), missing.len());
-            for (page_id, page) in missing.into_iter().zip(loaded) {
-                metrics.page_bytes += page.len() as u64;
-                self.put_page(key, PageKey { page_id }, page.clone());
-                pages.insert(page_id, page);
-            }
-        }
-
-        let result = ranges
-            .iter()
-            .map(|range| {
-                let size = (range.end - range.start) as u32;
-                if size == 0 {
-                    return Bytes::new();
-                }
-                let buffer = Buffer::from_iter(
-                    PageKey::generate_page_keys(range.start, size, self.page_size)
-                        .map(|p| pages[&p.page_id].clone()),
-                );
-                buffer
-                    .slice(PageKey::calculate_range(range.start, size, self.page_size))
-                    .to_bytes()
-            })
-            .collect();
-        Ok((result, metrics))
-    }
-
-    fn get_page(&self, key: K, page_key: PageKey) -> Option<Bytes> {
-        self.index.get(&(key, page_key))
-    }
-
-    fn put_page(&self, key: K, page_key: PageKey, value: Bytes) {
-        // Clones the value to ensure it doesn't reference a larger buffer.
-        let value = Bytes::from(value.to_vec());
-        CACHE_BYTES
-            .with_label_values(&[INDEX_CONTENT_TYPE])
-            .add((self.weight_of_content)(&(key, page_key), &value).into());
-        self.index.insert((key, page_key), value);
+        let reader = IndexPageReader {
+            load: &load,
+            file_size,
+        };
+        let (pages, stats) = self.index.fetch(key, file_size, ranges, &reader).await?;
+        crate::metrics::cache_page_fetch_metrics(self.index_type, &stats);
+        Ok((
+            pages,
+            IndexCacheMetrics {
+                cache_hit: stats.cache_hit,
+                cache_miss: stats.cache_miss,
+                num_pages: stats.cache_hit + stats.cache_miss,
+                page_bytes: stats.aligned_bytes,
+            },
+        ))
     }
 
     /// Invalidates all cache entries whose keys satisfy `predicate`.
@@ -335,24 +192,354 @@ where
         let metadata_predicate = Arc::clone(&predicate);
 
         self.index_metadata
-            .invalidate_entries_if(move |key, _| metadata_predicate(key))
+            .invalidate_if(move |key, _| metadata_predicate(key))
             .expect("cache should support invalidation closures");
 
         self.index
-            .invalidate_entries_if(move |(key, _), _| predicate(key))
+            .invalidate_if(move |key| predicate(key))
             .expect("cache should support invalidation closures");
     }
 }
 
-/// Prunes the size of the last page based on the indexes.
-/// We have following cases:
-/// 1. The rest file size is less than the page size, read to the end of the file.
-/// 2. Otherwise, read the page size.
-fn prune_size<'a>(
-    indexes: impl Iterator<Item = &'a PageKey>,
+/// Adapts borrowed index readers to the common range-reader interface.
+struct IndexPageReader<'a, F> {
+    load: &'a F,
     file_size: u64,
-    page_size: u64,
-) -> u64 {
-    let last_page_start = indexes.last().map(|i| i.page_id * page_size).unwrap_or(0);
-    page_size.min(file_size - last_page_start)
+}
+
+#[async_trait]
+impl<F, Fut, E> RangeReader for IndexPageReader<'_, F>
+where
+    F: Fn(Vec<Range<u64>>) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<Vec<Bytes>, E>> + Send,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    async fn metadata(&self) -> io::Result<Metadata> {
+        Ok(Metadata {
+            content_length: self.file_size,
+        })
+    }
+
+    async fn read(&self, range: Range<u64>) -> io::Result<Bytes> {
+        let mut reads = self.read_vec(&[range]).await?;
+        if reads.len() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Index reader returned an invalid result count",
+            ));
+        }
+        Ok(reads.remove(0))
+    }
+
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+        (self.load)(ranges.to_vec())
+            .await
+            .map_err(|error| io::Error::other(Arc::new(error)))
+    }
+}
+
+/// Finds a typed shared error through the range-reader I/O wrappers.
+fn find_shared_page_source<E: std::error::Error + Send + Sync + 'static>(
+    mut error: &io::Error,
+) -> Option<Arc<E>> {
+    loop {
+        let source = error.get_ref()?;
+        if let Some(source) = source.downcast_ref::<Arc<E>>() {
+            return Some(source.clone());
+        }
+        if let Some(nested) = source.downcast_ref::<Arc<io::Error>>() {
+            error = nested;
+        } else {
+            error = source.downcast_ref::<io::Error>()?;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    fn metadata_cache() -> IndexCache<u64, u64> {
+        IndexCache::new_with_weighter(
+            1024,
+            1024,
+            4,
+            "test",
+            "test_index_metadata",
+            |_, _| 8,
+            |_, bytes| bytes.len() as u32,
+        )
+    }
+
+    #[tokio::test]
+    async fn metadata_shares_same_key_without_blocking_other_keys() {
+        let cache = metadata_cache();
+        let release = Notify::new();
+        let mut owner = Box::pin(cache.get_or_load_metadata(1, async {
+            release.notified().await;
+            Ok::<_, std::io::Error>(Arc::new(11))
+        }));
+        assert!(futures::poll!(&mut owner).is_pending());
+        let mut waiter = Box::pin(cache.get_or_load_metadata(1, async {
+            Err::<Arc<u64>, _>(std::io::Error::other("unexpected duplicate load"))
+        }));
+        assert!(futures::poll!(&mut waiter).is_pending());
+        let other = cache
+            .get_or_load_metadata(2, async { Ok::<_, std::io::Error>(Arc::new(33)) })
+            .await
+            .unwrap();
+        assert_eq!(*other, 33);
+        release.notify_one();
+        let owner = owner.await.unwrap();
+        let waiter = waiter.await.unwrap();
+        assert!(Arc::ptr_eq(&owner, &waiter));
+        assert_eq!(*cache.get_metadata(1).await.unwrap(), 11);
+    }
+
+    #[tokio::test]
+    async fn metadata_failure_is_shared_but_not_cached() {
+        let cache = metadata_cache();
+        let release = Notify::new();
+        let mut owner = Box::pin(cache.get_or_load_metadata(1, async {
+            release.notified().await;
+            Err::<Arc<u64>, _>(std::io::Error::other("metadata read failed"))
+        }));
+        assert!(futures::poll!(&mut owner).is_pending());
+        let mut waiter = Box::pin(
+            cache.get_or_load_metadata(1, async { Ok::<_, std::io::Error>(Arc::new(22)) }),
+        );
+        assert!(futures::poll!(&mut waiter).is_pending());
+        release.notify_one();
+        let error = owner.await.unwrap_err();
+        let shared = waiter.await.unwrap_err();
+        assert!(Arc::ptr_eq(&error, &shared));
+        assert!(cache.get_metadata(1).await.is_none());
+        let retried = cache
+            .get_or_load_metadata(1, async { Ok::<_, std::io::Error>(Arc::new(33)) })
+            .await
+            .unwrap();
+        assert_eq!(*retried, 33);
+    }
+
+    #[tokio::test]
+    async fn cancelled_metadata_loader_allows_waiter_to_take_over() {
+        let cache = metadata_cache();
+        let mut owner = Box::pin(cache.get_or_load_metadata(
+            1,
+            std::future::pending::<Result<Arc<u64>, std::io::Error>>(),
+        ));
+        assert!(futures::poll!(&mut owner).is_pending());
+        let mut waiter = Box::pin(
+            cache.get_or_load_metadata(1, async { Ok::<_, std::io::Error>(Arc::new(22)) }),
+        );
+        assert!(futures::poll!(&mut waiter).is_pending());
+        drop(owner);
+        let value = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*value, 22);
+    }
+
+    #[tokio::test]
+    async fn metadata_invalidation_releases_charge_with_live_reader() {
+        let cache = metadata_cache();
+        let value = Arc::new(11);
+        cache.index_metadata.insert(1, value.clone()).await;
+        cache.put_metadata(2, Arc::new(22)).await;
+        cache.index_metadata.run_pending_tasks().await;
+        assert_eq!(cache.index_metadata.entry_count(), 2);
+        cache.invalidate_if(|key| *key == 1);
+        assert!(cache.get_metadata(1).await.is_none());
+        assert_eq!(*cache.get_metadata(2).await.unwrap(), 22);
+        cache.index_metadata.run_pending_tasks().await;
+        assert_eq!(cache.index_metadata.entry_count(), 1);
+        assert_eq!(*value, 11);
+        drop(value);
+        assert_eq!(cache.index_metadata.entry_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn disabled_metadata_cache_does_not_share_loads() {
+        let cache = IndexCache::new_with_weighter(
+            0,
+            1024,
+            4,
+            "test_disabled",
+            "test_disabled_index_metadata",
+            |_: &u64, _: &Arc<u64>| 8,
+            |_, bytes| bytes.len() as u32,
+        );
+        let mut owner = Box::pin(cache.get_or_load_metadata(
+            1,
+            std::future::pending::<Result<Arc<u64>, std::io::Error>>(),
+        ));
+        assert!(futures::poll!(&mut owner).is_pending());
+        let mut independent = Box::pin(
+            cache.get_or_load_metadata(1, async { Ok::<_, std::io::Error>(Arc::new(22)) }),
+        );
+        assert!(futures::poll!(&mut independent).is_ready());
+    }
+
+    #[tokio::test]
+    async fn metadata_metrics_distinguish_requests_from_loads() {
+        let metrics = crate::metrics::cache_loading_metrics("test_index_metadata_metrics");
+        let mut cache = metadata_cache();
+        cache.index_metadata = cache.index_metadata.with_metrics(metrics.clone());
+        let release = Notify::new();
+        let mut owner = Box::pin(cache.get_or_load_metadata(1, async {
+            release.notified().await;
+            Ok::<_, std::io::Error>(Arc::new(11))
+        }));
+        let mut waiter = Box::pin(cache.get_or_load_metadata(1, async {
+            Err::<Arc<u64>, _>(std::io::Error::other("duplicate metadata load"))
+        }));
+        assert!(futures::poll!(&mut owner).is_pending());
+        assert!(futures::poll!(&mut waiter).is_pending());
+        assert_eq!(metrics.requests.active.get(), 2);
+        assert_eq!(metrics.loads.active.get(), 1);
+        release.notify_one();
+        let (owner, waiter) = tokio::join!(owner, waiter);
+        assert!(Arc::ptr_eq(&owner.unwrap(), &waiter.unwrap()));
+        assert_eq!(metrics.requests.succeeded.get(), 2);
+        assert_eq!(metrics.loads.succeeded.get(), 1);
+        assert_eq!(metrics.requests.active.get(), 0);
+        assert_eq!(metrics.loads.active.get(), 0);
+    }
+    #[tokio::test]
+    async fn overlapping_page_requests_share_bytes_and_preserve_legacy_metrics() {
+        let cache = metadata_cache();
+        let release = Notify::new();
+        let reads = std::sync::Mutex::new(Vec::new());
+        let load = |ranges: Vec<Range<u64>>| {
+            reads.lock().unwrap().push(ranges.clone());
+            let release = &release;
+            async move {
+                release.notified().await;
+                Ok::<_, io::Error>(
+                    ranges
+                        .iter()
+                        .map(|range| {
+                            Bytes::from(range.clone().map(|v| v as u8).collect::<Vec<_>>())
+                        })
+                        .collect(),
+                )
+            }
+        };
+        let first_ranges = std::slice::from_ref(&(0..8));
+        let second_ranges = std::slice::from_ref(&(4..12));
+        let mut first = Box::pin(cache.get_or_load_vec(1, 12, first_ranges, &load));
+        assert!(futures::poll!(&mut first).is_pending());
+        let mut second = Box::pin(cache.get_or_load_vec(1, 12, second_ranges, &load));
+        assert!(futures::poll!(&mut second).is_pending());
+        release.notify_waiters();
+        let (first, second) = tokio::join!(first, second);
+        let (first, first_metrics) = first.unwrap();
+        let (second, second_metrics) = second.unwrap();
+        assert_eq!(first, vec![Bytes::from_static(&[0, 1, 2, 3, 4, 5, 6, 7])]);
+        assert_eq!(
+            second,
+            vec![Bytes::from_static(&[4, 5, 6, 7, 8, 9, 10, 11])]
+        );
+        for metrics in [first_metrics, second_metrics] {
+            assert_eq!(
+                (
+                    metrics.cache_hit,
+                    metrics.cache_miss,
+                    metrics.num_pages,
+                    metrics.page_bytes
+                ),
+                (0, 2, 2, 8)
+            );
+        }
+        let batches = reads.lock().unwrap().clone();
+        assert_eq!(batches, vec![vec![0..4, 4..8], vec![8..12]]);
+        let mut physical = batches.into_iter().flatten().collect::<Vec<_>>();
+        physical.sort_by_key(|range| range.start);
+        assert!(physical.windows(2).all(|pair| pair[0].end <= pair[1].start));
+        assert_eq!(
+            physical
+                .iter()
+                .map(|range| range.end - range.start)
+                .sum::<u64>(),
+            12
+        );
+        let (hot, metrics) = cache
+            .get_or_load_vec(1, 12, &[1..6, 4..12], |_| async {
+                Err::<Vec<Bytes>, _>(io::Error::other("unexpected hot read"))
+            })
+            .await
+            .unwrap();
+        assert_eq!(hot[0], Bytes::from_static(&[1, 2, 3, 4, 5]));
+        assert_eq!(
+            (
+                metrics.cache_hit,
+                metrics.cache_miss,
+                metrics.num_pages,
+                metrics.page_bytes
+            ),
+            (3, 0, 3, 12)
+        );
+        cache.invalidate_if(|key| *key == 1);
+        assert!(!cache.index.contains(&1, 0).await);
+    }
+
+    #[tokio::test]
+    async fn index_pages_preserve_shared_typed_read_errors_and_retry() {
+        use common_error::ext::ErrorExt;
+        use index::inverted_index::error::{Error, IndexNotFoundSnafu};
+        let cache = metadata_cache();
+        let error = cache
+            .get_or_load_vec(1, 8, std::slice::from_ref(&(0..8)), |_| async {
+                Err::<Vec<Bytes>, _>(IndexNotFoundSnafu { name: "missing" }.build())
+            })
+            .await
+            .unwrap_err();
+        let retained = find_shared_page_source::<Error>(&error).unwrap();
+        assert_eq!(
+            retained.status_code(),
+            common_error::status_code::StatusCode::InvalidArguments
+        );
+        assert!(!cache.index.contains(&1, 0).await);
+        let (pages, _) = cache
+            .get_or_load_vec(1, 8, std::slice::from_ref(&(0..8)), |ranges| async move {
+                Ok::<_, io::Error>(
+                    ranges
+                        .iter()
+                        .map(|r| Bytes::from(vec![7; (r.end - r.start) as usize]))
+                        .collect(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(pages, vec![Bytes::from(vec![7; 8])]);
+    }
+    #[tokio::test]
+    async fn single_page_range_retains_shared_bytes() {
+        let cache = metadata_cache();
+        let (first, _) = cache
+            .get_or_load(1, 8, 1, 2, |ranges| async move {
+                Ok::<_, io::Error>(
+                    ranges
+                        .into_iter()
+                        .map(|range| Bytes::from(range.map(|n| n as u8).collect::<Vec<_>>()))
+                        .collect(),
+                )
+            })
+            .await
+            .unwrap();
+        let (second, metrics) = cache
+            .get_or_load(1, 8, 1, 2, |_| async {
+                Err::<Vec<Bytes>, _>(io::Error::other("unexpected read on cache hit"))
+            })
+            .await
+            .unwrap();
+        assert_eq!(&first[..], &[1, 2]);
+        assert_eq!(first, second);
+        assert_eq!(first.as_ptr(), second.as_ptr());
+        assert_eq!(metrics.cache_hit, 1);
+        assert_eq!(metrics.cache_miss, 0);
+    }
 }

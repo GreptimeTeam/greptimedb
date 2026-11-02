@@ -1,0 +1,140 @@
+-- Execution parallelism does not require compaction.type.
+CREATE TABLE compaction_output_parallelism (
+    ts TIMESTAMP TIME INDEX,
+    val INT
+) WITH ('compaction.experimental_output_parallelism' = '4');
+
+Affected Rows: 0
+
+INSERT INTO compaction_output_parallelism VALUES (0, 10);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('compaction_output_parallelism');
+
++----------------------------------------------------+
+| ADMIN FLUSH_TABLE('compaction_output_parallelism') |
++----------------------------------------------------+
+| 0                                                  |
++----------------------------------------------------+
+
+INSERT INTO compaction_output_parallelism VALUES (1000, 20);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('compaction_output_parallelism');
+
++----------------------------------------------------+
+| ADMIN FLUSH_TABLE('compaction_output_parallelism') |
++----------------------------------------------------+
+| 0                                                  |
++----------------------------------------------------+
+
+ADMIN COMPACT_TABLE('compaction_output_parallelism');
+
++------------------------------------------------------+
+| ADMIN COMPACT_TABLE('compaction_output_parallelism') |
++------------------------------------------------------+
+| 0                                                    |
++------------------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE compaction_output_parallelism;
+
++-------------------------------+--------------------------------------------------------------+
+| Table                         | Create Table                                                 |
++-------------------------------+--------------------------------------------------------------+
+| compaction_output_parallelism | CREATE TABLE IF NOT EXISTS "compaction_output_parallelism" ( |
+|                               |   "ts" TIMESTAMP(3) NOT NULL,                                |
+|                               |   "val" INT NULL,                                            |
+|                               |   TIME INDEX ("ts")                                          |
+|                               | )                                                            |
+|                               |                                                              |
+|                               | ENGINE=mito                                                  |
+|                               | WITH(                                                        |
+|                               |   'compaction.experimental_output_parallelism' = '4'         |
+|                               | )                                                            |
++-------------------------------+--------------------------------------------------------------+
+
+SELECT * FROM compaction_output_parallelism ORDER BY ts;
+
++---------------------+-----+
+| ts                  | val |
++---------------------+-----+
+| 1970-01-01T00:00:00 | 10  |
+| 1970-01-01T00:00:01 | 20  |
++---------------------+-----+
+
+-- A table can disable parallel encoding even when the engine default enables it.
+ALTER TABLE compaction_output_parallelism SET 'compaction.experimental_output_parallelism' = '1';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE compaction_output_parallelism;
+
++-------------------------------+--------------------------------------------------------------+
+| Table                         | Create Table                                                 |
++-------------------------------+--------------------------------------------------------------+
+| compaction_output_parallelism | CREATE TABLE IF NOT EXISTS "compaction_output_parallelism" ( |
+|                               |   "ts" TIMESTAMP(3) NOT NULL,                                |
+|                               |   "val" INT NULL,                                            |
+|                               |   TIME INDEX ("ts")                                          |
+|                               | )                                                            |
+|                               |                                                              |
+|                               | ENGINE=mito                                                  |
+|                               | WITH(                                                        |
+|                               |   'compaction.experimental_output_parallelism' = '1'         |
+|                               | )                                                            |
++-------------------------------+--------------------------------------------------------------+
+
+ALTER TABLE compaction_output_parallelism SET 'compaction.experimental_output_parallelism' = '0';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: compaction.experimental_output_parallelism, value: 0
+
+ALTER TABLE compaction_output_parallelism SET 'compaction.experimental_output_parallelism' = '-1';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: compaction.experimental_output_parallelism, value: -1
+
+ALTER TABLE compaction_output_parallelism SET 'compaction.experimental_output_parallelism' = 'invalid';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: compaction.experimental_output_parallelism, value: invalid
+
+-- UNSET removes the override without introducing compaction.type or compaction.override.
+ALTER TABLE compaction_output_parallelism UNSET 'compaction.experimental_output_parallelism';
+
+Affected Rows: 0
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE compaction_output_parallelism;
+
++-------------------------------+--------------------------------------------------------------+
+| Table                         | Create Table                                                 |
++-------------------------------+--------------------------------------------------------------+
+| compaction_output_parallelism | CREATE TABLE IF NOT EXISTS "compaction_output_parallelism" ( |
+|                               |   "ts" TIMESTAMP(3) NOT NULL,                                |
+|                               |   "val" INT NULL,                                            |
+|                               |   TIME INDEX ("ts")                                          |
+|                               | )                                                            |
+|                               |                                                              |
+|                               | ENGINE=mito                                                  |
+|                               |                                                              |
++-------------------------------+--------------------------------------------------------------+
+
+SELECT * FROM compaction_output_parallelism ORDER BY ts;
+
++---------------------+-----+
+| ts                  | val |
++---------------------+-----+
+| 1970-01-01T00:00:00 | 10  |
+| 1970-01-01T00:00:01 | 20  |
++---------------------+-----+
+
+DROP TABLE compaction_output_parallelism;
+
+Affected Rows: 0
+
+CREATE TABLE invalid_parallelism (ts TIMESTAMP TIME INDEX)
+WITH ('compaction.experimental_output_parallelism' = '0');
+
+Error: 1004(InvalidArguments), Invalid region options, compaction.experimental_output_parallelism must be greater than 0
+

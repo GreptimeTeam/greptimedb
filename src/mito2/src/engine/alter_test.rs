@@ -2074,6 +2074,68 @@ async fn test_alter_twcs_option_enables_compaction_override() {
 }
 
 #[tokio::test]
+async fn test_alter_compaction_output_parallelism_preserves_existing_snapshots() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(
+                CreateRequestBuilder::new()
+                    .insert_option("compaction.experimental_output_parallelism", "4")
+                    .build(),
+            ),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let initial_version = region.version();
+    assert_eq!(
+        Some(4),
+        initial_version.options.compaction_output_parallelism
+    );
+    for (kind, expected) in [
+        (
+            AlterKind::SetRegionOptions {
+                options: vec![SetRegionOption::CompactionOutputParallelism(Some(1))],
+            },
+            Some(1),
+        ),
+        (
+            AlterKind::UnsetRegionOptions {
+                keys: vec![UnsetRegionOption::CompactionOutputParallelism],
+            },
+            None,
+        ),
+    ] {
+        engine
+            .handle_request(region_id, RegionRequest::Alter(RegionAlterRequest { kind }))
+            .await
+            .unwrap();
+        let version = region.version();
+        assert_eq!(expected, version.options.compaction_output_parallelism);
+        assert!(!version.options.compaction_override);
+        assert_eq!(
+            initial_version.options.compaction,
+            version.options.compaction
+        );
+        assert_eq!(
+            Some(4),
+            initial_version.options.compaction_output_parallelism
+        );
+    }
+    // Direct engine callers must get the same validation as SQL callers.
+    let invalid = RegionRequest::Alter(RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::CompactionOutputParallelism(Some(0))],
+        },
+    });
+    assert!(engine.handle_request(region_id, invalid).await.is_err());
+    assert_eq!(None, region.version().options.compaction_output_parallelism);
+}
+
+#[tokio::test]
 async fn test_mixed_region_options_are_published_after_flush() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
@@ -2122,6 +2184,7 @@ async fn test_mixed_region_options_are_published_after_flush() {
                                 "2h".to_string(),
                             ),
                             SetRegionOption::MaxRowGroupRowCount(Some(1024)),
+                            SetRegionOption::CompactionOutputParallelism(Some(4)),
                         ],
                     },
                 }),
@@ -2135,6 +2198,7 @@ async fn test_mixed_region_options_are_published_after_flush() {
     assert_eq!(None, version.options.ttl);
     assert!(!version.options.compaction_override);
     assert_eq!(None, version.options.max_row_group_row_count);
+    assert_eq!(None, version.options.compaction_output_parallelism);
 
     listener.wake_flush();
     alter_job.await.unwrap();
@@ -2143,6 +2207,7 @@ async fn test_mixed_region_options_are_published_after_flush() {
     assert_eq!(Some(Duration::from_secs(500).into()), version.options.ttl);
     assert!(version.options.compaction_override);
     assert_eq!(Some(1024), version.options.max_row_group_row_count);
+    assert_eq!(Some(4), version.options.compaction_output_parallelism);
 }
 
 #[tokio::test(flavor = "multi_thread")]

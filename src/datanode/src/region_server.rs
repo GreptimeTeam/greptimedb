@@ -13,10 +13,6 @@
 // limitations under the License.
 
 mod catalog;
-#[cfg(feature = "enterprise")]
-mod flow_write;
-#[cfg(feature = "enterprise")]
-use flow_write::TrackedPayload;
 mod registrations;
 mod remote_dyn_filter;
 
@@ -42,14 +38,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-#[cfg(feature = "enterprise")]
-use common_grpc::flow_write::{COMMAND_KEY, FlowWriteRegistry, Reply};
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use common_runtime::Runtime;
+use common_runtime::{JoinHandle, Runtime};
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
@@ -83,7 +77,7 @@ use session::context::{
 };
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
-    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, RELATIONAL_ENGINE_NAME,
 };
 use store_api::region_engine::{
     RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, RemapManifestsRequest,
@@ -122,8 +116,6 @@ pub struct RegionServer {
     inner: Arc<RegionServerInner>,
     flight_compression: FlightCompression,
     suspend: Arc<AtomicBool>,
-    #[cfg(feature = "enterprise")]
-    flow_write_registry: Arc<FlowWriteRegistry<TrackedPayload, Reply>>,
 }
 
 pub struct RegionStat {
@@ -172,8 +164,6 @@ impl RegionServer {
             )),
             flight_compression,
             suspend: Arc::new(AtomicBool::new(false)),
-            #[cfg(feature = "enterprise")]
-            flow_write_registry: Arc::new(FlowWriteRegistry::default()),
         }
     }
 
@@ -250,11 +240,10 @@ impl RegionServer {
         if RegionServerInner::is_ingest_request(&request) {
             let inner = self.inner.clone();
             let request_type = request.request_type();
-            return common_runtime::spawn_ingest(async move {
+            let task = common_runtime::spawn_ingest(async move {
                 inner.handle_request(region_id, request).await
-            })
-            .await
-            .context(RuntimeJoinSnafu { request_type })?;
+            });
+            return join_ingest_task(task, request_type).await?;
         }
 
         self.inner.handle_request(region_id, request).await
@@ -472,6 +461,26 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
+    /// Sets the role of a region from a lease the metasrv grants until `deadline`, in reply to a
+    /// heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because the
+    /// region was downgraded or (re)opened after `sent_at`.
+    pub fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        sent_at: std::time::Instant,
+        deadline: std::time::Instant,
+    ) -> Result<bool> {
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        engine
+            .set_region_role_with_lease(region_id, role, sent_at, deadline)
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
     /// Set region role state gracefully.
     ///
     /// For [SettableRegionRoleState::Follower]:
@@ -643,17 +652,20 @@ impl RegionServer {
         let first_region_id = first.region_id;
         let request_type = first.request.request_type();
 
-        // Upstream batching keeps requests from the same engine together.
-        // Ordinary execution reports engine lookup failures per entry.
+        // Ordinary execution handles mixed engines and unavailable regions per entry.
         let Ok(CurrentEngine::Engine(engine)) =
             self.inner.get_engine(first_region_id, &RegionChange::None)
         else {
             return Ok(Either::Right(requests));
         };
         if engine.name() != METRIC_ENGINE_NAME
-            || !requests
-                .iter()
-                .all(|request| matches!(request.request, RegionRequest::Put(_)))
+            || !requests.iter().all(|request| {
+                matches!(request.request, RegionRequest::Put(_))
+                    && matches!(
+                        self.inner.region_map.get(&request.region_id).as_deref(),
+                        Some(RegionEngineWithStatus::Ready(engine)) if engine.name() == METRIC_ENGINE_NAME
+                    )
+            })
         {
             return Ok(Either::Right(requests));
         }
@@ -679,14 +691,13 @@ impl RegionServer {
             "RegionServer::handle_metric_batch_puts",
             batch_size = batch_size
         ));
-        let results = common_runtime::spawn_ingest(async move {
+        let task = common_runtime::spawn_ingest(async move {
             metric_engine
                 .put_regions_batch(put_requests)
                 .trace(span)
                 .await
-        })
-        .await
-        .context(RuntimeJoinSnafu { request_type })?;
+        });
+        let results = join_ingest_task(task, request_type).await?;
         let mut response = BatchRegionResponse {
             affected_rows: 0,
             extensions: HashMap::new(),
@@ -746,7 +757,7 @@ impl RegionServer {
             .collect();
         let started = Instant::now();
         let tracing_context = TracingContext::from_current_span();
-        common_runtime::spawn_ingest(async move {
+        let task = common_runtime::spawn_ingest(async move {
             let mut pending = engine
                 .handle_batch_put_requests(puts)
                 .into_iter()
@@ -800,10 +811,8 @@ impl RegionServer {
             }
             response.failures.sort_unstable_by_key(|(index, _)| *index);
             response
-        })
-        .await
-        .context(RuntimeJoinSnafu { request_type })
-        .map(Either::Left)
+        });
+        join_ingest_task(task, request_type).await.map(Either::Left)
     }
 
     /// Returns the mito engine when there are at least two requests, every one a put into a ready
@@ -1056,15 +1065,6 @@ impl RegionServerHandler for RegionServer {
         &self,
         request: RegionRequestV1,
     ) -> ServerResult<RegionResponseV1> {
-        #[cfg(feature = "enterprise")]
-        if request
-            .header
-            .as_ref()
-            .and_then(|header| header.query_context.as_ref())
-            .is_some_and(|context| context.extensions.contains_key(COMMAND_KEY))
-        {
-            return self.handle_flow_write_request(request).await;
-        }
         let accept_partial_result = request
             .header
             .as_ref()
@@ -2077,6 +2077,9 @@ impl RegionServerInner {
                     RegionAttribute::File => {
                         // do nothing
                     }
+                    RegionAttribute::Relational => {
+                        // do nothing
+                    }
                 }
             }
             RegionChange::Deregisters => {
@@ -2284,12 +2287,28 @@ fn is_metric_engine(engine: &str) -> bool {
 /// Records failed open attempts without using arbitrary engine names as metric labels.
 fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usize) {
     let engine = match engine {
-        MITO_ENGINE_NAME | METRIC_ENGINE_NAME | FILE_ENGINE_NAME => engine,
+        MITO_ENGINE_NAME | METRIC_ENGINE_NAME | FILE_ENGINE_NAME | RELATIONAL_ENGINE_NAME => engine,
         _ => "unknown",
     };
     crate::metrics::REGION_OPEN_FAILURES_TOTAL
         .with_label_values(&[engine, status_code.as_ref()])
         .inc_by(count as u64);
+}
+
+/// Awaits an ingest task without treating a join failure as an entry-level write result.
+async fn join_ingest_task<T>(task: JoinHandle<T>, request_type: &'static str) -> Result<T> {
+    task.await
+        .inspect_err(|error| {
+            let reason = if error.is_panic() {
+                "panic"
+            } else {
+                "cancelled"
+            };
+            crate::metrics::INGEST_TASK_FAILURES_TOTAL
+                .with_label_values(&[request_type, reason])
+                .inc();
+        })
+        .context(RuntimeJoinSnafu { request_type })
 }
 
 /// Records the result of `count` ingest requests answered by one response: the rows they
@@ -2317,6 +2336,7 @@ fn parse_region_attribute(
             Ok(RegionAttribute::Metric { physical })
         }
         FILE_ENGINE_NAME => Ok(RegionAttribute::File),
+        RELATIONAL_ENGINE_NAME => Ok(RegionAttribute::Relational),
         _ => error::UnexpectedSnafu {
             violated: format!("Unknown engine: {}", engine),
         }
@@ -2329,6 +2349,7 @@ enum RegionAttribute {
     Mito,
     Metric { physical: bool },
     File,
+    Relational,
 }
 
 impl RegionAttribute {
@@ -2337,6 +2358,7 @@ impl RegionAttribute {
             RegionAttribute::Mito => MITO_ENGINE_NAME,
             RegionAttribute::Metric { .. } => METRIC_ENGINE_NAME,
             RegionAttribute::File => FILE_ENGINE_NAME,
+            RegionAttribute::Relational => RELATIONAL_ENGINE_NAME,
         }
     }
 }
@@ -3611,9 +3633,11 @@ mod tests {
         let mut env = TestEnv::with_prefix("region-server-metric-results").await;
         let mito = env.create_engine(MitoConfig::default()).await;
         let metric = Arc::new(
-            MetricEngine::try_new(mito, metric_engine::config::EngineConfig::default()).unwrap(),
+            MetricEngine::try_new(mito.clone(), metric_engine::config::EngineConfig::default())
+                .unwrap(),
         );
         let mut server = mock_region_server();
+        server.register_engine(Arc::new(mito));
         server.register_engine(metric.clone());
         let mut inserts = Vec::new();
         for table in [10, 20] {
@@ -3712,6 +3736,50 @@ mod tests {
                 .iter()
                 .all(|(_, error)| error.retry_hint() == RetryHint::RetryAfterRouteRefresh)
         );
+
+        let regular_region = RegionId::new(30, 0);
+        let mut create = CreateRequestBuilder::new().build();
+        create.table_dir = "metric-results/30/".to_string();
+        let regular = InsertRequest {
+            region_id: regular_region.as_u64(),
+            rows: Some(Rows {
+                schema: rows_schema(&create),
+                rows: build_rows(0, 3),
+            }),
+            ..Default::default()
+        };
+        server
+            .handle_request(regular_region, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        // A metric entry must not route its Mito2 sibling through the metric engine.
+        for (metric_insert, metric_failed) in inserts.iter().zip([false, true]) {
+            for metric_first in [true, false] {
+                let requests = if metric_first {
+                    vec![metric_insert.clone(), regular.clone()]
+                } else {
+                    vec![regular.clone(), metric_insert.clone()]
+                };
+                let response = server
+                    .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests {
+                        requests,
+                    }))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.affected_rows,
+                    3 + usize::from(!metric_failed),
+                    "{:?}",
+                    response.failures
+                );
+                assert_eq!(response.failures.len(), usize::from(metric_failed));
+                if let Some((index, error)) = response.failures.first() {
+                    assert_eq!(*index, usize::from(!metric_first));
+                    assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+                    assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+                }
+            }
+        }
     }
 
     #[tokio::test]

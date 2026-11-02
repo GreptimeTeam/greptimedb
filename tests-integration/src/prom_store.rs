@@ -778,6 +778,329 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_native_histogram_remote_read() {
+        let standalone =
+            GreptimeDbStandaloneBuilder::new("standalone_native_histogram_remote_read")
+                .build()
+                .await;
+        check_native_histogram_remote_read(standalone.fe_instance()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_distributed_native_histogram_remote_read() {
+        let cluster =
+            tests::create_distributed_instance("distributed_native_histogram_remote_read").await;
+        check_native_histogram_remote_read(&cluster.frontend()).await;
+    }
+
+    async fn check_native_histogram_remote_read(instance: &Arc<Instance>) {
+        use api::greptime_proto::io::prometheus::write::v2::{
+            Histogram,
+            histogram::{Count, ZeroCount},
+        };
+        use common_query::native_histogram::{
+            encode_native_histogram, native_histogram_column_schema,
+        };
+        use servers::prom_remote_write::v2::test_util as remote_write_v2;
+
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "prometheus"));
+        instance
+            .do_query("CREATE DATABASE prometheus", ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_prom_handler(instance.clone(), None, true, Default::default(), None)
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let large = (1u64 << 53) + 1;
+        let histograms = vec![
+            Histogram {
+                count: Some(Count::CountInt(6)),
+                timestamp: 1000,
+                positive_spans: vec![api::greptime_proto::io::prometheus::write::v2::BucketSpan {
+                    offset: 0,
+                    length: 3,
+                }],
+                positive_deltas: vec![1, 2, -1],
+                sum: 10.0,
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountInt(large)),
+                zero_count: Some(ZeroCount::ZeroCountInt(large)),
+                timestamp: 2000,
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountFloat(6.0)),
+                zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+                positive_spans: vec![api::greptime_proto::io::prometheus::write::v2::BucketSpan {
+                    offset: 3,
+                    length: 2,
+                }],
+                positive_counts: vec![2.0, 3.5],
+                timestamp: 3000,
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountInt(0)),
+                sum: f64::from_bits(0x7ff0_0000_0000_0002),
+                timestamp: 4000,
+                ..Default::default()
+            },
+        ];
+        let request = remote_write_v2::request_with_labels_and_histograms(
+            vec![(prom_store::METRIC_NAME_LABEL, "latency"), ("job", "api")],
+            histograms,
+        );
+        let response = client
+            .post("/v1/prometheus/write?db=prometheus")
+            .header(
+                "content-type",
+                "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+            )
+            .header("content-encoding", "snappy")
+            .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
+            .send()
+            .await;
+        assert_eq!(response.status(), 204, "{}", response.text().await);
+        let (scalar, _) = to_grpc_row_insert_requests(&WriteRequest {
+            timeseries: vec![prom_store::mock_timeseries()[0].clone()],
+            ..Default::default()
+        })
+        .unwrap();
+        instance.write(scalar, ctx.clone(), true).await.unwrap();
+
+        for flushed in [false, true] {
+            if flushed {
+                instance
+                    .do_query("ADMIN FLUSH_TABLE('latency')", ctx.clone())
+                    .await
+                    .remove(0)
+                    .unwrap();
+            }
+            for accepted_response_types in [vec![], vec![0], vec![1, 0]] {
+                let mut query = remote_query("latency");
+                query.end_timestamp_ms = 4000;
+                query.matchers.push(LabelMatcher {
+                    name: "job".to_string(),
+                    value: "api".to_string(),
+                    r#type: MatcherType::Eq as i32,
+                });
+                let mut empty = query.clone();
+                empty.start_timestamp_ms = 5000;
+                empty.end_timestamp_ms = 6000;
+                let request = ReadRequest {
+                    queries: vec![
+                        remote_query("metric1"),
+                        query,
+                        remote_query("missing_metric"),
+                        empty,
+                    ],
+                    accepted_response_types,
+                };
+                let response = client
+                    .post("/v1/prometheus/read?db=prometheus")
+                    .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
+                    .send()
+                    .await;
+                assert_eq!(response.status(), 200, "{}", response.text().await);
+                assert_eq!(response.headers()["content-type"], "application/x-protobuf");
+                assert_eq!(response.headers()["content-encoding"], "snappy");
+                let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
+                let response = ReadResponse::decode(body.as_slice()).unwrap();
+                assert_eq!(response.results.len(), 4);
+                assert!(!response.results[0].timeseries[0].samples.is_empty());
+                assert!(response.results[2].timeseries.is_empty());
+                assert!(response.results[3].timeseries.is_empty());
+                let series = &response.results[1].timeseries[0];
+                assert_eq!(
+                    series.labels,
+                    vec![
+                        Label {
+                            name: "__name__".to_string(),
+                            value: "latency".to_string()
+                        },
+                        Label {
+                            name: "job".to_string(),
+                            value: "api".to_string()
+                        }
+                    ]
+                );
+                assert_eq!(series.histograms.len(), 4);
+                assert_eq!(series.histograms[0].positive_deltas, vec![1, 2, -1]);
+                assert_eq!(series.histograms[2].positive_counts, vec![2.0, 3.5]);
+                assert_eq!(
+                    series.histograms[1].count,
+                    Some(api::prom_store::remote::histogram::Count::CountInt(large))
+                );
+                assert_eq!(
+                    series.histograms[1].zero_count,
+                    Some(api::prom_store::remote::histogram::ZeroCount::ZeroCountInt(
+                        large
+                    ))
+                );
+                assert_eq!(
+                    series.histograms[2].count,
+                    Some(api::prom_store::remote::histogram::Count::CountFloat(6.0))
+                );
+                assert_eq!(series.histograms[3].sum.to_bits(), 0x7ff0_0000_0000_0002);
+            }
+        }
+        let response = client
+            .post("/v1/prometheus/read?db=prometheus")
+            .body(
+                prom_store::snappy_compress(
+                    &ReadRequest {
+                        queries: vec![remote_query("latency")],
+                        accepted_response_types: vec![1],
+                    }
+                    .encode_to_vec(),
+                )
+                .unwrap(),
+            )
+            .send()
+            .await;
+        assert!(!response.status().is_success());
+        assert!(
+            response
+                .text()
+                .await
+                .contains("does not support any of the requested response types")
+        );
+
+        // Typed inserts supply sub-millisecond pre-epoch times that neither OTLP
+        // nor millisecond Remote Write can express, and use a legacy field name.
+        for (table, datatype, timestamp) in [
+            (
+                "legacy_us",
+                ColumnDataType::TimestampMicrosecond,
+                ValueData::TimestampMicrosecondValue(-1001),
+            ),
+            (
+                "legacy_ns",
+                ColumnDataType::TimestampNanosecond,
+                ValueData::TimestampNanosecondValue(-1_001_000),
+            ),
+        ] {
+            let mut histogram_schema = native_histogram_column_schema().unwrap();
+            histogram_schema.column_name = "payload".to_string();
+            let histogram = encode_native_histogram(&Histogram {
+                count: Some(Count::CountInt(large)),
+                zero_count: Some(ZeroCount::ZeroCountInt(large)),
+                ..Default::default()
+            })
+            .unwrap();
+            instance
+                .write(
+                    RowInsertRequests {
+                        inserts: vec![RowInsertRequest {
+                            table_name: table.to_string(),
+                            rows: Some(Rows {
+                                schema: vec![
+                                    api::v1::ColumnSchema {
+                                        column_name: "event_time".to_string(),
+                                        datatype: datatype as i32,
+                                        semantic_type: SemanticType::Timestamp as i32,
+                                        ..Default::default()
+                                    },
+                                    histogram_schema,
+                                ],
+                                rows: vec![Row {
+                                    values: vec![
+                                        Value {
+                                            value_data: Some(timestamp),
+                                        },
+                                        Value {
+                                            value_data: Some(histogram),
+                                        },
+                                    ],
+                                }],
+                            }),
+                        }],
+                    },
+                    ctx.clone(),
+                    false,
+                )
+                .await
+                .unwrap();
+            for flushed in [false, true] {
+                if flushed {
+                    instance
+                        .do_query(&format!("ADMIN FLUSH_TABLE('{table}')"), ctx.clone())
+                        .await
+                        .remove(0)
+                        .unwrap();
+                }
+                let mut query = remote_query(table);
+                query.start_timestamp_ms = -2;
+                query.end_timestamp_ms = 0;
+                let response = post_remote_read(&client, vec![query]).await;
+                assert_eq!(response.status(), 200, "{}", response.text().await);
+                let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
+                let response = ReadResponse::decode(body.as_slice()).unwrap();
+                let series = &response.results[0].timeseries[0];
+                assert_eq!(series.labels.len(), 1);
+                assert_eq!(series.histograms[0].timestamp, -2);
+                assert_eq!(
+                    series.histograms[0].count,
+                    Some(api::prom_store::remote::histogram::Count::CountInt(large))
+                );
+            }
+        }
+        // Bypass ingestion's histogram codec to exercise whole-request failure.
+        let ValueData::StructValue(mut malformed) =
+            encode_native_histogram(&Histogram::default()).unwrap()
+        else {
+            unreachable!()
+        };
+        malformed.items[14].value_data = Some(ValueData::F64Value(0.0));
+        instance
+            .write(
+                RowInsertRequests {
+                    inserts: vec![RowInsertRequest {
+                        table_name: "malformed_histogram".to_string(),
+                        rows: Some(Rows {
+                            schema: vec![
+                                api::v1::ColumnSchema {
+                                    column_name: "ts".to_string(),
+                                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                                    semantic_type: SemanticType::Timestamp as i32,
+                                    ..Default::default()
+                                },
+                                native_histogram_column_schema().unwrap(),
+                            ],
+                            rows: vec![Row {
+                                values: vec![
+                                    Value {
+                                        value_data: Some(ValueData::TimestampMillisecondValue(
+                                            1000,
+                                        )),
+                                    },
+                                    Value {
+                                        value_data: Some(ValueData::StructValue(malformed)),
+                                    },
+                                ],
+                            }],
+                        }),
+                    }],
+                },
+                ctx.clone(),
+                false,
+            )
+            .await
+            .unwrap();
+        for queries in [
+            vec![remote_query("metric1"), remote_query("malformed_histogram")],
+            vec![remote_query("malformed_histogram"), remote_query("metric1")],
+        ] {
+            let response = post_remote_read(&client, queries).await;
+            assert_eq!(response.status(), 500);
+        }
+    }
+
     fn remote_query(metric: &str) -> Query {
         Query {
             start_timestamp_ms: 1000,

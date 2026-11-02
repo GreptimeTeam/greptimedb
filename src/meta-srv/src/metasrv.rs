@@ -67,6 +67,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::discovery;
+use crate::discovery::node_info::NodeInfoAccessor;
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
@@ -76,6 +77,7 @@ use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
+use crate::procedure::drain_datanode::manager::DrainDatanodeManagerRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
@@ -515,9 +517,13 @@ pub trait SelectorFactory: Send + Sync {
     fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef;
 
     /// Builds the resolver shared by allocation and failover callers.
+    ///
+    /// The accessor includes last-known records of inactive source nodes; discovery
+    /// is the shared scheduling-aware view of active nodes.
     fn build_affinity_resolver(
         &self,
-        _meta_peer_client: MetaPeerClientRef,
+        _node_info_accessor: Arc<dyn NodeInfoAccessor>,
+        _peer_discovery: PeerDiscoveryRef,
     ) -> Option<AffinityResolverRef> {
         None
     }
@@ -601,6 +607,7 @@ pub struct Metasrv {
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
+    drain_datanode_manager: DrainDatanodeManagerRef,
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
@@ -909,6 +916,11 @@ impl Metasrv {
 
     pub fn region_migration_manager(&self) -> &RegionMigrationManagerRef {
         &self.region_migration_manager
+    }
+
+    /// Returns the [`DrainDatanodeManagerRef`].
+    pub fn drain_datanode_manager(&self) -> &DrainDatanodeManagerRef {
+        &self.drain_datanode_manager
     }
 
     pub fn publish(&self) -> Option<PublisherRef> {

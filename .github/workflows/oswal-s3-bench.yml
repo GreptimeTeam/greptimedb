@@ -117,6 +117,18 @@ jobs:
           --timeout-minutes "$BENCHMARK_TIMEOUT_MINUTES" --ttl-hours "$JANITOR_TTL_HOURS"
         python3 greptimedb/.github/scripts/oswal-s3-bench.py image --tag "$GREPTIMEDB_TAG" --image "$GREPTIMEDB_IMAGE_INPUT" \
           --images "$OSWAL_IMAGES"
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Pull every GreptimeDB image and record its version
       id: images
       env:
@@ -200,6 +212,18 @@ jobs:
       run: |
         bash greptimedb/.github/scripts/pull-benchmark-image.sh greptime/minio:2024
         docker compose -f greptimedb/tests-integration/fixtures/docker-compose.yml up -d --wait minio
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Pull and check images, write the plan
       run: |
         bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull

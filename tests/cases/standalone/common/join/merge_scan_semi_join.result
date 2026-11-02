@@ -98,6 +98,337 @@ GROUP BY key_id ORDER BY key_id;
 | 33     | 2026-10-09T00:00:00 |
 +--------+---------------------+
 
+-- Reproduce issue 9492 at parallelism 2 with remote dynamic filters enabled.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 2;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 2                 |
++-------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| true                                        |
++---------------------------------------------+
+
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                  |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: merge_semi_data.key_id ASC NULLS LAST                                                                                           |
+|               |   Projection: merge_semi_data.key_id, min(merge_semi_data.ts) AS first_ts                                                             |
+|               |     Aggregate: groupBy=[[merge_semi_data.key_id]], aggr=[[min(merge_semi_data.ts)]]                                                   |
+|               |       LeftSemi Join: merge_semi_data.key_id = __correlated_sq_1.key_id                                                                |
+|               |         Projection: merge_semi_data.ts, merge_semi_data.key_id                                                                        |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                             |
+|               | Filter: merge_semi_data.key_id IS NOT NULL                                                                                            |
+|               |   TableScan: merge_semi_data, partial_filters=[merge_semi_data.key_id IS NOT NULL]                                                    |
+|               | ]]                                                                                                                                    |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                               |
+|               | SubqueryAlias: __correlated_sq_1                                                                                                      |
+|               |   Projection: merge_semi_data.key_id                                                                                                  |
+|               |     Filter: merge_semi_data.is_match AND merge_semi_data.key_id IS NOT NULL                                                           |
+|               |       TableScan: merge_semi_data, partial_filters=[merge_semi_data.is_match, merge_semi_data.key_id IS NOT NULL]                      |
+|               | ]]                                                                                                                                    |
+| physical_plan | SortPreservingMergeExec: [key_id@0 ASC NULLS LAST]                                                                                    |
+|               |   ProjectionExec: expr=[key_id@0 as key_id, min(merge_semi_data.ts)@1 as first_ts]                                                    |
+|               |     SortExec: expr=[key_id@0 ASC NULLS LAST], preserve_partitioning=[true]                                                            |
+|               |       AggregateExec: mode=SinglePartitioned, gby=[key_id@1 as key_id], aggr=[min(merge_semi_data.ts)]                                 |
+|               |         HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(key_id@1, key_id@0)]                                                 |
+|               |           RepartitionExec: partitioning=Hash([key_id@1], 2), input_partitions=2                                                       |
+|               |             ProjectionExec: expr=[ts@0 as ts, key_id@1 as key_id]                                                                     |
+|               |               MergeScanExec: peers=REDACTED
+|               |           RepartitionExec: partitioning=Hash([key_id@0], 2), input_partitions=2                                                       |
+|               |             MergeScanExec: peers=REDACTED
+|               |                                                                                                                                       |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
++--------+---------------------+
+| key_id | first_ts            |
++--------+---------------------+
+| 1      | 2026-10-09 00:00:00 |
+| 2      | 2026-10-09 00:00:00 |
+| 3      | 2026-10-09 00:00:00 |
+| 11     | 2026-10-09 00:00:00 |
+| 12     | 2026-10-09 00:00:00 |
+| 13     | 2026-10-09 00:00:00 |
+| 21     | 2026-10-09 00:00:00 |
+| 22     | 2026-10-09 00:00:00 |
+| 23     | 2026-10-09 00:00:00 |
+| 31     | 2026-10-09 00:00:00 |
+| 32     | 2026-10-09 00:00:00 |
+| 33     | 2026-10-09 00:00:00 |
++--------+---------------------+
+
+-- Use one partition as the result control.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 1;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 1                 |
++-------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| true                                        |
++---------------------------------------------+
+
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: merge_semi_data.key_id ASC NULLS LAST                                                                                         |
+|               |   Projection: merge_semi_data.key_id, min(merge_semi_data.ts) AS first_ts                                                           |
+|               |     Aggregate: groupBy=[[merge_semi_data.key_id]], aggr=[[min(merge_semi_data.ts)]]                                                 |
+|               |       LeftSemi Join: merge_semi_data.key_id = __correlated_sq_1.key_id                                                              |
+|               |         Projection: merge_semi_data.ts, merge_semi_data.key_id                                                                      |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                           |
+|               | Filter: merge_semi_data.key_id IS NOT NULL                                                                                          |
+|               |   TableScan: merge_semi_data, partial_filters=[merge_semi_data.key_id IS NOT NULL]                                                  |
+|               | ]]                                                                                                                                  |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                             |
+|               | SubqueryAlias: __correlated_sq_1                                                                                                    |
+|               |   Projection: merge_semi_data.key_id                                                                                                |
+|               |     Filter: merge_semi_data.is_match AND merge_semi_data.key_id IS NOT NULL                                                         |
+|               |       TableScan: merge_semi_data, partial_filters=[merge_semi_data.is_match, merge_semi_data.key_id IS NOT NULL]                    |
+|               | ]]                                                                                                                                  |
+| physical_plan | ProjectionExec: expr=[key_id@0 as key_id, min(merge_semi_data.ts)@1 as first_ts]                                                    |
+|               |   SortExec: expr=[key_id@0 ASC NULLS LAST], preserve_partitioning=[false]                                                           |
+|               |     AggregateExec: mode=Single, gby=[key_id@1 as key_id], aggr=[min(merge_semi_data.ts)]                                            |
+|               |       HashJoinExec: mode=CollectLeft, join_type=LeftSemi, on=[(key_id@1, key_id@0)]                                                 |
+|               |         ProjectionExec: expr=[ts@0 as ts, key_id@1 as key_id]                                                                       |
+|               |           CooperativeExec                                                                                                           |
+|               |             MergeScanExec: peers=REDACTED
+|               |         CooperativeExec                                                                                                             |
+|               |           MergeScanExec: peers=REDACTED
+|               |                                                                                                                                     |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
++--------+---------------------+
+| key_id | first_ts            |
++--------+---------------------+
+| 1      | 2026-10-09 00:00:00 |
+| 2      | 2026-10-09 00:00:00 |
+| 3      | 2026-10-09 00:00:00 |
+| 11     | 2026-10-09 00:00:00 |
+| 12     | 2026-10-09 00:00:00 |
+| 13     | 2026-10-09 00:00:00 |
+| 21     | 2026-10-09 00:00:00 |
+| 22     | 2026-10-09 00:00:00 |
+| 23     | 2026-10-09 00:00:00 |
+| 31     | 2026-10-09 00:00:00 |
+| 32     | 2026-10-09 00:00:00 |
+| 33     | 2026-10-09 00:00:00 |
++--------+---------------------+
+
+-- Keep two partitions and disable remote dynamic filters as the second control.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 2;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 2                 |
++-------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| false                                       |
++---------------------------------------------+
+
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                  |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: merge_semi_data.key_id ASC NULLS LAST                                                                                           |
+|               |   Projection: merge_semi_data.key_id, min(merge_semi_data.ts) AS first_ts                                                             |
+|               |     Aggregate: groupBy=[[merge_semi_data.key_id]], aggr=[[min(merge_semi_data.ts)]]                                                   |
+|               |       LeftSemi Join: merge_semi_data.key_id = __correlated_sq_1.key_id                                                                |
+|               |         Projection: merge_semi_data.ts, merge_semi_data.key_id                                                                        |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                             |
+|               | Filter: merge_semi_data.key_id IS NOT NULL                                                                                            |
+|               |   TableScan: merge_semi_data, partial_filters=[merge_semi_data.key_id IS NOT NULL]                                                    |
+|               | ]]                                                                                                                                    |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                               |
+|               | SubqueryAlias: __correlated_sq_1                                                                                                      |
+|               |   Projection: merge_semi_data.key_id                                                                                                  |
+|               |     Filter: merge_semi_data.is_match AND merge_semi_data.key_id IS NOT NULL                                                           |
+|               |       TableScan: merge_semi_data, partial_filters=[merge_semi_data.is_match, merge_semi_data.key_id IS NOT NULL]                      |
+|               | ]]                                                                                                                                    |
+| physical_plan | SortPreservingMergeExec: [key_id@0 ASC NULLS LAST]                                                                                    |
+|               |   ProjectionExec: expr=[key_id@0 as key_id, min(merge_semi_data.ts)@1 as first_ts]                                                    |
+|               |     SortExec: expr=[key_id@0 ASC NULLS LAST], preserve_partitioning=[true]                                                            |
+|               |       AggregateExec: mode=SinglePartitioned, gby=[key_id@1 as key_id], aggr=[min(merge_semi_data.ts)]                                 |
+|               |         HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(key_id@1, key_id@0)]                                                 |
+|               |           RepartitionExec: partitioning=Hash([key_id@1], 2), input_partitions=2                                                       |
+|               |             ProjectionExec: expr=[ts@0 as ts, key_id@1 as key_id]                                                                     |
+|               |               MergeScanExec: peers=REDACTED
+|               |           RepartitionExec: partitioning=Hash([key_id@0], 2), input_partitions=2                                                       |
+|               |             MergeScanExec: peers=REDACTED
+|               |                                                                                                                                       |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
++--------+---------------------+
+| key_id | first_ts            |
++--------+---------------------+
+| 1      | 2026-10-09 00:00:00 |
+| 2      | 2026-10-09 00:00:00 |
+| 3      | 2026-10-09 00:00:00 |
+| 11     | 2026-10-09 00:00:00 |
+| 12     | 2026-10-09 00:00:00 |
+| 13     | 2026-10-09 00:00:00 |
+| 21     | 2026-10-09 00:00:00 |
+| 22     | 2026-10-09 00:00:00 |
+| 23     | 2026-10-09 00:00:00 |
+| 31     | 2026-10-09 00:00:00 |
+| 32     | 2026-10-09 00:00:00 |
+| 33     | 2026-10-09 00:00:00 |
++--------+---------------------+
+
+-- Restore SQLness defaults on the shared session and check its next plan.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 4;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| true                                        |
++---------------------------------------------+
+
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                  |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: merge_semi_data.key_id ASC NULLS LAST                                                                                           |
+|               |   Projection: merge_semi_data.key_id, min(merge_semi_data.ts) AS first_ts                                                             |
+|               |     Aggregate: groupBy=[[merge_semi_data.key_id]], aggr=[[min(merge_semi_data.ts)]]                                                   |
+|               |       LeftSemi Join: merge_semi_data.key_id = __correlated_sq_1.key_id                                                                |
+|               |         Projection: merge_semi_data.ts, merge_semi_data.key_id                                                                        |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                             |
+|               | Filter: merge_semi_data.key_id IS NOT NULL                                                                                            |
+|               |   TableScan: merge_semi_data, partial_filters=[merge_semi_data.key_id IS NOT NULL]                                                    |
+|               | ]]                                                                                                                                    |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                               |
+|               | SubqueryAlias: __correlated_sq_1                                                                                                      |
+|               |   Projection: merge_semi_data.key_id                                                                                                  |
+|               |     Filter: merge_semi_data.is_match AND merge_semi_data.key_id IS NOT NULL                                                           |
+|               |       TableScan: merge_semi_data, partial_filters=[merge_semi_data.is_match, merge_semi_data.key_id IS NOT NULL]                      |
+|               | ]]                                                                                                                                    |
+| physical_plan | SortPreservingMergeExec: [key_id@0 ASC NULLS LAST]                                                                                    |
+|               |   ProjectionExec: expr=[key_id@0 as key_id, min(merge_semi_data.ts)@1 as first_ts]                                                    |
+|               |     SortExec: expr=[key_id@0 ASC NULLS LAST], preserve_partitioning=[true]                                                            |
+|               |       AggregateExec: mode=SinglePartitioned, gby=[key_id@1 as key_id], aggr=[min(merge_semi_data.ts)]                                 |
+|               |         HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(key_id@1, key_id@0)]                                                 |
+|               |           RepartitionExec: partitioning=Hash([key_id@1], 4), input_partitions=4                                                       |
+|               |             ProjectionExec: expr=[ts@0 as ts, key_id@1 as key_id]                                                                     |
+|               |               MergeScanExec: peers=REDACTED
+|               |           RepartitionExec: partitioning=Hash([key_id@0], 4), input_partitions=4                                                       |
+|               |             MergeScanExec: peers=REDACTED
+|               |                                                                                                                                       |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+
 DROP TABLE merge_semi_data;
 
 Affected Rows: 0

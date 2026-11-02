@@ -295,8 +295,10 @@ impl fmt::Debug for ObjectStoreLogStore {
 impl ObjectStoreLogStore {
     /// Builds the store under the node and generation prefix derived from `config`,
     /// recovering the catalog from the objects that already exist and writing
-    /// the object that starts the epoch of this instance. Recovery fails on the
-    /// first corrupted or conflicting object.
+    /// the object that starts the epoch of this instance. Before it recovers,
+    /// it fails unless the object store refuses to overwrite an object on a
+    /// conditional create. Recovery fails on the first corrupted or
+    /// conflicting object.
     pub async fn try_new(
         object_store: ObjectStore,
         config: &ObjectStoreWalConfig,
@@ -305,6 +307,7 @@ impl ObjectStoreLogStore {
     ) -> Result<Arc<Self>> {
         let prefix = config.node_prefix(node_id, generation);
         let io = ObjectStoreIo::new(object_store, &prefix)?;
+        io.probe_conditional_create().await?;
         Self::open(Arc::new(io), config, prefix).await
     }
 
@@ -4009,6 +4012,163 @@ mod tests {
             ));
             store.stop().await.unwrap();
         }
+    }
+
+    /// A writer that stores the object whether it exists or not, as an object
+    /// store that ignores the condition of a create does.
+    struct OverwritingWriter {
+        store: ObjectStore,
+        path: String,
+        content: Vec<u8>,
+    }
+
+    impl oio::Write for OverwritingWriter {
+        async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+            self.content.extend_from_slice(&buffer.to_bytes());
+            Ok(())
+        }
+
+        async fn close(&mut self) -> mock::Result<mock::Metadata> {
+            let content = std::mem::take(&mut self.content);
+            self.store.write(&self.path, content).await
+        }
+
+        async fn abort(&mut self) -> mock::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer that writes the object and then reports a failure, as a
+    /// create whose response is lost.
+    struct LosingWriter(oio::Writer);
+
+    impl oio::Write for LosingWriter {
+        async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+            self.0.write(buffer).await
+        }
+
+        async fn close(&mut self) -> mock::Result<mock::Metadata> {
+            self.0.close().await?;
+            Err(mock::Error::new(mock::ErrorKind::Unexpected, "lost response").set_temporary())
+        }
+
+        async fn abort(&mut self) -> mock::Result<()> {
+            self.0.abort().await
+        }
+    }
+
+    async fn keys(object_store: &ObjectStore) -> Vec<String> {
+        let mut keys = object_store
+            .list_with(&format!("{PREFIX}/"))
+            .recursive(true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.metadata().is_file())
+            .map(|entry| entry.path().to_string())
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[tokio::test]
+    async fn test_store_open_deletes_its_conditional_create_probe() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        store.stop().await.unwrap();
+
+        assert_eq!(
+            vec![object_path(&object_store, 0)],
+            keys(&object_store).await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_open_refuses_an_object_store_that_ignores_conditional_create() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let target = object_store.clone();
+        let ignoring = object_store.clone().layer(
+            MockLayerBuilder::default()
+                .writer_factory(Arc::new(move |path, _, _| {
+                    Box::new(OverwritingWriter {
+                        store: target.clone(),
+                        path: path.to_string(),
+                        content: Vec::new(),
+                    })
+                }))
+                .build()
+                .unwrap(),
+        );
+
+        let error = ObjectStoreLogStore::try_new(ignoring, &eager(), 1, 2)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidWalObjectStore { reason, .. }
+                if reason.contains("overwrote the existing object")),
+            "unexpected error: {error:?}"
+        );
+        // The open stops before it writes a start object, and deletes the
+        // probe.
+        assert!(keys(&object_store).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_store_open_accepts_a_retried_first_probe_create() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let lose_next = Arc::new(AtomicBool::new(true));
+        let losing = lose_next.clone();
+        let retrying = object_store.clone().layer(
+            MockLayerBuilder::default()
+                .writer_factory(Arc::new(move |_, _, inner| {
+                    if losing.swap(false, Ordering::SeqCst) {
+                        Box::new(LosingWriter(inner))
+                    } else {
+                        inner
+                    }
+                }))
+                .build()
+                .unwrap(),
+        );
+
+        // The first write of the open is the first create of the probe.
+        let store = open(retrying, &eager()).await;
+        assert!(!lose_next.load(Ordering::SeqCst));
+        store.stop().await.unwrap();
+        assert_eq!(
+            vec![object_path(&object_store, 0)],
+            keys(&object_store).await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_ignores_a_probe_left_behind() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // OpenDAL's unit deleter refuses every delete, so the probe stays.
+        let undeletable = object_store.clone().layer(
+            MockLayerBuilder::default()
+                .deleter_factory(Arc::new(|_| Box::new(())))
+                .build()
+                .unwrap(),
+        );
+        open(undeletable, &eager()).await.stop().await.unwrap();
+        let probe_prefix = format!("{PREFIX}/probes/");
+        let probes = keys(&object_store)
+            .await
+            .into_iter()
+            .filter(|key| key.starts_with(&probe_prefix))
+            .collect::<Vec<_>>();
+        assert_eq!(1, probes.len(), "{probes:?}");
+
+        // The next open recovers the start object of the first one only.
+        let store = open(object_store.clone(), &eager()).await;
+        let io = ObjectStoreIo::new(object_store, PREFIX).unwrap();
+        assert_eq!(vec![0, 1], object_seqs(&io).await);
+        store.stop().await.unwrap();
     }
 
     /// Rebuilds the catalog by decoding whole objects as a recovery oracle.
@@ -10388,7 +10548,7 @@ mod tests {
     /// object store access through the store, one case per fault, and checks
     /// that every row of the *Failure matrix* has one.
     mod fault_matrix {
-        use object_store::layers::mock::{self, MockLayerBuilder, oio};
+        use object_store::layers::mock::MockLayerBuilder;
         use prometheus::Histogram;
 
         use super::*;
@@ -11345,25 +11505,6 @@ mod tests {
             let armed = lose_next.clone();
             assert_identical_retry(io, move || armed.store(true, Ordering::SeqCst)).await;
             assert!(!lose_next.load(Ordering::SeqCst));
-        }
-
-        /// A writer that writes the object and then reports a failure, as a
-        /// create whose response is lost.
-        struct LosingWriter(oio::Writer);
-
-        impl oio::Write for LosingWriter {
-            async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
-                self.0.write(buffer).await
-            }
-
-            async fn close(&mut self) -> mock::Result<mock::Metadata> {
-                self.0.close().await?;
-                Err(mock::Error::new(mock::ErrorKind::Unexpected, "lost response").set_temporary())
-            }
-
-            async fn abort(&mut self) -> mock::Result<()> {
-                self.0.abort().await
-            }
         }
 
         /// Object 2 is created and object 3 in flight when object 1 fails.

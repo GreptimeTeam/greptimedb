@@ -15,7 +15,6 @@
 use std::any::Any;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
-use std::sync::Arc;
 
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
@@ -735,9 +734,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to submit batch: {}", source))]
-    SubmitBatch { source: Arc<Error> },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -876,7 +872,6 @@ impl ErrorExt for Error {
             Partition { source, .. } => source.status_code(),
             MetricEngine { source, .. } => source.status_code(),
             Operator { source, .. } => source.status_code(),
-            SubmitBatch { source, .. } => source.status_code(),
         }
     }
 
@@ -911,7 +906,6 @@ impl ErrorExt for Error {
             Partition { source, .. } => source.retry_hint(),
             MetricEngine { source, .. } => source.retry_hint(),
             Operator { source, .. } => source.retry_hint(),
-            SubmitBatch { source, .. } => source.retry_hint(),
 
             MemoryLimitExceeded { source, .. } => source.retry_hint(),
             CollectRecordbatch { source, .. } => source.retry_hint(),
@@ -1014,8 +1008,9 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
 
 #[cfg(test)]
 mod tests {
-    use common_error::GREPTIME_DB_HEADER_ERROR_CODE;
     use common_error::ext::PlainError;
+    use common_error::mock::MockError;
+    use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
 
     use super::*;
 
@@ -1043,5 +1038,42 @@ mod tests {
                 .unwrap(),
             (StatusCode::RequestOutdated as u32).to_string()
         );
+    }
+
+    #[tokio::test]
+    async fn test_storage_write_retry_hints_reach_tonic_status() {
+        for hint in [
+            RetryHint::NonRetryable,
+            RetryHint::Retryable,
+            RetryHint::RetryAfterRouteRefresh,
+        ] {
+            let source =
+                BoxedError::new(MockError::new(StatusCode::RequestOutdated).with_retry_hint(hint));
+            let completion = common_query::WriteCompletion::new(std::future::ready(Err(source)));
+            let error = Error::ExecuteGrpcQuery {
+                source: completion.wait().await.unwrap_err(),
+                location: Location::default(),
+            };
+            let status: tonic::Status = error.into();
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert_eq!(
+                status
+                    .metadata()
+                    .get(GREPTIME_DB_HEADER_ERROR_CODE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                (StatusCode::RequestOutdated as u32).to_string()
+            );
+            assert_eq!(
+                status
+                    .metadata()
+                    .get(GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                hint.as_str()
+            );
+        }
     }
 }

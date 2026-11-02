@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod attribution;
 mod options;
+mod progress;
 #[cfg(test)]
 mod tests;
 
@@ -35,12 +37,15 @@ use common_meta::rpc::router;
 use futures::future;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use prometheus::Histogram;
+use session::write_progress::WriteProgress;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio_util::sync::CancellationToken;
 
+pub use self::attribution::WriteAttribution;
 pub use self::options::WriteRetryOptions;
+pub use self::progress::TrackedWrite;
 use crate::error::{self, FindRegionLeaderSnafu, RequestRegionSnafu};
 use crate::req_convert::TablePartitioner;
 
@@ -108,6 +113,35 @@ impl WriteDispatcher {
         histogram: Histogram,
     ) -> Result<RegionResponse> {
         self.dispatch_inner(requests, Some(histogram)).await
+    }
+
+    /// Dispatches shared batches with row ownership retained across retries.
+    pub async fn dispatch_attributed(
+        &self,
+        requests: Vec<(RegionRequest, WriteAttribution)>,
+        histogram: Option<Histogram>,
+    ) -> Result<RegionResponse> {
+        let regions = requests
+            .iter()
+            .map(|(request, _)| write_region_id(request))
+            .collect::<Result<Vec<_>>>()?;
+        let peers = self
+            .resolve_peers(&regions)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let writes = requests
+            .into_iter()
+            .zip(regions)
+            .map(|((request, attribution), region)| {
+                Ok((get_peer(&peers, region)?, request, attribution))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let attempts = future::join_all(writes.into_iter().map(|(peer, request, attribution)| {
+            self.send_attributed(peer, request, attribution, histogram.as_ref())
+        }))
+        .await;
+        self.finish(attempts, histogram.as_ref(), None).await
     }
 
     /// Resolves routes before writes are detached from the caller.
@@ -179,17 +213,31 @@ impl WriteDispatcher {
         histogram: Option<Histogram>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<RegionResponse> {
+        self.execute_with_progress(writes, histogram, cancellation, None)
+            .await
+    }
+
+    pub(crate) async fn execute_with_progress(
+        &self,
+        writes: Vec<(PeerRef, RegionRequest)>,
+        histogram: Option<Histogram>,
+        cancellation: Option<&CancellationToken>,
+        progress: Option<Arc<WriteProgress>>,
+    ) -> Result<RegionResponse> {
         let histogram = histogram.as_ref();
+        let progress = progress.as_ref();
         let attempts = future::join_all(writes.into_iter().map(|(peer, request)| async move {
-            if self.retry.is_some() {
-                self.send_batch(peer, request, histogram).await
+            if self.retry.is_some() || progress.is_some() {
+                self.send_batch(peer, request, Vec::new(), histogram, progress)
+                    .await
             } else {
-                vec![self.send(peer, request, histogram).await]
+                vec![(Vec::new(), self.send(peer, request, histogram).await)]
             }
         }))
         .await
         .into_iter()
         .flatten()
+        .map(|(_, attempt)| attempt)
         .collect();
         self.finish(attempts, histogram, cancellation).await
     }
@@ -198,7 +246,18 @@ impl WriteDispatcher {
     pub(crate) async fn send(
         &self,
         peer: PeerRef,
+        request: RegionRequest,
+        histogram: Option<&Histogram>,
+    ) -> WriteAttempt {
+        self.send_attributed(peer, request, WriteAttribution::default(), histogram)
+            .await
+    }
+
+    async fn send_attributed(
+        &self,
+        peer: PeerRef,
         mut request: RegionRequest,
+        attribution: WriteAttribution,
         histogram: Option<&Histogram>,
     ) -> WriteAttempt {
         if let Some(retry) = &self.retry {
@@ -210,6 +269,8 @@ impl WriteDispatcher {
                     RoutedWrite {
                         peer,
                         request: Arc::new(request),
+                        attribution,
+                        owners: None,
                     },
                     histogram,
                 )
@@ -218,7 +279,7 @@ impl WriteDispatcher {
         let _timer = histogram.map(Histogram::start_timer);
         let datanode = self.node_manager.datanode(&peer).await;
         match datanode.handle(request).await {
-            Ok(response) => WriteAttempt::Success(response),
+            Ok(response) => acknowledged(response, &attribution),
             Err(error) => WriteAttempt::Failed {
                 error,
                 request: None,
@@ -262,18 +323,61 @@ impl WriteDispatcher {
         resolve_peers(&self.partition_manager, regions).await
     }
 
+    /// `owners` has one vector per request entry for tracked sends, or is empty otherwise.
     async fn send_batch(
         &self,
         peer: PeerRef,
         mut request: RegionRequest,
+        owners: Vec<Vec<usize>>,
         histogram: Option<&Histogram>,
-    ) -> Vec<WriteAttempt> {
+        progress: Option<&Arc<WriteProgress>>,
+    ) -> Vec<(Vec<usize>, WriteAttempt)> {
         if !matches!(&request.body, Some(Body::Inserts(_) | Body::Deletes(_))) {
-            return vec![self.send(peer, request, histogram).await];
+            return vec![(
+                owners.into_iter().flatten().collect(),
+                self.send(peer, request, histogram).await,
+            )];
         }
         // Upgrade datanodes first and roll back frontends first: old datanodes
         // cannot report which entries succeeded, so retrying a batch may replay writes.
         api::region::set_accept_partial_result(request.header.get_or_insert_default());
+        if self.retry.is_none() {
+            // Standalone consumes owned requests; retaining an Arc prevents local dispatch.
+            let requester = self.node_manager.datanode(&peer).await;
+            let _timer = histogram.map(Histogram::start_timer);
+            return match requester.handle(request).await {
+                Ok(response) => {
+                    if let Some(progress) = progress {
+                        progress.add_written(response.affected_rows);
+                    }
+                    vec![WriteAttempt::Success(response)]
+                }
+                Err(Error::PartialRegion { response }) => {
+                    if let Some(progress) = progress {
+                        progress.add_written(response.affected_rows);
+                    }
+                    let mut attempts = vec![WriteAttempt::Success(RegionResponse {
+                        affected_rows: response.affected_rows,
+                        extensions: response.extensions,
+                        metadata: Vec::new(),
+                    })];
+                    attempts.extend(response.failures.into_iter().map(|(_, error)| {
+                        WriteAttempt::Failed {
+                            error,
+                            request: None,
+                        }
+                    }));
+                    attempts
+                }
+                Err(error) => vec![WriteAttempt::Failed {
+                    error,
+                    request: None,
+                }],
+            }
+            .into_iter()
+            .map(|attempt| (Vec::new(), attempt))
+            .collect();
+        }
         let request = Arc::new(request);
         let requester = self.node_manager.datanode(&peer).await;
         let result = {
@@ -281,39 +385,68 @@ impl WriteDispatcher {
             requester.handle(Arc::clone(&request)).await
         };
         let error = match result {
-            Ok(response) => return vec![WriteAttempt::Success(response)],
+            Ok(response) => {
+                if let Some(progress) = progress {
+                    progress.add_written(response.affected_rows);
+                }
+                return vec![(
+                    owners.into_iter().flatten().collect(),
+                    WriteAttempt::Success(response),
+                )];
+            }
             Err(error) => error,
         };
         let request = match Arc::try_unwrap(request) {
             Ok(request) => request,
             Err(_) => {
-                return vec![WriteAttempt::Failed {
-                    error: UnexpectedSnafu {
-                        err_msg: "Region request is still shared after its RPC completed",
-                    }
-                    .build(),
-                    request: None,
-                }];
+                return vec![(
+                    owners.into_iter().flatten().collect(),
+                    WriteAttempt::Failed {
+                        error: UnexpectedSnafu {
+                            err_msg: "Region request is still shared after its RPC completed",
+                        }
+                        .build(),
+                        request: None,
+                    },
+                )];
             }
         };
         let requests = split_request(request);
+        let mut owners = owners.into_iter();
         match error {
             Error::PartialRegion { response } => {
+                if let Some(progress) = progress {
+                    progress.add_written(response.affected_rows);
+                }
                 let mut failures: HashMap<_, _> = response.failures.into_iter().collect();
-                let mut attempts = vec![WriteAttempt::Success(RegionResponse {
-                    affected_rows: response.affected_rows,
-                    extensions: response.extensions,
-                    metadata: Vec::new(),
-                })];
+                let mut attempts = Vec::new();
+                let mut success_owners = Vec::new();
                 for (index, request) in requests.into_iter().enumerate() {
+                    let owners = owners.next();
                     if let Some(error) = failures.remove(&index) {
+                        let failed_owners = owners.clone().unwrap_or_default();
                         let request = error.retry_hint().is_retryable().then(|| RoutedWrite {
                             peer: Arc::clone(&peer),
+                            attribution: direct_attribution(&request, progress.cloned()),
                             request: Arc::new(request),
+                            owners,
                         });
-                        attempts.push(WriteAttempt::Failed { error, request });
+                        attempts.push((failed_owners, WriteAttempt::Failed { error, request }));
+                    } else {
+                        success_owners.extend(owners.unwrap_or_default());
                     }
                 }
+                attempts.insert(
+                    0,
+                    (
+                        success_owners,
+                        WriteAttempt::Success(RegionResponse {
+                            affected_rows: response.affected_rows,
+                            extensions: response.extensions,
+                            metadata: Vec::new(),
+                        }),
+                    ),
+                );
                 attempts
             }
             error => {
@@ -322,14 +455,21 @@ impl WriteDispatcher {
                 requests
                     .into_iter()
                     .map(|request| {
+                        let owners = owners.next();
+                        let failed_owners = owners.clone().unwrap_or_default();
                         let request = error.retry_hint().is_retryable().then(|| RoutedWrite {
                             peer: Arc::clone(&peer),
+                            attribution: direct_attribution(&request, progress.cloned()),
                             request: Arc::new(request),
+                            owners,
                         });
-                        WriteAttempt::Failed {
-                            error: BatchRequestSnafu.into_error(Arc::clone(&error)),
-                            request,
-                        }
+                        (
+                            failed_owners,
+                            WriteAttempt::Failed {
+                                error: BatchRequestSnafu.into_error(Arc::clone(&error)),
+                                request,
+                            },
+                        )
                     })
                     .collect()
             }
@@ -363,6 +503,8 @@ struct WriteRetry {
 pub(crate) struct RoutedWrite {
     peer: PeerRef,
     request: Arc<RegionRequest>,
+    attribution: WriteAttribution,
+    owners: Option<Vec<usize>>,
 }
 
 impl WriteRetry {
@@ -370,7 +512,7 @@ impl WriteRetry {
         let _timer = histogram.map(Histogram::start_timer);
         let requester = self.node_manager.datanode(&write.peer).await;
         match requester.handle(Arc::clone(&write.request)).await {
-            Ok(response) => WriteAttempt::Success(response),
+            Ok(response) => acknowledged(response, &write.attribution),
             Err(error) => {
                 let request = error.retry_hint().is_retryable().then_some(write);
                 WriteAttempt::Failed { error, request }
@@ -543,19 +685,39 @@ impl WriteRetry {
                 partitioners.get(&table_id).context(UnexpectedSnafu {
                     err_msg: "Refreshed write has no partition snapshot",
                 })?;
-            let requests = partitioner
-                .rebuild_write_requests(request, table_info)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            rebuilt_requests.extend(requests);
+            if let Some(owners) = write.owners {
+                let requests = partitioner
+                    .rebuild_tracked_write_requests(request, table_info, Some(owners))
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                rebuilt_requests.extend(
+                    requests
+                        .into_iter()
+                        .map(|(request, owners)| ((request, WriteAttribution::default()), owners)),
+                );
+            } else {
+                let requests = partitioner
+                    .rebuild_attributed_write(request, table_info, write.attribution)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                rebuilt_requests.extend(requests.into_iter().map(|request| (request, None)));
+            }
         }
-        self.prepare(rebuilt_requests).await
+        let (requests, owners): (Vec<_>, Vec<_>) = rebuilt_requests.into_iter().unzip();
+        let mut writes = self.prepare(requests).await?;
+        for (write, owners) in writes.iter_mut().zip(owners) {
+            write.owners = owners;
+        }
+        Ok(writes)
     }
 
-    async fn prepare(&self, requests: Vec<RegionRequest>) -> Result<Vec<RoutedWrite>> {
+    async fn prepare(
+        &self,
+        requests: Vec<(RegionRequest, WriteAttribution)>,
+    ) -> Result<Vec<RoutedWrite>> {
         let regions = requests
             .iter()
-            .map(write_region_id)
+            .map(|(request, _)| write_region_id(request))
             .collect::<Result<Vec<_>>>()?;
         let peers = resolve_peers(&self.partition_manager, &regions)
             .await
@@ -564,10 +726,12 @@ impl WriteRetry {
         requests
             .into_iter()
             .zip(regions)
-            .map(|(request, region)| {
+            .map(|((request, attribution), region)| {
                 Ok(RoutedWrite {
                     peer: get_peer(&peers, region)?,
                     request: Arc::new(request),
+                    attribution,
+                    owners: None,
                 })
             })
             .collect()
@@ -597,6 +761,41 @@ impl WriteRetry {
             .invalidate(&Context::default(), &caches)
             .await
     }
+}
+
+fn acknowledged(response: RegionResponse, attribution: &WriteAttribution) -> WriteAttempt {
+    match attribution.record(response.affected_rows) {
+        Ok(()) => WriteAttempt::Success(response),
+        Err(error) => WriteAttempt::Failed {
+            error,
+            request: None,
+        },
+    }
+}
+
+pub(crate) fn write_row_count(request: &RegionRequest) -> usize {
+    match &request.body {
+        Some(Body::Inserts(inserts)) => inserts
+            .requests
+            .iter()
+            .filter_map(|request| request.rows.as_ref())
+            .map(|rows| rows.rows.len())
+            .sum(),
+        Some(Body::Deletes(deletes)) => deletes
+            .requests
+            .iter()
+            .filter_map(|request| request.rows.as_ref())
+            .map(|rows| rows.rows.len())
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn direct_attribution(
+    request: &RegionRequest,
+    progress: Option<Arc<WriteProgress>>,
+) -> WriteAttribution {
+    WriteAttribution::new(write_row_count(request), progress)
 }
 
 async fn resolve_peers(

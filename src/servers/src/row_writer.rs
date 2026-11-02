@@ -65,6 +65,10 @@ impl TableData {
         self.schema.len()
     }
 
+    pub(crate) fn column_index(&self, name: &str) -> Option<usize> {
+        self.column_indexes.get(name).copied()
+    }
+
     #[inline]
     pub fn num_rows(&self) -> usize {
         self.rows.len()

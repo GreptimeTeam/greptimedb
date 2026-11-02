@@ -80,8 +80,13 @@ after its TTL, so finish the inspection within that window.
 Trust model on the ECS path: the instance receives only the one-hour runner
 registration token via user data and holds no cloud credentials; the Aliyun
 AK/SK exist only in the control-plane jobs. Instance tags
-(`managed-by=query-regression-ci`, `query-regression-run-id`) feed the janitor
-sweep.
+(`managed-by=query-regression-ci`, `query-regression-run-id`,
+`github-repository`) feed the janitor sweep. The sweep only selects instances
+whose `github-repository` matches the requested repository. Older instances
+without that tag are excluded: verify their ownership before adding the tag,
+or clean them up by explicit instance ID. Per-run teardown remains unchanged.
+Update every repository sharing the account and region to the scoped helper;
+an older janitor can still sweep instances belonging to other repositories.
 
 ### Building and updating the ECS image
 

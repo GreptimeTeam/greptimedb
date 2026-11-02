@@ -137,6 +137,17 @@ impl TestingEnv {
         }
     }
 
+    /// Returns a context factory using the supplied metadata manager.
+    pub(crate) fn context_factory_with_metadata(
+        &self,
+        table_metadata_manager: TableMetadataManagerRef,
+    ) -> DefaultContextFactory {
+        DefaultContextFactory {
+            table_metadata_manager,
+            ..self.context_factory()
+        }
+    }
+
     /// Returns the mutable [MailboxContext].
     pub fn mailbox_context(&mut self) -> &mut MailboxContext {
         &mut self.mailbox_ctx

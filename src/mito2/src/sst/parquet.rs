@@ -35,6 +35,7 @@ use crate::error::{CompressionOptionsSnafu, Result, WriteParquetSnafu};
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
+use crate::sst::parquet::parallel_writer::EncodeRuntime;
 
 pub mod file_range;
 pub mod flat_format;
@@ -44,6 +45,7 @@ pub(crate) mod index_reader;
 pub(crate) mod index_writer;
 pub(crate) mod json_align;
 pub mod metadata;
+pub mod parallel_writer;
 pub mod prefilter;
 pub mod push_decoder;
 pub mod read_columns;
@@ -190,6 +192,11 @@ pub struct WriteOptions {
     pub max_file_size: Option<usize>,
     /// Encoding policy for direct floating-point field columns.
     pub float_field_encoding: FloatFieldEncoding,
+    /// Maximum number of blocking tasks that encode the columns of a row group.
+    /// Values below 2 encode on the writing task.
+    pub encode_parallelism: usize,
+    /// Runtime whose blocking pool runs the parallel column encoding.
+    pub encode_runtime: EncodeRuntime,
 }
 
 impl Default for WriteOptions {
@@ -199,6 +206,8 @@ impl Default for WriteOptions {
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
             max_file_size: None,
             float_field_encoding: FloatFieldEncoding::default(),
+            encode_parallelism: 1,
+            encode_runtime: EncodeRuntime::default(),
         }
     }
 }
@@ -492,7 +501,8 @@ mod tests {
         }
     }
 
-    struct NoopIndexBuilder;
+    /// Builds an indexer with no enabled indexes for SST writer tests.
+    pub(crate) struct NoopIndexBuilder;
 
     #[async_trait::async_trait]
     impl IndexerBuilder for NoopIndexBuilder {
@@ -504,6 +514,54 @@ mod tests {
         ) -> Indexer {
             Indexer::default()
         }
+    }
+
+    #[tokio::test]
+    async fn test_parallel_encoding_writes_identical_file() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let metadata = Arc::new(sst_region_metadata());
+        let mut contents = Vec::new();
+        for encode_parallelism in [1, 3] {
+            let handle = sst_file_handle(0, 1000);
+            let file_path = FixedPathProvider {
+                region_file_id: handle.file_id(),
+            };
+            let path = file_path.build_sst_file_path(handle.file_id());
+            let source = new_flat_source_from_record_batches(vec![
+                new_record_batch_by_range(&["a", "d"], 0, 60),
+                new_record_batch_by_range(&["b", "f"], 0, 40),
+                new_record_batch_by_range(&["b", "h"], 100, 200),
+            ]);
+            let write_opts = WriteOptions {
+                row_group_size: 50,
+                encode_parallelism,
+                ..Default::default()
+            };
+
+            let mut metrics = Metrics::new(WriteType::Flush);
+            let mut writer = ParquetWriter::new_with_object_store(
+                object_store.clone(),
+                metadata.clone(),
+                IndexConfig::default(),
+                NoopIndexBuilder,
+                file_path,
+                &mut metrics,
+            )
+            .await;
+            let info = writer
+                .write_all_flat(source, None, &write_opts)
+                .await
+                .unwrap()
+                .remove(0);
+            assert_eq!(200, info.num_rows);
+            assert_eq!(4, info.num_row_groups);
+            contents.push(object_store.read(&path).await.unwrap().to_vec());
+        }
+        assert!(
+            contents[0] == contents[1],
+            "parallel encoding changed the SST"
+        );
     }
 
     #[tokio::test]
