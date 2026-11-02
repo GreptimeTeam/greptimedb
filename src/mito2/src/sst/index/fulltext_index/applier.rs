@@ -168,6 +168,9 @@ pub type FulltextIndexApplierRef = Arc<FulltextIndexApplier>;
 
 impl FulltextIndexApplier {
     /// Creates a new `FulltextIndexApplier`.
+    ///
+    /// `metadata` resolves the expected fulltext options for JSON path targets.
+    /// Targets whose options cannot be resolved are treated as incompatible with SSTs.
     pub fn new(
         table_dir: String,
         path_type: PathType,

@@ -200,8 +200,11 @@ pub(crate) fn fulltext_target_options(
 ) -> Option<datatypes::schema::FulltextOptions> {
     let path = match target {
         IndexTarget::ColumnId(id) => {
-            return metadata
-                .column_by_id(*id)?
+            let column = metadata.column_by_id(*id)?;
+            if !column.column_schema.data_type.is_string() {
+                return None;
+            }
+            return column
                 .column_schema
                 .fulltext_options()
                 .ok()?
@@ -235,9 +238,48 @@ mod tests {
     use datatypes::arrow::array::{Int64Array, NullArray};
     use datatypes::arrow::buffer::NullBuffer;
     use datatypes::arrow::datatypes::Field;
+    use datatypes::schema::{ColumnSchema, FulltextOptions};
     use datatypes::value::Value;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
 
     use super::*;
+
+    #[test]
+    fn test_fulltext_target_options_requires_string_column() {
+        let options = FulltextOptions {
+            enable: true,
+            ..Default::default()
+        };
+        for data_type in [
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::int64_datatype(),
+        ] {
+            let expected = data_type.is_string().then_some(options.clone());
+            let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("value", data_type, true)
+                    .with_fulltext_options(options.clone())
+                    .unwrap(),
+                column_id: 1,
+                semantic_type: SemanticType::Field,
+            });
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                column_id: 2,
+                semantic_type: SemanticType::Timestamp,
+            });
+            let metadata = builder.build().unwrap();
+            assert_eq!(
+                fulltext_target_options(&metadata, &IndexTarget::ColumnId(1)),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn test_extract_json_type_hint_values_null_type() {

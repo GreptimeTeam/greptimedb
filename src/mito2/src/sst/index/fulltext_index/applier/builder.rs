@@ -285,11 +285,12 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
     fn expr_target(metadata: &RegionMetadata, expr: &Expr) -> Option<IndexTarget> {
         if let Expr::Column(column) = expr {
             let column = metadata.column_by_name(&column.name)?;
-            return column
-                .column_schema
-                .data_type
-                .is_string()
-                .then_some(IndexTarget::ColumnId(column.column_id));
+            if !column.column_schema.data_type.is_string() {
+                return None;
+            }
+            let target = IndexTarget::ColumnId(column.column_id);
+            crate::sst::index::column::fulltext_target_options(metadata, &target)?;
+            return Some(target);
         }
         let (target, ty) = crate::sst::index::column::json_index_target(metadata, expr, |hint| {
             hint.fulltext_index
@@ -546,6 +547,10 @@ mod tests {
     }
 
     fn mock_metadata() -> RegionMetadata {
+        mock_metadata_with_fulltext(FulltextBackend::Bloom)
+    }
+
+    fn mock_metadata_without_fulltext() -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -578,6 +583,57 @@ mod tests {
             ScalarFunctionFactory::from(Arc::new(MatchesTermFunction::default()) as FunctionRef)
                 .provide(Default::default()),
         )
+    }
+
+    #[test]
+    fn test_ordinary_fulltext_requests_require_enabled_index() {
+        for options in [
+            None,
+            Some(FulltextOptions::default()),
+            Some(FulltextOptions {
+                enable: true,
+                ..Default::default()
+            }),
+            Some(FulltextOptions {
+                enable: true,
+                backend: FulltextBackend::Tantivy,
+                ..Default::default()
+            }),
+        ] {
+            let enabled = options.as_ref().is_some_and(|options| options.enable);
+            let bloom_enabled = options
+                .as_ref()
+                .is_some_and(|options| options.enable && options.backend == FulltextBackend::Bloom);
+            let mut metadata = mock_metadata_without_fulltext();
+            if let Some(options) = options {
+                metadata.column_metadatas[0]
+                    .column_schema
+                    .set_fulltext_options(&options)
+                    .unwrap();
+            }
+            let column = datafusion_expr::col("text");
+            let expressions = [
+                (
+                    matches_func().call(vec![column.clone(), "error".lit()]),
+                    enabled,
+                ),
+                (
+                    matches_term_func().call(vec![column.clone(), "error".lit()]),
+                    enabled,
+                ),
+                (
+                    matches_term_func()
+                        .call(vec![lower().call(vec![column.clone()]), "error".lit()]),
+                    enabled,
+                ),
+                (column.like("%error timeout retry%".lit()), bloom_enabled),
+            ];
+            for (expr, expected) in expressions {
+                let mut requests = BTreeMap::new();
+                FulltextIndexApplierBuilder::extract_requests(&expr, &metadata, &mut requests);
+                assert_eq!(!requests.is_empty(), expected, "{expr}");
+            }
+        }
     }
 
     #[test]
@@ -870,7 +926,7 @@ mod tests {
         }
         // Only columns with a bloom fulltext index.
         for metadata in [
-            mock_metadata(),
+            mock_metadata_without_fulltext(),
             mock_metadata_with_fulltext(FulltextBackend::Tantivy),
         ] {
             assert_eq!(
