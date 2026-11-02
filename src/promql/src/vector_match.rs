@@ -796,6 +796,7 @@ fn binary_field(
         // allocates, it is charged by the block it takes as it grows, and it is dropped with the
         // scan, so the next group's list replaces it.
         let mut duplicate_at: Option<usize> = None;
+        let group_key = Arc::new(key.clone());
         overlap(
             one,
             members,
@@ -807,8 +808,9 @@ fn binary_field(
                         evidence.field,
                         point,
                         0,
-                        key.clone(),
-                        duplicate_message(key, side, timestamp_at(point)),
+                        Arc::clone(&group_key),
+                        side,
+                        timestamp_at(point),
                     )?;
                 }
                 if evaluated[point] && duplicate_at.is_none_or(|first| point < first) {
@@ -1582,7 +1584,6 @@ pub type GroupKey = Vec<(Arc<str>, Arc<str>)>;
 
 /// A per-node, per-field reduction of duplicate evidence across output partitions.
 pub struct DuplicateEvidence {
-    grid_len: usize,
     slots: std::sync::Mutex<HashMap<(usize, usize), DuplicateSlot>>,
     reservation: std::sync::Mutex<MemoryReservation>,
     remaining: std::sync::atomic::AtomicUsize,
@@ -1592,6 +1593,7 @@ pub struct DuplicateEvidence {
 
 #[derive(Default)]
 struct DuplicateSlot {
+    grid_len: Option<usize>,
     lhs_present: Vec<bool>,
     rhs_present: Vec<bool>,
     candidates: HashMap<usize, DuplicateCandidate>,
@@ -1603,11 +1605,21 @@ struct DuplicateSlot {
 pub struct DuplicateCandidate {
     pub point: usize,
     pub rank: u8,
-    pub group: GroupKey,
-    pub message: String,
+    pub group: Arc<GroupKey>,
+    /// `"left"` or `"right"`: the side that carried the duplicate.
+    pub side: &'static str,
+    pub timestamp: i64,
 }
 
-fn candidate_owned_bytes(group: &GroupKey, message: &str) -> usize {
+impl DuplicateCandidate {
+    /// The error text, built only when the verdict is reported.
+    pub fn message(&self) -> String {
+        duplicate_message(&self.group, self.side, self.timestamp)
+    }
+}
+
+fn candidate_owned_bytes(group: &GroupKey) -> usize {
+    // Charge label bytes for every retained candidate, conservatively over-counting shared groups.
     group
         .iter()
         .map(|(name, value)| name.len().saturating_add(value.len()))
@@ -1617,15 +1629,13 @@ fn candidate_owned_bytes(group: &GroupKey, message: &str) -> usize {
                 .capacity()
                 .saturating_mul(std::mem::size_of::<(Arc<str>, Arc<str>)>()),
         )
-        .saturating_add(message.len())
         .saturating_add(std::mem::size_of::<DuplicateCandidate>())
 }
 
 impl DuplicateEvidence {
-    /// Creates evidence storage sized to the evaluation grid for each output partition.
-    pub fn new(pool: &Arc<dyn MemoryPool>, grid_len: usize, partitions: usize) -> Self {
+    /// Creates evidence storage for each output partition; slots grow to their binary's grid.
+    pub fn new(pool: &Arc<dyn MemoryPool>, partitions: usize) -> Self {
         Self {
-            grid_len,
             slots: std::sync::Mutex::new(HashMap::new()),
             reservation: std::sync::Mutex::new(
                 MemoryConsumer::new("DuplicateEvidence").register(pool),
@@ -1639,6 +1649,11 @@ impl DuplicateEvidence {
     /// ORs one partition's operand presence into the node/field slot.
     pub fn complete(&self) -> bool {
         self.exit_claim(false)
+    }
+
+    /// Whether every output partition has completed or aborted this evidence generation.
+    pub fn finished(&self) -> bool {
+        self.remaining.load(std::sync::atomic::Ordering::Acquire) == 0
     }
 
     #[cfg(test)]
@@ -1725,6 +1740,29 @@ impl DuplicateEvidence {
     ) -> Result<()> {
         let mut slots = self.slots.lock().unwrap();
         let slot = slots.entry((node_index, field)).or_default();
+        if let Some(existing_len) = slot.grid_len {
+            if existing_len != lhs_present.len() || existing_len != rhs_present.len() {
+                return Err(DataFusionError::Internal(
+                    "binary match grid length differs across partitions".into(),
+                ));
+            }
+        } else {
+            if lhs_present.len() != rhs_present.len() {
+                return Err(DataFusionError::Internal(
+                    "binary match operand grid lengths differ".into(),
+                ));
+            }
+            if slot
+                .candidates
+                .keys()
+                .any(|point| *point >= lhs_present.len())
+            {
+                return Err(DataFusionError::Internal(
+                    "duplicate candidate is outside its binary grid".into(),
+                ));
+            }
+            slot.grid_len = Some(lhs_present.len());
+        }
         if let Some(existing) = slot.filling {
             if existing != filling {
                 return Err(DataFusionError::Internal(
@@ -1734,7 +1772,7 @@ impl DuplicateEvidence {
         } else {
             slot.filling = Some(filling);
         }
-        let len = self.grid_len;
+        let len = lhs_present.len();
         if len > slot.lhs_present.len() {
             let additional = (len - slot.lhs_present.len())
                 .saturating_mul(2)
@@ -1753,22 +1791,26 @@ impl DuplicateEvidence {
     }
 
     /// Retains the lowest-ranked candidate for this point, independent of current presence.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_candidate(
         &self,
         node_index: usize,
         field: usize,
         point: usize,
         rank: u8,
-        group: GroupKey,
-        message: String,
+        group: Arc<GroupKey>,
+        side: &'static str,
+        timestamp: i64,
     ) -> Result<()> {
         let mut slots = self.slots.lock().unwrap();
         let slot = slots.entry((node_index, field)).or_default();
-        if point >= self.grid_len {
-            return Ok(());
+        if slot.grid_len.is_some_and(|len| point >= len) {
+            return Err(DataFusionError::Internal(
+                "duplicate candidate is outside its binary grid".into(),
+            ));
         }
         let Some(existing) = slot.candidates.get(&point) else {
-            let entry_bytes = candidate_owned_bytes(&group, &message)
+            let entry_bytes = candidate_owned_bytes(&group)
                 .saturating_add(std::mem::size_of::<(usize, DuplicateCandidate)>());
             self.reservation.lock().unwrap().try_grow(entry_bytes)?;
             if let Err(error) = slot.candidates.try_reserve(1) {
@@ -1781,14 +1823,15 @@ impl DuplicateEvidence {
                     point,
                     rank,
                     group,
-                    message,
+                    side,
+                    timestamp,
                 },
             );
             return Ok(());
         };
         if rank < existing.rank {
-            let old_bytes = candidate_owned_bytes(&existing.group, &existing.message);
-            let new_bytes = candidate_owned_bytes(&group, &message);
+            let old_bytes = candidate_owned_bytes(&existing.group);
+            let new_bytes = candidate_owned_bytes(&group);
             self.reservation.lock().unwrap().try_grow(new_bytes)?;
             self.reservation.lock().unwrap().shrink(old_bytes);
             slot.candidates.insert(
@@ -1797,26 +1840,12 @@ impl DuplicateEvidence {
                     point,
                     rank,
                     group,
-                    message,
+                    side,
+                    timestamp,
                 },
             );
         }
         Ok(())
-    }
-
-    /// Returns the earliest retained candidate whose merged presence satisfies the final gate.
-    pub fn settled(&self, node_index: usize, field: usize) -> Option<DuplicateCandidate> {
-        let slots = self.slots.lock().unwrap();
-        let slot = slots.get(&(node_index, field))?;
-        let filling = slot.filling?;
-        slot.candidates
-            .iter()
-            .filter_map(|(&point, candidate)| {
-                let lhs = slot.lhs_present.get(point).copied().unwrap_or(false);
-                let rhs = slot.rhs_present.get(point).copied().unwrap_or(false);
-                (if filling { lhs || rhs } else { lhs && rhs }).then(|| candidate.clone())
-            })
-            .min_by_key(|candidate| candidate.point)
     }
 }
 

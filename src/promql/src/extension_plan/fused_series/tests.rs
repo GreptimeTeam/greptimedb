@@ -4707,3 +4707,160 @@ async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
         );
     }
 }
+
+#[test]
+fn duplicate_evidence_claims_share_generation_and_reset_finished_or_reissued_partitions() {
+    use std::sync::{Arc, Mutex};
+
+    use super::{EvidenceGenerations, claim_evidence};
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let slot = Mutex::new(EvidenceGenerations {
+        evidence: None,
+        issued: Vec::new(),
+    });
+    let first = claim_evidence(&slot, 0, 2, &pool);
+    let second = claim_evidence(&slot, 1, 2, &pool);
+    assert!(Arc::ptr_eq(&first, &second));
+    first.complete();
+    second.complete();
+
+    let after_finished = claim_evidence(&slot, 0, 2, &pool);
+    assert!(!Arc::ptr_eq(&first, &after_finished));
+    let after_reclaim = claim_evidence(&slot, 0, 2, &pool);
+    assert!(!Arc::ptr_eq(&after_finished, &after_reclaim));
+}
+
+fn duplicate_evidence_partitioned_exec(
+    partitions: Vec<Vec<RecordBatch>>,
+    left_lookback_ms: i64,
+    right_lookback_ms: i64,
+) -> Arc<dyn ExecutionPlan> {
+    let mut root = binary_tree(raw_schema(), raw_schema()).root().clone();
+    if let NativeExpr::Binary {
+        left,
+        right,
+        matching,
+    } = &mut root.expr
+    {
+        matching.labels = MatchingLabels::On(vec![Arc::from(HOST)]);
+        matching.cardinality = Cardinality::OneToOne;
+        if let NativeExpr::Instant { op, .. } = &mut left.expr {
+            op.lookback_ms = left_lookback_ms;
+        }
+        if let NativeExpr::Instant { op, .. } = &mut right.expr {
+            op.lookback_ms = right_lookback_ms;
+        }
+    }
+    let exec = plan(
+        NativeTree::try_new(root).expect("differently bound instant selectors form a valid tree"),
+        memory_exec_partitioned(partitions),
+    )
+    .expect("one-source binary runs over a partitioned input");
+    assert_eq!(2, exec.properties().partitioning.partition_count());
+    exec
+}
+
+fn match_series(key: &str, job: &str, time: i64, value: f64) -> RecordBatch {
+    frame(&chunk_of(
+        &raw_schema(),
+        &format!("{key}-{job}"),
+        metric(&[(HOST, key), (JOB, job)], Some(METRIC)),
+        &[time],
+        vec![vec![Some(value)]],
+        true,
+    ))
+}
+
+async fn partitioned_duplicate_verdict(exec: Arc<dyn ExecutionPlan>) -> Vec<String> {
+    let context = SessionContext::default().task_ctx();
+    let streams = (0..exec.properties().partitioning.partition_count())
+        .map(|partition| {
+            exec.execute(partition, Arc::clone(&context))
+                .expect("each fused output partition executes")
+        })
+        .collect::<Vec<_>>();
+    let mut errors = Vec::new();
+    for stream in streams {
+        if let Err(error) = stream.try_collect::<Vec<_>>().await {
+            errors.push(error.to_string());
+        }
+    }
+    errors
+}
+
+#[tokio::test]
+async fn duplicate_evidence_merges_presence_across_partitions() {
+    let exec = duplicate_evidence_partitioned_exec(
+        vec![
+            vec![
+                match_series("k", "right-a", GRID_START - 1, 1.0),
+                match_series("k", "right-b", GRID_START - 1, 2.0),
+            ],
+            vec![match_series("k", "left", GRID_START, 3.0)],
+        ],
+        0,
+        GRID_STEP,
+    );
+    let errors = partitioned_duplicate_verdict(exec).await;
+    assert_eq!(
+        1,
+        errors.len(),
+        "the merged verdict is emitted once: {errors:?}"
+    );
+    assert!(
+        errors[0].contains("found duplicate series for the match group"),
+        "{}",
+        errors[0]
+    );
+    assert!(errors[0].contains("{host=\"k\"}"), "{}", errors[0]);
+
+    let only_duplicate_partition = duplicate_evidence_partitioned_exec(
+        vec![
+            vec![
+                match_series("k", "right-a", GRID_START - 1, 1.0),
+                match_series("k", "right-b", GRID_START - 1, 2.0),
+            ],
+            vec![],
+        ],
+        0,
+        GRID_STEP,
+    );
+    assert!(
+        partitioned_duplicate_verdict(only_duplicate_partition)
+            .await
+            .is_empty(),
+        "the duplicate partition has no left presence, so cannot self-report"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_evidence_allows_missing_opposite_side_across_partitions() {
+    let exec = duplicate_evidence_partitioned_exec(
+        vec![
+            vec![
+                match_series("k", "right-a", GRID_START - GRID_STEP, 1.0),
+                match_series("k", "right-b", GRID_START - GRID_STEP, 2.0),
+            ],
+            vec![],
+        ],
+        0,
+        GRID_STEP,
+    );
+    let errors = partitioned_duplicate_verdict(exec).await;
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[tokio::test]
+async fn duplicate_evidence_allows_same_key_at_disjoint_steps_across_partitions() {
+    let exec = duplicate_evidence_partitioned_exec(
+        vec![
+            vec![match_series("k", "right", GRID_START, 1.0)],
+            vec![match_series("k", "left", GRID_START + GRID_STEP, 3.0)],
+        ],
+        0,
+        0,
+    );
+    let errors = partitioned_duplicate_verdict(exec).await;
+    assert!(errors.is_empty(), "{errors:?}");
+}

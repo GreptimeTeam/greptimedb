@@ -1432,7 +1432,7 @@ impl RetainedInput {
 /// output queue and handed over from there.
 struct BinaryRuntime {
     node_index: usize,
-    #[allow(dead_code)] // The next duplicate-evidence step will consume this handle.
+    /// Evidence shared with the other output partitions of this fused-series execution.
     evidence: Option<Arc<DuplicateEvidence>>,
     /// The kernel and the modifiers the compiler bound it with.
     kernel: PairKernel,
@@ -1500,8 +1500,7 @@ impl Reader {
 }
 
 impl BinaryRuntime {
-    /// Evidence slot for one field; the next duplicate-evidence step will consume it.
-    #[allow(dead_code)]
+    /// Identifies this binary node's evidence slot for a field.
     fn slot(&self, field: usize) -> (usize, usize) {
         (self.node_index, field)
     }
@@ -2651,8 +2650,6 @@ struct InputSlot {
 /// borrows of this one owner.
 pub struct NativeExecutionState {
     root: RuntimeNode,
-    #[allow(dead_code)] // Retained at execution-state lifetime for the next evidence step.
-    duplicate_evidence: Option<Arc<DuplicateEvidence>>,
     inputs: Vec<InputSlot>,
     /// A constant root waiting for its only pull; operand scalars remain chunkless.
     scalar_root: Option<(Arc<EvalGrid>, f64, NodeState)>,
@@ -4194,7 +4191,6 @@ impl NativeExecutionState {
         }
         Ok(Self {
             root,
-            duplicate_evidence,
             inputs,
             scalar_root,
         })

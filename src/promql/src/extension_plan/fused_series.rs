@@ -56,7 +56,9 @@ use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{
+    MemoryConsumer, MemoryPool, MemoryReservation, UnboundedMemoryPool,
+};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -1087,6 +1089,70 @@ pub(crate) fn classify_output(
     Ok(classification)
 }
 
+/// Whether the tree has a binary with two vector operands that can produce a duplicate verdict.
+fn native_tree_has_vector_binary(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Binary { left, right, .. } => {
+            (!matches!(left.output, NativeType::Scalar(_))
+                && !matches!(right.output, NativeType::Scalar(_)))
+                || native_tree_has_vector_binary(left)
+                || native_tree_has_vector_binary(right)
+        }
+        NativeExpr::VectorOf { input }
+        | NativeExpr::Instant { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => native_tree_has_vector_binary(input),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            native_tree_has_vector_binary(input)
+                || parameters.iter().any(native_tree_has_vector_binary)
+        }
+        NativeExpr::Set { left, right, .. } => {
+            native_tree_has_vector_binary(left) || native_tree_has_vector_binary(right)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            native_tree_has_vector_binary(base) || native_tree_has_vector_binary(info)
+        }
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
+    }
+}
+
+/// Which execution the plan instance is handing evidence to.
+///
+/// `execute` runs once per output partition per execution and the partitions of one execution
+/// share evidence. A generation is identified by the claims it has issued. Abandoned generations
+/// retain storage only for what they stored, charged to the pool meanwhile.
+struct EvidenceGenerations {
+    evidence: Option<Arc<DuplicateEvidence>>,
+    issued: Vec<bool>,
+}
+
+fn claim_evidence(
+    slot: &Mutex<EvidenceGenerations>,
+    partition: usize,
+    partitions: usize,
+    pool: &Arc<dyn MemoryPool>,
+) -> Arc<DuplicateEvidence> {
+    let mut generations = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if generations.evidence.is_none()
+        || generations.issued.get(partition).copied().unwrap_or(true)
+        || generations
+            .evidence
+            .as_ref()
+            .is_some_and(|evidence| evidence.finished())
+    {
+        generations.evidence = Some(Arc::new(DuplicateEvidence::new(pool, partitions)));
+        generations.issued = vec![false; partitions];
+    }
+    generations.issued[partition] = true;
+    Arc::clone(generations.evidence.as_ref().unwrap())
+}
+
 /// The physical node that runs a compiled native tree over its input's raw series.
 pub struct FusedSeriesExec {
     /// The PromQL text the tree was compiled from, which is what the plan line shows.
@@ -1106,10 +1172,8 @@ pub struct FusedSeriesExec {
     tags: Arc<[String]>,
     /// The columns this node produces.
     output_schema: SchemaRef,
-    /// Per-node metrics, registered by each execution of the tree.
-    #[allow(dead_code)]
-    // Retained at plan-instance lifetime for the next duplicate-evidence step.
-    duplicate_evidence: Mutex<Option<Arc<DuplicateEvidence>>>,
+    /// The evidence generation claimed by this plan's output partitions.
+    duplicate_evidence: Mutex<EvidenceGenerations>,
     /// Per-node metrics, registered by each execution of the tree.
     metric: ExecutionPlanMetricsSet,
     /// Aggregate state exported by each partition, when this is the partial mode.
@@ -1280,7 +1344,10 @@ impl FusedSeriesExec {
             time_column,
             tags: tags.into(),
             output_schema,
-            duplicate_evidence: Mutex::new(None),
+            duplicate_evidence: Mutex::new(EvidenceGenerations {
+                evidence: None,
+                issued: Vec::new(),
+            }),
             metric: ExecutionPlanMetricsSet::new(),
             properties,
             partial_fold,
@@ -1398,56 +1465,36 @@ impl ExecutionPlan for FusedSeriesExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         if partition >= self.properties.partitioning.partition_count() {
-            if let Some(evidence) = self
-                .duplicate_evidence
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-            {
-                evidence.abort();
-            }
             return Err(DataFusionError::Execution(
                 "FusedSeries output partition is out of range".into(),
             ));
         }
-        let evidence = {
-            let mut slot = self
-                .duplicate_evidence
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            match slot.as_ref() {
-                Some(existing) => Arc::clone(existing),
-                None => {
-                    let grid_len = self
-                        .tree
-                        .root()
-                        .output
-                        .grid()
-                        .expect("fused tree has an evaluation grid")
-                        .spec()
-                        .len as usize;
-                    let created = Arc::new(DuplicateEvidence::new(
-                        &context.runtime_env().memory_pool,
-                        grid_len,
-                        self.properties.partitioning.partition_count(),
-                    ));
-                    *slot = Some(Arc::clone(&created));
-                    created
-                }
-            }
+        let partitions = self.properties.partitioning.partition_count();
+        let needs_evidence = partitions > 1 && native_tree_has_vector_binary(self.tree.root());
+        let evidence = if needs_evidence {
+            Some(claim_evidence(
+                &self.duplicate_evidence,
+                partition,
+                partitions,
+                &context.runtime_env().memory_pool,
+            ))
+        } else {
+            None
         };
-        let mut claim = EvidenceClaim {
-            evidence: Arc::clone(&evidence),
+        let mut claim = evidence.as_ref().map(|evidence| EvidenceClaim {
+            evidence: Arc::clone(evidence),
             active: true,
-        };
+        });
         let state = match NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
-            Some(Arc::clone(&evidence)),
+            evidence.clone(),
         ) {
             Ok(state) => state,
             Err(error) => {
-                claim.abort();
+                if let Some(claim) = &mut claim {
+                    claim.abort();
+                }
                 return Err(error);
             }
         };
@@ -1528,7 +1575,7 @@ impl ExecutionPlan for FusedSeriesExec {
             _export_budget: Arc::clone(&export_budget),
             ready: VecDeque::new(),
             done: false,
-            duplicate_evidence: Arc::clone(&evidence),
+            duplicate_evidence: evidence,
             evidence_completed: false,
             evidence_claim: claim,
         };
@@ -1545,8 +1592,10 @@ impl ExecutionPlan for FusedSeriesExec {
 
 impl Drop for FusedSeriesStream {
     fn drop(&mut self) {
-        if !self.evidence_completed {
-            self.evidence_claim.abort();
+        if !self.evidence_completed
+            && let Some(claim) = &mut self.evidence_claim
+        {
+            claim.abort();
         }
     }
 }
@@ -1669,9 +1718,9 @@ pub struct FusedSeriesStream {
     ready: VecDeque<RecordBatch>,
     /// Whether the input ended and everything it settled has been handed out.
     done: bool,
-    duplicate_evidence: Arc<DuplicateEvidence>,
+    duplicate_evidence: Option<Arc<DuplicateEvidence>>,
     evidence_completed: bool,
-    evidence_claim: EvidenceClaim,
+    evidence_claim: Option<EvidenceClaim>,
 }
 
 struct EvidenceClaim {
@@ -1774,7 +1823,9 @@ impl FusedSeriesStream {
     fn fail(&mut self) {
         self.done = true;
         if !self.evidence_completed {
-            self.evidence_claim.abort();
+            if let Some(claim) = &mut self.evidence_claim {
+                claim.abort();
+            }
             self.evidence_completed = true;
         }
         self.executor = None;
@@ -1861,12 +1912,18 @@ impl FusedSeriesStream {
                             return Poll::Ready(Some(Err(error)));
                         }
                         self.done = true;
-                        if self.evidence_claim.complete()
-                            && let Some(candidate) = self.duplicate_evidence.verdict()
+                        if self
+                            .evidence_claim
+                            .as_mut()
+                            .is_some_and(EvidenceClaim::complete)
+                            && let Some(candidate) = self
+                                .duplicate_evidence
+                                .as_ref()
+                                .and_then(|evidence| evidence.verdict())
                         {
                             self.fail();
                             return Poll::Ready(Some(Err(DataFusionError::Execution(
-                                candidate.message,
+                                candidate.message(),
                             ))));
                         }
                         self.evidence_completed = true;

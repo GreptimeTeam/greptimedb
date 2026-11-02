@@ -3954,7 +3954,7 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_duplicate_evidence_keeps_late_grid_point_across_partitions() {
+async fn native_duplicate_evidence_keeps_late_grid_point_on_grid() {
     common_telemetry::init_default_ut_logging();
     let (standalone, _) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_duplicate_evidence_late_point",
@@ -3978,9 +3978,8 @@ async fn native_duplicate_evidence_keeps_late_grid_point_across_partitions() {
     )
     .await;
 
-    // TQL range 0..4 seconds at 1 second steps is 5 points; parallelism 2 gives fewer
-    // partitions than points. The duplicate is at point index 4, beyond the old partition-sized
-    // evidence array.
+    // TQL range 0..4 seconds at 1 second steps has 5 grid points. The duplicate at index 4
+    // verifies that duplicate evidence is sized to the binary grid, not the output partition count.
     let duplicate_sql =
         "TQL EVAL (0, 4, '1s') native_dup_left + on(match_key) group_left() native_dup_right";
     let output = instance
