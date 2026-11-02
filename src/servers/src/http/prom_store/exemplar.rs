@@ -19,7 +19,7 @@ use api::v1::RowInsertRequests;
 use api::v1::value::ValueData;
 use common_error::ext::BoxedError;
 use common_query::prelude::EXEMPLAR_METRIC_COLUMN;
-use futures::future::{join_all, ready};
+use futures::future::ready;
 use operator::insert::PreparedMetricInserts;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -33,6 +33,8 @@ use crate::query_handler::PromStoreProtocolHandlerRef;
 #[derive(Default)]
 pub(super) struct Outcome {
     pub cost: usize,
+    pub accepted: bool,
+    /// Accepted rows on success; confirmed storage writes on error.
     pub written: [u64; 3],
     pub error: Option<error::Error>,
 }
@@ -42,7 +44,7 @@ enum PreparedWrite {
     Rows(RowInsertRequests),
 }
 
-/// Preflights all destinations together, then preserves confirmed counts by input kind.
+/// Preflights all destinations together, retaining per-kind write progress.
 pub(super) async fn write(
     handler: PromStoreProtocolHandlerRef,
     batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
@@ -122,53 +124,67 @@ pub(super) async fn write(
             if source_preparation_failed {
                 prepared.retain(|(kind, _, _)| *kind != 2);
             }
-            let outputs = join_all(prepared.into_iter().map(|(kind, ctx, request)| {
-                let handler = &handler;
-                let batcher = &batcher;
-                let sources = &sources;
-                async move {
-                    let output = match request {
-                        Err(error) => Err(error),
-                        Ok(PreparedWrite::Metric(request)) => {
-                            handler.write_prepared_metric(request, ctx).await
-                        }
-                        Ok(PreparedWrite::Rows(request)) => {
-                            let batch = (ctx, request);
-                            if kind == 2 && !metric_engine {
-                                error::NotSupportedSnafu {
-                                    feat: "exemplars require metric-engine ingestion",
-                                }
-                                .fail()
-                            } else if kind == 2 {
-                                handler
-                                    .write_exemplars_with_sources(batch.1, batch.0, sources)
-                                    .await
-                            } else if metric_engine
-                                && let Some(batcher) = batcher
-                                && batcher
-                                    .accepts_bulk_destinations(std::iter::once(&batch))
-                                    .await
-                            {
-                                batcher
-                                    .submit_output_with(batch.1, batch.0, |_| ready(Ok(())))
-                                    .await
-                                    .map(|(output, ())| output)
-                            } else {
-                                handler
-                                    .write_prepared(batch.1, batch.0, metric_engine)
-                                    .await
-                            }
-                        }
-                    };
-                    (kind, output)
+            let sample_batches = prepared.iter().filter_map(|(kind, ctx, request)| {
+                if *kind == 0
+                    && let Ok(PreparedWrite::Rows(request)) = request
+                {
+                    Some((ctx, request))
+                } else {
+                    None
                 }
-            }))
-            .await;
+            });
+            let batcher = if metric_engine
+                && let Some(batcher) = batcher.as_ref()
+                && batcher.accepts_bulk_destinations(sample_batches).await
+            {
+                Some(batcher)
+            } else {
+                None
+            };
+            let mut outputs = Vec::with_capacity(prepared.len());
+            // Serialize schema preparation across batches that resolve to the same table.
+            for (kind, ctx, request) in prepared {
+                let mut deferred = false;
+                let output = match request {
+                    Err(error) => Err(error),
+                    Ok(PreparedWrite::Metric(request)) => {
+                        handler.write_prepared_metric(request, ctx).await
+                    }
+                    Ok(PreparedWrite::Rows(request)) => {
+                        if kind == 2 && !metric_engine {
+                            error::NotSupportedSnafu {
+                                feat: "exemplars require metric-engine ingestion",
+                            }
+                            .fail()
+                        } else if kind == 2 {
+                            handler
+                                .write_exemplars_with_sources(request, ctx, &sources)
+                                .await
+                        } else if kind == 0
+                            && let Some(batcher) = batcher
+                        {
+                            deferred = !batcher.is_synchronous();
+                            batcher
+                                .submit_output_with(request, ctx, |_| ready(Ok(())))
+                                .await
+                                .map(|(output, ())| output)
+                        } else {
+                            handler.write_prepared(request, ctx, metric_engine).await
+                        }
+                    }
+                };
+                outputs.push((kind, output, deferred));
+            }
             let mut outcome = Outcome::default();
-            for (kind, output) in outputs {
+            let mut pending_samples = Vec::new();
+            for (kind, output, deferred) in outputs {
                 match output {
                     Ok(output) => {
                         outcome.cost += output.meta.cost;
+                        if deferred && !output.meta.write_completions.is_empty() {
+                            pending_samples.push(output);
+                            continue;
+                        }
                         let progress = output.write_progress().await;
                         outcome.written[kind] += progress.affected_rows as u64;
                         if let Err(error) =
@@ -180,6 +196,18 @@ pub(super) async fn write(
                     Err(error) => {
                         outcome.error.get_or_insert(error);
                     }
+                }
+            }
+            if outcome.error.is_none() {
+                outcome.accepted = !pending_samples.is_empty();
+                outcome.written[0] += pending_samples
+                    .iter()
+                    .map(|output| output.extract_rows_and_cost().0 as u64)
+                    .sum::<u64>();
+            } else {
+                // Split submissions may share a counter; each completion owns its row count.
+                for output in pending_samples {
+                    outcome.written[0] += output.write_progress().await.affected_rows as u64;
                 }
             }
             outcome
@@ -240,6 +268,7 @@ async fn prepare(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use api::prom_store::remote::ReadRequest;
     use api::v1::{Row, RowInsertRequest, Rows};
@@ -258,6 +287,9 @@ mod tests {
         exemplar_done: Arc<Notify>,
         deny_schema: bool,
         fail_preparation: bool,
+        successful_writes: bool,
+        check_serial: bool,
+        writing: AtomicBool,
     }
 
     #[async_trait]
@@ -322,12 +354,23 @@ mod tests {
             ctx: QueryContextRef,
             _: bool,
         ) -> Result<Output> {
+            if self.check_serial {
+                assert!(!self.writing.swap(true, Ordering::SeqCst));
+                tokio::task::yield_now().await;
+                self.writing.store(false, Ordering::SeqCst);
+            }
             assert!(ctx.confirmed_writes());
             assert_eq!(
                 ctx.write_rows_to_admit(ctx.current_catalog(), &ctx.current_schema(), 3),
                 0
             );
             self.events.lock().unwrap().push("metric".into());
+            if self.successful_writes {
+                if let Some(counter) = ctx.write_progress() {
+                    counter.add_written(2);
+                }
+                return Ok(Output::new_with_affected_rows(2));
+            }
             let done = self.exemplar_done.clone();
             let counter = ctx.write_progress().cloned();
             let completion = WriteCompletion::with_progress(async move {
@@ -516,78 +559,205 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exemplar_v2_error_headers_retain_confirmed_counts() {
+    async fn exemplar_submits_metric_batches_sequentially() {
+        let handler = Arc::new(Handler {
+            successful_writes: true,
+            check_serial: true,
+            ..Default::default()
+        });
+        let ctx = QueryContext::arc();
+        let samples = ["metric", "other", "other"]
+            .into_iter()
+            .map(|name| {
+                (
+                    Arc::new(ctx.fork()),
+                    RowInsertRequests {
+                        inserts: vec![RowInsertRequest {
+                            table_name: name.into(),
+                            rows: Some(Rows {
+                                schema: vec![],
+                                rows: vec![Row { values: vec![] }; 2],
+                            }),
+                        }],
+                    },
+                )
+            })
+            .collect();
+        let exemplars = ExemplarRequests::from([(
+            None,
+            vec![Exemplar {
+                metric: "metric".into(),
+                series_labels: BTreeMap::new(),
+                labels: BTreeMap::new(),
+                timestamp: 1,
+                value: 1.0,
+            }],
+        )]);
+        let outcome = write(handler, None, true, samples, vec![], exemplars, ctx).await;
+        assert!(outcome.error.is_none());
+        assert_eq!(outcome.written, [6, 0, 1]);
+    }
+
+    #[tokio::test]
+    async fn exemplar_v2_batching_acknowledgement_and_partial_counts() {
         use api::greptime_proto::io::prometheus::write::v2;
+        use common_memory_manager::OnExhaustedPolicy;
         use prost::Message;
 
+        use crate::batcher::logical_table::test_util::{WorkerCommand, submission_batcher};
         use crate::http::extractor::PipelineInfo;
         use crate::http::prom_store::{PromStoreState, RemoteWriteQuery, remote_write_v2};
         use crate::prom_remote_write::REMOTE_WRITE_V2_VERSION;
         use crate::prom_remote_write::validation::PromValidationMode;
+        use crate::request_memory_limiter::ServerMemoryLimiter;
 
-        let db = "exemplar_confirmed_counts";
-        let counters = [
-            &*crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES,
-            &*crate::metrics::PROM_STORE_REMOTE_WRITE_EXEMPLARS,
-        ]
-        .map(|counter| counter.with_label_values(&[db, REMOTE_WRITE_V2_VERSION]));
-        let before = counters.each_ref().map(|counter| counter.get());
-        let request = v2::Request {
-            symbols: vec![String::new(), "__name__".into(), "metric".into()],
-            timeseries: vec![v2::TimeSeries {
-                labels_refs: vec![1, 2],
-                samples: vec![
-                    v2::Sample {
-                        timestamp: 1,
-                        value: 1.0,
-                        ..Default::default()
-                    };
-                    2
+        for (sync, successful_writes) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let (batcher, mut receiver) = submission_batcher(sync).await;
+            let limiter = ServerMemoryLimiter::new(1024 * 1024, OnExhaustedPolicy::Fail);
+            let db = "exemplar_confirmed_counts";
+            let counters = [
+                &*crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES,
+                &*crate::metrics::PROM_STORE_REMOTE_WRITE_EXEMPLARS,
+            ]
+            .map(|counter| counter.with_label_values(&[db, REMOTE_WRITE_V2_VERSION]));
+            let before = counters.each_ref().map(|counter| counter.get());
+            let request = v2::Request {
+                symbols: vec![
+                    String::new(),
+                    "__name__".into(),
+                    "metric".into(),
+                    "cpu".into(),
                 ],
-                exemplars: vec![v2::Exemplar {
-                    labels_refs: vec![],
-                    value: 0.25,
-                    timestamp: 1,
-                }],
-                ..Default::default()
-            }],
-        };
-        let response = remote_write_v2(
-            PromStoreState {
-                prom_store_handler: Arc::new(Handler::default()),
-                pipeline_handler: None,
-                prom_store_with_metric_engine: true,
-                prom_validation_mode: PromValidationMode::Strict,
-                pending_rows_batcher: None,
-                memory_limiter: Default::default(),
-            },
-            RemoteWriteQuery {
-                db: Some(db.into()),
-                ..Default::default()
-            },
-            QueryContext::with("greptime", "public"),
-            PipelineInfo {
-                pipeline_name: None,
-                pipeline_version: None,
-                pipeline_params: Default::default(),
-            },
-            false,
-            crate::prom_store::snappy_compress(&request.encode_to_vec())
-                .unwrap()
-                .into(),
-            0,
-        )
-        .await
-        .unwrap();
-        assert!(response.status().is_server_error());
-        for (kind, count) in [("samples", "1"), ("histograms", "0"), ("exemplars", "1")] {
-            assert_eq!(
-                response.headers()[format!("x-prometheus-remote-write-{kind}-written")],
-                count
+                timeseries: vec![
+                    v2::TimeSeries {
+                        labels_refs: vec![1, 2],
+                        samples: vec![
+                            v2::Sample {
+                                timestamp: 1,
+                                value: 1.0,
+                                ..Default::default()
+                            };
+                            2
+                        ],
+                        exemplars: vec![v2::Exemplar {
+                            labels_refs: vec![],
+                            value: 0.25,
+                            timestamp: 1,
+                        }],
+                        ..Default::default()
+                    },
+                    v2::TimeSeries {
+                        labels_refs: vec![1, 3],
+                        samples: vec![
+                            v2::Sample {
+                                timestamp: 1,
+                                value: 1.0,
+                                ..Default::default()
+                            };
+                            2
+                        ],
+                        ..Default::default()
+                    },
+                ],
+            };
+            let response = remote_write_v2(
+                PromStoreState {
+                    prom_store_handler: Arc::new(Handler {
+                        successful_writes,
+                        ..Default::default()
+                    }),
+                    pipeline_handler: None,
+                    prom_store_with_metric_engine: true,
+                    prom_validation_mode: PromValidationMode::Strict,
+                    pending_rows_batcher: Some(batcher),
+                    memory_limiter: limiter.clone(),
+                },
+                RemoteWriteQuery {
+                    db: Some(db.into()),
+                    ..Default::default()
+                },
+                QueryContext::with("greptime", "public"),
+                PipelineInfo {
+                    pipeline_name: None,
+                    pipeline_version: None,
+                    pipeline_params: Default::default(),
+                },
+                false,
+                crate::prom_store::snappy_compress(&request.encode_to_vec())
+                    .unwrap()
+                    .into(),
+                0,
             );
-        }
-        for (counter, before) in counters.into_iter().zip(before) {
-            assert_eq!(counter.get() - before, 1);
+            tokio::pin!(response);
+            let mut early_response = None;
+            let command = tokio::select! {
+                biased;
+                result = &mut response => {
+                    early_response = Some(result.unwrap());
+                    receiver.try_recv().unwrap()
+                }
+                command = receiver.recv() => command.unwrap(),
+            };
+            assert_eq!(early_response.is_some(), !sync && successful_writes);
+            assert!(limiter.used_bytes() > 0);
+            let WorkerCommand::Submit {
+                ctx,
+                response_tx,
+                _completion,
+                ..
+            } = command
+            else {
+                panic!("expected sample submission")
+            };
+            let affected_rows = if successful_writes { 2 } else { 1 };
+            ctx.write_progress().unwrap().add_written(affected_rows);
+            let progress = WriteProgress {
+                affected_rows,
+                error: (!successful_writes).then(|| {
+                    Arc::new(BoxedError::new(
+                        error::InternalSnafu {
+                            err_msg: "partial queued write",
+                        }
+                        .build(),
+                    ))
+                }),
+            };
+            assert_eq!(
+                response_tx.send(progress).is_ok(),
+                sync || !successful_writes
+            );
+            drop(_completion);
+            let response = match early_response {
+                Some(response) => response,
+                None => response.await.unwrap(),
+            };
+            if successful_writes {
+                assert_eq!(response.status(), if sync { 204 } else { 202 });
+            } else {
+                assert!(response.status().is_server_error());
+            }
+            let samples = if successful_writes { "4" } else { "2" };
+            for (kind, count) in [
+                ("samples", samples),
+                ("histograms", "0"),
+                ("exemplars", "1"),
+            ] {
+                assert_eq!(
+                    response.headers()[format!("x-prometheus-remote-write-{kind}-written")],
+                    count
+                );
+            }
+            for ((counter, before), count) in counters
+                .into_iter()
+                .zip(before)
+                .zip([if successful_writes { 4 } else { 2 }, 1])
+            {
+                assert_eq!(counter.get() - before, count);
+            }
+            drop(ctx);
+            assert_eq!(limiter.used_bytes(), 0);
         }
     }
 

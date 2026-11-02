@@ -4600,6 +4600,152 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
     }
 }
 
+#[rstest]
+#[case::histogram("histogram")]
+#[case::schema_alias("schema_alias")]
+#[case::physical_conflict("physical_conflict")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_unpinned_batches(#[case] kind: &str, #[values(false, true)] batching: bool) {
+    use api::greptime_proto::io::prometheus::write::v2;
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+    use crate::test_util::build_test_prom_server;
+
+    let instance = GreptimeDbStandaloneBuilder::new("exemplar_unpinned_batches")
+        .build()
+        .await;
+    let frontend = instance.fe_instance();
+    let server = build_test_prom_server(frontend.clone(), batching, None).build();
+    let app = server.build(server.make_app()).unwrap();
+    let mut request = v2::Request {
+        symbols: vec![String::new()],
+        timeseries: vec![],
+    };
+    let add = |request: &mut v2::Request, labels: &[(&str, &str)]| {
+        let mut labels_refs = Vec::new();
+        for (name, value) in labels {
+            labels_refs.extend([
+                request.symbols.len() as u32,
+                request.symbols.len() as u32 + 1,
+            ]);
+            request.symbols.extend([(*name).into(), (*value).into()]);
+        }
+        request.timeseries.push(v2::TimeSeries {
+            labels_refs,
+            samples: vec![v2::Sample {
+                timestamp: 1000,
+                value: 1.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+    };
+    add(&mut request, &[("__name__", "metric")]);
+    request.timeseries[0].exemplars.push(v2::Exemplar {
+        timestamp: 1000,
+        value: 0.5,
+        labels_refs: vec![],
+    });
+    match kind {
+        "histogram" => {
+            add(&mut request, &[("__name__", "unpinned")]);
+            request.timeseries[1].samples.clear();
+            request.timeseries[1].histograms.push(v2::Histogram {
+                count: Some(v2::histogram::Count::CountInt(0)),
+                timestamp: 1000,
+                ..Default::default()
+            });
+        }
+        "schema_alias" => {
+            add(
+                &mut request,
+                &[("__name__", "unpinned"), ("left_tag", "left")],
+            );
+            add(
+                &mut request,
+                &[
+                    ("__name__", "unpinned"),
+                    ("__schema__", "public"),
+                    ("right_tag", "right"),
+                ],
+            );
+        }
+        "physical_conflict" => {
+            for (physical, job) in [("physical_a", "one"), ("physical_b", "two")] {
+                execute_sql(&frontend, &format!(
+                    "CREATE TABLE {physical} (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE, job STRING PRIMARY KEY) ENGINE=metric WITH ('physical_metric_table'='')"
+                )).await;
+                add(
+                    &mut request,
+                    &[
+                        ("__name__", "unpinned"),
+                        ("__physical_table__", physical),
+                        ("job", job),
+                    ],
+                );
+            }
+        }
+        _ => unreachable!(),
+    }
+    let response = app
+        .oneshot(
+            Request::post("/v1/prometheus/write")
+                .header("Content-Encoding", "snappy")
+                .header(
+                    "Content-Type",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                )
+                .body(Body::from(
+                    snappy_compress(&request.encode_to_vec()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        204,
+        "{:?}",
+        to_bytes(response.into_body(), usize::MAX).await.unwrap()
+    );
+    assert_eq!(
+        response.headers()["x-prometheus-remote-write-samples-written"],
+        if kind == "histogram" { "1" } else { "3" }
+    );
+    assert_eq!(
+        response.headers()["x-prometheus-remote-write-histograms-written"],
+        if kind == "histogram" { "1" } else { "0" }
+    );
+    assert_eq!(
+        response.headers()["x-prometheus-remote-write-exemplars-written"],
+        "1"
+    );
+    let filter = match kind {
+        "histogram" => "greptime_native_histogram IS NOT NULL",
+        "schema_alias" => "left_tag = 'left' OR right_tag = 'right'",
+        "physical_conflict" => "job IN ('one', 'two')",
+        _ => unreachable!(),
+    };
+    let output = execute_sql(
+        &frontend,
+        &format!("SELECT count(*) FROM unpinned WHERE {filter}"),
+    )
+    .await;
+    check_output_stream(
+        output.data,
+        &format!(
+            "+----------+\n| count(*) |\n+----------+\n| {}        |\n+----------+",
+            if kind == "histogram" { 1 } else { 2 }
+        ),
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_exemplar_source_identity_policy() {
     use std::collections::BTreeMap;

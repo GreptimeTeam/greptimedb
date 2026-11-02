@@ -406,7 +406,12 @@ async fn remote_write_v2(
             outcome.written[1],
             outcome.written[2],
         );
-        return Ok((StatusCode::NO_CONTENT, headers).into_response());
+        let status = if outcome.accepted {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::NO_CONTENT
+        };
+        return Ok((status, headers).into_response());
     }
     let outcome = match write_prometheus_v2_rows_with_progress(
         prom_store_handler,
@@ -567,7 +572,10 @@ async fn write_prometheus_rows_with_progress(
         // ordinary insert path, which routes per destination; time index
         // units need no check — the bulk encode converts each request to
         // its destination's unit.
-        if batcher.accepts_bulk_destinations(batches.iter()).await {
+        if batcher
+            .accepts_bulk_destinations(batches.iter().map(|(ctx, request)| (ctx, request)))
+            .await
+        {
             let mut rows_written = 0;
             for (temp_ctx, reqs) in batches {
                 let rows =
@@ -675,7 +683,9 @@ async fn write_prometheus_v2_rows_with_progress(
         })?;
     let batcher = if prom_store_with_metric_engine
         && let Some(batcher) = pending_rows_batcher.as_ref()
-        && batcher.accepts_bulk_destinations(batches.iter()).await
+        && batcher
+            .accepts_bulk_destinations(batches.iter().map(|(ctx, request)| (ctx, request)))
+            .await
     {
         Some(batcher.as_ref() as &dyn PromWriteBatcher)
     } else {
