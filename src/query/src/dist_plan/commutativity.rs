@@ -1004,6 +1004,21 @@ mod tests {
 
         // A partial producer exports aggregate state; its merge remains frontend-side.
         let split = aggregate_finalize_plan(table_scan_plan());
+        let LogicalPlan::Extension(split_extension) = &split else {
+            unreachable!()
+        };
+        let finalize = split_extension
+            .node
+            .as_any()
+            .downcast_ref::<AggregateFinalize>()
+            .unwrap();
+        let inputs = finalize.inputs();
+        let [producer] = inputs.as_slice() else {
+            unreachable!()
+        };
+        DFLogicalSubstraitConvertor
+            .encode(*producer, DefaultSerializer)
+            .expect("partial FusedSeries producer uses its ordinary serializer");
         let placed = analyze(DistPlannerAnalyzer::new(true), split);
         assert!(as_aggregate_finalize(&placed).is_some());
         let child = placed.inputs();
