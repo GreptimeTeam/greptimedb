@@ -2299,6 +2299,180 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     }
 }
 
+/// Compare value and response ordering for native routes added for common PromQL shapes.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_sort_absent_histogram_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_shapes_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table' = 'true'); \
+         CREATE TABLE native_shapes (host STRING, le STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, le)) ENGINE=metric WITH ('on_physical_table' = 'native_shapes_phy'); \
+         INSERT INTO native_shapes (host, le, ts, val) VALUES \
+         ('a', '1', 0, 1), ('a', '1', 10000, 2), ('b', '1', 0, 5), ('b', '1', 10000, 6), \
+         ('h', '1', 0, 2), ('h', '1', 10000, 4), ('h', '1', 20000, 6), ('h', '2', 0, 4), ('h', '2', 10000, 8), ('h', '2', 20000, 12), \
+         ('h', '+Inf', 0, 6), ('h', '+Inf', 10000, 12), ('h', '+Inf', 20000, 18)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let cases = [
+        (
+            "sort(native_shapes{le=\"1\"})",
+            "TQL EVAL (10, 10, '1s') sort(native_shapes{le=\"1\"})",
+        ),
+        (
+            "sort_desc(native_shapes{le=\"1\"})",
+            "TQL EVAL (10, 10, '1s') sort_desc(native_shapes{le=\"1\"})",
+        ),
+        (
+            "absent(native_shapes{host=\"missing\"})",
+            "TQL EVAL (10, 10, '1s') absent(native_shapes{host=\"missing\"})",
+        ),
+        (
+            "absent(native_shapes{host=\"a\"})",
+            "TQL EVAL (10, 10, '1s') absent(native_shapes{host=\"a\"})",
+        ),
+        (
+            "histogram_quantile(0.9, rate(native_shapes{host=\"h\"}[20s]))",
+            "TQL EVAL (20, 20, '1s') histogram_quantile(0.9, rate(native_shapes{host=\"h\"}[20s]))",
+        ),
+    ];
+    for (shape, sql) in cases {
+        observer.clear();
+        let native = native_tql_output(&instance, sql, true).await;
+        assert!(
+            observer.fused().is_some(),
+            "{shape} did not run natively: {sql}"
+        );
+        let legacy = native_tql_output(&instance, sql, false).await;
+        if shape.starts_with("histogram_quantile") {
+            let collect = |output: Output| async move {
+                match output.data {
+                    OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+                    OutputData::RecordBatches(batches) => batches,
+                    _ => unreachable!("query returns record batches"),
+                }
+            };
+            let native = collect(native).await;
+            let legacy = collect(legacy).await;
+            let native_schema = native.schema();
+            let legacy_schema = legacy.schema();
+            let native_columns = native_schema.column_schemas();
+            let legacy_columns = legacy_schema.column_schemas();
+            let native_value_index = native_columns
+                .iter()
+                .position(|column| {
+                    column.data_type == datatypes::prelude::ConcreteDataType::float64_datatype()
+                })
+                .unwrap();
+            let legacy_value_index = legacy_columns
+                .iter()
+                .position(|column| {
+                    column.data_type == datatypes::prelude::ConcreteDataType::float64_datatype()
+                })
+                .unwrap();
+            let native_rows = native.iter().map(|batch| batch.num_rows()).sum::<usize>();
+            let legacy_rows = legacy.iter().map(|batch| batch.num_rows()).sum::<usize>();
+            assert_eq!(native_rows, legacy_rows);
+            assert!(native_rows >= 1, "histogram_quantile must produce data");
+            assert_eq!(native_columns.len(), legacy_columns.len());
+            assert_eq!(native_value_index, legacy_value_index);
+            for (index, (native_column, legacy_column)) in
+                native_columns.iter().zip(legacy_columns).enumerate()
+            {
+                if index == native_value_index {
+                    assert_ne!(native_column.name, legacy_column.name);
+                    assert_eq!(native_column.name, "val");
+                    assert_eq!(
+                        legacy_column.name,
+                        "prom_rate(ts_range,val,ts,Int64(20000))"
+                    );
+                } else {
+                    assert_eq!(native_column.name, legacy_column.name);
+                    assert_eq!(native_column.data_type, legacy_column.data_type);
+                }
+            }
+            assert_eq!(
+                native_columns[native_value_index].data_type,
+                legacy_columns[legacy_value_index].data_type
+            );
+            let native_data = native
+                .iter()
+                .flat_map(|batch| {
+                    let timestamps = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap();
+                    let labels = cast(batch.column(1).as_ref(), &DataType::Utf8).unwrap();
+                    let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
+                    let values = cast(
+                        batch.column(native_value_index).as_ref(),
+                        &DataType::Float64,
+                    )
+                    .unwrap();
+                    let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+                    (0..batch.num_rows())
+                        .map(|row| {
+                            (
+                                timestamps.value(row),
+                                labels.value(row).to_string(),
+                                values.value(row),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let legacy_data = legacy
+                .iter()
+                .flat_map(|batch| {
+                    let timestamps = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap();
+                    let labels = cast(batch.column(1).as_ref(), &DataType::Utf8).unwrap();
+                    let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
+                    let values = cast(
+                        batch.column(legacy_value_index).as_ref(),
+                        &DataType::Float64,
+                    )
+                    .unwrap();
+                    let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+                    (0..batch.num_rows())
+                        .map(|row| {
+                            (
+                                timestamps.value(row),
+                                labels.value(row).to_string(),
+                                values.value(row),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(native_data.len(), legacy_data.len());
+            for (native_row, legacy_row) in native_data.iter().zip(&legacy_data) {
+                assert_eq!((native_row.0, &native_row.1), (legacy_row.0, &legacy_row.1));
+                assert!(
+                    (native_row.2 - legacy_row.2).abs() <= 1e-12,
+                    "native value {} != legacy value {}",
+                    native_row.2,
+                    legacy_row.2
+                );
+            }
+        } else {
+            let native = native_output_text(native).await;
+            let legacy = native_output_text(legacy).await;
+            assert_eq!(native, legacy, "{shape}; SQL: {sql}");
+        }
+    }
+}
+
 /// Native instant selectors preserve anchored evaluation and sample timestamps in standalone.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_instant_at_uses_sample_time_and_anchor() {
