@@ -1875,10 +1875,12 @@ impl FusedSeriesExec {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(partition_count),
-            if partial_fold.is_some() || frame_schema {
-                // Partial aggregate state and canonical frame series are emitted only after EOF.
+            if partial_fold.is_some() {
+                // Partial aggregate state is emitted only after EOF.
                 EmissionType::Final
             } else {
+                // A frame's identities, and every other output, are emitted while the input is
+                // still arriving, so the node's emission type is the input's.
                 inputs.first().map_or(EmissionType::Final, |(input, _, _)| {
                     input.properties().emission_type
                 })
