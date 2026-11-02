@@ -16,8 +16,8 @@ use std::sync::atomic::Ordering;
 
 use arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
 use common_time::{Timestamp, timestamp::TimeUnit};
-use datatypes::arrow::array::{Array, BooleanArray, UInt64Array};
-use datatypes::arrow::compute::filter_record_batch;
+use datatypes::arrow::array::{Array, UInt64Array};
+use datatypes::arrow::compute::take_record_batch;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
@@ -52,6 +52,36 @@ struct SourceBatch {
     batch: RecordBatch,
     source: FileMeta,
     legacy_override: bool,
+}
+
+/// Retains only the input batch and row destinations, never future output arrays.
+/// Row indices break destination ties so each fragment preserves source order.
+struct RoutedBatch {
+    input: SourceBatch,
+    rows: Vec<(RegionId, i64, usize)>,
+    offset: usize,
+}
+
+impl RoutedBatch {
+    /// Materializes one fragment on the blocking pool, only when dispatch pulls it.
+    fn next_fragment(&mut self, router: &SharedSource) -> Result<Option<SourceEvent>> {
+        router.check_cancelled()?;
+        let Some(&(region_id, window, _)) = self.rows.get(self.offset) else {
+            return Ok(None);
+        };
+        let remaining = &self.rows[self.offset..];
+        let len = remaining
+            .partition_point(|(id, time_window, _)| (*id, *time_window) == (region_id, window));
+        let indices =
+            UInt64Array::from_iter_values(remaining[..len].iter().map(|(_, _, row)| *row as u64));
+        let batch = router.target_batch(&self.input, region_id, &indices)?;
+        self.offset += len;
+        Ok(Some(SourceEvent::Batch {
+            region_id,
+            window,
+            batch,
+        }))
+    }
 }
 
 /// Source boundaries are ordered after all routed fragments of that source.
@@ -214,10 +244,21 @@ impl SharedSource {
                     read_rows += batch.num_rows() as u64;
                     let router = self.clone();
                     let source = file.clone();
-                    let batches = common_runtime::spawn_blocking_compact(move || {
+                    let mut routed = common_runtime::spawn_blocking_compact(move || {
                         router.route(SourceBatch { batch, source, legacy_override })
                     }).await.context(crate::error::JoinSnafu)??;
-                    for batch in batches { yield batch; }
+                    loop {
+                        let router = self.clone();
+                        let (event, remaining) = common_runtime::spawn_blocking_compact(move || {
+                            let event = routed.next_fragment(&router)?;
+                            Ok::<_, crate::error::Error>((event, routed))
+                        }).await.context(crate::error::JoinSnafu)??;
+                        routed = remaining;
+                        let Some(event) = event else { break; };
+                        // Dispatch reserves/spills and sends this fragment before
+                        // polling again. No work slot is held across the yield.
+                        yield event;
+                    }
                 }
                 if read_rows != expected_rows {
                     Err(InvalidMultiRegionCompactionSnafu { reason: "Shared source scan did not cover its complete footer row count" }.build())?;
@@ -230,61 +271,55 @@ impl SharedSource {
         })
     }
 
-    fn route(&self, input: SourceBatch) -> Result<Vec<SourceEvent>> {
-        let SourceBatch {
-            batch,
-            source,
-            legacy_override,
-        } = input;
-        let owners = self.row_owners(&batch)?;
-        let mut routed = Vec::new();
-        for (id, target) in &self.targets {
-            let mask = BooleanArray::from(
-                owners
-                    .iter()
-                    .map(|owner| *owner == Some(*id))
-                    .collect::<Vec<_>>(),
-            );
-            let selected = mask.true_count();
-            if selected == 0 {
-                continue;
-            }
-            let input = target.inputs.get(&source.file_id()).context(
-                InvalidMultiRegionCompactionSnafu {
-                    reason: "Target has no effective metadata for the selected source",
-                },
-            )?;
-            let filtered = filter_record_batch(&batch, &mask).context(ComputeArrowSnafu)?;
-            let override_sequence =
-                if input.region_id != *id || (!input.preserve_row_sequence && legacy_override) {
-                    input.sequence
-                } else {
-                    None
-                };
-            let mut columns = filtered.columns().to_vec();
-            if let Some(sequence) = override_sequence {
-                columns[sequence_column_index(filtered.num_columns())] =
-                    Arc::new(UInt64Array::from(vec![sequence.get(); selected]));
-            }
-            let filtered =
-                RecordBatch::try_new(self.schema.clone(), columns).context(NewRecordBatchSnafu)?;
-            let windows = self.time_windows(&filtered)?;
-            let unique_windows: std::collections::BTreeSet<_> = windows.iter().copied().collect();
-            for window in unique_windows {
-                let mask = BooleanArray::from(
-                    windows
-                        .iter()
-                        .map(|value| *value == window)
-                        .collect::<Vec<_>>(),
-                );
-                routed.push(SourceEvent::Batch {
-                    region_id: *id,
-                    window,
-                    batch: filter_record_batch(&filtered, &mask).context(ComputeArrowSnafu)?,
-                });
-            }
+    fn route(&self, input: SourceBatch) -> Result<RoutedBatch> {
+        self.check_cancelled()?;
+        let owners = self.row_owners(&input.batch)?;
+        let windows = self.time_windows(&input.batch)?;
+        let mut rows: Vec<_> = owners
+            .into_iter()
+            .zip(windows)
+            .enumerate()
+            .map(|(row, (region_id, window))| (region_id, window, row))
+            .collect();
+        rows.sort_unstable();
+        Ok(RoutedBatch {
+            input,
+            rows,
+            offset: 0,
+        })
+    }
+
+    fn target_batch(
+        &self,
+        source: &SourceBatch,
+        region_id: RegionId,
+        indices: &UInt64Array,
+    ) -> Result<RecordBatch> {
+        let target = self
+            .targets
+            .get(&region_id)
+            .context(InvalidMultiRegionCompactionSnafu {
+                reason: "Routed fragment names an unknown region",
+            })?;
+        let input = target.inputs.get(&source.source.file_id()).context(
+            InvalidMultiRegionCompactionSnafu {
+                reason: "Target has no effective metadata for the selected source",
+            },
+        )?;
+        let filtered = take_record_batch(&source.batch, indices).context(ComputeArrowSnafu)?;
+        let override_sequence = if input.region_id != region_id
+            || (!input.preserve_row_sequence && source.legacy_override)
+        {
+            input.sequence
+        } else {
+            None
+        };
+        let mut columns = filtered.columns().to_vec();
+        if let Some(sequence) = override_sequence {
+            columns[sequence_column_index(filtered.num_columns())] =
+                Arc::new(UInt64Array::from_value(sequence.get(), filtered.num_rows()));
         }
-        Ok(routed)
+        RecordBatch::try_new(self.schema.clone(), columns).context(NewRecordBatchSnafu)
     }
 
     fn time_windows(&self, filtered: &RecordBatch) -> Result<Vec<i64>> {
@@ -318,7 +353,7 @@ impl SharedSource {
             .collect::<Result<Vec<_>>>()
     }
 
-    fn row_owners(&self, batch: &RecordBatch) -> Result<Vec<Option<RegionId>>> {
+    fn row_owners(&self, batch: &RecordBatch) -> Result<Vec<RegionId>> {
         let rows = batch.num_rows();
         let masks = self
             .partition_rule
@@ -345,15 +380,16 @@ impl SharedSource {
             }
         }
         self.resolve_unassigned(batch, &mut owners)?;
-        ensure!(
-            owners
-                .iter()
-                .all(|owner| owner.is_some_and(|id| self.targets.contains_key(&id))),
-            InvalidMultiRegionCompactionSnafu {
-                reason: "Partition rule selected a region outside the captured targets"
-            }
-        );
-        Ok(owners)
+        owners
+            .into_iter()
+            .map(|owner| {
+                owner.filter(|id| self.targets.contains_key(id)).context(
+                    InvalidMultiRegionCompactionSnafu {
+                        reason: "Partition rule selected a region outside the captured targets",
+                    },
+                )
+            })
+            .collect()
     }
 
     fn resolve_unassigned(

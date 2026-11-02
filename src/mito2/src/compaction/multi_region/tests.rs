@@ -16,13 +16,14 @@ use std::time::Duration;
 
 use api::v1::OpType;
 use datatypes::arrow::array::{
-    Array, BinaryArray, BinaryDictionaryBuilder, StringArray, TimestampMillisecondArray,
-    UInt8Array, UInt64Array,
+    Array, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, StringArray,
+    TimestampMillisecondArray, UInt8Array, UInt64Array,
 };
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::{DataType, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
+use futures::TryStreamExt;
 use partition::expr::col;
 use partition::multi_dim::MultiDimPartitionRule;
 use store_api::codec::PrimaryKeyEncoding;
@@ -855,6 +856,181 @@ async fn unknown_partition_target_fails_before_creating_output() {
         "{error:?}"
     );
     assert!(protection.files.lock().unwrap().is_empty());
+}
+
+/// One decoded batch fans out into 1024 windows, with 32 extra columns
+/// materialized by schema compatibility before routing.
+async fn wide_window_fixture() -> (Fixture, MultiRegionCompactionPlan) {
+    use api::v1::SemanticType;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+
+    let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
+        let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 1024, 5);
+        let mut columns = batch.columns().to_vec();
+        columns[3] = Arc::new(TimestampMillisecondArray::from_iter_values(
+            (0..1024).map(|row| (row - 512) * 3_600_000),
+        ));
+        vec![RecordBatch::try_new(batch.schema(), columns).unwrap()]
+    })
+    .await;
+    let mut plan = fixture.plan(1);
+    plan.memory_limit = 4 * 1024 * 1024;
+    for target in plan.targets.values_mut() {
+        let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
+        for column in 0..32 {
+            builder.push_column_metadata(ColumnMetadata {
+                column_id: 10 + column,
+                semantic_type: SemanticType::Field,
+                column_schema: ColumnSchema::new(
+                    format!("wide_{column}"),
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                )
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::UInt64(
+                    1000 + column as u64,
+                ))))
+                .unwrap(),
+            });
+        }
+        target.metadata = Arc::new(builder.build().unwrap());
+    }
+    (fixture, plan)
+}
+
+#[tokio::test]
+async fn wide_source_routes_windows_without_retaining_future_fragments() {
+    let (fixture, plan) = wide_window_fixture().await;
+    let (context, _) = fixture.context(None);
+    let counters = Arc::new(SourceCounters::default());
+    let source = source::SharedSource::build(
+        &plan,
+        &context,
+        validate_plan(&plan).unwrap(),
+        counters.clone(),
+    )
+    .await
+    .unwrap();
+    let mut stream = source.batches();
+    for row in 0..1024 {
+        let Some(source::SourceEvent::Batch {
+            region_id,
+            window,
+            batch,
+        }) = stream.try_next().await.unwrap()
+        else {
+            panic!("source ended before all windows were routed");
+        };
+        assert_eq!(RegionId::new(1, 0), region_id);
+        assert_eq!(row - 512, window);
+        assert_eq!(1, batch.num_rows());
+        assert_eq!(39, batch.num_columns());
+        let keys = batch
+            .column(primary_key_column_index(batch.num_columns()))
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap();
+        // Each eagerly filtered fragment retains the shared dictionary. This
+        // checks live ownership while the consumer is paused, not a cache-only
+        // counter or process RSS. Allow fixed reader/cursor ownership overhead,
+        // but not one reference per future window (1024 in the regression).
+        assert!(
+            Arc::strong_count(keys.values()) < 16,
+            "future fragments retained {} dictionary references",
+            Arc::strong_count(keys.values())
+        );
+        assert_eq!(
+            row as u64,
+            batch
+                .column_by_name("field_0")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0)
+        );
+        for column in 0..32 {
+            let values = batch
+                .column_by_name(&format!("wide_{column}"))
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            assert_eq!(0, values.null_count());
+            assert_eq!(1000 + column as u64, values.value(0));
+        }
+    }
+    assert!(matches!(
+        stream.try_next().await.unwrap(),
+        Some(source::SourceEvent::SourceEnd)
+    ));
+    assert!(stream.try_next().await.unwrap().is_none());
+    assert_eq!(1, counters.files.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(
+        1024,
+        counters.rows.load(std::sync::atomic::Ordering::Relaxed)
+    );
+}
+
+#[tokio::test]
+async fn cancelling_between_routed_fragments_stops_the_source() {
+    let (fixture, plan) = wide_window_fixture().await;
+    let (context, _) = fixture.context(None);
+    let source = source::SharedSource::build(
+        &plan,
+        &context,
+        validate_plan(&plan).unwrap(),
+        Arc::new(SourceCounters::default()),
+    )
+    .await
+    .unwrap();
+    let mut stream = source.batches();
+    assert!(matches!(
+        stream.try_next().await.unwrap(),
+        Some(source::SourceEvent::Batch { .. })
+    ));
+    context.cancellation.cancel();
+    let error = stream
+        .try_next()
+        .await
+        .err()
+        .expect("cancelled source yielded another fragment");
+    assert!(matches!(
+        error,
+        crate::error::Error::CompactionCancelled { .. }
+    ));
+}
+
+#[rstest::rstest]
+#[case(1)]
+#[case(2)]
+#[tokio::test]
+async fn many_windows_exhaust_metadata_without_outputs(#[case] workers: usize) {
+    let (fixture, mut plan) = wide_window_fixture().await;
+    plan.max_active_workers = workers;
+    let (context, protected) = fixture.context(None);
+    let error = tokio::time::timeout(Duration::from_secs(60), compact_regions(plan, context))
+        .await
+        .expect("window admission failure stalled the pipeline")
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            &error,
+            crate::error::Error::MultiRegionCompactionResource { reason, .. }
+                if reason == "Too many regions or time windows"
+        ),
+        "{error:?}"
+    );
+    assert!(protected.files.lock().unwrap().is_empty());
+    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
+    let path = crate::sst::location::sst_file_path(
+        fixture.layer.table_dir(),
+        fixture.source.file_id(),
+        fixture.layer.path_type(),
+    );
+    assert!(fixture.layer.object_store().exists(&path).await.unwrap());
 }
 
 #[test]
