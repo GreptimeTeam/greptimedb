@@ -1528,9 +1528,9 @@ fn same_grid(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Arc<EvalGrid>> {
 
 /// Label pairs identifying a match group or a result; empty values are absent, as in
 /// Prometheus.
-type GroupKey = Vec<(Arc<str>, Arc<str>)>;
+pub(crate) type GroupKey = Vec<(Arc<str>, Arc<str>)>;
 
-fn group_key(metric: &SeriesLabels, labels: &MatchingLabels) -> GroupKey {
+pub(crate) fn group_key(metric: &SeriesLabels, labels: &MatchingLabels) -> GroupKey {
     let mut key: GroupKey = match labels {
         MatchingLabels::On(names) => names
             .iter()

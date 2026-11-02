@@ -23,10 +23,11 @@ functions, vector matching and extension operators. Statement planning lives in
 
 Native PromQL is an experimental, standalone evaluation route alongside the
 existing DataFusion PromQL path. It operates on one storage region, which may
-supply multiple scan partitions. It can evaluate each independent input series
-in those partitions, but does not merge one logical series split across regions
-or partitions; cross-region `SeriesMerge`/`Exchange` and global final-label
-semantics are not implemented. Do not describe partition-local work as a global
+supply multiple scan partitions. Where a boundary must answer one logical
+series once, `SeriesRepartitionExec` merges that identity's fragments across
+scan partitions and recomputes a single close for it. Cross-region
+`SeriesMerge`/`Exchange` are still not implemented, so a logical series split
+across regions is not merged. Do not describe partition-local work as a global
 series merge.
 
 Vector operations use the existing vector-matching semantics; do not describe

@@ -55,13 +55,15 @@ fn evaluated_frame_schema(tree: &NativeTree) -> datafusion::common::DFSchemaRef 
     )
 }
 
-// Reproduction from the review: 16 hosts × 20k samples, `rate[10s]`, and 16 DN
-// partitions produces four batches per chain and fails while unpacking because
-// `CoalescePartitionsExec` interleaves their batches, so a chain is cut and the frames no
-// longer decode. This test asserts that failure, which is why it runs rather than being
-// ignored: it keeps the boundary honest until the frontend region merge becomes
-// chain-atomic, and it is the test to change when that fix lands. The parallelism-one
-// path is exercised by `native_prefix_executes_over_real_mito_region`.
+// Sends `rate[10s]` on a one-point evaluation grid for 16 hosts over 16 region-scan
+// partitions to the datanode's remote-read entry point, then checks that the evaluated frames
+// decode and each host reports the rate its samples produce. The former decode failure no longer
+// reproduces because #10023 makes region package completion close its pending final raw chunk,
+// so a chain's value and close are no longer latched apart in separate batches by the
+// batch-interleaving `CoalescePartitionsExec`. That coalescing is still not chain-atomic: a chain
+// spanning batches can still be cut. This one-point grid gives each host one evaluated value plus
+// a possible empty closing chunk, so it does not exercise a chain spanning many batches. The
+// parallelism-one path is exercised by `native_prefix_executes_over_real_mito_region`.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_prefix_multi_partition_series_chains() {
     let instance = GreptimeDbStandaloneBuilder::new("native_prefix_partitioned_chains")
@@ -205,20 +207,48 @@ async fn native_prefix_multi_partition_series_chains() {
     }
     let schema = batches.first().expect("evaluated frames").schema.clone();
     let batches = RecordBatches::try_new(schema, batches).unwrap();
-    let error = common_query::series_frame::unpack_evaluated_series(
+    // Package completion closes each region's pending final raw chunk, so the evaluated frames
+    // decode; ordinary partition coalescing still does not keep chains atomic. Check that every
+    // host's chain closes exactly once and carries the rate its own samples produce.
+    let decoded = common_query::series_frame::unpack_evaluated_series(
         Box::pin(DfRecordBatchStreamAdapter::new(batches.as_stream())),
         None,
     )
     .unwrap()
     .try_collect::<Vec<_>>()
     .await
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("evaluated series identity changed before its chain closed"),
-        "{error}"
-    );
+    .expect("a chain-atomic merge decodes every chain");
+
+    let mut closed = std::collections::BTreeMap::<String, (usize, Vec<f64>)>::new();
+    for (series, is_last) in decoded {
+        let host = series
+            .metric
+            .get("host")
+            .unwrap_or_else(|| panic!("a decoded series keeps its host label: {:?}", series.metric))
+            .to_string();
+        let entry = closed.entry(host).or_default();
+        if is_last {
+            entry.0 += 1;
+        }
+        for field in series.fields.iter() {
+            entry
+                .1
+                .extend(field.iter().filter_map(|sample| match sample {
+                    datatypes::series::samples::SampleRef::Float(value) => Some(value),
+                    datatypes::series::samples::SampleRef::Histogram(_)
+                    | datatypes::series::samples::SampleRef::Missing => None,
+                }));
+        }
+    }
+    assert_eq!(16, closed.len(), "one chain per host: {closed:?}");
+    for (host, (closes, values)) in &closed {
+        assert_eq!(1, *closes, "`{host}` closes its chain exactly once");
+        assert_eq!(
+            vec![1.0],
+            *values,
+            "`{host}` reports the rate of its own samples, which a cut chain would lose"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
