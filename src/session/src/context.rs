@@ -99,6 +99,9 @@ pub struct QueryContext {
     /// Process-local storage acknowledgements; never accepted from a wire context.
     #[builder(setter(skip))]
     write_progress: Option<Arc<WriteProgress>>,
+    /// Preserve storage acknowledgements for protocol-level partial-write accounting.
+    #[builder(setter(skip))]
+    confirmed_writes: bool,
     /// Process id for managing on-going queries
     #[builder(default)]
     process_id: u32,
@@ -299,6 +302,24 @@ impl QueryContext {
 
     pub fn set_write_progress(&mut self, progress: Arc<WriteProgress>) {
         self.write_progress = Some(progress);
+    }
+
+    /// Forks this context to retain storage acknowledgements for partial write accounting.
+    ///
+    /// Insertion APIs returning `Output` may return `Ok` while carrying storage errors
+    /// in `Output.meta.write_completions`, even on synchronous write paths. Callers must
+    /// await `Output::write_progress()` and inspect both its acknowledged row count and
+    /// its `error` before treating the write as successful.
+    pub fn with_confirmed_writes(&self) -> Self {
+        let mut ctx = self.fork();
+        ctx.confirmed_writes = true;
+        ctx
+    }
+
+    /// Whether insertion outputs retain storage acknowledgements and may defer errors.
+    /// See [`Self::with_confirmed_writes`] for the caller's completion-handling contract.
+    pub fn confirmed_writes(&self) -> bool {
+        self.confirmed_writes
     }
 
     /// Forks this context with an independent snapshot of mutable session data.
@@ -776,6 +797,7 @@ impl QueryContextBuilder {
             batching_enabled: self.batching_enabled.unwrap_or_default(),
             admitted_write: None,
             write_progress: None,
+            confirmed_writes: false,
             logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
