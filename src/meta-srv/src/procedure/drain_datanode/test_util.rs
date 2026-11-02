@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +25,7 @@ use common_meta::instruction::{
     SimpleReply, UpgradeRegionReply, UpgradeRegionsReply,
 };
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::test_utils::new_test_table_info;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
@@ -31,6 +33,7 @@ use common_procedure::{
     Context as ExecContext, ProcedureId, ProcedureManagerRef, ProcedureState, Status,
 };
 use common_time::util::current_time_millis;
+use common_wal::options::{KafkaWalOptions, WalOptions};
 use store_api::storage::RegionId;
 
 use crate::error::Result;
@@ -38,8 +41,7 @@ use crate::metasrv::SelectorContext;
 use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::drain_datanode::manager::DrainDatanodeManager;
 use crate::procedure::drain_datanode::{
-    Context, DEFAULT_PARALLELISM, DrainDatanodePlan, DrainDatanodeStrategy, PersistentContext,
-    State,
+    Context, DEFAULT_PARALLELISM, DrainDatanodeStrategy, PersistentContext, State,
 };
 use crate::procedure::region_migration::manager::{
     RegionMigrationManager, RegionMigrationManagerRef,
@@ -302,15 +304,40 @@ pub(super) async fn run_until_done(
     panic!("the drain procedure did not finish in 50 steps");
 }
 
-/// Seeds the volatile plan, as if `CheckDrained` had built it.
-pub(super) fn seed_plan(ctx: &mut Context, leader_regions: Vec<RegionId>) {
-    ctx.volatile_ctx.plan = Some(DrainDatanodePlan {
-        leader_regions,
-        follower_regions: vec![],
-    });
+/// Sets the pending leader regions for a state test.
+pub(super) fn set_leader_regions(ctx: &mut Context, leader_regions: Vec<RegionId>) {
+    ctx.volatile_ctx.leader_regions = leader_regions;
 }
 
 /// Returns the leader regions the procedure still has to migrate.
 pub(super) fn leader_regions(ctx: &Context) -> Vec<RegionId> {
-    ctx.volatile_ctx.leader_regions().to_vec()
+    ctx.volatile_ctx.leader_regions.clone()
+}
+
+/// Creates interleaved Kafka topic assignments for drain cursor tests.
+pub(crate) async fn create_kafka_table(
+    env: &TestEnv,
+    table_id: u32,
+    region_count: u32,
+    topic_count: u32,
+) {
+    let routes = (0..region_count)
+        .map(|i| leader_region(RegionId::new(table_id, i), 1))
+        .collect();
+    let options = (0..region_count)
+        .map(|i| {
+            (
+                i,
+                WalOptions::Kafka(KafkaWalOptions::new(format!("topic-{}", i % topic_count))),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    env.table_metadata_manager
+        .create_table_metadata(
+            new_test_table_info(table_id),
+            TableRouteValue::physical(routes),
+            options,
+        )
+        .await
+        .unwrap();
 }
