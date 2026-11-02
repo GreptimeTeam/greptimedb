@@ -230,7 +230,7 @@ pub(super) fn evaluate(
                     *start != 0 && range_start < *shifted && *shifted < *first_ts
                 })
                 .map(|(_, shifted)| shifted);
-            let Some(mut result) = histogram_rate(histograms, is_counter)? else {
+            let Some(mut result) = histogram_rate(histograms, is_counter, offset_ms)? else {
                 record_warning(
                     collector,
                     format!(
@@ -312,9 +312,9 @@ pub(super) fn evaluate(
                 }
             }
             let result = if function == Irate {
-                last_two::<true>(floats, histograms)?
+                last_two::<true>(floats, histograms, offset_ms)?
             } else {
-                last_two::<false>(floats, histograms)?
+                last_two::<false>(floats, histograms, offset_ms)?
             };
             if result.is_none() && !had_floats && tail_histograms.len() == 2 {
                 record_warning(
@@ -559,6 +559,7 @@ fn edges(floats: Option<FloatWindow<'_>>, histograms: &Histograms, kind: EdgeKin
 fn last_two<const IS_RATE: bool>(
     floats: Option<FloatWindow<'_>>,
     histograms: &Histograms,
+    offset_ms: i64,
 ) -> Result<Option<GridSample>> {
     let floats = floats.map(|window| {
         let from = window.values.len().saturating_sub(2);
@@ -580,7 +581,10 @@ fn last_two<const IS_RATE: bool>(
         (Sample::Histogram(prev), Sample::Histogram(last)) => {
             let interval = last_ts - prev_ts;
             let mut result = last.clone();
-            if !IS_RATE || !last.detect_reset(prev)? {
+            // `irate` drops the counter's accumulations on a reset the way the existing planner's
+            // `idelta_value` does, start timestamp included; `idelta` is a plain difference and
+            // reads no reset at all.
+            if !IS_RATE || !last.detect_counter_reset_shifted(prev, prev_ts, last_ts, offset_ms) {
                 if result.uses_custom_buckets() != prev.uses_custom_buckets() {
                     return Ok(None);
                 }
@@ -599,7 +603,11 @@ fn last_two<const IS_RATE: bool>(
 
 /// Prometheus `histogramRate`: the increase from the first to the last histogram, adding back
 /// what counter resets dropped. `None` when the histograms mix exponential and custom buckets.
-fn histogram_rate(points: &Histograms, is_counter: bool) -> Result<Option<FloatHistogram>> {
+fn histogram_rate(
+    points: &Histograms,
+    is_counter: bool,
+    offset_ms: i64,
+) -> Result<Option<FloatHistogram>> {
     let last = &points[points.len() - 1].1;
     let mut prev = Cow::Borrowed(&points[0].1);
     let mut uses_custom_buckets = prev.uses_custom_buckets();
@@ -608,7 +616,7 @@ fn histogram_rate(points: &Histograms, is_counter: bool) -> Result<Option<FloatH
     // counter looks like when it is already above the previous value.
     if is_counter {
         let (second_ts, second) = &points[1];
-        if second.detect_counter_reset(&prev, points[0].0, *second_ts) {
+        if second.detect_counter_reset_shifted(&prev, points[0].0, *second_ts, offset_ms) {
             prev = Cow::Owned(second.empty_like());
             uses_custom_buckets = second.uses_custom_buckets();
         }
@@ -629,7 +637,12 @@ fn histogram_rate(points: &Histograms, is_counter: bool) -> Result<Option<FloatH
     result.sub(&prev)?;
     if is_counter {
         for (index, (current_ts, current)) in points.iter().enumerate().skip(1) {
-            if current.detect_counter_reset(&prev, points[index - 1].0, *current_ts) {
+            if current.detect_counter_reset_shifted(
+                &prev,
+                points[index - 1].0,
+                *current_ts,
+                offset_ms,
+            ) {
                 result.add(&prev)?;
             }
             prev = Cow::Borrowed(current);

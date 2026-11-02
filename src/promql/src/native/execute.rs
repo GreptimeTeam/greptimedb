@@ -52,8 +52,8 @@ use crate::instant_eval::{
 };
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
-    drop_metric_name, is_float_series, map_arithmetic_literal, map_arithmetic_series, map_compare,
-    map_compare_series, map_math, map_math_with_parameters,
+    drop_metric_name, is_float_series, map_arithmetic_literal, map_arithmetic_series,
+    map_compare_literal, map_compare_series, map_math, map_math_with_parameters,
 };
 use crate::map_time::{self, DateFunction};
 use crate::native::aggregate::{AggregateOutput, AggregateRuntime};
@@ -2072,6 +2072,7 @@ struct BroadcastRuntime {
     sample_schema: Arc<SeriesSchema>,
     /// The bytes charged for the scalar's value, which [`BroadcastScalar::Dynamic`] keeps.
     scalar_bytes: usize,
+    annotations: Option<PromqlAnnotationCollector>,
 }
 
 /// What a map with scalar parameters holds: its function and output layout, and each parameter's
@@ -2167,7 +2168,23 @@ impl BroadcastRuntime {
                     *operand,
                 )?),
                 BroadcastOp::Compare(comparison) => {
-                    map_compare(&self.sample_schema, &chunk.series, comparison, *operand)?
+                    // A histogram has no ordering against a scalar, so the positions it holds
+                    // answer nothing. Prometheus drops those samples and the existing planner says
+                    // so with an info (`NativeHistogramDrop`), which is what this mirrors; failing
+                    // the query instead would turn one unsupported sample into no answer at all.
+                    let (output, dropped_histogram) = map_compare_literal(
+                        &self.sample_schema,
+                        &chunk.series,
+                        comparison,
+                        *operand,
+                    )?;
+                    if dropped_histogram && let Some(collector) = &self.annotations {
+                        collector.record_info(format!(
+                            "{}: dropped native histogram samples because this binary operation is not supported for native histograms",
+                            comparison,
+                        ));
+                    }
+                    output
                 }
             },
             BroadcastScalar::Dynamic { left, value } => {
@@ -3479,18 +3496,31 @@ impl RuntimeNode {
             RuntimeOp::VectorOf { input, .. }
             | RuntimeOp::Instant { input, .. }
             | RuntimeOp::Merge { input, .. } => input.set_annotations(collector),
-            RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
+            RuntimeOp::Binary { left, right, .. } => {
+                left.set_annotations(collector.clone());
+                right.set_annotations(collector);
+            }
+            RuntimeOp::Broadcast {
+                left,
+                right,
+                broadcast,
+                ..
+            } => {
+                if let Some(broadcast) = broadcast {
+                    broadcast.annotations = Some(collector.clone());
+                }
                 left.set_annotations(collector.clone());
                 right.set_annotations(collector);
             }
             RuntimeOp::Aggregate { input, .. } => input.set_annotations(collector),
+            RuntimeOp::Timestamp { input, .. } => input.set_annotations(collector),
             RuntimeOp::Vector { input, vector, .. } => {
                 if let Some(vector) = vector {
                     vector.annotations = Some(collector.clone());
                 }
                 input.set_annotations(collector);
             }
-            _ => {}
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
         }
     }
 
@@ -6206,6 +6236,7 @@ fn broadcast_runtime(
         op: broadcast_op(matching)?,
         sample_schema,
         scalar_bytes: 0,
+        annotations: None,
     })
 }
 

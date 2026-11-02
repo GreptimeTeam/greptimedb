@@ -7717,6 +7717,52 @@ async fn native_histogram_selector_plans_a_native_producer() {
     );
 }
 
+/// A histogram reaching an aggregate keeps the existing plan wherever that aggregate sits.
+///
+/// The gate this pins cannot look at the root alone: `sum(h) * 2` has a binary root, and admitting
+/// it ran the per-partition producer's float-only fold, which every histogram sample fails at
+/// execution. The value entering each aggregate is what decides, so an operator above one does not
+/// hide it.
+#[tokio::test]
+async fn histogram_into_an_aggregate_keeps_the_existing_plan_below_any_operator() {
+    for query in [
+        "sum(some_metric)",
+        "sum(some_metric) * 2",
+        "sum(some_metric) / 2",
+        "-sum(some_metric)",
+        "avg(some_metric) + 1",
+        "sum(sum(some_metric))",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} ran a native fold over histograms: {}",
+            plan.display_indent_schema()
+        );
+    }
+}
+
+/// A float-producing prefix around an aggregate stays on the native route.
+///
+/// `count_over_time` over a histogram answers floats, so the aggregate folds floats and the split
+/// is sound; only a histogram entering the aggregate is refused.
+#[tokio::test]
+async fn float_prefix_into_an_aggregate_still_runs_natively() {
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "sum(count_over_time(some_metric[5m]))",
+        true,
+        table_provider,
+    )
+    .await;
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "{}",
+        plan.display_indent_schema()
+    );
+}
+
 /// An instant selection over a native histogram keeps the histogram, so its output column stays the
 /// canonical struct rather than becoming a float.
 #[tokio::test]

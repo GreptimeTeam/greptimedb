@@ -608,20 +608,20 @@ impl FloatHistogram {
         bound(idx, self.schema, &self.custom_values)
     }
 
-    /// Go `DetectReset`: whether `self` cannot follow `previous` without a counter reset.
-    /// A counter reset the start timestamps witness, in Prometheus's rule: a current sample whose
-    /// start lies between the previous sample and itself began counting again, so the counts need
-    /// not have dropped for this to be a reset.
+    /// The reset a pair of start timestamps witnesses, given the window timestamps they are
+    /// compared against.
     ///
-    /// The native path reuses it so a restarted counter that happens to be above the previous
-    /// value is not read as an increase.
-    pub(crate) fn detect_start_timestamp_reset(
-        &self,
-        previous: &Self,
+    /// Separate from the payload so a caller whose window timestamps have been moved by an
+    /// `offset` can shift the stored timestamps onto the same axis without cloning either
+    /// histogram: `range_eval` keeps its samples at `timestamp + offset_ms` while the stored start
+    /// timestamp stays where the sender put it, and comparing across those two axes reports a
+    /// reset for a pair that never restarted.
+    pub(crate) fn start_timestamp_reset(
+        current_start: i64,
+        previous_start: i64,
         previous_ts: i64,
         current_ts: i64,
     ) -> bool {
-        let current_start = self.start_timestamp.unwrap_or_default();
         if current_start == 0 || current_start >= current_ts || current_start < previous_ts {
             return false;
         }
@@ -633,20 +633,32 @@ impl FloatHistogram {
         // previous start timestamp later than its own sample. That is not a counter the sender can
         // have observed, so requiring it to be at or before `previous_ts` keeps such a payload from
         // being reported as a reset.
-        let previous_start = previous.start_timestamp.unwrap_or_default();
         previous_start <= previous_ts && previous_start != 0 && previous_start != previous_ts
     }
 
-    /// Detects a counter reset the way the existing planner does, over start timestamps and then
-    /// the payload.
-    pub(crate) fn detect_counter_reset(
+    /// Detects a counter reset for a window whose timestamps an `offset` has already moved.
+    ///
+    /// The stored start timestamps are shifted by `offset_ms` before they are compared, which is
+    /// the axis `range_eval` hands its windows. Shifting them here rather than in a copy of each
+    /// histogram keeps the check allocation-free on the per-point path.
+    pub(crate) fn detect_counter_reset_shifted(
         &self,
         previous: &Self,
         previous_ts: i64,
         current_ts: i64,
+        offset_ms: i64,
     ) -> bool {
-        self.detect_start_timestamp_reset(previous, previous_ts, current_ts)
-            || self.detect_reset(previous).unwrap_or(false)
+        let shifted = |start: Option<i64>| {
+            start
+                .and_then(|start| start.checked_add(offset_ms))
+                .unwrap_or_default()
+        };
+        Self::start_timestamp_reset(
+            shifted(self.start_timestamp),
+            shifted(previous.start_timestamp),
+            previous_ts,
+            current_ts,
+        ) || self.detect_reset(previous).unwrap_or(false)
     }
 
     pub(crate) fn detect_reset(&self, previous: &Self) -> Result<bool> {

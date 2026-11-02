@@ -28,7 +28,9 @@ pub use broadcast::{
     ParameterizedMath, ScalarFunction, ScalarSeriesOperand, map_arithmetic_series,
     map_compare_series, map_math_with_parameters, map_scalar_function,
 };
-pub use comparison::{Comparison, ComparisonOp, map_compare, scalar_arithmetic, scalar_compare};
+pub use comparison::{
+    Comparison, ComparisonOp, map_compare, map_compare_literal, scalar_arithmetic, scalar_compare,
+};
 
 use std::f64::consts::PI;
 use std::sync::Arc;

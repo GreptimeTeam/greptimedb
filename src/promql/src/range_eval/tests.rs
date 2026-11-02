@@ -5081,6 +5081,215 @@ fn a_histogram_outside_every_smoothed_window_is_accepted() {
     }
 }
 
+/// One histogram sample of one field, with the count, sum and start timestamp the caller names.
+fn histogram_chunk_with(
+    schema: &SeriesSchema,
+    ts: i64,
+    count: f64,
+    start_timestamp: Option<i64>,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let offsets = [0];
+    let lengths = [1];
+    let buckets = [count];
+    let mut builder = HistogramBatchBuilder::new();
+    let index = builder
+        .push(HistogramView {
+            schema: 0,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count,
+            sum: count,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp,
+            custom_values: &[],
+            positive: BucketSideView {
+                span_offsets: &offsets,
+                span_lengths: &lengths,
+                buckets: &buckets,
+            },
+            negative: BucketSideView {
+                span_offsets: &[],
+                span_lengths: &[],
+                buckets: &[],
+            },
+        })
+        .unwrap();
+    let samples = Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(index)]),
+        builder.finish().unwrap(),
+    )
+    .unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from(0u64.to_le_bytes().to_vec()),
+        Some(metric(0)),
+        RawTimestamps::try_new(ScalarBuffer::from(vec![ts])).unwrap(),
+        SeriesFields::try_from_vec(vec![samples]).unwrap(),
+        is_last,
+    )
+    .unwrap()
+}
+
+/// `offset` moves a window's timestamps without moving the stored start timestamps, so a reset
+/// check that reads the two on different axes answers differently for the same two samples.
+///
+/// Both queries below read the window `{2s, 3s}` of the same series: the first because it is
+/// evaluated at 3s, the second because `offset 2m` moves it there. A start timestamp of 2.5s on the
+/// second sample lies inside that window on both, and a counter restart is what it means on both.
+#[test]
+fn offset_does_not_change_the_counter_reset_a_window_reports() {
+    let schema = raw_schema(1);
+    let counts = |range_ms: i64, offset_ms: i64, eval_ts: i64, function| {
+        let mut evaluator = RangeEvaluator::try_new(
+            &schema,
+            grid(eval_ts, 1_000, 1),
+            RangeWindow {
+                range_ms,
+                offset_ms,
+                anchor_ms: None,
+                modifier: None,
+            },
+            function,
+        )
+        .unwrap();
+        let chunks = collect_chunks(
+            &mut evaluator,
+            &[
+                histogram_chunk_with(&schema, 2_000, 6.0, None, false),
+                histogram_chunk_with(&schema, 3_000, 7.0, Some(2_500), true),
+            ],
+        );
+        let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+        match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+            SampleRef::Histogram(histogram) => histogram.count,
+            other => panic!("expected a histogram, got {}", describe_sample(Some(other))),
+        }
+    };
+    // The window has to hold both samples for the pair check to run at all: `(1000, 3000]`.
+    for function in [RangeFunction::Increase, RangeFunction::Rate] {
+        let unshifted = counts(2_000, 0, 3_000, function);
+        let shifted = counts(2_000, 120_000, 123_000, function);
+        assert!(
+            (unshifted - shifted).abs() < 1e-12,
+            "{function:?}: the same window answered {unshifted} unshifted and {shifted} with \
+             `offset 2m`, so the reset check read two different time axes"
+        );
+    }
+}
+
+/// A comparison over a histogram drops the positions it holds instead of failing the query.
+///
+/// Prometheus compares float samples only, and the existing planner states the same rule by
+/// answering no value for a histogram while recording an info (`NativeHistogramDrop`). The float
+/// sample beside it in the same series still answers, which is what separates dropping a sample
+/// from dropping the chunk.
+#[test]
+fn comparing_a_mixed_series_with_a_scalar_drops_only_the_histogram_positions() {
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields.clone(),
+        eval_grid: Some(grid(1_000, 2_000, 2)),
+    });
+    // One field over two positions: a float at 1s and a histogram at 3s.
+    let mut histogram = FloatHistogram::try_from_view(&HistogramView {
+        schema: 0,
+        zero_threshold: 0.0,
+        zero_count: 0.0,
+        count: 7.0,
+        sum: 7.0,
+        reset_hint: CounterResetHint::Unknown,
+        start_timestamp: None,
+        custom_values: &[],
+        positive: BucketSideView {
+            span_offsets: &[0],
+            span_lengths: &[1],
+            buckets: &[7.0],
+        },
+        negative: BucketSideView {
+            span_offsets: &[],
+            span_lengths: &[],
+            buckets: &[],
+        },
+    })
+    .unwrap();
+    histogram.compact();
+    let mut builder = GridSeriesBuilder::try_new(Arc::clone(&schema)).unwrap();
+    builder.push(0, &[Some(2.0)]).unwrap();
+    builder
+        .push_samples(1, &[Some(GridSample::Histogram(Box::new(histogram)))])
+        .unwrap();
+    let series = builder.finish(metric(0)).unwrap().unwrap();
+
+    let (output, dropped) = crate::map::map_compare_literal(
+        &schema,
+        &series,
+        crate::map::Comparison::Filter(crate::map::ComparisonOp::Greater),
+        crate::map::ScalarOperand::Right(0.0),
+    )
+    .unwrap();
+    assert!(
+        dropped,
+        "the histogram position was not reported as dropped"
+    );
+    let output = output.expect("the float sample passed the filter");
+    let kept = output
+        .time
+        .positions()
+        .filter_map(
+            |(point, row)| match output.fields.as_slice()[0].cursor().at(row) {
+                Some(SampleRef::Float(value)) => Some((point, value)),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kept,
+        vec![(0, 2.0)],
+        "only the float position survives the comparison"
+    );
+}
+
+/// `irate` reads the counter reset its two points witness, start timestamps included.
+///
+/// The existing planner's `idelta_value` is this query's oracle: it uses `detect_counter_reset`,
+/// not the payload-only `detect_reset`. A restarted counter whose counts happen to grow again is
+/// therefore a reset, and the answer is the last sample rather than their difference.
+#[test]
+fn irate_reads_a_reset_the_start_timestamp_witnesses() {
+    let schema = raw_schema(1);
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(3_000, 1_000, 1),
+        RangeWindow {
+            // The window `(2000, 3000]` holds both samples: `irate` reads the last two points of
+            // its window, so both have to be inside it.
+            range_ms: 2_000,
+            offset_ms: 0,
+            anchor_ms: None,
+            modifier: None,
+        },
+        RangeFunction::Irate,
+    )
+    .unwrap();
+    let chunks = collect_chunks(
+        &mut evaluator,
+        &[
+            histogram_chunk_with(&schema, 2_000, 6.0, None, false),
+            histogram_chunk_with(&schema, 3_000, 7.0, Some(2_500), true),
+        ],
+    );
+    let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+    match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+        // The reset makes the last sample the whole answer: 7 over a one second interval.
+        SampleRef::Histogram(histogram) => assert!(
+            (histogram.count - 7.0).abs() < 1e-12,
+            "irate read the start timestamp as no reset and answered {}",
+            histogram.count
+        ),
+        other => panic!("expected a histogram, got {}", describe_sample(Some(other))),
+    }
+}
+
 /// A `rate` over gauge histograms reports the flavor warning into the collector the evaluator was
 /// given.
 ///
