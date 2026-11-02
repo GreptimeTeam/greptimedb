@@ -53,6 +53,7 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::Stream;
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
+use table::table::scan::SeriesScanExec;
 
 use crate::source::materialize_raw_labels;
 
@@ -110,14 +111,15 @@ impl RawSeriesSource {
     }
 
     /// The physical node over `series_scan`, the region's raw-series leaf for this binding.
-    pub fn to_execution_plan(
+    pub fn to_per_series_execution_plan(
         &self,
         series_scan: Arc<dyn ExecutionPlan>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(RawSeriesSourceExec::try_new(
+        Ok(Arc::new(RawSeriesSourceExec::try_new_with_provenance(
             series_scan,
             Arc::clone(&self.metric_name),
             self.fields.clone(),
+            true,
         )?))
     }
 }
@@ -241,14 +243,17 @@ pub struct RawSeriesSourceExec {
     metric_name: Arc<str>,
     series_schema: Arc<SeriesSchema>,
     properties: Arc<PlanProperties>,
+    per_series_scan: bool,
 }
 
 impl RawSeriesSourceExec {
-    fn try_new(
+    fn try_new_with_provenance(
         input: Arc<dyn ExecutionPlan>,
         metric_name: Arc<str>,
         fields: Vec<String>,
+        per_series_scan: bool,
     ) -> DataFusionResult<Self> {
+        let per_series_scan = per_series_scan && input.downcast_ref::<SeriesScanExec>().is_some();
         let series_schema = series_schema(&fields);
         let partition_count = input.properties().partitioning.partition_count();
         if partition_count == 0 {
@@ -277,7 +282,17 @@ impl RawSeriesSourceExec {
             metric_name,
             series_schema,
             properties,
+            per_series_scan,
         })
+    }
+
+    /// Whether this node was built by a caller that declared its child a per-series scan, and that
+    /// child is one.
+    ///
+    /// A consumer may publish an identity as soon as its chain closes only under this property, so
+    /// it is answered from what the constructor established rather than from the node's type.
+    pub fn is_per_series_scan(&self) -> bool {
+        self.per_series_scan
     }
 }
 
@@ -338,10 +353,11 @@ impl ExecutionPlan for RawSeriesSourceExec {
             .iter()
             .map(|field| field.name.to_string())
             .collect();
-        Ok(Arc::new(Self::try_new(
+        Ok(Arc::new(Self::try_new_with_provenance(
             children.swap_remove(0),
             Arc::clone(&self.metric_name),
             fields,
+            self.per_series_scan,
         )?))
     }
 

@@ -19,14 +19,13 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::series::frame::{FrameContent, FrameLabelMode, SeriesFrameDeclaration};
-use promql::extension_plan::SeriesRepartitionExec;
+use promql::extension_plan::{RawSeriesSourceExec, SeriesRepartitionExec};
 
 /// Ensures a multi-partition series-frame *root* is emitted through one output partition.
 ///
-/// The client receives one stream, and a series frame is not safe to coalesce: a stored series may
-/// be split across partitions and a chunk's `is_last` closes only its own producer. The router
-/// merges each complete identity first, so an evaluated or explicit-label raw root leaves here
-/// through it.
+/// The client receives one stream. Some multi-partition frame roots need identities merged across
+/// partitions; region per-series scans do not, because their scan contract assigns each identity to
+/// one partition.
 ///
 /// The view is the root of a query-engine execution, which in a distributed statement is one
 /// region's own root as well: a region answers its part of the statement through the same engine,
@@ -63,15 +62,13 @@ impl PhysicalOptimizerRule for SeriesFrameOutput {
             return Ok(plan);
         }
         // A raw frame reaches the client through the same single stream, and ordinary batch
-        // coalescing cannot produce it: the chunks of one stored series may sit in different
-        // partitions, and a per-stream `is_last` is not the series' global end. The router
-        // reconstructs each complete primary key and recomputes finality, so it is the only
-        // correct exit. It needs explicit labels to check that one key has one binding; a key-only
-        // frame has to stay rejected rather than silently coalesced.
-        // No production plan reaches the rejection below with a key-only frame: the only producer
-        // is the region's series scan, and every plan that executes it puts `RawSeriesSourceExec`
-        // or `FusedSeries` above it, both of which publish explicit labels. The rejection is what
-        // keeps that true rather than a cost paid by a reachable query.
+        // coalescing cannot produce it: a chunk's `is_last` closes only its own producer, so
+        // coalescing would hand over several partial series under one identity. The router needs
+        // explicit labels to check that one key has one binding; a key-only frame therefore stays
+        // rejected rather than silently coalesced.
+        //
+        // Ordinary multi-partition roots need their identities merged, but a root whose producer
+        // declared that each identity lives in one partition does not: its chain is the identity.
         if declaration.content() == FrameContent::Raw
             && declaration.labels() != FrameLabelMode::Explicit
         {
@@ -82,7 +79,17 @@ impl PhysicalOptimizerRule for SeriesFrameOutput {
             ));
         }
 
-        Ok(Arc::new(SeriesRepartitionExec::try_new(plan, 1)?))
+        let completion = plan
+            .downcast_ref::<RawSeriesSourceExec>()
+            .is_some_and(RawSeriesSourceExec::is_per_series_scan)
+            || plan.downcast_ref::<SeriesRepartitionExec>().is_some();
+        if completion {
+            Ok(Arc::new(SeriesRepartitionExec::try_new_complete_disjoint(
+                plan, 1,
+            )?))
+        } else {
+            Ok(Arc::new(SeriesRepartitionExec::try_new(plan, 1)?))
+        }
     }
 
     fn name(&self) -> &str {
@@ -134,6 +141,16 @@ mod tests {
     }
 
     #[test]
+    fn an_unmarked_raw_root_selects_merge_inputs_router() {
+        let exec = optimized(raw_plan(3)).unwrap();
+        let router = exec.downcast_ref::<SeriesRepartitionExec>().unwrap();
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::MergeInputs,
+            router.identity_completion()
+        );
+    }
+
+    #[test]
     fn a_multi_partition_raw_root_is_routed_into_one_output() {
         let plan = raw_plan(3);
         assert_eq!(3, plan.properties().output_partitioning().partition_count());
@@ -148,6 +165,11 @@ mod tests {
             .downcast_ref::<SeriesRepartitionExec>()
             .expect("the exit is the shared router");
         assert_eq!(
+            promql::extension_plan::IdentityCompletion::MergeInputs,
+            router.identity_completion(),
+            "unproven memory roots use conservative merging"
+        );
+        assert_eq!(
             &SeriesRouting::RawPrimaryKey,
             router.routing_policy(),
             "raw identities meet at their complete primary key"
@@ -156,6 +178,18 @@ mod tests {
             raw_frame_schema(),
             exec.schema(),
             "the frame schema is kept"
+        );
+    }
+
+    #[test]
+    fn a_repartition_root_selects_complete_disjoint_router() {
+        let source: Arc<dyn ExecutionPlan> =
+            Arc::new(SeriesRepartitionExec::try_new(raw_plan(3), 2).unwrap());
+        let exec = optimized(source).unwrap();
+        let router = exec.downcast_ref::<SeriesRepartitionExec>().unwrap();
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::CompleteDisjoint,
+            router.identity_completion()
         );
     }
 
