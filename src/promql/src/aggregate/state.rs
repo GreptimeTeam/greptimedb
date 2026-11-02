@@ -326,8 +326,6 @@ impl FloatMerger {
     }
 
     /// Merges one Arrow-backed state row directly, without materializing a partial aggregate.
-    // Used by the native aggregate frame consumer when it wires direct state-row merging.
-    #[allow(dead_code)]
     pub(crate) fn merge_row(
         &mut self,
         row: &StateRow,
@@ -555,8 +553,8 @@ impl FloatMerger {
 
 /// One present field's state at one position, read from the row's component arrays.
 ///
-/// The components come from the row's own declaration, which `merge_row` has already checked
-/// against the merge's kind, so a component list that disagrees is caught before this runs.
+/// The components come from the row's own declaration; the native aggregate caller checks
+/// compatibility before this runs, so a component list that disagrees is caught before this runs.
 fn state_at(
     fields: &StateFieldsBatch,
     field: usize,

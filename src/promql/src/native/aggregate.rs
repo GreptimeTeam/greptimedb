@@ -43,7 +43,7 @@ use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, Grouping as BoundGrouping,
     aggregate_state_binding,
 };
-use crate::native::state::{StateChunk, state_chunk_from_partial};
+use crate::native::state::{StateChunk, state_bytes, state_chunk_from_partial};
 
 /// The output shape produced by an aggregate stage.
 pub(crate) enum AggregateOutput {
@@ -242,10 +242,11 @@ impl AggregateRuntime {
     }
 
     /// Transient bytes required to consume a state chunk.
-    pub(crate) fn pending_state(&self, _chunk: &StateChunk) -> usize {
-        // StateRow only clones handles into the caller-owned frame batch; merge allocations are
-        // admitted directly by FloatMerger::merge_row.
-        0
+    pub(crate) fn pending_state(&self, chunk: &StateChunk) -> usize {
+        match chunk {
+            StateChunk::Series { .. } => state_bytes(chunk),
+            StateChunk::Row(row) => crate::native::state::state_row_bytes(row),
+        }
     }
 
     /// The number of retained groups, for budgeting the output queue backing storage.

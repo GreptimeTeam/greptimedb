@@ -251,6 +251,25 @@ pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
     }
 }
 
+/// Bytes held by one decoded state row's owned wrappers.
+pub(crate) fn state_row_bytes(row: &crate::aggregate::state::StateRow) -> usize {
+    let fields = row.fields.len();
+    // Child value buffers are shared with the frame batch; charging them here would double-count.
+    size_of::<StateChunk>()
+        .saturating_add(size_of::<crate::aggregate::state::StateRow>())
+        .saturating_add(fields.saturating_mul(size_of::<datafusion::arrow::array::StructArray>()))
+        .saturating_add(
+            (0..fields)
+                .filter_map(|index| row.fields.field(index))
+                .map(|field| {
+                    field
+                        .num_columns()
+                        .saturating_mul(size_of::<datafusion::arrow::array::ArrayRef>())
+                })
+                .fold(0usize, usize::saturating_add),
+        )
+}
+
 /// Bytes a state chunk holds: labels, axis runs, and one sparse state vector per field.
 ///
 /// Like [`crate::grid_series::series_bytes`] this is a work estimate rather than a heap
@@ -262,8 +281,10 @@ pub(crate) fn state_bytes(chunk: &StateChunk) -> usize {
         state_schema,
     } = chunk
     else {
-        // The frame batch owns the Arrow buffers; the row only carries cloned handles into them.
-        return 0;
+        let StateChunk::Row(row) = chunk else {
+            unreachable!("a state chunk is either producer series or a decoded row")
+        };
+        return state_row_bytes(row);
     };
     let series_bytes = series.iter().fold(0usize, |total, series| {
         let runs = series.time.runs().count();

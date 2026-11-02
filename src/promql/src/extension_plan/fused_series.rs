@@ -2794,18 +2794,24 @@ impl FusedSeriesStream {
                 "FusedSeriesExec stream pushed a chunk after its execution closed".to_string(),
             ));
         };
-        for input_id in self.input_ids.get(feed.source).ok_or_else(|| {
+        let input_ids = self.input_ids.get(feed.source).ok_or_else(|| {
             DataFusionError::Execution(format!(
                 "FusedSeries has no runtime input IDs for source {}",
                 feed.source
             ))
-        })? {
-            match &feed.chunk {
-                FusedChunk::Raw(chunk) => executor.push_raw(*input_id, chunk.clone())?,
-                FusedChunk::Evaluated(chunk) => {
-                    executor.push_evaluated(*input_id, chunk.clone())?
-                }
-                FusedChunk::State(chunk) => executor.push_state(*input_id, (*chunk).clone())?,
+        })?;
+        let last = input_ids.len().saturating_sub(1);
+        let mut chunk = Some(feed.chunk);
+        for (index, input_id) in input_ids.iter().enumerate() {
+            let chunk = if index == last {
+                chunk.take().unwrap()
+            } else {
+                chunk.as_ref().unwrap().clone()
+            };
+            match chunk {
+                FusedChunk::Raw(chunk) => executor.push_raw(*input_id, chunk)?,
+                FusedChunk::Evaluated(chunk) => executor.push_evaluated(*input_id, chunk)?,
+                FusedChunk::State(chunk) => executor.push_state(*input_id, chunk)?,
             }
         }
         if self.frame_mode || self.state_mode {

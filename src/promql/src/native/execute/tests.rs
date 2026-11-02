@@ -11391,14 +11391,29 @@ fn partial_final_matches_complete_over_concatenated_input() {
         }
         let tree_final = aggregate_tree(AggregateStage::Final);
         let mut final_exec = executor(&tree_final, pool());
+        let mut first_row_cost = None;
         for state in partial_states {
+            // The cost the input queue charges is `state_bytes`, so that is what the assertion
+            // pins: a row reported as zero bytes would be held unaccounted while it waits.
+            if first_row_cost.is_none() {
+                first_row_cost = Some(crate::native::state::state_bytes(&state));
+            }
             final_exec.push_state(InputId::new(0), state).unwrap();
         }
+        assert!(
+            first_row_cost.unwrap() > 0,
+            "a queued state row must report the wrappers it owns"
+        );
+        assert!(
+            final_exec.state().reserved_bytes() > 0,
+            "the executor must reserve what its input queue holds"
+        );
         final_exec.end_of_input().unwrap();
         let mut merged = Vec::new();
         while let Some(chunk) = final_exec.next_chunk().unwrap() {
             merged.push(chunk);
         }
+        assert_eq!(final_exec.state().reserved_bytes(), 0);
         let mut complete = executor(&aggregate_tree(AggregateStage::Complete), pool());
         for vals in [vec![1.0, 2.0], vec![3.0, 4.0]] {
             complete
