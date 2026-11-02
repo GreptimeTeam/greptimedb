@@ -34,7 +34,7 @@ use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::PutOptions;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId};
+use store_api::storage::{ConcreteDataType, FileId, RegionId};
 
 use crate::error::{
     CastVectorSnafu, ComputeArrowSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu,
@@ -260,23 +260,17 @@ impl FulltextIndexer {
         self.creators.values().map(|c| c.inner.memory_usage()).sum()
     }
 
-    /// Returns IDs of columns that the creator is responsible for.
-    pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.creators.keys().filter_map(|target| match target {
-            IndexTarget::ColumnId(id) => Some(*id),
-            IndexTarget::JsonPath(_) => None,
-        })
+    /// Returns the targets indexed by this creator.
+    pub fn indexed_targets(&self) -> impl Iterator<Item = &IndexTarget> {
+        self.creators.keys()
     }
 
-    /// Returns IDs of columns indexed with the bloom backend.
-    pub fn bloom_column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
+    /// Returns the targets indexed with the bloom backend.
+    pub fn bloom_indexed_targets(&self) -> impl Iterator<Item = &IndexTarget> {
         self.creators
             .values()
             .filter(|c| matches!(c.inner, AltFulltextCreator::Bloom(_)))
-            .filter_map(|c| match &c.target {
-                IndexTarget::ColumnId(id) => Some(*id),
-                IndexTarget::JsonPath(_) => None,
-            })
+            .map(|c| &c.target)
     }
 }
 
@@ -552,7 +546,7 @@ mod tests {
     use puffin::puffin_manager::{PuffinManager, PuffinWriter};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_request::PathType;
-    use store_api::storage::{ConcreteDataType, FileId, RegionId};
+    use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId};
 
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
@@ -702,8 +696,18 @@ mod tests {
                         creator.update(&mut batch).await.unwrap();
                     }
                 }
-                assert_eq!(creator.column_ids().count(), 0);
-                assert_eq!(creator.bloom_column_ids().count(), 0);
+                assert_eq!(creator.indexed_targets().count(), hints.len());
+                assert!(
+                    creator
+                        .indexed_targets()
+                        .all(|target| matches!(target, IndexTarget::JsonPath(_)))
+                );
+                let bloom_targets: BTreeSet<_> = creator.bloom_indexed_targets().collect();
+                if backend == FulltextBackend::Bloom {
+                    assert_eq!(bloom_targets, creator.indexed_targets().collect());
+                } else {
+                    assert!(bloom_targets.is_empty());
+                }
                 let store = mock_object_store();
                 let puffin = factory.build(
                     store.clone(),

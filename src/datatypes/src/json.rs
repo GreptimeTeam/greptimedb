@@ -33,6 +33,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, InvalidJson2SettingsSnafu, Result, UnsupportedJsonTypeSnafu};
 use crate::json::value::{JsonValue, JsonVariant, encode_serde_json_as_jsonb};
 use crate::prelude::DataType as _;
+use crate::schema::{FulltextOptions, SkippingIndexOptions};
 use crate::types::json_type::{JsonNativeType, JsonObjectType};
 use crate::value::{ListValue, StructValue, Value};
 
@@ -95,10 +96,10 @@ pub struct JsonTypeHint {
     pub inverted_index: bool,
     /// Optional Bloom Filter configuration for this path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skipping_index: Option<crate::schema::SkippingIndexOptions>,
+    pub skipping_index: Option<SkippingIndexOptions>,
     /// Optional fulltext configuration for a string path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fulltext_index: Option<crate::schema::FulltextOptions>,
+    pub fulltext_index: Option<FulltextOptions>,
 }
 
 /// Specifies how encoding handles a value that does not match its JSON2 type hint.
@@ -228,7 +229,7 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
                 }
                 .fail();
             }
-            crate::schema::FulltextOptions::new(
+            FulltextOptions::new(
                 options.enable,
                 options.analyzer.clone(),
                 options.case_sensitive,
@@ -238,7 +239,7 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
             )?;
         }
         if let Some(options) = &hint.skipping_index {
-            crate::schema::SkippingIndexOptions::new(
+            SkippingIndexOptions::new(
                 options.granularity,
                 options.false_positive_rate(),
                 options.index_type.clone(),

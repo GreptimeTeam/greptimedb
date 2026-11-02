@@ -47,6 +47,7 @@ use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
+use crate::sst::index::column::skipping_target_data_type;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::{TYPE_BLOOM_FILTER_INDEX, trigger_index_background_download};
 
@@ -443,9 +444,7 @@ impl BloomFilterIndexApplier {
         let mut compatible_targets = Vec::new();
 
         for (target, expected) in &self.expected_predicate_target_types {
-            if crate::sst::index::column::skipping_target_data_type(sst_metadata, target).as_ref()
-                != Some(expected)
-            {
+            if skipping_target_data_type(sst_metadata, target).as_ref() != Some(expected) {
                 has_type_mismatch = true;
                 continue;
             }

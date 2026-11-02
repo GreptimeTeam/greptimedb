@@ -35,6 +35,7 @@ use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
 use crate::error::{ColumnNotFoundSnafu, ConvertValueSnafu, EncodeSnafu, Result};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplier;
+use crate::sst::index::column::{json_index_target, skipping_target_data_type};
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 pub struct BloomFilterIndexApplierBuilder<'a> {
@@ -144,8 +145,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         self.predicates
             .keys()
             .filter_map(|target| {
-                let ty =
-                    crate::sst::index::column::skipping_target_data_type(self.metadata, target)?;
+                let ty = skipping_target_data_type(self.metadata, target)?;
                 Some((target.clone(), ty))
             })
             .collect()
@@ -173,9 +173,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         if let Expr::Column(column) = expr {
             return self.column_target_and_type(&column.name);
         }
-        crate::sst::index::column::json_index_target(self.metadata, expr, |hint| {
-            hint.skipping_index.is_some()
-        })
+        json_index_target(self.metadata, expr, |hint| hint.skipping_index.is_some())
     }
 
     /// Collects an equality expression (column = value)

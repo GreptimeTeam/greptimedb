@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 
 use common_base::term_token::extract_like_probes;
+use common_telemetry::warn;
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::{Like, ScalarFunction};
 use datafusion_expr::{BinaryExpr, Expr, Operator};
@@ -30,6 +31,7 @@ use store_api::storage::ConcreteDataType;
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
 use crate::error::Result;
+use crate::sst::index::column::fulltext_target_options;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
@@ -255,7 +257,9 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
 
         let (expr, col_lowered) = Self::unwrap_lower(&like.expr);
         let target = Self::expr_target(metadata, expr)?;
-        let options = crate::sst::index::column::fulltext_target_options(metadata, &target)?;
+        let options = fulltext_target_options(metadata, &target)
+            .inspect_err(|err| warn!(err; "Failed to resolve fulltext options for {target:?}"))
+            .ok()??;
         if !options.enable || options.backend != FulltextBackend::Bloom {
             return None;
         }
@@ -289,7 +293,9 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
                 return None;
             }
             let target = IndexTarget::ColumnId(column.column_id);
-            crate::sst::index::column::fulltext_target_options(metadata, &target)?;
+            fulltext_target_options(metadata, &target)
+                .inspect_err(|err| warn!(err; "Failed to resolve fulltext options for {target:?}"))
+                .ok()??;
             return Some(target);
         }
         let (target, ty) = crate::sst::index::column::json_index_target(metadata, expr, |hint| {
@@ -500,6 +506,34 @@ mod tests {
             );
             assert!(applier.compatible_requests_for_sst(&metadata).is_none());
         }
+    }
+
+    #[test]
+    fn test_ordinary_fulltext_sst_compatibility() {
+        let (_dir, factory) = PuffinManagerFactory::new_for_test_block("ordinary_fulltext_plan");
+        let metadata = mock_metadata_with_fulltext(FulltextBackend::Bloom);
+        let applier = FulltextIndexApplier::new(
+            "test".into(),
+            PathType::Bare,
+            object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+            BTreeMap::from([(IndexTarget::ColumnId(1), FulltextRequest::default())]),
+            factory,
+            &metadata,
+        );
+        assert!(applier.compatible_requests_for_sst(&metadata).is_some());
+        assert!(
+            applier
+                .compatible_requests_for_sst(&mock_metadata_with_fulltext(FulltextBackend::Tantivy))
+                .is_none()
+        );
+        let mut non_string = metadata.clone();
+        non_string.column_metadatas[0].column_schema.data_type = ConcreteDataType::int64_datatype();
+        assert!(applier.compatible_requests_for_sst(&non_string).is_none());
+        assert!(
+            applier
+                .compatible_requests_for_sst(&mock_metadata_without_fulltext())
+                .is_none()
+        );
     }
 
     fn json_metadata(options: Option<FulltextOptions>) -> RegionMetadata {

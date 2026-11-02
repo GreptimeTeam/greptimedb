@@ -1052,8 +1052,6 @@ impl ParquetReaderBuilder {
         };
         for index_applier in appliers.iter().flatten() {
             // Filter out index requests incompatible with this SST.
-            // Its JSON path hints or fulltext settings may differ from the current schema;
-            // ordinary column requests and compatible JSON paths are retained.
             let Some(requests) = index_applier.compatible_requests_for_sst(sst_metadata) else {
                 continue;
             };
@@ -1321,8 +1319,6 @@ impl ParquetReaderBuilder {
         };
         for index_applier in appliers.iter().flatten() {
             // Filter out index requests incompatible with this SST.
-            // Its JSON path hints or fulltext settings may differ from the current schema;
-            // ordinary column requests and compatible JSON paths are retained.
             let Some(requests) = index_applier.compatible_requests_for_sst(sst_metadata) else {
                 continue;
             };

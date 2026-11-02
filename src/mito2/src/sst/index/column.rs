@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
-use crate::error::{ConvertVectorSnafu, InvalidRecordBatchSnafu, Result};
+use crate::error::{ConvertVectorSnafu, IndexOptionsSnafu, InvalidRecordBatchSnafu, Result};
 use crate::sst::parquet::format::PrimaryKeyArray;
 
 /// Extracts leaf values for a JSON type hint at the given path.
@@ -198,38 +198,48 @@ pub(crate) fn skipping_target_data_type(
 pub(crate) fn fulltext_target_options(
     metadata: &RegionMetadata,
     target: &IndexTarget,
-) -> Option<FulltextOptions> {
+) -> Result<Option<FulltextOptions>> {
     let path = match target {
         IndexTarget::ColumnId(id) => {
-            let column = metadata.column_by_id(*id)?;
+            let Some(column) = metadata.column_by_id(*id) else {
+                return Ok(None);
+            };
             if !column.column_schema.data_type.is_string() {
-                return None;
+                return Ok(None);
             }
             return column
                 .column_schema
                 .fulltext_options()
-                .ok()?
-                .filter(|options| options.enable);
+                .with_context(|_| IndexOptionsSnafu {
+                    column_name: &column.column_schema.name,
+                })
+                .map(|options| options.filter(|options| options.enable));
         }
         IndexTarget::JsonPath(path) => path,
     };
-    let column = metadata.column_by_id(path.column_id())?;
+    let Some(column) = metadata.column_by_id(path.column_id()) else {
+        return Ok(None);
+    };
     if !column.column_schema.data_type.is_json2() {
-        return None;
+        return Ok(None);
     }
-    let extension = column
+    let Some(extension) = column
         .column_schema
         .extension_type::<Json2ExtensionType>()
-        .ok()??;
-    extension
+        .with_context(|_| IndexOptionsSnafu {
+            column_name: &column.column_schema.name,
+        })?
+    else {
+        return Ok(None);
+    };
+    Ok(extension
         .metadata()
         .json_settings()
         .type_hints()
         .iter()
-        .find(|hint| hint.path == path.path() && hint.data_type.is_string())?
-        .fulltext_index
-        .clone()
-        .filter(|options| options.enable)
+        .find(|hint| hint.path == path.path() && hint.data_type.is_string())
+        .and_then(|hint| hint.fulltext_index.clone())
+        .filter(|options| options.enable))
 }
 
 #[cfg(test)]
@@ -276,7 +286,7 @@ mod tests {
             });
             let metadata = builder.build().unwrap();
             assert_eq!(
-                fulltext_target_options(&metadata, &IndexTarget::ColumnId(1)),
+                fulltext_target_options(&metadata, &IndexTarget::ColumnId(1)).unwrap(),
                 expected
             );
         }

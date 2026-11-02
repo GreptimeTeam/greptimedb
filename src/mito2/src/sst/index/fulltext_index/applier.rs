@@ -149,8 +149,8 @@ pub struct FulltextIndexApplier {
     /// Requests to be applied.
     requests: Arc<BTreeMap<IndexTarget, FulltextRequest>>,
 
-    /// Expected JSON path fulltext settings from the current schema.
-    expected_json_options: BTreeMap<IndexTarget, FulltextOptions>,
+    /// Expected fulltext settings from the current schema.
+    expected_options: BTreeMap<IndexTarget, FulltextOptions>,
 
     /// The source of the index.
     index_source: IndexSource,
@@ -171,11 +171,14 @@ impl FulltextIndexApplier {
         puffin_manager_factory: PuffinManagerFactory,
         metadata: &RegionMetadata,
     ) -> Self {
-        let expected_json_options = requests
+        let expected_options = requests
             .keys()
-            .filter(|target| matches!(target, IndexTarget::JsonPath(_)))
             .filter_map(|target| {
-                fulltext_target_options(metadata, target).map(|options| (target.clone(), options))
+                fulltext_target_options(metadata, target)
+                    .inspect_err(|err| warn!(err; "Failed to resolve expected fulltext options for {target:?}"))
+                    .ok()
+                    .flatten()
+                    .map(|options| (target.clone(), options))
             })
             .collect();
         let requests = Arc::new(requests);
@@ -183,14 +186,13 @@ impl FulltextIndexApplier {
 
         Self {
             requests,
-            expected_json_options,
+            expected_options,
             index_source,
             bloom_filter_index_cache: None,
         }
     }
 
-    /// Keeps only targets compatible with the SST's saved JSON path settings.
-    /// Ordinary columns use the blob's own configuration without this check.
+    /// Keeps only targets compatible with the SST's saved fulltext settings.
     /// Returns `None` when no compatible request remains for this SST.
     pub fn compatible_requests_for_sst(
         &self,
@@ -241,17 +243,18 @@ impl FulltextIndexApplier {
     }
 
     fn is_target_compatible(&self, metadata: &RegionMetadata, target: &IndexTarget) -> bool {
-        if matches!(target, IndexTarget::ColumnId(_)) {
-            return true;
-        }
-        let Some(expected) = self.expected_json_options.get(target) else {
+        let Some(expected) = self.expected_options.get(target) else {
             return false;
         };
-        let Some(actual) = fulltext_target_options(metadata, target) else {
+        let Some(actual) = fulltext_target_options(metadata, target)
+            .inspect_err(|err| warn!(err; "Failed to resolve SST fulltext options for {target:?}"))
+            .ok()
+            .flatten()
+        else {
             return false;
         };
-        // Segment layout and FPR are self-described by the blob. Both Bloom
-        // analyzers use ScriptTokenizer; Tantivy's analyzers differ.
+        // Ordinary column DDL forbids changing analyzer or case_sensitive, but
+        // permits backend changes. JSON path hints can change all three.
         expected.backend == actual.backend
             && expected.case_sensitive == actual.case_sensitive
             && (expected.backend == FulltextBackend::Bloom || expected.analyzer == actual.analyzer)
