@@ -151,7 +151,7 @@ pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<Recor
 }
 
 // Validate nested values before the infallible protobuf conversion reads type extensions.
-fn value_matches_type(
+pub(crate) fn value_matches_type(
     value: &Value,
     datatype: i32,
     extension: Option<&ColumnDataTypeExtension>,

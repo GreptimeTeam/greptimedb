@@ -293,7 +293,7 @@ mod tests {
             .unwrap()
             .set_compacting(busy);
         let request = compact_request::Options::Regular(Default::default());
-        let picker = new_picker(&request, &region.region_options, limit, None);
+        let picker = new_picker(&request, &region.region_options, limit, None, false);
 
         let picked = picker.pick(&region).await.unwrap().unwrap();
         assert_eq!(expected_windows.len(), picked.outputs.len());
@@ -312,7 +312,7 @@ mod tests {
 
         // The LastRow picker must retain its original seed cap and priority.
         region.region_options.merge_mode = Some(MergeMode::LastRow);
-        let picker = new_picker(&request, &region.region_options, limit, None);
+        let picker = new_picker(&request, &region.region_options, limit, None, false);
         let picked = picker.pick(&region).await.unwrap().unwrap();
         assert_eq!(limit.unwrap_or(3).min(3), picked.outputs.len());
         for (output, window) in picked.outputs.iter().rev().zip(windows.iter().rev()) {
@@ -487,6 +487,7 @@ mod tests {
             &region.region_options,
             Some(1),
             TimestampRange::new(Timestamp::new_second(0), Timestamp::new_second(3600)),
+            false,
         );
 
         let picked = picker.pick(&region).await.unwrap();
@@ -543,6 +544,7 @@ mod tests {
             &region.region_options,
             Some(1),
             TimestampRange::new(Timestamp::new_second(10), Timestamp::new_second(20)),
+            false,
         );
 
         let picked = picker.pick(&region).await.unwrap().unwrap();
@@ -590,6 +592,7 @@ mod tests {
             &region.region_options,
             Some(1),
             None,
+            false,
         );
         let picked = picker.pick(&region).await.unwrap().unwrap();
         assert!(picked.outputs.is_empty());

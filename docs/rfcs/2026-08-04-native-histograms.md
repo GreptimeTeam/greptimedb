@@ -16,8 +16,8 @@ Struct before persistence and are queried only as native histograms.
 Prometheus Remote Write 2.0 native histograms and cumulative OTLP/HTTP
 exponential histograms are enabled by default.
 Remote Write 1.0 histogram payloads are rejected instead of being acknowledged and dropped.
-Native-histogram Remote Read is deferred; the existing Remote Read path
-continues to return scalar samples only.
+Remote Read returns scalar samples and native histograms through `SAMPLES`,
+including exact stored integer counts. Streamed responses remain deferred.
 
 # Goals
 
@@ -25,13 +25,15 @@ continues to return scalar samples only.
 2. Keep one stable Prometheus-compatible persisted representation across
    Prometheus and OTLP ingestion.
 3. Match Prometheus query behavior where it is observable and practical.
-4. State intentional limitations explicitly so incomplete behavior is not
+4. Return stored native histograms through sampled Remote Read without rounding
+   integer counts or losing supported histogram fields.
+5. State intentional limitations explicitly so incomplete behavior is not
    mistaken for support.
 
 # Non-Goals
 
 - Supporting native histograms in Remote Write 1.0.
-- Returning native histograms through Prometheus Remote Read.
+- Streaming Remote Read responses (`STREAMED_XOR_CHUNKS`).
 - Persisting Remote Write metric metadata.
 - Persisting exemplars.
 - Converting OTLP delta values to cumulative values during ingestion. Supported
@@ -107,39 +109,72 @@ beyond it. The overflow index is `(1024 << schema) + 1` for non-negative schemas
 and `(1024 >> -schema) + 1` for negative schemas. Inputs beyond that index are
 rejected rather than clamped or merged into infinity.
 
+Ingestion and sampled Remote Read share histogram layout validation. An initial
+exponential span offset of `i32::MIN` is rejected on either side, including for
+empty spans; other negative initial offsets remain supported. For custom
+histograms with `N` bounds, bucket index `N` is the overflow bucket, and empty
+spans may end at `N + 1`. Span extents beyond that boundary are rejected.
+
+This tightens ingestion acceptance: these layouts were previously accepted on
+write but rejected by Remote Read. A validation failure rejects the entire
+Remote Write 2.0 request with HTTP 400 and all written-count headers set to zero,
+before any samples or histograms are persisted. Healthy samples in the same
+request are also rejected; senders that do not retry HTTP 400 can drop them.
+
 Exemplars and declared metric metadata are accepted on the wire but are not
 persisted by this feature.
 
 ## Remote Read
 
-Native-histogram Remote Read is deferred. GreptimeDB's existing Remote Read path
-continues to negotiate `SAMPLES` responses and serialize scalar samples only.
+`/v1/prometheus/read` returns scalar samples and integer or float native
+histograms through the existing Snappy-compressed `SAMPLES` protobuf response.
+Omitting accepted types, requesting `SAMPLES`, or requesting
+`[STREAMED_XOR_CHUNKS, SAMPLES]` selects this format. Streaming-only requests
+remain unsupported; the response is still buffered as a whole.
 
-A follow-up can map the stored Struct into `TimeSeries.histograms`. It must
-preserve integer counts without passing through `f64`, retain the stored
-histogram fields, and decide sampled versus streamed response coverage. The
-sampled protobuf has no start-timestamp field, so that omission must remain
-explicit if sampled responses are implemented.
+One request can query both scalar and histogram metrics. A histogram series
+can contain integer and float histogram samples, but the one-sample-kind-per-
+metric-table rule remains unchanged. The selected field must be `Float64` or
+the canonical native-histogram Struct, regardless of its stored column name.
+
+Integer counts remain exact within the existing nonnegative `i64` storage
+range, including above `2^53`. Stored absolute integer buckets become signed
+wire deltas, retaining their sequence across span boundaries. Float bucket
+counts remain absolute. Schema, spans, custom bounds, zero threshold, sum
+(including stale-NaN bits), reset hint, and millisecond timestamps are retained.
+The sampled protobuf has no `start_timestamp` field, so that value remains in
+storage but is omitted from the response. Raw-delta OTLP histograms retain
+their temporality labels and gauge hints; Remote Read does not accumulate them
+or reconstruct the original OTLP point.
+
+Malformed or wire-incompatible non-null stored histograms fail the entire
+`ReadRequest` with HTTP 500, including healthy queries in that request. Read
+validation remains necessary for older rows and typed inserts that bypass the
+histogram ingestion encoder. Incompatible stored rows are not repaired by the
+stricter ingestion checks. Null histograms remain absent samples.
+
+Custom-bucket interoperability is exercised against Prometheus revision
+`e471c7708c6b0b13e2050222bbd5a907b36f4113`, including `AtHistogram` and
+`AtFloatHistogram` on integer custom buckets. This is a tested revision, not
+a minimum-release claim; older readers can lose custom bounds during integer-
+to-float conversion. Integer payloads are not downgraded for those readers.
+The [wire fixture and iterator check](../../tests/compatibility/wire/native_histogram_remote_read/README.md)
+record the independent expectations and reproduction commands.
 
 ## OTLP
 
 OTLP/HTTP exponential histograms are accepted by default.
 OTel Arrow exponential histograms are rejected because
 the current Arrow wire format omits `zero_threshold`; accepting them would
-silently change the distribution. Currently, cumulative temporality is required;
-delta and unspecified exponential histograms are rejected before their points are
-converted. Explicit OTLP histograms keep their existing `_bucket`, `_sum`, and
-`_count` representation. OTLP delta sums and explicit histograms are stored as
-raw interval values with `otlp_aggregation_temporality="delta"`. Explicit
-histogram bucket counts are prefix-summed within each point for the classic
-histogram representation, but values are never accumulated across timestamps.
-For these tagged float series, PromQL `increase()` sums the interval values
-in the query range, and `rate()` divides that sum by the range duration.
-Delta-to-cumulative conversion is intentionally out of scope, not deferred work.
-Raw-delta exponential-histogram support is planned below; delta exponential
-points remain rejected until it is implemented. See
-[Table Semantic Layer](2026-05-28-table-semantic-layer.md#conflict-and-update-semantics)
-for the per-series temporality contract.
+silently change the distribution. Cumulative and delta temporality are accepted;
+unspecified and unrecognized temporality are rejected before processing points.
+Explicit OTLP histograms keep their existing `_bucket`, `_sum`, and `_count`
+representation. All delta metrics store raw interval values with
+`otlp_aggregation_temporality="delta"`; ingestion never accumulates across points
+or requests. Explicit histogram bucket counts are prefix-summed within a point.
+Tagged float series retain GreptimeDB's automatic delta `rate()`/`increase()`
+extension. Native histograms use the explicit queries below instead.
+Delta-to-cumulative conversion is outside this feature.
 
 OTLP scales `-4` through `8` map directly to Prometheus schemas. Higher scales
 are downscaled to schema `8`: dense counts that collide are merged before the
@@ -148,11 +183,14 @@ This preserves count mass but irreversibly loses distinctions between source
 buckets that merge. Lower scales are rejected. OTLP counts always populate the
 integer histogram family. The transmitted non-negative finite zero threshold
 and zero count are preserved; the Struct start timestamp is stored in
-milliseconds and the reset hint is unknown. Point timestamps and attributes
-retain their existing mode-specific conversion rules. Legacy mode retains its
-normalized name, attribute rules, and nanosecond row timestamp. Non-legacy mode
-retains Prometheus-compatible translation and its millisecond row timestamp.
-Both modes write the same canonical Struct.
+milliseconds. The reset hint is gauge for delta and unknown for cumulative samples.
+OTLP metrics always use Prometheus-compatible name and attribute conversion;
+`otlp_metric_compat` remains accepted as table metadata but does not select a
+conversion mode. Metric-engine conversion retains nanoseconds until alignment
+to the destination time-index unit: seconds, milliseconds, microseconds, or nanoseconds.
+New logical tables inherit their backing table's unit; auto-created physical
+tables default to milliseconds. Ordinary insertion uses milliseconds.
+Both storage paths write the same canonical Struct.
 
 An absent sum is stored as an ordinary quiet NaN, so the sample remains
 selectable while `histogram_sum` is unknown. Any NaN sum on a point without
@@ -172,33 +210,71 @@ produced an accepted row.
 Zero-count buckets are omitted after downscaling, splitting nonzero runs into
 sparse spans without changing integer counts. Rejected data points increment
 `greptime_servers_otlp_exponential_histogram_rejected_data_points_total`, labeled
-by `reason`: `delta_temporality`, `unspecified_temporality`, or
-`invalid_data_point`. Each rejected point is counted once, including when
+by `reason`: `unspecified_temporality` or `invalid_data_point`. Attribute and
+schema rejections use `invalid_data_point`; other metric families do not
+increment this histogram-specific counter. Each rejected point is counted once, including when
 resource descriptors are enabled. Minimum, maximum, and exemplars are not persisted.
 
-### Planned raw-delta exponential histograms
+### Raw-delta exponential histograms
 
-Accept OTLP delta exponential histograms and store each point's interval counts
-and sum in the existing canonical native-histogram Struct, without accumulating
-across timestamps. Reuse the integer-count encoding, scale conversion,
-zero-threshold preservation, stale-marker handling, and partial-success path.
-OTel Arrow support remains blocked independently by its missing `zero_threshold`.
+Each stored delta sample retains its interval count, sum, zero count and buckets.
+The temporality tag separates delta and cumulative series under the same table
+name. Query raw deltas explicitly:
 
-Store `otlp_aggregation_temporality="delta"` as part of series identity, as for
-delta sums and explicit histograms. Use the gauge reset hint for delta histogram
-samples so decreasing interval counts are not interpreted as counter resets.
-Prometheus uses the same gauge hint for
-[raw-delta exponential-histogram ingestion](https://github.com/prometheus/prometheus/blob/9f159f6df198280b757163ec555ffde0c8bfe8e0/storage/remote/otlptranslator/prometheusremotewrite/histograms.go#L125).
-The temporality tag, rather than the gauge hint alone or table metadata,
-determines raw-delta query behavior.
+```promql
+sum_over_time(request_duration{otlp_aggregation_temporality="delta"}[3m])
+sum_over_time(request_duration{otlp_aggregation_temporality="delta"}[3m]) / 180
+histogram_count(sum_over_time(request_duration{otlp_aggregation_temporality="delta"}[3m]))
+```
 
-Extend the per-series `increase()` and `rate()` selection to native histogram
-inputs: sum interval histograms over the query range, then divide by the range
-duration for `rate()`. Do not apply cumulative reset correction, synthetic-zero
-insertion, or counter extrapolation to these delta samples. Preserve cumulative
-histogram behavior and mixed float/histogram range warnings. Acceptance coverage
-must include multiple intervals whose counts decrease, exact integer ingestion,
-stale points, partial rejection, and pure-native and mixed-range query paths.
+Samples are selected by their endpoint timestamp in the existing left-open,
+right-closed range. Each selected sample contributes its entire interval,
+including intervals crossing the left boundary. A single sample contributes its
+full value; an empty window emits no sample. Counts `10,20,15` at seconds
+`60,120,180` give count `45` at second `180`, or `0.25` after division by `180`.
+Missing intervals do not shorten the divisor. There is no prorating, reset
+correction, extrapolation, synthetic zero insertion or inferred coverage.
+
+Native-histogram `rate()` and `increase()` retain counter behavior, regardless
+of the tag; they are not supported queries for raw deltas. Converting a histogram
+to a float can enter the existing scalar-delta extension, so the explicit
+expressions above are the supported examples. Existing sum/division UDFs and
+serialization are reused without a new wire format.
+
+Under default storage options, identical table/tags/stored timestamps overwrite
+with the last point, without adding buckets. Timestamp alignment can collapse
+endpoints at coarser units; interval starts do not form part of the key. Preserve
+source order through default resolution and row merging. Existing storage
+options continue to apply.
+
+Metrics recovery is point-based across gauges, sums, explicit histograms,
+summaries and exponential histograms. Point-local validation precedes
+existing-schema validation, which precedes simultaneous detection of fresh
+logical/physical conflicts. Reject the union of contributors to all conflicts;
+remove every output of a rejected point. Defaults distinguish omitted columns
+from explicit nulls. Auto-DDL configuration and hints remain authoritative;
+metric-engine timestamp alignment remains permitted with auto-DDL disabled.
+Only surviving points contribute metadata and descriptor windows. Metadata
+describes actual outputs, excluding absent sums and empty quantile outputs.
+
+Authentication, authorization, admission, catalog and primary-write failures
+retain their failure paths. Synchronous acceptance waits for writes; eligible
+asynchronous batching acknowledges enqueue, and later flush errors retain their
+existing metrics. Descriptor failures after primary acceptance remain warnings,
+including a partial-success warning with zero rejected points. No write is
+retried in smaller subsets after an ambiguous result.
+
+Prometheus compatibility follows raw-delta ingestion with a gauge reset hint
+and explicit summation. GreptimeDB retains its temporality label, transmitted
+zero threshold, NaN for absent sums, canonical stale representation, integer
+bounds, sparse compaction and existing arithmetic. Equivalent distributions
+need not have identical layouts or floating-point results. Start timestamps
+remain stored but explicit summation does not use them for counter correction.
+Public metadata is `unknown` for freshly created delta/mixed-temporality tables;
+existing creation-time options are not refreshed by later writes.
+
+Upgrade receiving ingestion frontends before enabling delta senders. Mixed-version
+query execution is unverified; this feature introduces no new query UDF or format.
 
 # PromQL Compatibility Decisions
 
@@ -304,16 +380,20 @@ partial-success behavior, kind exclusivity,
 stale-marker selector semantics, synthetic-zero rates, incompatible empty
 layouts, overflow-safe averages, layout-sensitive equality, infinite custom
 midpoints, and exponential overflow indices for schemas `-4`, `0`, and `8`.
-Behavioral coverage also verifies frontend PromQL warning and info responses.
+Behavioral coverage also verifies frontend PromQL warning and info responses,
+sampled Remote Read before and after flush in standalone and distributed
+setups, exact large integers, stale-marker bits, timestamp units, and OTLP
+normalization. Frozen upstream protobuf fixtures guard the wire encoder.
 
 This work does not change GreptimeDB's persisted Struct or protobuf
-dependencies. It adds the disabled-by-default public OTLP gate; existing
-native-histogram data remains readable.
+dependencies. Remote Read uses the existing endpoint and negotiation without
+a new configuration option; existing native-histogram data remains readable.
 
 # Future Work
 
-- Native-histogram Remote Read, including exact integer round-trips and streamed
-  chunks with start timestamps.
+- TODO: Add native histogram and float histogram chunks to
+  `STREAMED_XOR_CHUNKS`, with checksummed framing and bounded buffering. Decide
+  separately whether to include start-timestamp-bearing chunk encodings.
 - Raw-delta OTLP exponential-histogram storage and temporality-aware native
   histogram queries, as described above; no delta-to-cumulative conversion.
 - Persistent Remote Write metadata and accurate help/unit updates.

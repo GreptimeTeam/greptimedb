@@ -36,9 +36,9 @@ SHOW CREATE TABLE alter_repartition_table;
 |                         |   PRIMARY KEY ("device_id")                            |
 |                         | )                                                      |
 |                         | PARTITION ON COLUMNS ("device_id", "area") (           |
-|                         |   device_id < 100,                                     |
-|                         |   device_id >= 100 AND device_id < 200,                |
-|                         |   device_id >= 200                                     |
+|                         |   "device_id" < 100,                                   |
+|                         |   "device_id" >= 100 AND "device_id" < 200,            |
+|                         |   "device_id" >= 200                                   |
 |                         | )                                                      |
 |                         | ENGINE=mito                                            |
 |                         |                                                        |
@@ -66,9 +66,9 @@ SHOW CREATE TABLE alter_repartition_table;
 |                         |   PRIMARY KEY ("device_id")                            |
 |                         | )                                                      |
 |                         | PARTITION ON COLUMNS ("device_id", "area") (           |
-|                         |   device_id < 100,                                     |
-|                         |   device_id >= 100 AND device_id < 200,                |
-|                         |   device_id >= 200                                     |
+|                         |   "device_id" < 100,                                   |
+|                         |   "device_id" >= 100 AND "device_id" < 200,            |
+|                         |   "device_id" >= 200                                   |
 |                         | )                                                      |
 |                         | ENGINE=mito                                            |
 |                         |                                                        |
@@ -197,9 +197,9 @@ SHOW CREATE TABLE metric_physical_table;
 |                       |   PRIMARY KEY ("host")                               |
 |                       | )                                                    |
 |                       | PARTITION ON COLUMNS ("host") (                      |
-|                       |   host < 'h1',                                       |
-|                       |   host >= 'h1' AND host < 'h2',                      |
-|                       |   host >= 'h2'                                       |
+|                       |   "host" < 'h1',                                     |
+|                       |   "host" >= 'h1' AND "host" < 'h2',                  |
+|                       |   "host" >= 'h2'                                     |
 |                       | )                                                    |
 |                       | ENGINE=metric                                        |
 |                       | WITH(                                                |
@@ -250,9 +250,9 @@ SHOW CREATE TABLE metric_physical_table;
 |                       |   PRIMARY KEY ("host")                               |
 |                       | )                                                    |
 |                       | PARTITION ON COLUMNS ("host") (                      |
-|                       |   host < 'h1',                                       |
-|                       |   host >= 'h1' AND host < 'h2',                      |
-|                       |   host >= 'h2'                                       |
+|                       |   "host" < 'h1',                                     |
+|                       |   "host" >= 'h1' AND "host" < 'h2',                  |
+|                       |   "host" >= 'h2'                                     |
 |                       | )                                                    |
 |                       | ENGINE=metric                                        |
 |                       | WITH(                                                |

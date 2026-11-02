@@ -14,14 +14,32 @@
 
 use std::collections::HashSet;
 
+use api::v1::meta::heartbeat_request::NodeWorkloads;
+use common_meta::cluster::NodeInfo;
 use common_meta::peer::Peer;
-use snafu::ensure;
+use snafu::{ResultExt, ensure};
 
 use crate::error;
 use crate::error::Result;
-use crate::metasrv::SelectTarget;
+use crate::metasrv::{SelectTarget, SelectorContext};
 use crate::selector::SelectorOptions;
 use crate::selector::weighted_choose::{WeightedChoose, WeightedItem};
+
+/// Returns active datanodes that may receive new regions.
+pub(crate) async fn active_schedulable_datanodes(
+    ctx: &SelectorContext,
+    filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+) -> Result<Vec<NodeInfo>> {
+    let datanodes = ctx
+        .peer_discovery
+        .active_datanodes(filter)
+        .await
+        .context(error::ListActiveDatanodesSnafu)?;
+    Ok(datanodes
+        .into_iter()
+        .filter(NodeInfo::is_schedulable)
+        .collect())
+}
 
 /// Filter out the excluded peers from the `weight_array`.
 pub fn filter_out_excluded_peers(
@@ -268,6 +286,7 @@ mod tests {
             env_vars: pool
                 .map(|pool| HashMap::from([("pool".into(), pool.into())]))
                 .unwrap_or_default(),
+            schedulable: None,
         }
     }
 

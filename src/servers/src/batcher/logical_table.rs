@@ -316,9 +316,11 @@ impl LogicalTablePendingRowsBatcher {
         };
 
         let (response_tx, response_rx) = oneshot::channel();
+        let progress = ctx.write_progress().cloned();
 
         let batch_key = batch_key_from_ctx(&ctx);
         let mut cmd = Some(WorkerCommand::Submit {
+            _completion: progress.as_ref().map(|progress| progress.start()),
             table_batches,
             total_rows,
             ctx,
@@ -369,6 +371,9 @@ impl LogicalTablePendingRowsBatcher {
                 .context(error::SubmitBatchSnafu)
                 .map(|()| (total_rows as u64, prepared))
         } else {
+            if let Some(progress) = progress {
+                progress.mark_accepted();
+            }
             Ok((total_rows as u64, prepared))
         }
     }

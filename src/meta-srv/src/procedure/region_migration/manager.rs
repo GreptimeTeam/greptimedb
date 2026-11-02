@@ -537,17 +537,15 @@ impl RegionMigrationManager {
         Ok(procedure_id)
     }
 
-    /// Submits a new region migration procedure.
-    pub async fn submit_procedure(
+    /// Builds a new region migration procedure for `task` without submitting it.
+    ///
+    /// Returns the built [`ProcedureWithId`] so that a parent procedure can run it as a
+    /// child procedure.
+    pub async fn build_subprocedure(
         &self,
         procedure_context: ProcedureContext,
         mut task: RegionMigrationProcedureTask,
-    ) -> Result<Option<ProcedureId>> {
-        if let Some(event_context) = procedure_context.event_context.as_ref() {
-            task.trigger_reason =
-                RegionMigrationTriggerReason::from_trigger_reason(event_context.reason);
-        }
-
+    ) -> Result<ProcedureWithId> {
         let Some(guard) = self.insert_running_procedure(&task) else {
             return error::MigrationRunningSnafu {
                 region_id: task.region_id,
@@ -608,6 +606,23 @@ impl RegionMigrationManager {
         );
         let procedure_with_id =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
+        Ok(procedure_with_id)
+    }
+
+    /// Submits a new region migration procedure.
+    pub async fn submit_procedure(
+        &self,
+        procedure_context: ProcedureContext,
+        mut task: RegionMigrationProcedureTask,
+    ) -> Result<Option<ProcedureId>> {
+        if let Some(event_context) = procedure_context.event_context.as_ref() {
+            task.trigger_reason =
+                RegionMigrationTriggerReason::from_trigger_reason(event_context.reason);
+        }
+
+        let procedure_with_id = self
+            .build_subprocedure(procedure_context, task.clone())
+            .await?;
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
         let mut watcher = self

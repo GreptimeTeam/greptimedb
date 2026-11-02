@@ -14,16 +14,19 @@
 
 use std::any::Any;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 
-use datafusion_expr::ColumnarValue;
+use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_expr::{ColumnarValue, Expr};
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow;
-use datatypes::arrow::array::{BooleanArray, BooleanBufferBuilder, RecordBatch};
+use datatypes::arrow::array::{Array, BooleanArray, BooleanBufferBuilder, RecordBatch};
 use datatypes::arrow::buffer::BooleanBuffer;
-use datatypes::arrow::datatypes::Schema;
+use datatypes::arrow::compute::prep_null_mask_filter;
+use datatypes::arrow::datatypes::{Field, Schema};
+use datatypes::data_type::DataType as _;
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::{Deserialize, Serialize};
@@ -33,13 +36,26 @@ use store_api::storage::RegionNumber;
 use crate::PartitionRule;
 use crate::checker::PartitionChecker;
 use crate::error::{self, Result, UndefinedColumnSnafu};
-use crate::expr::{Operand, PartitionExpr, RestrictedOp};
+use crate::expr::{Operand, PartitionExpr, RestrictedOp, plan_physical_expr};
+use crate::function::IcebergHash;
 use crate::partition::RegionMask;
 
 /// The default region number when no partition exprs are matched.
 const DEFAULT_REGION: RegionNumber = 0;
 
-type PhysicalExprCache = Option<(Vec<Arc<dyn PhysicalExpr>>, Arc<Schema>)>;
+type PhysicalExprCache = Option<Arc<PhysicalPartitionExprs>>;
+
+/// Partition predicates planned for one input schema.
+#[derive(Debug)]
+struct PhysicalPartitionExprs {
+    input_schema: Arc<Schema>,
+    exprs: Vec<Arc<dyn PhysicalExpr>>,
+    /// Input indices of the columns under `iceberg_hash`. Each hash is evaluated
+    /// once per batch and appended to the input as `eval_schema` describes, and
+    /// `exprs` read the results instead of hashing per predicate.
+    hash_inputs: Vec<usize>,
+    eval_schema: Arc<Schema>,
+}
 
 /// Multi-Dimiension partition rule. RFC [here](https://github.com/GreptimeTeam/greptimedb/blob/main/docs/rfcs/2024-02-21-multi-dimension-partition-rule/rfc.md)
 ///
@@ -136,6 +152,14 @@ impl MultiDimPartitionRule {
                 let r = &values[*index];
                 Self::perform_op(l, &expr.op, r)
             }
+            (Operand::IcebergHash(hash), Operand::Value(r)) => {
+                let l = self.evaluate_hash(hash, values)?;
+                Self::perform_op(&l, &expr.op, r)
+            }
+            (Operand::Value(l), Operand::IcebergHash(hash)) => {
+                let r = self.evaluate_hash(hash, values)?;
+                Self::perform_op(l, &expr.op, &r)
+            }
             (Operand::Expr(lhs), Operand::Expr(rhs)) => {
                 let lhs = self.evaluate_expr(lhs, values)?;
                 let rhs = self.evaluate_expr(rhs, values)?;
@@ -147,6 +171,15 @@ impl MultiDimPartitionRule {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn evaluate_hash(&self, hash: &IcebergHash, values: &[Value]) -> Result<Value> {
+        let column = hash.column();
+        let index = self
+            .name_to_index
+            .get(column)
+            .context(UndefinedColumnSnafu { column })?;
+        IcebergHash::evaluate_value(&values[*index])
     }
 
     fn perform_op(lhs: &Value, op: &RestrictedOp, rhs: &Value) -> Result<bool> {
@@ -238,27 +271,38 @@ impl MultiDimPartitionRule {
         }
         let physical_exprs = {
             let cache_read_guard = self.physical_expr_cache.read().unwrap();
-            if let Some((cached_exprs, schema)) = cache_read_guard.as_ref()
-                && schema == record_batch.schema_ref()
+            if let Some(cached) = cache_read_guard.as_ref()
+                && &cached.input_schema == record_batch.schema_ref()
             {
-                cached_exprs.clone()
+                cached.clone()
             } else {
                 drop(cache_read_guard); // Release the read lock before acquiring write lock
 
-                let schema = record_batch.schema();
-                let new_cache = self
-                    .exprs
-                    .iter()
-                    .map(|e| e.try_as_physical_expr(&schema))
-                    .collect::<Result<Vec<_>>>()?;
-
+                let new_cache = Arc::new(self.plan_physical_exprs(record_batch.schema())?);
                 let mut cache_write_guard = self.physical_expr_cache.write().unwrap();
-                cache_write_guard.replace((new_cache.clone(), schema));
+                cache_write_guard.replace(new_cache.clone());
                 new_cache
             }
         };
 
+        let eval_batch;
+        let record_batch = if physical_exprs.hash_inputs.is_empty() {
+            record_batch
+        } else {
+            let mut columns = record_batch.columns().to_vec();
+            for index in &physical_exprs.hash_inputs {
+                columns.push(
+                    IcebergHash::evaluate_array(record_batch.column(*index).as_ref())
+                        .context(error::EvaluateRecordBatchSnafu)?,
+                );
+            }
+            eval_batch = RecordBatch::try_new(physical_exprs.eval_schema.clone(), columns)
+                .context(error::ComputeArrowKernelSnafu)?;
+            &eval_batch
+        };
+
         let mut result: HashMap<u32, RegionMask> = physical_exprs
+            .exprs
             .iter()
             .zip(self.regions.iter())
             .filter_map(|(expr, region_num)| {
@@ -272,6 +316,9 @@ impl MultiDimPartitionRule {
                     }
                 };
                 let array = match columnar_value_to_boolean_array(col_val, num_rows) {
+                    // A NULL result means the row is not in this region. Masks are merged
+                    // with non-Kleene `or` below, where a NULL would drop the row.
+                    Ok(array) if array.null_count() > 0 => prep_null_mask_filter(&array),
                     Ok(array) => array,
                     Err(e) => {
                         return Some(Err(e));
@@ -320,6 +367,97 @@ impl MultiDimPartitionRule {
             }
         }
         Ok(result)
+    }
+
+    fn plan_physical_exprs(&self, input_schema: Arc<Schema>) -> Result<PhysicalPartitionExprs> {
+        let mut hashes = BTreeSet::new();
+        for expr in &self.exprs {
+            collect_hashes(expr, &mut hashes);
+        }
+        if hashes.is_empty() {
+            let exprs = self
+                .exprs
+                .iter()
+                .map(|e| e.try_as_physical_expr(&input_schema))
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(PhysicalPartitionExprs {
+                eval_schema: input_schema.clone(),
+                input_schema,
+                exprs,
+                hash_inputs: vec![],
+            });
+        }
+
+        let mut fields = input_schema.fields().to_vec();
+        let mut hash_columns = HashMap::with_capacity(hashes.len());
+        let mut hash_inputs = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            let index =
+                input_schema
+                    .index_of(hash.column())
+                    .ok()
+                    .context(UndefinedColumnSnafu {
+                        column: hash.column(),
+                    })?;
+            let mut name = format!("__partition_hash_{}", hash_inputs.len());
+            while input_schema.field_with_name(&name).is_ok() {
+                name.push('_');
+            }
+            fields.push(Arc::new(Field::new(
+                &name,
+                IcebergHash::output_type().as_arrow_type(),
+                true,
+            )));
+            hash_columns.insert(
+                hash.to_logical_expr(),
+                Expr::Column(datafusion_common::Column::from_name(name)),
+            );
+            hash_inputs.push(index);
+        }
+        let eval_schema = Arc::new(Schema::new(fields));
+
+        let exprs = self
+            .exprs
+            .iter()
+            .map(|expr| {
+                let expr = expr
+                    .try_as_logical_expr()?
+                    .transform(|expr| {
+                        Ok(match hash_columns.get(&expr) {
+                            Some(column) => Transformed::yes(column.clone()),
+                            None => Transformed::no(expr),
+                        })
+                    })
+                    .context(error::CreatePhysicalExprSnafu)?
+                    .data;
+                debug_assert!(
+                    !expr
+                        .exists(|expr| Ok(matches!(expr, Expr::ScalarFunction(_))))
+                        .unwrap(),
+                    "iceberg_hash should read the precomputed columns: {expr}"
+                );
+                plan_physical_expr(expr, &eval_schema)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(PhysicalPartitionExprs {
+            input_schema,
+            exprs,
+            hash_inputs,
+            eval_schema,
+        })
+    }
+}
+
+fn collect_hashes(expr: &PartitionExpr, hashes: &mut BTreeSet<IcebergHash>) {
+    for operand in [expr.lhs(), expr.rhs()] {
+        match operand {
+            Operand::IcebergHash(hash) => {
+                hashes.insert(hash.clone());
+            }
+            Operand::Expr(expr) => collect_hashes(expr, hashes),
+            Operand::Column(_) | Operand::Value(_) => {}
+        }
     }
 }
 
@@ -794,9 +932,10 @@ mod tests {
 mod test_split_record_batch {
     use std::sync::Arc;
 
+    use common_time::timestamp::Timestamp;
     use datafusion_common::ScalarValue;
-    use datatypes::arrow::array::{Int64Array, StringArray};
-    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use datatypes::arrow::array::{Int64Array, StringArray, TimestampNanosecondArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
     use rand::Rng;
 
@@ -850,6 +989,110 @@ mod test_split_record_batch {
                 "failed on region: {}",
                 region
             );
+        }
+    }
+
+    #[test]
+    fn test_split_record_batch_widened_time_index_unit_with_hash() {
+        // The precomputed-hash path must coerce millisecond bounds against a
+        // nanosecond time index too.
+        let bound = Value::from(Timestamp::new_millisecond(1_000));
+        let hash = Operand::IcebergHash(IcebergHash::new("host"));
+        let exprs = [
+            (
+                col("ts").lt(bound.clone()),
+                hash.clone().lt(Value::Int32(0)),
+            ),
+            (
+                col("ts").lt(bound.clone()),
+                hash.clone().gt_eq(Value::Int32(0)),
+            ),
+            (
+                col("ts").gt_eq(bound.clone()),
+                hash.clone().lt(Value::Int32(0)),
+            ),
+            (col("ts").gt_eq(bound), hash.gt_eq(Value::Int32(0))),
+        ]
+        .into_iter()
+        .map(|(ts, hash)| ts.and(hash))
+        .collect();
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["ts".to_string(), "host".to_string()],
+            vec![1, 2, 3, 4],
+            exprs,
+            true,
+        )
+        .unwrap();
+
+        let hosts = ["a", "b", "c", "server42"];
+        let mut ts = vec![];
+        let mut host = vec![];
+        for nanos in [500_000_000, 2_000_000_000] {
+            for h in hosts {
+                ts.push(nanos);
+                host.push(h);
+            }
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), false),
+            Field::new("host", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampNanosecondArray::from(ts)),
+                Arc::new(StringArray::from(host)),
+            ],
+        )
+        .unwrap();
+
+        let expected = rule.split_record_batch_naive(&batch).unwrap();
+        let result = rule.split_record_batch(&batch).unwrap();
+        for (region, expected) in expected {
+            let actual = result
+                .get(&region)
+                .map(|mask| mask.array().clone())
+                .unwrap_or_else(|| BooleanArray::from(vec![false; batch.num_rows()]));
+            assert_eq!(actual, expected, "region {region}");
+        }
+    }
+
+    #[test]
+    fn test_split_record_batch_widened_time_index_unit() {
+        // https://github.com/GreptimeTeam/greptimedb/issues/9747
+        // The partition bounds keep the unit they were created with (millisecond)
+        // after the time index column is widened to nanosecond, so the batch
+        // schema and the bound values mix timestamp units.
+        let bound = Value::from(Timestamp::new_millisecond(1_000));
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["ts".to_string()],
+            vec![0, 1],
+            vec![col("ts").lt(bound.clone()), col("ts").gt_eq(bound)],
+            true,
+        )
+        .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampNanosecondArray::from(vec![
+                500_000_000,
+                2_000_000_000,
+            ]))],
+        )
+        .unwrap();
+
+        // 500_000_000ns < 1000ms and 2_000_000_000ns >= 1000ms: one row per region.
+        let expected = rule.split_record_batch_naive(&batch).unwrap();
+        assert_eq!(expected.len(), 2);
+        let result = rule.split_record_batch(&batch).unwrap();
+        assert_eq!(result.len(), expected.len());
+        for (region, value) in &result {
+            assert_eq!(value.array(), expected.get(region).unwrap());
         }
     }
 
@@ -975,6 +1218,183 @@ mod test_split_record_batch {
 
         let total_rows = result.get(&0).unwrap().selected_rows();
         assert_eq!(total_rows, batch.num_rows());
+    }
+
+    #[test]
+    fn test_hash_partition_batch_matches_row() {
+        use datatypes::arrow::array::{Array, StringDictionaryBuilder, UInt64Array};
+        use datatypes::arrow::datatypes::{DataType, Field, UInt32Type};
+
+        let host_hash = Operand::IcebergHash(IcebergHash::new("host"));
+        let tenant_hash = Operand::IcebergHash(IcebergHash::new("tenant"));
+        let exprs = [
+            host_hash
+                .clone()
+                .lt(Value::Int32(0))
+                .and(col("tenant").lt(Value::UInt64(100))),
+            host_hash
+                .clone()
+                .lt(Value::Int32(0))
+                .and(col("tenant").gt_eq(Value::UInt64(100))),
+            host_hash
+                .clone()
+                .gt_eq(Value::Int32(0))
+                .and(tenant_hash.clone().lt(Value::Int32(0))),
+            host_hash
+                .gt_eq(Value::Int32(0))
+                .and(tenant_hash.gt_eq(Value::Int32(0))),
+        ]
+        .iter()
+        .map(|expr| {
+            PartitionExpr::from_json_str(&expr.as_json_str().unwrap())
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "tenant".to_string()],
+            vec![1, 2, 3, 4],
+            exprs,
+            true,
+        )
+        .unwrap();
+
+        let hosts = [
+            None,
+            Some(""),
+            Some("a"),
+            Some("b"),
+            Some("中🙂"),
+            Some("server42"),
+        ];
+        let tenants = [None, Some(0), Some(99), Some(100), Some(u64::MAX)];
+        let mut host_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut tenant_values = vec![];
+        for host in hosts {
+            for tenant in tenants {
+                host_builder.append_option(host);
+                tenant_values.push(tenant);
+            }
+        }
+        let host_array = Arc::new(host_builder.finish());
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("host", host_array.data_type().clone(), true),
+                Field::new("tenant", DataType::UInt64, true),
+            ])),
+            vec![host_array, Arc::new(UInt64Array::from(tenant_values))],
+        )
+        .unwrap();
+
+        let by_row = rule.split_record_batch_naive(&batch).unwrap();
+        let by_batch = rule.split_record_batch(&batch).unwrap();
+        assert!(!by_batch.contains_key(&DEFAULT_REGION));
+        for (region, expected) in by_row {
+            let actual = by_batch
+                .get(&region)
+                .map(|mask| mask.array().clone())
+                .unwrap_or_else(|| BooleanArray::from(vec![false; batch.num_rows()]));
+            assert_eq!(actual, expected, "region {region}");
+        }
+    }
+
+    #[test]
+    fn test_comparison_batch_matches_row() {
+        use datatypes::arrow::array::Array;
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        let inputs = [None, Some(4), Some(5), Some(6)];
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, true)])),
+            vec![Arc::new(Int64Array::from(inputs.to_vec()))],
+        )
+        .unwrap();
+        let mut mismatches = vec![];
+        for op in [
+            RestrictedOp::Eq,
+            RestrictedOp::NotEq,
+            RestrictedOp::Lt,
+            RestrictedOp::LtEq,
+            RestrictedOp::Gt,
+            RestrictedOp::GtEq,
+        ] {
+            for bound in [Value::Null, Value::Int64(5)] {
+                // Both operand orders, since a rule restored without canonicalization may
+                // keep the literal on the left.
+                for expr in [
+                    PartitionExpr::new(col("a"), op.clone(), bound.clone().into()),
+                    PartitionExpr {
+                        lhs: Box::new(bound.clone().into()),
+                        op: op.clone(),
+                        rhs: Box::new(col("a")),
+                    },
+                ] {
+                    let rule = MultiDimPartitionRule::try_new(
+                        vec!["a".to_string()],
+                        vec![1],
+                        vec![expr.clone()],
+                        false,
+                    )
+                    .unwrap();
+                    let by_batch = match expr
+                        .try_as_physical_expr(batch.schema_ref())
+                        .unwrap()
+                        .evaluate(&batch)
+                    {
+                        Ok(by_batch) => {
+                            columnar_value_to_boolean_array(by_batch, batch.num_rows()).unwrap()
+                        }
+                        Err(err) => {
+                            mismatches.push(format!("{expr}: batch error {err}"));
+                            continue;
+                        }
+                    };
+                    for (row, input) in inputs.iter().enumerate() {
+                        let value = input.map_or(Value::Null, Value::Int64);
+                        let by_row = rule.evaluate_expr(&expr, &[value]).unwrap();
+                        let by_batch = by_batch.is_valid(row) && by_batch.value(row);
+                        if by_row != by_batch {
+                            mismatches.push(format!(
+                                "{expr} with a = {input:?}: row {by_row}, batch {by_batch}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn test_split_null_rows_match_row_routing() {
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string()],
+            vec![0, 1],
+            vec![
+                col("host").not_eq(Value::from("a")),
+                col("host").eq(Value::from("a")),
+            ],
+            true,
+        )
+        .unwrap();
+        for hosts in [vec![Some("a"), None, Some("z")], vec![Some("a"), None]] {
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)])),
+                vec![Arc::new(StringArray::from(hosts.clone()))],
+            )
+            .unwrap();
+            let by_row = rule.split_record_batch_naive(&batch).unwrap();
+            let by_batch = rule.split_record_batch(&batch).unwrap();
+            for (region, expected) in by_row {
+                let actual = by_batch
+                    .get(&region)
+                    .map(|mask| mask.array().clone())
+                    .unwrap_or_else(|| BooleanArray::from(vec![false; batch.num_rows()]));
+                assert_eq!(actual, expected, "{hosts:?}, region {region}");
+            }
+        }
     }
 
     #[test]

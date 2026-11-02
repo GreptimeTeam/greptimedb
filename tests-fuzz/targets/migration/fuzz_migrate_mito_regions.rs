@@ -158,7 +158,7 @@ async fn insert_values<R: Rng + 'static>(
         let result = ctx
             .greptime
             // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
-            .execute(sql.as_str())
+            .execute(sqlx::AssertSqlSafe(sql.as_str()))
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
         ensure!(
@@ -208,7 +208,11 @@ async fn validate_insert_exprs(
             primary_keys_column_list
         );
         info!("Executing sql: {select_sql}");
-        let fetched_rows = ctx.greptime.fetch_all(select_sql.as_str()).await.unwrap();
+        let fetched_rows = ctx
+            .greptime
+            .fetch_all(sqlx::AssertSqlSafe(select_sql.as_str()))
+            .await
+            .unwrap();
         let mut expected_rows = replace_default(&insert_expr.values_list, table_ctx, insert_expr);
         sort_by_primary_keys(&mut expected_rows, primary_keys_idx);
         validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
@@ -224,7 +228,11 @@ async fn validate_insert_exprs(
         column_list, table_ctx.name, ts_column.name, ts_value, primary_keys_column_list
     );
     info!("Executing sql: {select_sql}");
-    let fetched_rows = ctx.greptime.fetch_all(select_sql.as_str()).await.unwrap();
+    let fetched_rows = ctx
+        .greptime
+        .fetch_all(sqlx::AssertSqlSafe(select_sql.as_str()))
+        .await
+        .unwrap();
     let mut expected_rows = replace_default(&insert_expr.values_list, table_ctx, insert_expr);
     sort_by_primary_keys(&mut expected_rows, primary_keys_idx);
     validator::row::assert_eq::<MySql>(&insert_expr.columns, &fetched_rows, &expected_rows)?;
@@ -291,7 +299,7 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
     let create_expr = generate_create_expr(input, &mut rng)?;
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&create_expr)?;
-    let _result = sqlx::query(&sql)
+    let _result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -364,7 +372,7 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
 
     // Cleans up
     let sql = format!("DROP TABLE {}", table_ctx.name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;

@@ -28,16 +28,13 @@ use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::test_util::new_ddl_context_with_kv_backend;
 use common_meta::wal_provider::RegionWalOptions;
-use common_procedure::{
-    Context as ProcedureContext, ContextProvider, ProcedureId, ProcedureState, Status,
-};
+use common_procedure::{Context as ProcedureContext, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
 use common_wal::options::{KafkaWalOptions, WalOptions};
 use datatypes::value::Value;
 use partition::expr::{PartitionExpr, col};
 use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::table_name::TableName;
-use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
@@ -248,60 +245,4 @@ pub fn extract_subprocedure_ids(status: Status) -> Vec<ProcedureId> {
         .into_iter()
         .map(|procedure| procedure.id)
         .collect()
-}
-
-pub fn procedure_state_receiver(state: ProcedureState) -> watch::Receiver<ProcedureState> {
-    let (tx, rx) = watch::channel(ProcedureState::Running);
-    tx.send(state).unwrap();
-    rx
-}
-
-pub fn procedure_context_with_receivers(
-    receivers: HashMap<ProcedureId, watch::Receiver<ProcedureState>>,
-) -> ProcedureContext {
-    ProcedureContext {
-        procedure_id: ProcedureId::random(),
-        provider: Arc::new(ProcedureStateReceiverProvider {
-            receivers,
-            inner: MockContextProvider::default(),
-        }),
-        event_context: None,
-    }
-}
-
-struct ProcedureStateReceiverProvider {
-    receivers: HashMap<ProcedureId, watch::Receiver<ProcedureState>>,
-    inner: MockContextProvider,
-}
-
-#[async_trait::async_trait]
-impl ContextProvider for ProcedureStateReceiverProvider {
-    async fn procedure_state(
-        &self,
-        procedure_id: ProcedureId,
-    ) -> common_procedure::Result<Option<ProcedureState>> {
-        self.inner.procedure_state(procedure_id).await
-    }
-
-    async fn procedure_state_receiver(
-        &self,
-        procedure_id: ProcedureId,
-    ) -> common_procedure::Result<Option<watch::Receiver<ProcedureState>>> {
-        Ok(self.receivers.get(&procedure_id).cloned())
-    }
-
-    async fn try_put_poison(
-        &self,
-        key: &common_procedure::PoisonKey,
-        procedure_id: ProcedureId,
-    ) -> common_procedure::Result<()> {
-        self.inner.try_put_poison(key, procedure_id).await
-    }
-
-    async fn acquire_lock(
-        &self,
-        key: &common_procedure::StringKey,
-    ) -> common_procedure::local::DynamicKeyLockGuard {
-        self.inner.acquire_lock(key).await
-    }
 }

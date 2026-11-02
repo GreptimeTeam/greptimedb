@@ -188,7 +188,9 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
         }
         let key = batch_key_from_ctx(&table_info.name, &ctx);
         let (response_tx, response_rx) = oneshot::channel();
+        let progress = ctx.write_progress().cloned();
         let pending = PendingBatch {
+            _completion: progress.as_ref().map(|progress| progress.start()),
             table_info,
             batch,
             ctx,
@@ -231,6 +233,9 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
         if self.pending_rows_batch_sync {
             completion.await?;
         } else {
+            if let Some(progress) = progress {
+                progress.mark_accepted();
+            }
             output
                 .meta
                 .write_completions
@@ -379,7 +384,10 @@ mod tests {
                 );
                 Arc::get_mut(&mut batcher).unwrap().pending_rows_batch_sync = sync;
                 let table = Arc::new(new_test_table_info(1, "ack", [0].into_iter()));
-                let ctx = QueryContext::arc();
+                let progress = Arc::new(session::write_progress::WriteProgress::default());
+                let mut ctx = QueryContext::with("greptime", "public");
+                ctx.set_write_progress(progress.clone());
+                let ctx = Arc::new(ctx);
                 let key = batch_key_from_ctx(&table.name, &ctx);
                 // Hold the worker command to control completion independently of scheduling.
                 let (_, receiver) = batcher.workers.get_or_create(key, 1).await;
@@ -414,6 +422,8 @@ mod tests {
                     assert!(futures::poll!(pending.as_mut()).is_pending());
                     completion = Some(pending);
                 }
+                assert_eq!(progress.accepted(), !sync);
+                assert_eq!(progress.written(), 0);
                 // Early acknowledgement must not release capacity before completion.
                 let acquire = batcher.acquire();
                 tokio::pin!(acquire);
@@ -827,6 +837,7 @@ mod tests {
             let (response_tx, response_rx) = oneshot::channel();
             self.tx
                 .send(WorkerCommand::Submit(PendingBatch {
+                    _completion: None,
                     table_info,
                     batch,
                     ctx: QueryContext::arc(),

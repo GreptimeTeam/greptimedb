@@ -31,9 +31,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
-    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY,
-    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM,
+    COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY,
+    PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    TWCS_TRIGGER_FILE_NUM,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -413,6 +414,18 @@ impl TableMeta {
                         );
                     } else {
                         new_options.extra_options.remove(AUTO_FLUSH_INTERVAL_KEY);
+                    }
+                }
+                SetRegionOption::CompactionOutputParallelism(parallelism) => {
+                    if let Some(parallelism) = parallelism {
+                        new_options.extra_options.insert(
+                            COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM.to_string(),
+                            parallelism.to_string(),
+                        );
+                    } else {
+                        new_options
+                            .extra_options
+                            .remove(COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM);
                     }
                 }
                 SetRegionOption::MaxRowGroupRowCount(row_count) => {
@@ -1093,6 +1106,16 @@ impl TableMeta {
                     }
                 );
             } else {
+                // Partition rules keep bounds typed as the column, and functions such as
+                // `iceberg_hash` route by the typed value, so a new type would reroute or
+                // break routing. Time index widening above keeps timestamps comparable.
+                ensure!(
+                    !self.partition_key_indices.contains(&index),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!("Not allowed to change partition column '{}'", column.name)
+                    }
+                );
                 ensure!(
                     column
                         .data_type
@@ -1912,6 +1935,50 @@ mod tests {
     }
 
     #[test]
+    fn test_modify_partition_column_type() {
+        // `col2` is nullable and not in the primary key, so only its partition role
+        // decides whether the change is allowed.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "col2".to_string(),
+                target_type: ConcreteDataType::float64_datatype(),
+            }],
+        };
+        for (partition_key_indices, allowed) in [(vec![], true), (vec![2], false)] {
+            let meta = TableMetaBuilder::empty()
+                .schema(Arc::new(new_test_schema()))
+                .primary_key_indices(vec![0])
+                .partition_key_indices(partition_key_indices)
+                .engine("engine")
+                .next_column_id(3)
+                .build()
+                .unwrap();
+            let result = meta.builder_with_alter_kind("my_table", &alter_kind);
+            assert_eq!(result.is_ok(), allowed);
+        }
+
+        // Widening the unit of a time index that is also a partition column is allowed.
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .partition_key_indices(vec![1])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+            }],
+        };
+        assert!(
+            meta.builder_with_alter_kind("my_table", &alter_kind)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn test_add_columns() {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::empty()
@@ -2515,6 +2582,55 @@ mod tests {
                 .to_region_options()
                 .contains_key(REPARTITION_COLUMN_HINT_KEY)
         );
+    }
+
+    #[test]
+    fn test_compaction_output_parallelism_persistence_and_unset() {
+        let mut meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("mito")
+            .next_column_id(3)
+            .options(TableOptions::default())
+            .build()
+            .unwrap();
+        for (kind, expected) in [
+            (
+                AlterKind::SetTableOptions {
+                    options: vec![SetRegionOption::CompactionOutputParallelism(Some(4))],
+                },
+                Some("4"),
+            ),
+            (
+                AlterKind::SetTableOptions {
+                    options: vec![SetRegionOption::CompactionOutputParallelism(Some(1))],
+                },
+                Some("1"),
+            ),
+            (
+                AlterKind::UnsetTableOptions {
+                    keys: vec![UnsetRegionOption::CompactionOutputParallelism],
+                },
+                None,
+            ),
+        ] {
+            meta = meta
+                .builder_with_alter_kind("my_table", &kind)
+                .unwrap()
+                .build()
+                .unwrap();
+            // Restart uses the persisted table options to reopen regions.
+            let json = serde_json::to_string(&meta.options).unwrap();
+            let restored: TableOptions = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                expected,
+                restored
+                    .extra_options
+                    .get(COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM)
+                    .map(String::as_str)
+            );
+            assert!(!restored.extra_options.contains_key(COMPACTION_TYPE));
+        }
     }
 
     #[test]

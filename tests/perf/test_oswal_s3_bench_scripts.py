@@ -224,15 +224,106 @@ class PlanTest(unittest.TestCase):
             with self.subTest(bucket=bucket), self.assertRaisesRegex(ValueError, "cross-region"):
                 bench.check_regions(bucket, runner)
 
-    def test_manifest_takes_the_sha256_digest(self):
+    def test_manifest_records_the_checked_images_pinned_to_their_digests(self):
         plan = bench.build_plan("1,8", "2000000", "1000", "2", smoke=False)
-        inspect = [{"RepoDigests": ["greptime/greptimedb@sha256:" + "a" * 64]}]
-        manifest = bench.build_manifest(plan, inspect, "runtime@sha256:" + "b" * 64, "c6id.2xlarge",
+        checked = [{"label": "", "image": "greptime/greptimedb@sha256:" + "a" * 64,
+                    "requested": "greptime/greptimedb:v1.4.0-nightly-20261012", "version": "1.4.0", "commit": "abc"}]
+        manifest = bench.build_manifest(plan, checked, "runtime@sha256:" + "b" * 64, "c6id.2xlarge",
                                         "ap-southeast-1", "oswal-bench/1-1")
         self.assertEqual(manifest["greptimedb_image"], "greptime/greptimedb@sha256:" + "a" * 64)
+        self.assertEqual(manifest["greptimedb_images"], checked)
         self.assertEqual((manifest["rows"], manifest["rounds"], manifest["concurrency"]), (2_000_000, 2, [1, 8]))
-        with self.assertRaises(ValueError):
-            bench.build_manifest(plan, [{"RepoDigests": []}], "", "", "", "")
+        for images in ([checked[0] | {"image": "greptime/greptimedb:v1.4.0"}], [checked[0] | {"label": "base"}]):
+            with self.subTest(images=images), self.assertRaises(ValueError):
+                bench.build_manifest(plan, images, "", "", "", "")
+
+    def test_every_cell_runs_once_per_image_in_an_order_that_reverses_every_other_round(self):
+        images = json.dumps([{"label": label, "image": f"docker.io/greptime/greptimedb-dev:{label}"}
+                             for label in ("base", "pr1", "pr2")])
+        plan = bench.build_plan("8", "2000000", "1000", "3", smoke=False, configs="D", images=images)
+        self.assertEqual([c["id"] for c in plan["cells"]], [
+            "1-8-D-base", "1-8-D-pr1", "1-8-D-pr2", "2-8-D-pr2", "2-8-D-pr1", "2-8-D-base",
+            "3-8-D-base", "3-8-D-pr1", "3-8-D-pr2"])
+        self.assertEqual(plan["images"], ["base", "pr1", "pr2"])
+        # The configurations reverse with the images, and a warm-up runs the first load cell per image.
+        groups = json.dumps([{"name": "crash", "mode": "crash", "configs": "E", "rounds": 1, "cycles": 1},
+                             {"name": "single", "configs": "D,E"}])
+        plan = bench.build_plan("8", "2000000", "1000", "2", smoke=False, groups=groups,
+                                images=json.dumps(json.loads(images)[:2]), warmup=True)
+        self.assertEqual([c["id"] for c in plan["cells"]], [
+            "single-0-8-D-base", "single-0-8-D-pr1", "crash-1-8-E-base", "crash-1-8-E-pr1",
+            "single-1-8-D-base", "single-1-8-D-pr1", "single-1-8-E-base", "single-1-8-E-pr1",
+            "single-2-8-E-pr1", "single-2-8-E-base", "single-2-8-D-pr1", "single-2-8-D-base"])
+        warmups = [c for c in plan["cells"] if c.get("warmup")]
+        self.assertEqual([(c["round"], c["image"], c["mode"]) for c in warmups], [(0, "base", "load"), (0, "pr1", "load")])
+        self.assertEqual((plan["rounds"], plan["warmup"]), (2, True))
+        # Without images every cell keeps its id and runs the one image.
+        single = bench.build_plan("8", "2000000", "1000", "1", smoke=False, configs="D")
+        self.assertEqual([(c["id"], c["image"]) for c in single["cells"]], [("1-8-D", "")])
+        self.assertEqual((single["images"], single["warmup"]), ([""], False))
+
+    def test_invalid_images_and_warmups_are_rejected(self):
+        ref = "docker.io/greptime/greptimedb-dev:dev"
+        for images in ([{"label": "base", "image": ref}], [{"label": f"i{n}", "image": ref} for n in range(5)],
+                       [{"label": "base", "image": ref}, {"label": "base", "image": ref}],
+                       [{"label": "Base", "image": ref}, {"label": "pr1", "image": ref}],
+                       [{"label": "ninechars", "image": ref}, {"label": "pr1", "image": ref}],
+                       [{"label": 1, "image": ref}, {"label": "pr1", "image": ref}],
+                       [{"label": "base", "image": "greptimedb"}, {"label": "pr1", "image": ref}],
+                       [{"label": "base", "image": ref, "env": "A=1"}, {"label": "pr1", "image": ref}],
+                       {"base": ref}):
+            with self.subTest(images=images), self.assertRaises(ValueError):
+                bench.build_plan("8", "6000", "1000", "1", smoke=False, images=json.dumps(images))
+        crash_only = json.dumps([{"name": "c", "mode": "crash", "configs": "D"}])
+        with self.assertRaisesRegex(ValueError, "warmup needs a load group"):
+            bench.build_plan("8", "6000", "1000", "1", smoke=False, groups=crash_only, warmup=True)
+        # One image twice compares it with itself.
+        pair = [{"label": "base", "image": ref}, {"label": "again", "image": ref}]
+        self.assertEqual(bench.resolve_images(json.dumps(pair), "", "nightly"), pair)
+        with self.assertRaisesRegex(ValueError, "not both"):
+            bench.resolve_images(json.dumps(pair), ref, "nightly")
+        self.assertEqual(bench.resolve_images("", ref, "nightly"), [{"label": "", "image": ref}])
+
+    def test_a_plan_longer_than_the_benchmark_timeout_is_refused(self):
+        groups = json.dumps([{"name": "single", "configs": "D,E"}, {"name": "multi", "configs": "D,E", "partitions": 8}])
+        images = json.dumps([{"label": label, "image": f"docker.io/greptime/greptimedb-dev:{label}"}
+                             for label in ("base", "pr1", "pr2")])
+        plan = bench.build_plan("8", "2000000", "1000", "5", smoke=False, groups=groups, images=images, warmup=True)
+        self.assertEqual(len(plan["cells"]), 63)
+        self.assertEqual(bench.estimate_minutes(plan), 75)
+        cells = {c["id"]: c for c in plan["cells"]}
+        # Durable at concurrency 8 writes 34,000 rows/s to one region and 26,000 to eight.
+        self.assertAlmostEqual(bench.cell_seconds(cells["single-1-8-D-base"], 1000), 5 + 2_000_000 / 34_000)
+        self.assertAlmostEqual(bench.cell_seconds(cells["multi-1-8-D-pr1"], 1000), 5 + 2_000_000 / 26_000)
+        self.assertAlmostEqual(bench.cell_seconds(cells["multi-1-8-E-pr2"], 4000), 5 + 2_000_000 / 60_000)
+        # A smaller batch keeps the request rate: one-row batches write a thousandth of the rows.
+        self.assertAlmostEqual(bench.cell_seconds(cells["single-1-8-D-base"], 1), 5 + 2_000_000 / 34)
+        durable = cells["single-1-8-D-base"]
+        self.assertAlmostEqual(bench.load_rate(durable | {"concurrency": 4}), 9_000 + 25_000 * 2 / 3)
+        self.assertEqual(bench.load_rate(durable | {"concurrency": 64}), 55_000)
+        crash = bench.build_plan("8", "6000", "1000", "1", smoke=False, groups=json.dumps(
+            [{"name": "c", "mode": "crash", "configs": "D", "cycles": 5, "kill_after": [5, 20]}]))["cells"][0]
+        self.assertEqual(bench.cell_seconds(crash, 1), 5 + 5 * (12.5 + 15))
+        command = [sys.executable, str(SCRIPTS / "oswal-s3-bench.py"), "plan", "--smoke", "false", "--concurrency",
+                   "8", "--rows", "2000000", "--rounds", "5", "--groups", groups,
+                   "--images", images, "--warmup", "true", "--ttl-hours", "8"]
+        for batch_rows, timeout, expected in (("1000", "75", "about 75 minutes"), ("1000", "74", "more than the 74-minute"),
+                                               ("1", "360", "more than the 360-minute")):
+            done = subprocess.run(command + ["--batch-rows", batch_rows, "--timeout-minutes", timeout],
+                                  capture_output=True, text=True, timeout=60)
+            with self.subTest(batch_rows=batch_rows, timeout=timeout):
+                self.assertEqual(done.returncode, 0 if expected.startswith("about") else 1, done.stderr)
+                self.assertIn(expected, done.stdout + done.stderr)
+
+    def test_the_workflow_checks_every_image_before_an_instance_is_allocated(self):
+        workflow = (SCRIPTS.parent / "workflows" / "oswal-s3-bench.yml").read_text()
+        self.assertIn("OSWAL_IMAGES: ${{ inputs.images }}", workflow)
+        self.assertEqual(workflow.count('--images "$OSWAL_IMAGES"'), 3)
+        self.assertEqual(workflow.count('--warmup "$WARMUP"'), 2)
+        validate = workflow[workflow.index("  validate:"):workflow.index("  provision:")]
+        self.assertIn("greptimedb_images: ${{ steps.images.outputs.greptimedb_images }}", validate)
+        self.assertIn("check-images \"$REQUESTED_IMAGES\"", validate)
+        self.assertIn("GREPTIMEDB_IMAGES: ${{ needs.validate.outputs.greptimedb_images }}", workflow)
 
 
 def write_lines(path, lines):
@@ -425,11 +516,12 @@ class SummaryTest(unittest.TestCase):
         self.assertNotIn("kafka_client_produce_elapsed_count", summary.parse_metrics(ACK_BUCKETS)["samples"])
 
     def write_cell(self, root, cell_id, rows_per_second, exit_code=0, metrics="", **extra):
-        round_number, concurrency, config = cell_id.split("-")
+        round_number, concurrency, config, *image = cell_id.split("-")
         path = root / "cells" / cell_id
         (path / "greptimedb-1").mkdir(parents=True)
         (path / "cell.json").write_text(json.dumps({
             "id": cell_id, "round": int(round_number), "concurrency": int(concurrency), "config": config,
+            "image": image[0] if image else "",
             "wal": bench.WAL_CONFIGS[config], "metrics_scraped": True, "env": {},
             "exit_code": exit_code, "wal_device": "/dev/nvme1n1", "version": "1.4.0", "load_wall_seconds": 61.0} | extra))
         if exit_code == 0:
@@ -664,6 +756,51 @@ class SummaryTest(unittest.TestCase):
             self.assertIn("1-1-D (failed, exit 1)", summary.render({}, rows, summary.ratios(rows)))
 
 
+    def test_images_are_compared_with_the_first_in_every_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            images = [{"label": label, "image": f"docker.io/greptime/greptimedb-dev:{label}"} for label in ("base", "pr1")]
+            plan = bench.build_plan("8", "6000", "1000", "2", smoke=False, configs="R,D", images=json.dumps(images),
+                                    warmup=True)
+            (root / "plan.json").write_text(json.dumps(plan))
+            (root / "run.json").write_text(json.dumps({"rows": 6000, "batch_rows": 1000, "greptimedb_images": [
+                i | {"image": f"greptime/greptimedb-dev@sha256:{n * 64}", "version": "1.4.0", "commit": f"{n * 7}"}
+                for i, n in zip(images, "ab")]}))
+            # The warm-up cells are far off and must not move any ratio.
+            speeds = {"0-8-R-base": 10.0, "0-8-R-pr1": 999.0,
+                      "1-8-R-base": 100.0, "1-8-R-pr1": 100.0, "1-8-D-base": 50.0, "1-8-D-pr1": 40.0,
+                      "2-8-D-pr1": 66.0, "2-8-D-base": 55.0, "2-8-R-pr1": 100.0, "2-8-R-base": 110.0}
+            for cell_id, speed in speeds.items():
+                self.write_cell(root, cell_id, speed, warmup=cell_id.startswith("0-"),
+                                host_load_start=[0.5, 0.4, 0.3], host_load_end=[1.25, 0.5, 0.3])
+            with open(root / "cells" / "2-8-D-pr1" / "greptimedb-1" / "load-transcript.jsonl", "w") as out:
+                for seconds in (0.2, 0.3):
+                    out.write(json.dumps({"step": "grpc_write_batch", "status": "success", "duration_seconds": seconds}) + "\n")
+            output = subprocess.run([sys.executable, str(SCRIPTS / "oswal-s3-bench-summary.py"), "--root", str(root)],
+                                    check=True, capture_output=True, text=True).stdout
+            result = json.loads((root / "summary.json").read_text())
+            compared = {(c["config"], c["image"]): c for c in result["image_ratios"]}
+            self.assertEqual(list(compared), [("R", "base"), ("R", "pr1"), ("D", "base"), ("D", "pr1")])
+            durable = compared[("D", "pr1")]
+            self.assertEqual(durable["ratio_to"], "base")
+            self.assertEqual(durable["per_round"], [0.8, 1.2])
+            self.assertAlmostEqual(durable["geomean"], 0.96 ** 0.5)
+            self.assertEqual((durable["min"], durable["max"]), (0.8, 1.2))
+            self.assertEqual([r["rows_per_second"] for r in durable["rounds"]], [40.0, 66.0])
+            self.assertEqual((durable["rounds"][1]["client_p50"], durable["rounds"][1]["client_p99"]), (0.2, 0.3))
+            self.assertEqual(durable["rounds"][0]["host_load_end"], [1.25, 0.5, 0.3])
+            self.assertEqual((compared[("D", "base")]["per_round"], compared[("D", "base")]["geomean"]), (None, None))
+            # The ratios to the Raft Engine control stay within each image.
+            pairs = {(r["image"], r["ratio"]): r["per_round"] for r in result["ratios"]}
+            self.assertEqual(pairs, {("base", "D/R"): [0.5, 0.5], ("pr1", "D/R"): [0.4, 0.66]})
+            self.assertIn("| base | `greptime/greptimedb-dev@sha256:" + "a" * 64 + "` | 1.4.0 | `aaaaaaa` |", output)
+            self.assertIn("| — | 8 | D | pr1 | 40; 66 | — / —; 200.0 / 300.0 | 0.800, 1.200 | 0.980 | 0.800 | 1.200 |", output)
+            self.assertIn("| — | 8 | D | base | 50; 55 | — / —; — / — | — | — | — | — |", output)
+            self.assertIn("| 0-8-R-pr1 (warm-up) |", output)
+            self.assertIn("| `/dev/nvme1n1` | 0.50 / 1.25 |", output)
+            self.assertIn("| — | pr1 | 8 | D/R | 0.400, 0.660 | 0.514 |", output)
+
+
 FAKE_DOCKER = r"""#!/usr/bin/env bash
 printf '%s\n' "docker $*" >> "$FAKE_LOG"
 case "$1" in
@@ -677,6 +814,7 @@ case "$1" in
         echo "{\"count_before\": 0, \"count_after\": $FAKE_ROWS, \"load_seconds\": 2, \"rows_per_second\": 3000, \"table\": \"agent_observations\"}" \
             > "$results/greptimedb-1/load-result.json" ;;
     kill) touch "${FAKE_KILL_FLAG:-/dev/null}" ;;
+    rm) [[ -z "${FAKE_LOAD_AFTER:-}" ]] || echo "$FAKE_LOAD_AFTER" > "$OSWAL_LOADAVG" ;;
     inspect) echo true ;;
     exec) [[ "$*" == *cpu.stat* ]] && echo 'usage_usec 5000000' || echo 'version: 1.4.0-test' ;;
     logs) echo 'server log'
@@ -723,14 +861,16 @@ done
 
 class CellLifecycleTest(unittest.TestCase):  # the run script against fake docker and curl
 
-    def run_cells(self, root, load_rc, metrics_rc=0, restart=False, count=6000, groups=""):
+    def run_cells(self, root, load_rc, metrics_rc=0, restart=False, count=6000, groups="", images="", checked=None):
         bin_dir = root / "bin"
         bin_dir.mkdir()
         for name, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
             (bin_dir / name).write_text(body)
             (bin_dir / name).chmod(0o755)
         plan = bench.build_plan("8", "6000", "1000", "1", smoke=False, configs="D,E", restart=restart,
-                                extra_env="RUST_LOG=info", groups=groups)
+                                extra_env="RUST_LOG=info", groups=groups, images=images)
+        if checked is None:
+            checked = [{"label": label, "image": f"greptimedb{label}@sha256:" + "a" * 64} for label in plan["images"]]
         (root / "results").mkdir()
         (root / "results" / "plan.json").write_text(json.dumps(plan))
         env = os.environ | {
@@ -738,7 +878,7 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             "FAKE_LOAD_RC": str(load_rc), "FAKE_METRICS_RC": str(metrics_rc), "FAKE_ROWS": "6000", "FAKE_COUNT": str(count),
             "PLAN": str(root / "results" / "plan.json"),
             "RESULTS": str(root / "results"), "CORPUS_DIR": str(root / "corpus"), "OWNER": "o11ybench-oswal-1-1",
-            "RUNTIME_IMAGE": "runtime@sha256:" + "b" * 64, "GREPTIMEDB_IMAGE": "greptimedb@sha256:" + "a" * 64,
+            "RUNTIME_IMAGE": "runtime@sha256:" + "b" * 64, "GREPTIMEDB_IMAGES": json.dumps(checked),
             "RUN_PREFIX": "oswal-bench/1-1", "WAL_ROOT": str(root / "wal"), "S3_BUCKET": "bucket",
             "S3_REGION": "ap-southeast-1", "AWS_ACCESS_KEY_ID": "AKIAFAKEKEY", "AWS_SECRET_ACCESS_KEY": "fake-secret-value",
         }
@@ -1069,6 +1209,156 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             recorded = json.loads((root / "results" / "cells" / "1-8-D" / "cell.json").read_text())
             self.assertEqual((recorded["exit_code"], recorded["restart_count"]), (5, 5999))
 
+
+    def test_every_cell_starts_its_own_image_and_records_the_host_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "loadavg").write_text("0.50 0.40 0.30 1/200 99\n")
+            images = json.dumps([{"label": label, "image": f"docker.io/greptime/greptimedb-dev:{label}"}
+                                 for label in ("base", "pr1")])
+            old = os.environ.copy()
+            os.environ.update({"OSWAL_LOADAVG": str(root / "loadavg"), "FAKE_LOAD_AFTER": "1.25 1.00 0.75 1/200 99"})
+            try:
+                cells, _, log, _ = self.run_cells(root, load_rc=0, images=images)
+            finally:
+                os.environ.clear()
+                os.environ.update(old)
+            self.assertEqual(cells.returncode, 0, cells.stdout + cells.stderr)
+            starts = [line for line in log.splitlines() if line.startswith("docker run -d")]
+            self.assertEqual([re.search(r"--name o11ybench-oswal-1-1-(\S+) ", line).group(1) for line in starts],
+                             ["1-8-D-base", "1-8-D-pr1", "1-8-E-base", "1-8-E-pr1"])
+            for line in starts:
+                label = line.split("--name ")[1].split()[0].rsplit("-", 1)[1]
+                self.assertIn(f" greptimedb{label}@sha256:{'a' * 64} standalone start", line)
+            self.assertIn(f"TARGET_IMAGE=greptimedbpr1@sha256:{'a' * 64}", log)
+            first, second = (json.loads((root / "results" / "cells" / i / "cell.json").read_text())
+                             for i in ("1-8-D-base", "1-8-D-pr1"))
+            self.assertEqual((first["image"], first["host_load_start"], first["host_load_end"]),
+                             ("base", [0.5, 0.4, 0.3], [1.25, 1.0, 0.75]))
+            self.assertEqual(second["host_load_start"], [1.25, 1.0, 0.75])
+
+    def test_a_cell_without_a_checked_image_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            images = json.dumps([{"label": label, "image": f"docker.io/greptime/greptimedb-dev:{label}"}
+                                 for label in ("base", "pr1")])
+            cells, _, log, _ = self.run_cells(root, load_rc=0, images=images,
+                                              checked=[{"label": "base", "image": "greptimedb@sha256:" + "a" * 64}])
+            self.assertNotEqual(cells.returncode, 0)
+            self.assertIn("1-8-D-pr1: no image labelled 'pr1'", cells.stderr)
+            self.assertEqual(log.count("docker run -d"), 2)
+
+    def test_check_images_pins_every_image_to_its_digest_and_records_its_version(self):
+        fake_docker = r"""#!/usr/bin/env bash
+printf '%s\n' "docker $*" >> "$FAKE_LOG"
+case "$1 $2" in
+    "image inspect") printf '[{"RepoDigests": ["%s@sha256:%064d"]}]\n' "${3%:*}" "$(printf '%s' "$3" | cksum | cut -d' ' -f1)" ;;
+    "run --rm") [[ "$*" == *nocommit* ]] || commit="commit: 0123456789abcdef$(printf '%s' "$4" | cksum | cut -c1-4)"
+        printf 'greptime\nbranch: main\n%s\nclean: true\nversion: 1.4.0\n' "${commit:-}" ;;
+esac
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, body in (("docker", fake_docker), ("timeout", '#!/usr/bin/env bash\nshift 2\nexec "$@"\n')):
+                (root / name).write_text(body)
+                (root / name).chmod(0o755)
+            env = os.environ | {"PATH": f"{root}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
+                                "GITHUB_OUTPUT": str(root / "output")}
+            requested = [{"label": label, "image": f"docker.io/greptime/greptimedb-dev:{label}"} for label in ("base", "pr1")]
+            done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "check-images", json.dumps(requested)],
+                                  env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            name, _, value = (root / "output").read_text().strip().partition("=")
+            checked = json.loads(value)
+            self.assertEqual(name, "greptimedb_images")
+            self.assertEqual([(c["label"], c["requested"], c["version"]) for c in checked],
+                             [(r["label"], r["image"], "1.4.0") for r in requested])
+            for c in checked:
+                self.assertRegex(c["image"], r"^docker\.io/greptime/greptimedb-dev@sha256:[0-9]{64}$")
+                self.assertTrue(c["commit"].startswith("0123456789abcdef"), c)
+                self.assertIn(f"docker run --rm --entrypoint greptime {c['image']} --version", (root / "fake.log").read_text())
+            self.assertNotEqual(checked[0]["image"], checked[1]["image"])
+            requested[1]["image"] = "docker.io/greptime/nocommit:pr1"
+            done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "check-images", json.dumps(requested)],
+                                  env=env, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(done.returncode, 0)
+            self.assertIn("reports no version or commit", done.stderr)
+
+
+    def test_check_runtime_pins_a_named_digest_offline_and_resolves_only_a_tag(self):
+        digest = "sha256:" + "c" * 64
+        fake_docker = f"""#!/usr/bin/env bash
+printf '%s\\n' "docker $*" >> "$FAKE_LOG"
+[[ "$1 $2 $3" == "buildx imagetools inspect" ]] || exit 9
+printf '{{"mediaType": "application/vnd.oci.image.index.v1+json", "digest": "{digest}", "size": 856}}\\n'
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docker").write_text(fake_docker)
+            (root / "docker").chmod(0o755)
+            env = os.environ | {"PATH": f"{root}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
+                                "GITHUB_OUTPUT": str(root / "output")}
+            repository, named = "public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime", "sha256:" + "d" * 64
+            # Expected pin, or error, and whether the registry is asked.
+            for image, expected, asks in ((f"{repository}:77a84e1c8136", f"{repository}@{digest}", True),
+                                          (f"{repository}:77a84e1c8136@{named}", f"{repository}@{named}", False),
+                                          (f"{repository}@{named}", f"{repository}@{named}", False),
+                                          (f"{repository}:77a84e1c8136@sha256:abc", "not a full ECR Public", False),
+                                          (f"public.ecr.aws/@{named}", "not a full ECR Public", False),
+                                          (f"{repository}@@{named}", "not a full ECR Public", False),
+                                          (f"{repository}:bad tag", "not a full ECR Public", False),
+                                          ("docker.io/greptime/o11ybenchruntime:1", "must come from AWS ECR Public", False)):
+                with self.subTest(image=image):
+                    (root / "output").write_text("")
+                    (root / "fake.log").write_text("")
+                    done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "check-runtime", image],
+                                          env=env, capture_output=True, text=True, timeout=60)
+                    if expected.startswith(repository):
+                        self.assertEqual(done.returncode, 0, done.stderr)
+                        self.assertEqual((root / "output").read_text(), f"runtime_image={expected}\n")
+                    else:
+                        self.assertNotEqual(done.returncode, 0)
+                        self.assertIn(expected, done.stderr)
+                        self.assertEqual((root / "output").read_text(), "")
+                    calls = (root / "fake.log").read_text().splitlines()
+                    self.assertEqual(calls, [f"docker buildx imagetools inspect --format {{{{json .Manifest}}}} {image}"]
+                                     if asks else [])
+
+    def test_the_benchmark_host_checks_the_runtime_contents_before_pulling_greptimedb(self):
+        # The fake runs the step's own check in a directory standing in for the image's working directory.
+        fake_docker = r"""#!/usr/bin/env bash
+printf '%s\n' "docker $*" >> "$FAKE_LOG"
+case "$1" in
+    run) cd "$FAKE_RUNTIME_ROOT" && exec sh -c "$7" ;;
+    image) echo '[{}]' ;;
+esac
+"""
+        loader, generator = "scripts/agent-observability/greptimedb.sh", "scripts/generate_agent_observations.py"
+        for present, passes in (((loader, generator), True), ((generator,), False), ((loader,), False)):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name, body in (("docker", fake_docker), ("timeout", '#!/usr/bin/env bash\nshift 2\nexec "$@"\n')):
+                    (root / name).write_text(body)
+                    (root / name).chmod(0o755)
+                for path in present:
+                    (root / "image" / path).parent.mkdir(parents=True, exist_ok=True)
+                    (root / "image" / path).write_text("")
+                runtime = "public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime@sha256:" + "c" * 64
+                env = os.environ | {"PATH": f"{root}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
+                                    "FAKE_RUNTIME_ROOT": str(root / "image"), "RESULTS": str(root / "results"),
+                                    "RUNTIME_IMAGE": runtime,
+                                    "GREPTIMEDB_IMAGES": json.dumps([{"label": "", "image": "greptimedb@sha256:" + "a" * 64}])}
+                done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "pull"], env=env,
+                                      capture_output=True, text=True, timeout=60)
+                log = (root / "fake.log").read_text().splitlines()
+                self.assertTrue(log[1].startswith(f"docker run --rm --entrypoint sh {runtime} -c "), log[1])
+                if passes:
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    self.assertEqual([line.split()[1] for line in log], ["pull", "run", "pull", "image", "image"])
+                else:
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn("lacks the agent observability loader or generator", done.stderr)
+                    self.assertEqual([line.split()[1] for line in log], ["pull", "run"])
 
 if __name__ == "__main__":
     unittest.main()

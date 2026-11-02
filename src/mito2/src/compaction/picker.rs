@@ -128,6 +128,7 @@ pub fn new_picker(
     region_options: &RegionOptions,
     max_background_tasks: Option<usize>,
     time_range: Option<TimestampRange>,
+    manual: bool,
 ) -> Arc<dyn Picker> {
     if let compact_request::Options::StrictWindow(window) = compact_request_options {
         let window = if window.window_seconds == 0 {
@@ -148,8 +149,10 @@ pub fn new_picker(
                 time_window_seconds: twcs_opts.time_window_seconds(),
                 max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
                 append_mode: region_options.append_mode,
+                merge_mode: region_options.merge_mode(),
                 max_background_tasks,
                 time_range,
+                all_windows_inactive: manual,
             },
         };
         if region_options.merge_mode() == MergeMode::LastNonNull {

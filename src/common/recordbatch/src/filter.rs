@@ -19,10 +19,11 @@ mod predicate;
 mod tests;
 mod timestamp;
 
+use std::borrow::Borrow;
 use std::sync::Arc;
 
 use datafusion::error::Result as DfResult;
-use datafusion::logical_expr::{Expr, Literal, Operator};
+use datafusion::logical_expr::{Expr, Literal, Operator, utils};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::arrow::array::{ArrayRef, Datum};
 use datafusion_common::arrow::buffer::BooleanBuffer;
@@ -40,6 +41,41 @@ pub use self::predicate::{regexp_is_match_dictionary, regexp_is_match_scalar};
 pub use self::timestamp::timestamp_scalar_value;
 use crate::error::{Result, ToArrowScalarSnafu};
 use crate::filter::predicate::SimplePredicate;
+
+/// Prunes candidates using known metadata columns. Missing columns and unsupported
+/// predicates cannot exclude a candidate. Complete SQL predicates must still run
+/// after pruning.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataFilter {
+    filters: Arc<[SimpleFilterEvaluator]>,
+}
+
+impl MetadataFilter {
+    /// Compiles supported conjuncts once for reuse across scan stages. OR is
+    /// never split: an unknown alternative might match the candidate.
+    pub fn new(expressions: &[Expr]) -> Self {
+        Self {
+            filters: expressions
+                .iter()
+                .flat_map(utils::split_conjunction)
+                .filter_map(SimpleFilterEvaluator::try_new)
+                .collect(),
+        }
+    }
+
+    /// Returns false only when known metadata proves a conjunct cannot match.
+    /// `None` means unavailable metadata, distinct from a known SQL NULL scalar.
+    /// Values may be borrowed so repeated predicates can reuse allocated strings.
+    pub fn matches<T: Borrow<ScalarValue>>(
+        &self,
+        mut value: impl FnMut(&str) -> Option<T>,
+    ) -> bool {
+        self.filters.iter().all(|filter| {
+            value(filter.column_name())
+                .is_none_or(|value| filter.evaluate_scalar(value.borrow()).unwrap_or(true))
+        })
+    }
+}
 
 /// Evaluates supported single-column predicates with precompiled regular expressions.
 /// Compound predicates preserve SQL null semantics until conversion to a scan mask.

@@ -19,7 +19,6 @@ on:
     # NIGHTLY_RELEASE_MAX_AGE_DAYS days, see the 'Check nightly release necessity' step.
     - cron: '0 0 * * 1-5'
   workflow_dispatch: # Allows you to run this workflow manually.
-    # Notes: The GitHub Actions ONLY support 10 inputs; this final input is the tenth.
     inputs:
       linux_amd64_runner:
         type: choice
@@ -57,9 +56,19 @@ on:
         description: Do not run integration tests during the build
         type: boolean
         default: true
-      build_linux_artifacts:
+      build_linux_amd64_artifacts:
         type: boolean
-        description: Build linux artifacts (amd64, arm64, and riscv64)
+        description: Build linux-amd64 artifacts (publishing always builds all Linux architectures)
+        required: false
+        default: false
+      build_linux_arm64_artifacts:
+        type: boolean
+        description: Build linux-arm64 artifacts (publishing always builds all Linux architectures)
+        required: false
+        default: false
+      build_linux_riscv64_artifacts:
+        type: boolean
+        description: Build linux-riscv64 artifacts (publishing always builds all Linux architectures)
         required: false
         default: false
       build_macos_artifacts:
@@ -115,6 +124,9 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: ubuntu-latest
     outputs:
+      build-linux-amd64: ${{ steps.linux-architectures.outputs.amd64 }}
+      build-linux-arm64: ${{ steps.linux-architectures.outputs.arm64 }}
+      build-linux-riscv64: ${{ steps.linux-architectures.outputs.riscv64 }}
       linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
       linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
       macos-runner: ${{ inputs.macos_runner || vars.DEFAULT_MACOS_RUNNER }}
@@ -142,6 +154,17 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # Publishing and automatic releases retain the full Linux build.
+      - name: Resolve Linux architectures
+        id: linux-architectures
+        env:
+          BUILD_LINUX_AMD64_ARTIFACTS: ${{ inputs.build_linux_amd64_artifacts }}
+          BUILD_LINUX_ARM64_ARTIFACTS: ${{ inputs.build_linux_arm64_artifacts }}
+          BUILD_LINUX_RISCV64_ARTIFACTS: ${{ inputs.build_linux_riscv64_artifacts }}
+          PUBLISH_GITHUB_RELEASE: ${{ inputs.publish_github_release }}
+          RELEASE_IMAGES: ${{ inputs.release_images }}
+        run: bash .github/scripts/release-linux-architectures.sh >> "$GITHUB_OUTPUT"
 
       - name: Check Rust toolchain version
         shell: bash
@@ -182,7 +205,7 @@ jobs:
           ./.github/scripts/check-version.sh "${{ steps.create-version.outputs.version }}"
 
       - name: Allocate linux-amd64 runner
-        if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && steps.check-nightly.outputs.nightly-required == 'true' }}
+        if: ${{ (steps.linux-architectures.outputs.amd64 == 'true' || steps.linux-architectures.outputs.riscv64 == 'true') && steps.check-nightly.outputs.nightly-required == 'true' }}
         uses: ./.github/actions/start-runner
         id: start-linux-amd64-runner
         with:
@@ -196,7 +219,7 @@ jobs:
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 
       - name: Allocate linux-arm64 runner
-        if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && steps.check-nightly.outputs.nightly-required == 'true' }}
+        if: ${{ steps.linux-architectures.outputs.arm64 == 'true' && steps.check-nightly.outputs.nightly-required == 'true' }}
         uses: ./.github/actions/start-runner
         id: start-linux-arm64-runner
         with:
@@ -211,7 +234,7 @@ jobs:
 
   build-linux-amd64-artifacts:
     name: Build linux-amd64 artifacts
-    if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
+    if: ${{ needs.allocate-runners.outputs.build-linux-amd64 == 'true' && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
     needs: [
       allocate-runners,
     ]
@@ -237,7 +260,7 @@ jobs:
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
-    if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
+    if: ${{ needs.allocate-runners.outputs.build-linux-arm64 == 'true' && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
     needs: [
       allocate-runners,
     ]
@@ -264,7 +287,7 @@ jobs:
 
   build-linux-riscv64-artifacts:
     name: Build linux-riscv64 artifacts
-    if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
+    if: ${{ needs.allocate-runners.outputs.build-linux-riscv64 == 'true' && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
     needs: [
       allocate-runners,
     ]
@@ -493,9 +516,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:

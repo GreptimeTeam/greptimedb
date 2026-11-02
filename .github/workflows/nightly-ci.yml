@@ -53,12 +53,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sqlness
         run: make sqlness-test
         env:
@@ -82,9 +86,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - uses: rui314/setup-mold@v1
       - name: Install toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -134,18 +138,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - uses: KyleMayes/install-llvm-action@v1
         with:
           version: "14.0"
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: false
           components: llvm-tools-preview
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install Cargo Nextest
         uses: taiki-e/install-action@nextest
       - name: Install WSL distribution
@@ -157,6 +164,7 @@ jobs:
         env:
           CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1
+          RUST_MIN_STACK: 8388608 # 8 MiB, aligned with Rust CI and release tests.
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
           GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}

@@ -32,7 +32,7 @@ use datafusion::functions_nested::expr_fn::make_array;
 use datafusion::prelude::SessionContext;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ExprSchema, JoinType, ScalarValue, TableReference};
-use datafusion_expr::expr::{Exists, ScalarFunction};
+use datafusion_expr::expr::{Exists, NullTreatment, ScalarFunction};
 use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, Extension, LogicalPlanBuilder, Operator, Subquery,
@@ -528,6 +528,72 @@ fn dictionary_literals_in_values_keep_their_schema() {
             .to_string()
             .contains("Dictionary(UInt32, Utf8(\"host-a\"))")
     );
+}
+
+#[test]
+fn like_filters_are_pushed_down() {
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone() as _));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider as _)
+        .unwrap();
+
+    let like = |negated, pattern: &str, escape_char, case_insensitive| {
+        Expr::Like(datafusion_expr::expr::Like::new(
+            negated,
+            Box::new(col("t.pk1")),
+            Box::new(lit(pattern.to_string())),
+            escape_char,
+            case_insensitive,
+        ))
+    };
+    // Substrait has no negated LIKE, so `NOT LIKE` comes back as `NOT (.. LIKE ..)`.
+    for (predicate, decoded) in [
+        (
+            like(false, "% timeout %", None, false),
+            like(false, "% timeout %", None, false),
+        ),
+        (
+            like(true, "% timeout %", None, false),
+            Expr::Not(Box::new(like(false, "% timeout %", None, false))),
+        ),
+        (
+            like(false, "% timeout %", None, true),
+            like(false, "% timeout %", None, true),
+        ),
+        (
+            like(false, "100!% done", Some('!'), false),
+            like(false, "100!% done", Some('!'), false),
+        ),
+    ] {
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+            .unwrap()
+            .filter(predicate.clone())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = DistPlannerAnalyzer {}
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let remote_input = find_merge_scan(&result).unwrap().input();
+        assert!(
+            has_filter_above_table_scan(remote_input, "t", &predicate),
+            "{result}"
+        );
+
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(remote_input, DefaultSerializer)
+            .unwrap();
+        let decoded_plan =
+            futures::executor::block_on(DFLogicalSubstraitConvertor.decode(bytes, ctx.state()))
+                .unwrap();
+        assert!(
+            has_filter_above_table_scan(&decoded_plan, "t", &decoded),
+            "{decoded_plan}"
+        );
+    }
 }
 
 fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
@@ -2416,6 +2482,75 @@ fn date_bin_ts_group_by() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn ignore_nulls_aggregate_stays_on_frontend() {
+    use datafusion::functions_aggregate::first_last::last_value;
+
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let input = LogicalPlanBuilder::scan_with_filters("t", source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    for (group_by, null_treatment) in [
+        (
+            vec![col("pk1"), col("pk2")],
+            Some(NullTreatment::IgnoreNulls),
+        ),
+        (vec![col("number")], Some(NullTreatment::IgnoreNulls)),
+        (vec![col("pk1"), col("pk2")], None),
+        (
+            vec![col("pk1"), col("pk2")],
+            Some(NullTreatment::RespectNulls),
+        ),
+    ] {
+        let mut ignored = last_value(col("number"), vec![]);
+        let Expr::AggregateFunction(func) = &mut ignored else {
+            panic!("expected aggregate expression");
+        };
+        func.params.null_treatment = null_treatment;
+        let aggregate_exprs = if null_treatment == Some(NullTreatment::IgnoreNulls) {
+            let mut ordinary = last_value(col("number"), vec![]);
+            let Expr::AggregateFunction(func) = &mut ordinary else {
+                panic!("expected aggregate expression");
+            };
+            func.params.null_treatment = None;
+            vec![ordinary.alias("ordinary"), ignored.alias("ignored")]
+        } else {
+            vec![ignored]
+        };
+        let plan = LogicalPlanBuilder::from(input.clone())
+            .aggregate(group_by, aggregate_exprs)
+            .unwrap()
+            .build()
+            .unwrap();
+        let analyzed = DistPlannerAnalyzer {}
+            .analyze(plan.clone(), &ConfigOptions::default())
+            .unwrap();
+        if null_treatment == Some(NullTreatment::IgnoreNulls) {
+            let LogicalPlan::Aggregate(aggregate) = &analyzed else {
+                panic!("IGNORE NULLS aggregate must remain on the frontend: {analyzed}");
+            };
+            let remote_input = find_merge_scan(&analyzed).unwrap().input();
+            assert!(
+                !matches!(remote_input, LogicalPlan::Aggregate(_)),
+                "remote input contains aggregate: {remote_input}"
+            );
+            let Some(func) =
+                common_function::aggrs::aggr_wrapper::get_aggr_func(&aggregate.aggr_expr[1])
+            else {
+                unreachable!();
+            };
+            assert_eq!(Some(NullTreatment::IgnoreNulls), func.params.null_treatment);
+        } else {
+            let remote_input = find_merge_scan(&analyzed).unwrap().input();
+            assert!(matches!(remote_input, LogicalPlan::Aggregate(_)));
+        }
+    }
 }
 
 #[test]

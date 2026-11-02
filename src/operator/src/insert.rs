@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "enterprise")]
-mod flow_write;
+mod otlp;
+
+pub use otlp::MetricInsertPreflight;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -583,6 +584,9 @@ impl Inserter {
     }
 
     /// Handles row inserts request with metric engine.
+    ///
+    /// Resolves or creates `physical_table` only when a logical target is missing.
+    /// Existing targets retain their backing tables and time-index units.
     pub async fn handle_metric_row_inserts(
         &self,
         mut requests: RowInsertRequests,
@@ -601,22 +605,30 @@ impl Inserter {
         });
         validate_column_count_match(&requests)?;
 
-        // check and create physical table
-        let physical_table_ref = self
-            .create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
-            .await?;
-
-        // check and create logical tables; `create_or_alter_tables_on_demand`
-        // aligns each request's time index unit with the unit of the table it
-        // targets, inside its existing table lookups: existing tables keep
-        // their own unit (which matches the physical table they are bound
-        // to), and new tables use the selected physical table's unit (from
-        // `physical_table_ref`). Ingestion endpoints encode timestamps in a
-        // fixed unit (prometheus remote write always uses millisecond; OTLP
-        // keeps nanosecond precision on the metric engine path), and the
-        // metric engine requires each logical table's requests to match its
-        // time index unit. Narrowing conversions truncate the sub-unit part
-        // (floor), following `Timestamp::convert_to`.
+        // The selected backing table is needed only by new logical targets.
+        let mut has_new_tables = false;
+        for request in &requests.inserts {
+            if self
+                .get_table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    &request.table_name,
+                )
+                .await?
+                .is_none()
+            {
+                has_new_tables = true;
+                break;
+            }
+        }
+        let new_table_unit = if has_new_tables {
+            let physical = self
+                .create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
+                .await?;
+            table_time_index_unit(&physical)
+        } else {
+            None
+        };
         let CreateAlterTableResult {
             instant_table_ids,
             table_infos,
@@ -628,7 +640,7 @@ impl Inserter {
                 statement_executor,
                 true,
                 true,
-                table_time_index_unit(&physical_table_ref),
+                new_table_unit,
             )
             .await?;
         let name_to_info = table_infos
@@ -843,55 +855,17 @@ impl Inserter {
             has_instant_rows,
         )?;
 
-        // Tracked Flow children use a same-capability write protocol. Keep the
-        // ordinary dispatch path unchanged for every other request.
-        #[cfg(feature = "enterprise")]
-        if flow_write::is_child(ctx) {
-            let dispatcher = self.write_dispatcher.clone();
-            let request = request_factory.build_insert(normal_requests);
-            let writes = dispatcher.prepare(vec![request]).await?;
-            let tracked_tasks = writes.into_iter().map(|(peer, mut request)| {
-                let mut query_context = crate::utils::to_meta_query_context(ctx.clone());
-                query_context.extensions.insert(
-                    common_grpc::flow_write::CHILD_KEY.to_string(),
-                    "1".to_string(),
-                );
-                if let Some(header) = request.header.as_mut() {
-                    header.query_context = Some(query_context.into());
-                }
-                let node_manager = self.node_manager.clone();
-                async move { flow_write::dispatch(&node_manager, &peer, request).await }
-            });
-            let results = future::join_all(tracked_tasks).await;
-            let mut affected_rows = 0;
-            let mut first_error = None;
-            for result in results {
-                match result {
-                    Ok(response) => affected_rows += response.affected_rows,
-                    Err(error) if first_error.is_none() => first_error = Some(error),
-                    Err(_) => {}
-                }
-            }
-            if let Some(error) = first_error {
-                return Err(error);
-            }
-            crate::metrics::DIST_INGEST_ROW_COUNT
-                .with_label_values(&[ctx.get_db_string().as_str()])
-                .inc_by(affected_rows as u64);
-            return Ok(Output::new(
-                OutputData::AffectedRows(affected_rows),
-                OutputMeta::new_with_cost(write_cost as _),
-            ));
-        }
-
         let dispatcher = self.write_dispatcher.clone();
         let request = request_factory.build_insert(normal_requests);
         let writes = dispatcher.prepare(vec![request]).await?;
         // Dropping the caller stops retries without abandoning in-flight writes.
         let cancellation = CancellationToken::new();
         let _guard = cancellation.clone().drop_guard();
+        let progress = ctx.write_progress().cloned();
         let affected_rows = common_runtime::spawn_global(async move {
-            dispatcher.execute(writes, None, Some(&cancellation)).await
+            dispatcher
+                .execute_with_progress(writes, None, Some(&cancellation), progress)
+                .await
         })
         .await
         .context(JoinTaskSnafu)?
@@ -1065,11 +1039,10 @@ impl Inserter {
     /// remote write. This will modify the `RowInsertRequests` in place.
     /// `is_single_value` indicates whether the default schema only contains single value column so we can accommodate it.
     ///
-    /// `align_time_index_unit` is the selected physical metric table's time
-    /// index unit; passing `Some` (metric engine path only) rewrites each
-    /// request's time index column, inside this function's existing table
-    /// lookups (no extra catalog access): existing destination tables are
-    /// converted to their own unit, and new tables to the given unit.
+    /// `align_time_index_unit` supplies the selected physical table's time-index
+    /// unit for new logical tables. Existing logical targets always use their
+    /// own unit, even when this argument is `None` because no new target needs
+    /// the selected backing table.
     #[allow(clippy::too_many_arguments)]
     async fn create_or_alter_tables_on_demand(
         &self,
@@ -1123,7 +1096,7 @@ impl Inserter {
                 // Metric path: an existing destination table keeps its own
                 // time index unit (it may be bound to another physical
                 // table than the one selected by this request).
-                if align_time_index_unit.is_some()
+                if matches!(auto_create_table_type, AutoCreateTableType::Logical(_))
                     && let Some(rows) = req.rows.as_mut()
                     && let Some(target_unit) = table_time_index_unit(&table)
                 {
@@ -1167,7 +1140,7 @@ impl Inserter {
                     // Metric path: an existing destination table keeps its
                     // own time index unit (it may be bound to another
                     // physical table than the one selected by this request).
-                    if align_time_index_unit.is_some()
+                    if matches!(auto_create_table_type, AutoCreateTableType::Logical(_))
                         && let Some(rows) = req.rows.as_mut()
                         && let Some(target_unit) = table_time_index_unit(&table)
                     {
@@ -1582,7 +1555,8 @@ impl Inserter {
     /// When `accommodate_existing_schema` is true, it may modify the input `req` to
     /// accommodate it with existing schema. See [`create_or_alter_tables_on_demand`](Self::create_or_alter_tables_on_demand)
     /// for more details.
-    /// When `is_single_value` is true, it also rejects native-histogram/float kind changes.
+    /// When `is_single_value` is true, it also rejects native-histogram/float kind
+    /// changes even when no columns need adding.
     /// When both options are true, it considers fields when modifying the input `req`.
     fn get_alter_table_expr_on_demand(
         &self,
@@ -1612,12 +1586,6 @@ impl Inserter {
             .iter()
             .filter(|col| col.semantic_type == SemanticType::Field as i32)
             .count();
-        let column_exprs = ColumnExpr::from_column_schemas(request_schema);
-        let add_columns = expr_helper::extract_add_columns_expr(&table.schema(), column_exprs)?;
-        let Some(mut add_columns) = add_columns else {
-            return Ok(None);
-        };
-
         if is_single_value {
             let request_is_native_histogram = request_is_native_histogram(request_schema);
             let table_is_native_histogram = table_is_native_histogram(table);
@@ -1630,6 +1598,12 @@ impl Inserter {
                 }
             );
         }
+
+        let column_exprs = ColumnExpr::from_column_schemas(request_schema);
+        let add_columns = expr_helper::extract_add_columns_expr(&table.schema(), column_exprs)?;
+        let Some(mut add_columns) = add_columns else {
+            return Ok(None);
+        };
 
         // If accommodate_existing_schema is true, update request schema for Timestamp/Field columns
         if accommodate_existing_schema {

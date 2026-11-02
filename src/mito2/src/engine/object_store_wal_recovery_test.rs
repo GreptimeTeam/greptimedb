@@ -1251,8 +1251,21 @@ async fn test_reopen_after_a_failed_create_shows_only_the_acknowledged_write() {
     assert_eq!(vec![0, 1], wal_object_seqs(&object_store).await);
     assert_eq!(0, latest(&store, REGION_A));
 
-    // The same key and timestamp is written again under the same row
-    // sequence, and acknowledged from object 2.
+    assert_eq!(
+        1,
+        region(&engine, REGION_A)
+            .version_control
+            .current()
+            .last_sequence
+    );
+    assert_eq!(
+        0,
+        region(&engine, REGION_A)
+            .version_control
+            .committed_sequence()
+    );
+
+    // Write the same key and timestamp with a higher sequence in object 2.
     let mut writer = SealedWriter {
         store: store.clone(),
         admitted: 1,
@@ -1266,7 +1279,7 @@ async fn test_reopen_after_a_failed_create_shows_only_the_acknowledged_write() {
     assert_eq!(vec![1, 2], wal_object_seqs(&object_store).await);
     assert_eq!(entry_id(2, 1), latest(&store, REGION_A));
     let region_a = region(&engine, REGION_A);
-    assert_eq!(1, region_a.version_control.committed_sequence());
+    assert_eq!(2, region_a.version_control.committed_sequence());
     let expected = "\
 +-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |

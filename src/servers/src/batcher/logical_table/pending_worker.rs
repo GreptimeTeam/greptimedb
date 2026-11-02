@@ -43,6 +43,8 @@ pub(in crate::batcher::logical_table) struct PendingBatch {
 }
 
 pub(in crate::batcher::logical_table) struct FlushWaiter {
+    pub(in crate::batcher::logical_table) _completion:
+        Option<session::write_progress::PendingWrite>,
     pub(in crate::batcher::logical_table) response_tx:
         oneshot::Sender<std::result::Result<(), Arc<Error>>>,
     pub(in crate::batcher::logical_table) _permit: Arc<OwnedSemaphorePermit>,
@@ -56,6 +58,7 @@ pub(in crate::batcher::logical_table) struct PendingWorker {
 /// Commands accepted by a logical-table batching worker.
 pub(crate) enum WorkerCommand {
     Submit {
+        _completion: Option<session::write_progress::PendingWrite>,
         table_batches: Vec<(String, u32, RecordBatchWithTsIdx)>,
         total_rows: usize,
         ctx: QueryContextRef,
@@ -122,20 +125,22 @@ pub(crate) fn start_worker(
             tokio::select! {
                 cmd = rx.recv() => {
                     match cmd {
-                        Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit }) => {
+                        Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit, _completion }) => {
                             let submitted_at = tokio::time::Instant::now();
                             idle_timer.as_mut().reset(submitted_at + worker_idle_timeout);
 
                             pending_flush.submit(
-                                FlushWaiter { response_tx, _permit },
+                                FlushWaiter { response_tx, _permit, _completion },
                                 total_rows,
                             );
+                            let progress = ctx.write_progress().cloned();
                             let pending_batch = batch.get_or_insert_with(||{
                                 PENDING_BATCHES.inc();
                                 PendingBatch::new(ctx)
                             });
 
-                            for (table_name, table_id, record_batch) in table_batches {
+                            for (table_name, table_id, mut record_batch) in table_batches {
+                                record_batch.progress = progress.clone();
                                 pending_batch.add_table_batch(table_name, table_id, record_batch);
                             }
 
@@ -316,6 +321,7 @@ mod tests {
             PendingCore::new(TimingFlushPolicy::try_new(Duration::from_secs(10), 1).unwrap());
         pending_flush.submit(
             FlushWaiter {
+                _completion: None,
                 response_tx,
                 _permit: Arc::new(permit),
             },
@@ -362,6 +368,7 @@ mod tests {
             let (response_tx, mut response_rx) = oneshot::channel();
             pending_flush.submit(
                 FlushWaiter {
+                    _completion: None,
                     response_tx,
                     _permit: Arc::new(semaphore.clone().acquire_owned().await.unwrap()),
                 },
@@ -614,6 +621,7 @@ mod tests {
         let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
         worker_tx
             .send(WorkerCommand::Submit {
+                _completion: None,
                 table_batches: vec![(
                     "cpu".to_string(),
                     42,

@@ -20,7 +20,7 @@ use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::key::flow::flow_info::FlowInfoValue;
-use crate::key::flow::{FlowScoped, flownode_addr_helper};
+use crate::key::flow::{FlowScoped, build_replace_ops, flownode_addr_helper};
 use crate::key::node_address::NodeAddressKey;
 use crate::key::{
     BytesAdapter, DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue,
@@ -216,25 +216,26 @@ impl FlowRouteManager {
     /// Builds a update flow routes transaction.
     ///
     /// Puts `__flow/route/{flow_id}/{partition_id}` keys.
-    /// Also removes `__flow/route/{flow_id}/{old_partition_id}` keys.
+    /// Also removes the `__flow/route/{flow_id}/{old_partition_id}` keys that are not put.
     pub(crate) fn build_update_txn<I: IntoIterator<Item = (FlowPartitionId, FlowRouteValue)>>(
         &self,
         flow_id: FlowId,
         current_flow_info: &DeserializedValueWithBytes<FlowInfoValue>,
         flow_routes: I,
     ) -> Result<Txn> {
-        let del_txns = current_flow_info.flownode_ids().keys().map(|partition_id| {
-            let key = FlowRouteKey::new(flow_id, *partition_id).to_bytes();
-            Ok(TxnOp::Delete(key))
-        });
+        let old_keys = current_flow_info
+            .flownode_ids()
+            .keys()
+            .map(|partition_id| FlowRouteKey::new(flow_id, *partition_id).to_bytes());
+        let new_kvs = flow_routes
+            .into_iter()
+            .map(|(partition_id, route)| {
+                let key = FlowRouteKey::new(flow_id, partition_id).to_bytes();
+                Ok((key, route.try_as_raw_value()?))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        let put_txns = flow_routes.into_iter().map(|(partition_id, route)| {
-            let key = FlowRouteKey::new(flow_id, partition_id).to_bytes();
-
-            Ok(TxnOp::Put(key, route.try_as_raw_value()?))
-        });
-        let txns = del_txns.chain(put_txns).collect::<Result<Vec<_>>>()?;
-        Ok(Txn::new().and_then(txns))
+        Ok(Txn::new().and_then(build_replace_ops(old_keys, new_kvs)))
     }
 
     async fn remap_flow_route_addresses(

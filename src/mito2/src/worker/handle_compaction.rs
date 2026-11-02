@@ -79,6 +79,7 @@ impl<S> RegionWorkerLoop<S> {
                                     region_id,
                                     build_type: IndexBuildType::Compact,
                                     file_metas: edit.files_to_add,
+                                    result_senders: Vec::new(),
                                 },
                                 OptionOutputTx::new(None),
                             )
@@ -245,6 +246,7 @@ impl<S> RegionWorkerLoop<S> {
                     region_id,
                     build_type: IndexBuildType::Compact,
                     file_metas: index_build_file_metas,
+                    result_senders: Vec::new(),
                 },
                 OptionOutputTx::new(None),
             )

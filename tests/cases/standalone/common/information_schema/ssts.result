@@ -243,6 +243,84 @@ FROM (
 | 1                     |
 +-----------------------+
 
+-- Timestamp filters must run before ordering and limiting. Sort columns must
+-- remain available even when they are absent from the output projection.
+SELECT min_ts, max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0 AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+ORDER BY min_ts ASC NULLS LAST, max_ts ASC
+LIMIT 2;
+
++-------------------------+-------------------------+
+| min_ts                  | max_ts                  |
++-------------------------+-------------------------+
+| 1970-01-01T00:00:00.002 | 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 | 1970-01-01T00:00:00.003 |
++-------------------------+-------------------------+
+
+SELECT min_ts, max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0
+ORDER BY max_ts DESC NULLS FIRST, min_ts DESC
+LIMIT 2 OFFSET 1;
+
++-------------------------+-------------------------+
+| min_ts                  | max_ts                  |
++-------------------------+-------------------------+
+| 1970-01-01T00:00:00.100 | 1970-01-01T00:00:00.200 |
+| 1970-01-01T00:00:00.003 | 1970-01-01T00:00:00.003 |
++-------------------------+-------------------------+
+
+SELECT visible
+FROM information_schema.ssts_manifest
+WHERE region_id > 0 AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+ORDER BY min_ts DESC
+LIMIT 2;
+
++---------+
+| visible |
++---------+
+| true    |
+| true    |
++---------+
+
+-- Table predicates share region metadata pruning, including when table_id
+-- is not part of the output projection.
+SELECT min_ts, max_ts FROM information_schema.ssts_manifest
+WHERE table_id > 0 ORDER BY min_ts, max_ts LIMIT 2;
+
++-------------------------+-------------------------+
+| min_ts                  | max_ts                  |
++-------------------------+-------------------------+
+| 1970-01-01T00:00:00.001 | 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 | 1970-01-01T00:00:00.002 |
++-------------------------+-------------------------+
+
+SELECT min_ts FROM information_schema.ssts_manifest
+WHERE table_id = 0 ORDER BY min_ts LIMIT 1;
+
++--------+
+| min_ts |
++--------+
++--------+
+
+-- A false region predicate and a zero limit must produce empty results.
+SELECT min_ts FROM information_schema.ssts_manifest
+WHERE region_id = 0 ORDER BY min_ts LIMIT 1;
+
++--------+
+| min_ts |
++--------+
++--------+
+
+SELECT min_ts FROM information_schema.ssts_manifest
+ORDER BY min_ts LIMIT 0;
+
++--------+
+| min_ts |
++--------+
++--------+
+
 DROP TABLE sst_case;
 
 Affected Rows: 0

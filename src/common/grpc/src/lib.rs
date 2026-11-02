@@ -15,8 +15,6 @@
 pub mod channel_manager;
 pub mod error;
 pub mod flight;
-#[cfg(feature = "enterprise")]
-pub mod flow_write;
 pub mod precision;
 pub mod reloadable_tls;
 pub mod select;

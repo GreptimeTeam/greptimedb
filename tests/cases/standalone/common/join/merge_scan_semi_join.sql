@@ -46,4 +46,107 @@ WHERE key_id IN (
 )
 GROUP BY key_id ORDER BY key_id;
 
+-- Reproduce issue 9492 at parallelism 2 with remote dynamic filters enabled.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 2;
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
+-- Use one partition as the result control.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 1;
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
+-- Keep two partitions and disable remote dynamic filters as the second control.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 2;
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = false;
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
+-- Restore SQLness defaults on the shared session and check its next plan.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 4;
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = true;
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT key_id, MIN(ts) AS first_ts
+FROM merge_semi_data
+WHERE key_id IN (
+  SELECT key_id FROM merge_semi_data WHERE is_match = true
+)
+GROUP BY key_id ORDER BY key_id;
+
 DROP TABLE merge_semi_data;

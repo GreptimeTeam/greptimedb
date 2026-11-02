@@ -43,6 +43,7 @@ use crate::query_id::QueryId;
 use crate::session_config::{
     InvalidConfigValueSnafu, PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle,
 };
+use crate::write_progress::WriteProgress;
 use crate::{MutableInner, ReadPreference};
 
 pub type QueryContextRef = Arc<QueryContext>;
@@ -95,6 +96,9 @@ pub struct QueryContext {
     /// Process-local admission for one database in this request. Never sent over the wire.
     #[builder(setter(skip))]
     admitted_write: Option<(String, String)>,
+    /// Process-local storage acknowledgements; never accepted from a wire context.
+    #[builder(setter(skip))]
+    write_progress: Option<Arc<WriteProgress>>,
     /// Process id for managing on-going queries
     #[builder(default)]
     process_id: u32,
@@ -289,6 +293,14 @@ impl From<&QueryContext> for api::v1::QueryContext {
 }
 
 impl QueryContext {
+    pub fn write_progress(&self) -> Option<&Arc<WriteProgress>> {
+        self.write_progress.as_ref()
+    }
+
+    pub fn set_write_progress(&mut self, progress: Arc<WriteProgress>) {
+        self.write_progress = Some(progress);
+    }
+
     /// Forks this context with an independent snapshot of mutable session data.
     ///
     /// Unlike [`Clone`], changes to the schema, user, timezone, and other fields
@@ -437,6 +449,24 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().read_preference = read_preference;
     }
 
+    /// Returns the latest procedure ID recorded in this Session.
+    pub fn last_procedure_id(&self) -> Option<String> {
+        self.mutable_session_data
+            .read()
+            .unwrap()
+            .last_procedure_id
+            .clone()
+    }
+
+    /// Records a procedure ID after successful statement execution and
+    /// construction of its ID result.
+    ///
+    /// Recording precedes `post_execute` hooks and protocol transmission, which
+    /// may still fail. It does not confirm that the client received the ID.
+    pub fn set_last_procedure_id(&self, procedure_id: String) {
+        self.mutable_session_data.write().unwrap().last_procedure_id = Some(procedure_id);
+    }
+
     pub fn current_user(&self) -> UserInfoRef {
         self.mutable_session_data.read().unwrap().user_info.clone()
     }
@@ -447,11 +477,6 @@ impl QueryContext {
 
     pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
         self.extensions.insert(key.into(), value.into());
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub fn remove_extension(&mut self, key: &str) {
-        self.extensions.remove(key);
     }
 
     pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
@@ -750,6 +775,7 @@ impl QueryContextBuilder {
             channel,
             batching_enabled: self.batching_enabled.unwrap_or_default(),
             admitted_write: None,
+            write_progress: None,
             logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),

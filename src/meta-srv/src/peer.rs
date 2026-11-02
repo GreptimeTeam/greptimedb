@@ -112,7 +112,7 @@ mod tests {
     use super::*;
     use crate::selector::Selector;
     use crate::selector::round_robin::RoundRobinSelector;
-    use crate::test_util::{create_meta_peer_client, put_datanodes};
+    use crate::test_util::{create_meta_peer_client, new_node_scheduling_discovery, put_datanodes};
 
     struct OnlySecondNode;
 
@@ -244,7 +244,7 @@ mod tests {
             let allocator = MetasrvPeerAllocator::new(
                 SelectorContext {
                     affinity_fallback: fallback,
-                    peer_discovery: discovery.clone(),
+                    peer_discovery: Arc::new(new_node_scheduling_discovery(&discovery).1),
                     affinity,
                 },
                 selector.clone(),

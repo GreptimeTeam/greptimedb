@@ -39,6 +39,7 @@ use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManage
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::PeerDiscoveryRef;
 use common_meta::reconciliation::manager::ReconciliationManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
@@ -56,6 +57,7 @@ use store_api::storage::MAX_REGION_SEQ;
 use crate::bootstrap::build_default_meta_peer_client;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
+use crate::discovery::node_scheduling::SchedulingAwarePeerDiscovery;
 use crate::error::{self, BuildWalProviderSnafu, OtherSnafu, Result};
 use crate::event::EventHandlerImpl;
 use crate::gc::{DefaultGcSchedulerCtx, GcScheduler};
@@ -70,7 +72,9 @@ use crate::metasrv::{
     RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorFactoryRef, SelectorRef,
     TABLE_ID_SEQ,
 };
+use crate::node_scheduling::NodeSchedulingManager;
 use crate::peer::MetasrvPeerAllocator;
+use crate::procedure::drain_datanode::manager::DrainDatanodeManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManager;
@@ -238,7 +242,31 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
-        let database_operator = Arc::new(DatabaseOperator::new(meta_peer_client.clone()));
+
+        let node_scheduling_manager = Arc::new(NodeSchedulingManager::new(kv_backend.clone()));
+
+        // The only place a node scheduling decorator is built. Every consumer that reads the
+        // datanode list (region placement, failover exclusions) must go through
+        // `Metasrv::selector_ctx().peer_discovery`, and building a `PeerDiscoveryRef` from the raw
+        // client is impossible by construction. Bypassing this decorator silently drops the
+        // drain fence, so do not build a second instance.
+        let selector_ctx = SelectorContext {
+            affinity_fallback: plugins
+                .as_ref()
+                .and_then(|plugins| plugins.get::<AffinityFallback>())
+                .unwrap_or_default(),
+            affinity: plugins
+                .as_ref()
+                .and_then(|plugins| plugins.get::<AffinityRef>())
+                .unwrap_or_else(|| Arc::new(NoopAffinity)),
+            peer_discovery: Arc::new(SchedulingAwarePeerDiscovery::new(
+                node_scheduling_manager.clone(),
+                meta_peer_client.clone(),
+            )),
+        };
+        // Frontends only; the decorator passes them through unchanged.
+        let database_operator =
+            Arc::new(DatabaseOperator::new(selector_ctx.peer_discovery.clone()));
 
         let event_inserter = Box::new(InsertForwarder::new(
             database_operator.clone(),
@@ -274,18 +302,6 @@ impl MetasrvBuilder {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-
-        let selector_ctx = SelectorContext {
-            affinity_fallback: plugins
-                .as_ref()
-                .and_then(|plugins| plugins.get::<AffinityFallback>())
-                .unwrap_or_default(),
-            affinity: plugins
-                .as_ref()
-                .and_then(|plugins| plugins.get::<AffinityRef>())
-                .unwrap_or_else(|| Arc::new(NoopAffinity)),
-            peer_discovery: meta_peer_client.clone(),
-        };
 
         let wal_provider = build_wal_provider(&options.wal, kv_backend.clone())
             .await
@@ -395,10 +411,24 @@ impl MetasrvBuilder {
             ),
         ));
         region_migration_manager.try_start()?;
+
+        let drain_datanode_manager = Arc::new(DrainDatanodeManager::new(
+            procedure_manager.clone(),
+            table_metadata_manager.clone(),
+            node_scheduling_manager.clone(),
+            region_migration_manager.clone(),
+            selector_ctx.clone(),
+        ));
+        drain_datanode_manager.try_start()?;
         let affinity_resolver = plugins
             .as_ref()
             .and_then(|plugins| plugins.get::<SelectorFactoryRef>())
-            .and_then(|factory| factory.build_affinity_resolver(meta_peer_client.clone()));
+            .and_then(|factory| {
+                factory.build_affinity_resolver(
+                    meta_peer_client.clone(),
+                    selector_ctx.peer_discovery.clone(),
+                )
+            });
         let region_supervisor_selector = plugins
             .as_ref()
             .and_then(|plugins| plugins.get::<RegionStatAwareSelectorRef>());
@@ -483,7 +513,7 @@ impl MetasrvBuilder {
         {
             let ctx = DdlManagerConfigureContext {
                 kv_backend: kv_backend.clone(),
-                meta_peer_client: meta_peer_client.clone(),
+                peer_discovery: selector_ctx.peer_discovery.clone(),
             };
             configurator
                 .configure(ddl_manager, ctx)
@@ -668,6 +698,7 @@ impl MetasrvBuilder {
             plugins: plugins.unwrap_or_else(Plugins::default),
             memory_region_keeper,
             region_migration_manager,
+            drain_datanode_manager,
             region_supervisor_ticker,
             cache_invalidator,
             leader_region_registry,
@@ -679,6 +710,7 @@ impl MetasrvBuilder {
             resource_stat: Arc::new(resource_stat),
             gc_ticker,
             database_operator,
+            node_scheduling_manager,
         })
     }
 }
@@ -744,7 +776,7 @@ impl Default for MetasrvBuilder {
 /// The context for [`DdlManagerConfiguratorRef`].
 pub struct DdlManagerConfigureContext {
     pub kv_backend: KvBackendRef,
-    pub meta_peer_client: MetaPeerClientRef,
+    pub peer_discovery: PeerDiscoveryRef,
 }
 
 #[cfg(test)]
@@ -839,6 +871,9 @@ mod tests {
         use common_meta::cluster::NodeInfo;
         use common_meta::error::Result as MetaResult;
 
+        use common_meta::ddl_manager::DdlManagerConfigurator;
+
+        use crate::discovery::node_info::NodeInfoAccessor;
         use crate::metasrv::{SelectorFactory, SelectorFactoryContext};
 
         struct TestAffinity;
@@ -864,10 +899,32 @@ mod tests {
         struct RecordingFactory {
             calls: Arc<AtomicUsize>,
             resolver: AffinityResolverRef,
+            discovery: Arc<std::sync::Mutex<Option<PeerDiscoveryRef>>>,
+        }
+
+        struct RecordingConfigurator {
+            discovery: Arc<std::sync::Mutex<Option<PeerDiscoveryRef>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl DdlManagerConfigurator<DdlManagerConfigureContext> for RecordingConfigurator {
+            async fn configure(
+                &self,
+                ddl_manager: DdlManager,
+                ctx: DdlManagerConfigureContext,
+            ) -> std::result::Result<DdlManager, common_error::ext::BoxedError> {
+                *self.discovery.lock().unwrap() = Some(ctx.peer_discovery);
+                Ok(ddl_manager)
+            }
         }
 
         impl SelectorFactory for RecordingFactory {
-            fn build_affinity_resolver(&self, _: MetaPeerClientRef) -> Option<AffinityResolverRef> {
+            fn build_affinity_resolver(
+                &self,
+                _: Arc<dyn NodeInfoAccessor>,
+                peer_discovery: PeerDiscoveryRef,
+            ) -> Option<AffinityResolverRef> {
+                *self.discovery.lock().unwrap() = Some(peer_discovery);
                 self.calls.fetch_add(1, Ordering::Relaxed);
                 Some(self.resolver.clone())
             }
@@ -877,6 +934,8 @@ mod tests {
             }
         }
 
+        let factory_discovery = Arc::new(std::sync::Mutex::new(None));
+        let configurator_discovery = Arc::new(std::sync::Mutex::new(None));
         let calls = Arc::new(AtomicUsize::new(0));
         let resolver: AffinityResolverRef = Arc::new(TestResolver);
         let affinity: AffinityRef = Arc::new(TestAffinity);
@@ -886,7 +945,12 @@ mod tests {
         plugins.insert(Arc::new(RecordingFactory {
             calls: calls.clone(),
             resolver: resolver.clone(),
+            discovery: factory_discovery.clone(),
         }) as SelectorFactoryRef);
+        plugins.insert(Arc::new(RecordingConfigurator {
+            discovery: configurator_discovery.clone(),
+        })
+            as DdlManagerConfiguratorRef<DdlManagerConfigureContext>);
         let metasrv = MetasrvBuilder::new()
             .options(MetasrvOptions {
                 enable_telemetry: false,
@@ -906,6 +970,12 @@ mod tests {
             AffinityFallback::Unconstrained
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+        for discovery in [factory_discovery, configurator_discovery] {
+            assert!(Arc::ptr_eq(
+                discovery.lock().unwrap().as_ref().unwrap(),
+                &metasrv.selector_ctx().peer_discovery,
+            ));
+        }
         assert!(Arc::ptr_eq(&metasrv.selector_ctx().affinity, &affinity));
         assert!(Arc::ptr_eq(
             metasrv
@@ -916,5 +986,45 @@ mod tests {
                 .unwrap(),
             &resolver
         ));
+    }
+
+    #[tokio::test]
+    async fn test_builder_wires_node_scheduling_discovery() {
+        use common_meta::peer::Peer;
+
+        use crate::key::NodeSchedulingRole;
+        use crate::test_util::put_datanodes;
+
+        let metasrv = MetasrvBuilder::new()
+            .options(MetasrvOptions {
+                enable_telemetry: false,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        put_datanodes(
+            metasrv.meta_peer_client(),
+            vec![Peer::empty(1), Peer::empty(2)],
+        )
+        .await;
+        metasrv
+            .node_scheduling_manager()
+            .mark_unschedulable(NodeSchedulingRole::Datanode, 2)
+            .await
+            .unwrap();
+
+        let datanodes = metasrv
+            .selector_ctx()
+            .peer_discovery
+            .active_datanodes(None)
+            .await
+            .unwrap();
+        assert_eq!(2, datanodes.len());
+        for datanode in datanodes {
+            let expected = datanode.peer.id != 2;
+            assert_eq!(Some(expected), datanode.schedulable);
+        }
     }
 }

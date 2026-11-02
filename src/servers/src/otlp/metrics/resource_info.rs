@@ -27,15 +27,10 @@ use common_catalog::consts::SEMANTIC_GRAPH_WINDOW_NANOS;
 use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use otel_arrow_rust::proto::opentelemetry::common::v1::KeyValue;
-use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
-    AggregationTemporality, ResourceMetrics, metric,
-};
 
 use crate::error::Result;
 use crate::otlp::metrics::{
-    INSTANCE_KEY, JOB_KEY, ServiceIdentity, exponential_histogram_gate,
-    exponential_histogram_value, histogram_data_point_rejection, scalar_value_string,
-    service_identity,
+    INSTANCE_KEY, JOB_KEY, ServiceIdentity, scalar_value_string, service_identity,
 };
 use crate::otlp::trace::{
     KEY_CONTAINER_ID, KEY_CONTAINER_NAME, KEY_HOST_ID, KEY_HOST_NAME, KEY_K8S_CONTAINER_NAME,
@@ -88,8 +83,15 @@ pub struct ResourceInfoData {
 }
 
 impl ResourceInfoData {
-    /// Takes the raw attributes, before the promote filter runs on them.
-    pub fn observe(&mut self, raw_attrs: &[KeyValue], resource: &ResourceMetrics) {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub(super) fn observe_times(
+        &mut self,
+        raw_attrs: &[KeyValue],
+        times: impl IntoIterator<Item = i64>,
+    ) {
         let mut tags = Vec::with_capacity(MAX_PROJECTED_TAGS);
         let ServiceIdentity { job, instance } = service_identity(raw_attrs);
         if let Some(job) = job {
@@ -113,13 +115,13 @@ impl ResourceInfoData {
         tags.sort_unstable();
 
         let mut observed: BTreeMap<i64, i64> = BTreeMap::new();
-        for_each_encoded_time(resource, |ts| {
+        for ts in times {
             let window = ts - ts.rem_euclid(SEMANTIC_GRAPH_WINDOW_NANOS);
             observed
                 .entry(window)
                 .and_modify(|newest| *newest = (*newest).max(ts))
                 .or_insert(ts);
-        });
+        }
         if observed.is_empty() {
             return;
         }
@@ -167,58 +169,6 @@ impl ResourceInfoData {
     }
 }
 
-/// Visits the times of the data points the encoder writes rows for, so a
-/// resource is described exactly where it is measured rather than wherever
-/// its request happens to reach.
-fn for_each_encoded_time(resource: &ResourceMetrics, mut visit: impl FnMut(i64)) {
-    fn visit_all(points: impl Iterator<Item = u64>, visit: &mut impl FnMut(i64)) {
-        for ts in points {
-            visit(ts as i64);
-        }
-    }
-    for scope in &resource.scope_metrics {
-        for m in &scope.metrics {
-            match &m.data {
-                Some(metric::Data::Gauge(g)) => {
-                    visit_all(g.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
-                }
-                Some(metric::Data::Sum(s)) => {
-                    visit_all(s.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
-                }
-                Some(metric::Data::Histogram(h)) => {
-                    let is_delta = matches!(
-                        AggregationTemporality::try_from(h.aggregation_temporality),
-                        Ok(AggregationTemporality::Delta)
-                    );
-                    visit_all(
-                        h.data_points
-                            .iter()
-                            .filter(|point| {
-                                histogram_data_point_rejection(point, is_delta).is_none()
-                            })
-                            .map(|point| point.time_unix_nano),
-                        &mut visit,
-                    )
-                }
-                Some(metric::Data::Summary(s)) => {
-                    visit_all(s.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
-                }
-                Some(metric::Data::ExponentialHistogram(h))
-                    if exponential_histogram_gate(h).is_ok() =>
-                {
-                    for point in &h.data_points {
-                        if let Ok((_, ts)) = exponential_histogram_value(point) {
-                            visit(ts);
-                        }
-                    }
-                }
-                Some(metric::Data::ExponentialHistogram(_)) => {}
-                None => {}
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use api::v1::SemanticType;
@@ -226,8 +176,8 @@ mod tests {
     use common_query::prelude::set_default_prefix;
     use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, any_value};
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
-        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Metric,
-        NumberDataPoint, ScopeMetrics,
+        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Metric,
+        ResourceMetrics, ScopeMetrics, metric,
     };
 
     use super::*;
@@ -243,27 +193,6 @@ mod tests {
         }
     }
 
-    fn gauge_at(times: &[i64]) -> ResourceMetrics {
-        ResourceMetrics {
-            scope_metrics: vec![ScopeMetrics {
-                metrics: vec![Metric {
-                    data: Some(metric::Data::Gauge(Gauge {
-                        data_points: times
-                            .iter()
-                            .map(|ts| NumberDataPoint {
-                                time_unix_nano: *ts as u64,
-                                ..Default::default()
-                            })
-                            .collect(),
-                    })),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn observe_projects_allowlist_and_dedups_per_request() {
         let mut data = ResourceInfoData::default();
@@ -275,7 +204,7 @@ mod tests {
             kv("k8s.node.name", "node-a"),
             kv("os.type", "linux"),
         ];
-        data.observe(&attrs, &gauge_at(&[100, 50]));
+        data.observe_times(&attrs, [100, 50]);
         assert_eq!(data.rows.len(), 1);
         let (tags, windows) = data.rows.iter().next().unwrap();
         assert_eq!(windows.values().copied().collect::<Vec<_>>(), vec![100]);
@@ -288,12 +217,29 @@ mod tests {
                 .all(|(k, _)| k != "os.type" && k != "service.instance.id")
         );
 
-        data.observe(&[kv("host.id", "h-2")], &gauge_at(&[10]));
+        let mut reordered = attrs.clone();
+        reordered.reverse();
+        data.observe_times(&reordered, [200, 75]);
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(
+            data.rows.values().next().unwrap().values().next(),
+            Some(&200)
+        );
+
+        data.observe_times(&[kv("host.id", "h-2")], [10]);
         assert_eq!(data.rows.len(), 2);
 
         let mut empty = ResourceInfoData::default();
-        empty.observe(&[kv("os.type", "linux")], &gauge_at(&[100]));
+        empty.observe_times(&[kv("os.type", "linux")], [100]);
         assert!(empty.into_row_insert_requests().unwrap().is_none());
+    }
+
+    #[test]
+    fn observe_without_accepted_points_does_not_emit_rows() {
+        let mut data = ResourceInfoData::default();
+        data.observe_times(&[kv("service.name", "api")], []);
+        assert!(data.is_empty());
+        assert!(data.into_row_insert_requests().unwrap().is_none());
     }
 
     /// Earlier windows would keep their metric rows but lose their entities.
@@ -301,9 +247,9 @@ mod tests {
     fn observe_keeps_one_row_per_graph_window() {
         let window = SEMANTIC_GRAPH_WINDOW_NANOS;
         let mut data = ResourceInfoData::default();
-        data.observe(
+        data.observe_times(
             &[kv("service.name", "api")],
-            &gauge_at(&[window + 1, window + 2, 3 * window + 7]),
+            [window + 1, window + 2, 3 * window + 7],
         );
 
         let windows = data.rows.values().next().unwrap();
@@ -320,6 +266,7 @@ mod tests {
         let exponential = |temporality: AggregationTemporality| ResourceMetrics {
             scope_metrics: vec![ScopeMetrics {
                 metrics: vec![Metric {
+                    name: "latency".into(),
                     data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
                         data_points: vec![ExponentialHistogramDataPoint {
                             time_unix_nano: 100,
@@ -337,10 +284,21 @@ mod tests {
             AggregationTemporality::Delta,
             AggregationTemporality::Unspecified,
         ] {
-            let resource = exponential(temporality);
-            let mut data = ResourceInfoData::default();
-            data.observe(&[kv("service.name", "api")], &resource);
-            assert!(data.into_row_insert_requests().unwrap().is_none());
+            let mut resource = exponential(temporality);
+            resource.resource = Some(
+                otel_arrow_rust::proto::opentelemetry::resource::v1::Resource {
+                    attributes: vec![kv("service.name", "api")],
+                    ..Default::default()
+                },
+            );
+            let conversion = crate::otlp::metrics::to_grpc_insert_requests(
+                otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest { resource_metrics: vec![resource] },
+                &mut session::protocol_ctx::OtlpMetricCtx { resource_info: true, ..Default::default() },
+            ).unwrap();
+            assert_eq!(
+                conversion.resource_info.is_none(),
+                temporality == AggregationTemporality::Unspecified
+            );
         }
     }
 
@@ -348,9 +306,9 @@ mod tests {
     fn rows_carry_raw_key_tags_value_and_millis_timestamp() {
         set_default_prefix(None).unwrap();
         let mut data = ResourceInfoData::default();
-        data.observe(
+        data.observe_times(
             &[kv("service.name", "api"), kv("host.id", "h-1")],
-            &gauge_at(&[1_700_000_000_123_456_789]),
+            [1_700_000_000_123_456_789],
         );
         let requests = data.into_row_insert_requests().unwrap().unwrap();
         assert_eq!(requests.inserts.len(), 1);
