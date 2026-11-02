@@ -34,6 +34,7 @@ type Histograms = [(i64, FloatHistogram)];
 
 /// The window of one field at `eval_ts`, holding `histograms` (not empty) and `floats` when it
 /// has any float sample.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn evaluate(
     function: RangeFunction,
     floats: Option<FloatWindow<'_>>,
