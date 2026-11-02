@@ -1968,22 +1968,142 @@ async fn native_fused_plans_dynamic_scalars() {
         let fused = find_fused_series(&plan).expect("a data-free statement uses the native route");
         assert!(fused.children().is_empty(), "{query}");
     }
-    let query = "count_values(\"l\", vector(1))";
+    for (query, expected_value, expected_label, expected_formatted_value) in [
+        ("count_values(\"l\", vector(1))", "value", "l", "1"),
+        (
+            "count_values(\"value\", vector(1))",
+            "native_value_0",
+            "value",
+            "1",
+        ),
+        (
+            "count_values(\"vector(s)\", vector(1))",
+            "value",
+            "vector(s)",
+            "1",
+        ),
+        (
+            "count_values(\"__name__\", vector(1))",
+            "value",
+            "__name__",
+            "1",
+        ),
+        ("count_values(\"值\", vector(1))", "value", "值", "1"),
+        (
+            "count_values(\"value\", vector(time() - time() + 1))",
+            "native_value_0",
+            "value",
+            "1",
+        ),
+        (
+            "count_values(\"value\", hour())",
+            "native_value_0",
+            "value",
+            "__hour__",
+        ),
+        (
+            "count_values(\"value\", abs(vector(1)))",
+            "native_value_0",
+            "value",
+            "1",
+        ),
+        (
+            "count_values(\"value\", count_values(\"native_value_0\", vector(1)))",
+            "native_value_1",
+            "value",
+            "1",
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan).expect("data-free count_values takes native route");
+        assert!(fused.children().is_empty(), "{query}");
+        let expected_schema = vec![DEFAULT_TIME_INDEX_COLUMN, expected_value, expected_label];
+        let root_fields = fused.tree().root().output.samples().unwrap();
+        assert_eq!(
+            vec![expected_value],
+            root_fields
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            "{query} native value field"
+        );
+        assert_eq!(
+            expected_schema,
+            fused
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            "{query} output schema"
+        );
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert!(!batches.is_empty(), "{query}");
+        for batch in &batches {
+            assert_eq!(
+                expected_schema,
+                batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().as_str())
+                    .collect::<Vec<_>>(),
+                "{query} Arrow schema"
+            );
+            assert!(batch.num_rows() > 0, "{query}: {batch:?}");
+            let output_label = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let output_count = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                let expected = if expected_formatted_value == "__hour__" {
+                    let timestamp = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .value(row);
+                    ((timestamp / 3_600_000).rem_euclid(24)).to_string()
+                } else {
+                    expected_formatted_value.to_string()
+                };
+                assert_eq!(
+                    expected,
+                    output_label.value(row),
+                    "{query}: formatted label at row {row}"
+                );
+                assert_eq!(1.0, output_count.value(row), "{query}: count at row {row}");
+            }
+        }
+    }
+    let query = "sum(count_values(\"time\", vector(1)))";
     let plan = build_native_fused_plan(query, true).await;
-    let fused = find_fused_series(&plan).expect("data-free count_values takes native route");
+    let fused = find_fused_series(&plan).expect("a data-free time label keeps the native route");
     assert!(fused.children().is_empty(), "{query}");
-    let schema = fused.schema().as_ref();
     assert_eq!(
-        vec![DEFAULT_TIME_INDEX_COLUMN, "value", "l"],
-        schema
-            .fields()
+        vec!["value"],
+        fused
+            .tree()
+            .root()
+            .output
+            .samples()
+            .unwrap()
+            .fields
             .iter()
-            .map(|field| field.name().as_str())
+            .map(|field| field.name.as_ref())
             .collect::<Vec<_>>(),
-        "{query} output schema"
+        "{query} native value field"
     );
-    // The in-memory planner fixture has no executable region; data-free execution is covered by
-    // native runtime tests, while this assertion pins native admission and exact output schema.
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    assert!(!batches.is_empty(), "{query}");
+
     for query in [
         "scalar(some_metric)",
         "some_metric > bool scalar(some_metric)",

@@ -308,13 +308,50 @@ pub fn compile(
     Ok(compiled.tree)
 }
 
+fn data_free_value_field(stmt: &EvalStmt) -> Arc<str> {
+    fn visit(expr: &PromExpr, targets: &mut Vec<String>) {
+        match expr {
+            PromExpr::Aggregate(aggregate) => {
+                if aggregate.op.id() == token::T_COUNT_VALUES {
+                    if let Some(param) = &aggregate.param {
+                        if let PromExpr::StringLiteral(value) = unparen(param) {
+                            targets.push(value.val.clone());
+                        }
+                    }
+                }
+                visit(&aggregate.expr, targets);
+            }
+            PromExpr::Unary(unary) => visit(&unary.expr, targets),
+            PromExpr::Binary(binary) => {
+                visit(&binary.lhs, targets);
+                visit(&binary.rhs, targets);
+            }
+            PromExpr::Paren(paren) => visit(&paren.expr, targets),
+            PromExpr::Subquery(subquery) => visit(&subquery.expr, targets),
+            PromExpr::Call(call) => call.args.args.iter().for_each(|arg| visit(arg, targets)),
+            _ => {}
+        }
+    }
+    let mut targets = Vec::new();
+    visit(&stmt.expr, &mut targets);
+    if !targets.iter().any(|name| name == VECTOR_FIELD) {
+        return Arc::from(VECTOR_FIELD);
+    }
+    (0usize..)
+        .map(|index| format!("native_value_{index}"))
+        .find(|candidate| !targets.iter().any(|name| name == candidate))
+        .map(Arc::from)
+        .expect("the value field candidate sequence is unbounded")
+}
+
 /// Compiles a statement that reads no data — a constant, `time()`, `vector(time())`, `hour()` —
 /// to a tree without inputs, on the statement's grid.
 ///
 /// A statement that reads a selector is refused: its scan is the caller's to bind, through
 /// [`compile_selectors`].
 pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
-    let compiled = compile_selectors(
+    let output_field = data_free_value_field(stmt);
+    let compiled = compile_selectors_with_value_field(
         stmt,
         &|_| {
             Err(not_implemented(&format!(
@@ -323,6 +360,7 @@ pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
             )))
         },
         SeriesOrdering::Contiguous,
+        output_field,
     )?;
     Ok(compiled.tree)
 }
@@ -335,6 +373,15 @@ pub fn compile_selectors(
     stmt: &EvalStmt,
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
     ordering: SeriesOrdering,
+) -> Result<CompiledTree> {
+    compile_selectors_with_value_field(stmt, bindings, ordering, Arc::from(VECTOR_FIELD))
+}
+
+fn compile_selectors_with_value_field(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    value_field: Arc<str>,
 ) -> Result<CompiledTree> {
     if ordering == SeriesOrdering::Interleaved {
         return Err(not_implemented(
@@ -363,6 +410,7 @@ pub fn compile_selectors(
         ordering,
         inputs: &inputs,
         grid: statement_grid(stmt)?,
+        value_field,
     };
     let tree = NativeTree::try_new(compile_expr(&context, &stmt.expr)?)?;
     let inputs = inputs.into_inner();
@@ -433,6 +481,7 @@ struct Context<'a> {
     ordering: SeriesOrdering,
     inputs: &'a RefCell<Vec<CompiledInput>>,
     grid: Arc<EvalGrid>,
+    value_field: Arc<str>,
 }
 
 /// Compiles `expr` into the node it denotes, recursing into whatever it is made of.
@@ -1270,10 +1319,14 @@ fn scalar_call(
     };
     let node = match (name, args) {
         ("time", []) => eval_time(None),
-        ("vector", [scalar]) => vector_of(compile_expr(context, scalar)?, &grid()),
+        ("vector", [scalar]) => vector_of(
+            compile_expr(context, scalar)?,
+            &grid(),
+            &context.value_field,
+        ),
         (name, []) => match math_signature(name) {
             Some(MathSignature::Unary(MathOp::Date(date))) => {
-                vector_of(eval_time(Some(date)), &grid())
+                vector_of(eval_time(Some(date)), &grid(), &context.value_field)
             }
             _ => return Ok(None),
         },
@@ -1331,14 +1384,14 @@ fn parameterized_call(
 }
 
 /// `vector(s)`: the scalar `input` as one series without labels, under one value field.
-fn vector_of(input: NativeNode, grid: &Arc<EvalGrid>) -> NativeNode {
+fn vector_of(input: NativeNode, grid: &Arc<EvalGrid>, value_field: &str) -> NativeNode {
     NativeNode {
         expr: NativeExpr::VectorOf {
             input: Box::new(input),
         },
         output: NativeType::Samples(Arc::new(SeriesSchema {
             fields: Arc::from([FieldSpec {
-                name: Arc::from(VECTOR_FIELD),
+                name: Arc::from(value_field),
             }]),
             eval_grid: Some(Arc::clone(grid)),
         })),
@@ -1719,6 +1772,7 @@ fn subquery_window(
             inputs: context.inputs,
             ordering: context.ordering,
             grid: Arc::clone(&child_grid),
+            value_field: Arc::clone(&context.value_field),
         },
         expr,
     )?;

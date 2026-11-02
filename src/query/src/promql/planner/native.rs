@@ -235,9 +235,8 @@ impl PromPlanner {
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
-            // A data-free tree has no input scan. Its output tags still come from the compiled
-            // expression: decline only when the tag walk cannot derive them, otherwise use those
-            // names consistently in the output schema and binding.
+            // Bind only input tags: this data-free tree has no input, and its tags belong to its
+            // output schema.
             let Some(output_tags) = native_output_tags(tree.root(), &[]) else {
                 return Ok(None);
             };
@@ -252,7 +251,7 @@ impl PromPlanner {
                 FusedSeriesBinding {
                     grid,
                     time_index,
-                    tags: output_tags,
+                    tags: Vec::new(),
                     metric_name: None,
                 },
                 Vec::new(),
