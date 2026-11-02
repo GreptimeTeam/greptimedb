@@ -50,10 +50,8 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
-use promql::extension_plan::{
     FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
     input_locality, matching_operands_drop_key, tree_source_fields,
-};
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -1479,9 +1477,153 @@ async fn segment_tree(
     ) else {
         return Ok(None);
     };
-    Ok(Some(LogicalPlan::Extension(Extension {
+    let plan = LogicalPlan::Extension(Extension {
         node: Arc::new(plan),
-    })))
+    });
+    let Some(projected) = segmented_aggregate_projection(prom_expr, &plan, tree, bare_scans) else {
+        return Ok(Some(plan));
+    };
+    Ok(Some(projected))
+}
+
+/// Applies the legacy expression-derived names to a completed segmented aggregate.
+fn segmented_aggregate_projection(
+    prom_expr: &PromExpr,
+    plan: &LogicalPlan,
+    tree: &NativeTree,
+    scans: &[LogicalPlan],
+) -> Option<LogicalPlan> {
+    fn collect<'a>(
+        expr: &'a PromExpr,
+        aggregates: &mut Vec<&'a promql_parser::parser::AggregateExpr>,
+    ) -> bool {
+        match expr {
+            PromExpr::Paren(paren) => collect(&paren.expr, aggregates),
+            PromExpr::Aggregate(aggregate) => {
+                aggregates.push(aggregate);
+                collect(&aggregate.expr, aggregates)
+            }
+            PromExpr::VectorSelector(_) => true,
+            _ => false,
+        }
+    }
+
+    let mut aggregates = Vec::new();
+    if !collect(prom_expr, &mut aggregates) || aggregates.is_empty() {
+        return None;
+    }
+    let source_fields = tree_source_fields(tree).ok()?;
+    let mut bound_inputs = Vec::new();
+    fn visit(node: &NativeNode, inputs: &mut Vec<BoundInput>) {
+        match &node.expr {
+            NativeExpr::Input(input) => inputs.push(input.clone()),
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. } => visit(input, inputs),
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
+                visit(left, inputs);
+                visit(right, inputs);
+            }
+            _ => {}
+        }
+    }
+    visit(tree.root(), &mut bound_inputs);
+    bound_inputs.sort_by_key(|input| input.source_index);
+    bound_inputs.dedup_by_key(|input| input.source_index);
+    if bound_inputs.len() != source_fields.len() {
+        return None;
+    }
+    let mut named_fields = Vec::new();
+    for (input, names) in bound_inputs.iter().zip(&source_fields) {
+        let scan = scans.get(input.source_index)?;
+        let mut columns = Vec::new();
+        for name in names {
+            let (qualifier, field) = scan
+                .schema()
+                .qualified_field_with_unqualified_name(name)
+                .ok()?;
+            columns.push(DfExpr::Column(datafusion::prelude::Column::new(
+                qualifier.cloned(),
+                field.name(),
+            )));
+        }
+        named_fields.push(columns);
+    }
+    if named_fields.len() != 1 {
+        return None;
+    }
+    let mut columns = named_fields.pop()?;
+    let mut exprs = Vec::new();
+    for aggregate in aggregates.iter().rev() {
+        exprs = columns
+            .into_iter()
+            .map(|input| {
+                PromPlanner::create_numeric_aggregate_expr(aggregate.op, &aggregate.param, input)
+                    .ok()
+                    .map(PromPlanner::alias_extremum_as_builtin)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        columns = exprs
+            .iter()
+            .map(|expr| {
+                DfExpr::Column(datafusion::prelude::Column::from_name(
+                    expr.schema_name().to_string(),
+                ))
+            })
+            .collect();
+    }
+    let root_fields = match &tree.root().output {
+        NativeType::Samples(schema) => schema.fields.len(),
+        _ => return None,
+    };
+    if exprs.len() != root_fields {
+        return None;
+    }
+    let desired_names = exprs
+        .iter()
+        .map(|expr| expr.schema_name().to_string())
+        .collect::<Vec<_>>();
+    let root_schema = plan.schema();
+    let root_names = match &tree.root().output {
+        NativeType::Samples(schema) => schema
+            .fields
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect::<Vec<_>>(),
+        _ => return None,
+    };
+    if desired_names.len() != root_names.len() {
+        return None;
+    }
+    let mut projection = root_schema
+        .iter()
+        .map(|(qualifier, field)| {
+            DfExpr::Column(datafusion::prelude::Column::new(
+                qualifier.cloned(),
+                field.name(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    for (current, desired) in root_names.iter().zip(desired_names) {
+        let position = root_schema.index_of_column_by_name(None, current)?;
+        projection[position] =
+            DfExpr::Column(datafusion::prelude::Column::from_name(current)).alias(desired);
+    }
+    LogicalPlanBuilder::from(plan.clone())
+        .project(projection)
+        .ok()?
+        .build()
+        .ok()
 }
 
 /// The columns a [`FusedSeries`] node produces.
@@ -2148,11 +2290,16 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, cut_segments, fused_output_tags,
-        hybrid_binary_admitted, independent_scan_pair, native_promql_requested, scan_time_filter,
+        ArrowDataType, ArrowTimeUnit, NATIVE_PROMQL_EXTENSION_KEY, NativeType, collect_selectors,
+        cut_segments, fused_output_schema, fused_output_tags, hybrid_binary_admitted,
+        independent_scan_pair, native_promql_requested, nested_vector_match, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
+        compiled_test_tree_with_fields(query, &["v0"])
+    }
+
+    fn compiled_test_tree_with_fields(query: &str, fields: &[&str]) -> NativeTree {
         let statement = promql_parser::parser::EvalStmt {
             expr: promql_parser::parser::parse(query).unwrap(),
             start: UNIX_EPOCH,
@@ -2161,7 +2308,13 @@ mod tests {
             lookback_delta: Duration::from_secs(5),
         };
         let schema = Arc::new(SeriesSchema {
-            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            fields: fields
+                .iter()
+                .map(|name| FieldSpec {
+                    name: (*name).into(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
             eval_grid: None,
         });
         crate::promql::native_compile::compile_selectors(
@@ -2520,6 +2673,68 @@ mod tests {
         );
     }
 
+    fn numeric_aggregate_projection_keeps_grouping_tags_and_value_schema() {
+        let sources = [vec![
+            "host".to_string(),
+            "kind".to_string(),
+            "zone".to_string(),
+        ]];
+        for query in [
+            "sum by (host, zone) ((x))",
+            "min by (host, zone) ((x))",
+            "max without (kind) ((x))",
+        ] {
+            let tree = compiled_test_tree(query);
+            let NativeType::Samples(schema) = &tree.root().output else {
+                panic!("{query} must produce evaluated samples");
+            };
+            assert_eq!(1, schema.fields.len(), "{query}");
+            assert_eq!("v0", schema.fields[0].name.as_ref(), "{query}");
+            let tags = fused_output_tags(tree.root(), &sources).unwrap();
+            assert_eq!(
+                vec!["host", "zone"],
+                tags.iter().map(String::as_str).collect::<Vec<_>>(),
+                "{query}"
+            );
+        }
+
+        let tree = compiled_test_tree_with_fields("sum by (zone, host) ((x))", &["v0", "v1"]);
+        let NativeType::Samples(schema) = &tree.root().output else {
+            panic!("multi-field aggregate must produce evaluated samples");
+        };
+        assert_eq!(
+            vec!["v0", "v1"],
+            schema
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        let output = fused_output_schema(
+            &["v0".to_string(), "v1".to_string()],
+            &["zone".to_string(), "host".to_string()],
+            "ts",
+        )
+        .unwrap();
+        assert_eq!(
+            vec!["ts", "v0", "v1", "zone", "host"],
+            output
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            *output.field(0).data_type()
+        );
+        assert_eq!(ArrowDataType::Float64, *output.field(1).data_type());
+        assert_eq!(ArrowDataType::Float64, *output.field(2).data_type());
+        assert_eq!(ArrowDataType::Utf8, *output.field(3).data_type());
+        assert_eq!(ArrowDataType::Utf8, *output.field(4).data_type());
+    }
+
+    /// A map that only computes values passes its input's labels through unchanged.
     #[test]
     fn match_output_tags_pass_through_pointwise_math() {
         let sources = [vec!["host".to_string(), "kind".to_string()]];

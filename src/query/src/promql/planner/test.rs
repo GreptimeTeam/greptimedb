@@ -3666,33 +3666,26 @@ async fn native_fused_multi_source_segments_bind_their_own_table_scan() {
     );
 }
 
-/// A nested aggregate is not split, and its value column is the one the segmentation route names.
-///
-/// The split declines an aggregate above the cut, because a `Final` partition owns only its own
-/// groups and a second fold would see part of the vector. What answers the statement is then the
-/// segmentation route, and its value column is named after the raw field rather than after the
-/// statement's outer aggregate:
-///
-/// ```text
-/// flag on : ["field_0", "timestamp"]
-/// flag off: ["sum(avg(some_metric.field_0))", "timestamp"]
-/// ```
-///
-/// The difference is pinned here rather than smoothed over: it is the naming the segmentation route
-/// has always had, and it only became observable for this shape when the split narrowed. Replanning
-/// the outer aggregate as its own `Partial`/`Final` pair above the first split - the boundary the
-/// design assigns it - is what would restore the outer name, and it is not part of this change.
+/// A nested aggregate is not split, and both routes report the explicit expression-derived name.
 #[tokio::test]
-async fn native_fused_declined_nested_aggregate_keeps_the_segmented_names() {
+async fn native_fused_declined_nested_aggregate_keeps_the_expression_name() {
     let query = "sum(avg(some_metric) by (tag_0))";
     let plan = build_native_fused_plan(query, true).await;
     let legacy = build_native_fused_plan(query, false).await;
 
     assert!(find_final_split(&plan).is_none(), "{query}: {plan}");
     assert_eq!(
-        vec!["field_0".to_string(), "timestamp".to_string()],
+        sorted_column_names(&legacy),
         sorted_column_names(&plan),
-        "{query}"
+        "{query}: native and legacy plans must expose the same expression-derived names"
+    );
+    assert_eq!(
+        vec![
+            "sum(avg(some_metric.field_0))".to_string(),
+            "timestamp".to_string()
+        ],
+        sorted_column_names(&plan),
+        "{query}: the value column must retain its explicit expression name"
     );
     assert_eq!(
         vec![
@@ -3701,11 +3694,6 @@ async fn native_fused_declined_nested_aggregate_keeps_the_segmented_names() {
         ],
         sorted_column_names(&legacy),
         "{query}"
-    );
-    assert_ne!(
-        sorted_column_names(&legacy),
-        sorted_column_names(&plan),
-        "{query}: a matching name pair would mean this test no longer pins the gap"
     );
 }
 
