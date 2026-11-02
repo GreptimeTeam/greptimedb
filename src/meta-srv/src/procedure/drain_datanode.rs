@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod check_drained;
+mod batch_aggregator;
+pub(crate) mod cursor;
 pub(crate) mod dispatch;
 pub(crate) mod drain_datanode_end;
 pub(crate) mod drain_datanode_start;
 pub(crate) mod manager;
-mod migration;
+mod scan;
 pub(crate) mod utils;
 
 #[cfg(test)]
@@ -41,6 +42,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
 use crate::metasrv::SelectorContext;
+use crate::metrics::METRIC_META_REGION_MIGRATION_FAIL;
 use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::drain_datanode::drain_datanode_start::DrainDatanodeStart;
 use crate::procedure::drain_datanode::manager::{
@@ -66,15 +68,6 @@ pub enum DrainDatanodeStrategy {
     /// Drains every remaining region and records the failed ones.
     #[default]
     TryAll,
-}
-
-/// The regions placed on a datanode, split by role.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DrainDatanodePlan {
-    /// The leader regions still to migrate, sorted and deduplicated.
-    pub leader_regions: Vec<RegionId>,
-    /// The follower regions of the datanode, sorted and deduplicated.
-    pub follower_regions: Vec<RegionId>,
 }
 
 /// The persistent data of [`DrainDatanodeProcedure`].
@@ -110,19 +103,19 @@ pub struct SubprocedureMeta {
 /// bounded by [`MAX_RESCAN_ROUNDS`], and re-dispatches the regions that are still led by
 /// the drained datanode and have no running migration. Recovered migrations own their
 /// lifecycle and may finish after this drain procedure ends.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct VolatileContext {
-    /// The drain plan, `None` until it is built by the first state that runs.
-    ///
-    /// [`DrainDatanodePlan::leader_regions`] is the remaining work: a region leaves it when
-    /// its migration succeeded, when it was given up by [`DrainDatanodeStrategy::TryAll`],
-    /// when the drained datanode stopped leading it, or when another migration owns it.
-    pub plan: Option<DrainDatanodePlan>,
+    /// Regions being prepared or awaiting migration results in the current round.
+    pub(crate) leader_regions: Vec<RegionId>,
+    /// Paused metadata scan; dropped and rebuilt after a metadata read error.
+    pub(crate) scan: Option<scan::RegionScan>,
+    /// Number of followers seen in the current scan.
+    pub follower_count: usize,
     /// The number of regions confirmed to have left the source while collecting batch results.
     pub migrated: usize,
     /// The regions given up by [`DrainDatanodeStrategy::TryAll`] in this run.
     pub failed_regions: Vec<RegionId>,
-    /// The number of plan build attempts in this run, including failed reads.
+    /// The number of full scan attempts in this run, including failed reads.
     pub rescan_round: u32,
 }
 
@@ -142,7 +135,6 @@ pub struct DrainDatanodeProcedureTask {
 }
 
 /// The context of [`DrainDatanodeProcedure`].
-#[derive(Clone)]
 pub struct Context {
     /// The persistent data of the procedure.
     pub persistent_ctx: PersistentContext,
@@ -183,48 +175,29 @@ impl Context {
 }
 
 impl Context {
-    /// Rebuilds the drain plan from the authoritative table routes.
-    ///
-    /// Builds are bounded by [`MAX_RESCAN_ROUNDS`]: a datanode whose leader regions keep
-    /// coming back must not be rescanned forever.
-    pub(crate) async fn rebuild_plan(&mut self) -> Result<()> {
-        let node_id = self.persistent_ctx.node_id;
-        if self.volatile_ctx.rescan_round >= MAX_RESCAN_ROUNDS {
-            return error::DrainDatanodeRescanExceededSnafu {
-                node_id,
-                max_rounds: MAX_RESCAN_ROUNDS,
-            }
-            .fail();
-        }
-
-        self.volatile_ctx.rescan_round += 1;
-        let plan = utils::build_datanode_plan(&self.table_metadata_manager, node_id).await?;
-        self.volatile_ctx.plan = Some(plan);
-
-        Ok(())
-    }
-
-    /// Removes `region_id` from the current plan. A later scan may add it back.
+    /// Removes `region_id` from the current round. A later scan may add it back.
     pub(crate) fn forget_leader_region(&mut self, region_id: RegionId) {
-        if let Some(plan) = self.volatile_ctx.plan.as_mut() {
-            plan.leader_regions.retain(|region| *region != region_id);
+        self.volatile_ctx
+            .leader_regions
+            .retain(|region| *region != region_id);
+    }
+
+    /// Applies the failure strategy to regions that could not be prepared or dispatched.
+    pub(crate) fn handle_migration_error(
+        &mut self,
+        e: error::Error,
+        regions: &[RegionId],
+    ) -> Result<()> {
+        if self.persistent_ctx.strategy == DrainDatanodeStrategy::FailFast {
+            return Err(e);
         }
-    }
-}
-
-impl VolatileContext {
-    /// Returns the leader regions still to migrate.
-    pub(crate) fn leader_regions(&self) -> &[RegionId] {
-        self.plan
-            .as_ref()
-            .map_or(&[], |plan| plan.leader_regions.as_slice())
-    }
-
-    /// Returns the follower regions collected by the last plan build.
-    pub(crate) fn follower_regions(&self) -> &[RegionId] {
-        self.plan
-            .as_ref()
-            .map_or(&[], |plan| plan.follower_regions.as_slice())
+        error!(e; "Gave up draining regions {:?}", regions);
+        METRIC_META_REGION_MIGRATION_FAIL.inc_by(regions.len() as u64);
+        for &region_id in regions {
+            self.forget_leader_region(region_id);
+            self.volatile_ctx.failed_regions.push(region_id);
+        }
+        Ok(())
     }
 }
 
@@ -269,7 +242,7 @@ pub(crate) trait State: Sync + Send + Debug {
 /// [`RegionMigrationProcedure`](crate::procedure::region_migration::RegionMigrationProcedure)
 /// sub-procedures, and rescans for regions that still need a new migration. Migrations
 /// already registered in the tracker continue independently and may outlive this
-/// procedure. Follower regions are collected but not removed yet.
+/// procedure. Follower regions are counted but not removed yet.
 pub(crate) struct DrainDatanodeProcedure {
     state: Box<dyn State>,
     context: Context,
@@ -382,13 +355,23 @@ impl Procedure for DrainDatanodeProcedure {
 mod tests {
     use std::time::Duration;
 
+    use crate::procedure::drain_datanode::cursor::DrainDatanodeCursor;
+    use crate::procedure::drain_datanode::dispatch::Dispatch;
+    use crate::procedure::drain_datanode::test_util::{leader_regions, set_leader_regions};
+    use api::v1::meta::heartbeat_request::NodeWorkloads;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
+    use common_meta::cluster::NodeInfo;
+    use common_meta::error::Result as MetaResult;
+    use common_meta::key::TableMetadataManagerRef;
+    use common_meta::peer::{PeerDiscovery, PeerDiscoveryRef};
     use common_meta::state_store::KvStateStore;
     use common_procedure::store::ProcedureMessage;
     use common_procedure::store::state_store::StateStore;
     use common_procedure::{Procedure, ProcedureId, ProcedureState, Status};
     use futures::TryStreamExt;
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use store_api::storage::RegionId;
 
     use crate::error;
@@ -425,10 +408,7 @@ mod tests {
 
         assert!(matches!(status, Status::Done { .. }));
         assert_eq!(0, ctx.volatile_ctx.migrated);
-        assert_eq!(
-            vec![RegionId::new(1024, 1)],
-            ctx.volatile_ctx.follower_regions()
-        );
+        assert_eq!(1, ctx.volatile_ctx.follower_count);
         assert!(
             !env.node_scheduling_manager
                 .is_schedulable(NodeSchedulingRole::Datanode, 1)
@@ -532,7 +512,7 @@ mod tests {
                         "parallelism": DEFAULT_PARALLELISM, "strategy": "FailFast",
                         "deadline_ms": persistent_ctx.deadline_ms,
                     },
-                    "state": {"drain_datanode_state": "CheckDrained"},
+                    "state": {"drain_datanode_state": "DrainDatanodeCursor"},
                 }),
                 json
             );
@@ -543,7 +523,7 @@ mod tests {
                 |persistent_ctx| env.context(persistent_ctx),
             )
             .unwrap();
-            assert!(recovered.context.volatile_ctx.plan.is_none());
+            assert!(recovered.context.volatile_ctx.leader_regions.is_empty());
             drop(recovered);
             let id = ProcedureId::random();
             let message = common_procedure::store::ProcedureMessage {
@@ -815,5 +795,135 @@ mod tests {
                 region_route.leader_peer.as_ref().map(|peer| peer.id)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_drain_skips_region_moved_or_dropped_during_discovery() {
+        for strategy in [
+            DrainDatanodeStrategy::FailFast,
+            DrainDatanodeStrategy::TryAll,
+        ] {
+            // Target 2 yields RegionMigrated; leader 3 yields LeaderPeerChanged;
+            // dropping the table yields TableRouteNotFound.
+            for leader_id in [Some(2), Some(3), None] {
+                let env = TestEnv::new().await;
+                let region_id = RegionId::new(1024, 1);
+                env.create_table(vec![leader_region(region_id, 1)]).await;
+                let mut ctx = env.context(new_persistent_context(Some(2), strategy));
+                ctx.selector_ctx.peer_discovery = Arc::new(ChangeRouteDuringDiscovery {
+                    inner: ctx.selector_ctx.peer_discovery.clone(),
+                    metadata: env.table_metadata_manager.clone(),
+                    region_id,
+                    leader_id,
+                });
+                set_leader_regions(&mut ctx, vec![region_id]);
+
+                let (mut dispatch, _) = DrainDatanodeCursor::default()
+                    .next(&mut ctx, &TestingEnv::procedure_context())
+                    .await
+                    .unwrap();
+
+                let (next, status) = dispatch
+                    .next(&mut ctx, &TestingEnv::procedure_context())
+                    .await
+                    .unwrap();
+                assert!(next.as_any().is::<DrainDatanodeCursor>());
+                assert!(matches!(status, Status::Executing { persist: false, .. }));
+                assert!(leader_regions(&ctx).is_empty());
+                assert!(ctx.volatile_ctx.failed_regions.is_empty());
+                assert_eq!(0, ctx.volatile_ctx.migrated);
+                assert!(!env.region_migration_manager.tracker().contains(region_id));
+            }
+        }
+    }
+
+    /// Changes the route after the drain's first read, during target discovery.
+    struct ChangeRouteDuringDiscovery {
+        inner: PeerDiscoveryRef,
+        metadata: TableMetadataManagerRef,
+        region_id: RegionId,
+        leader_id: Option<u64>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerDiscovery for ChangeRouteDuringDiscovery {
+        async fn active_frontends(&self) -> MetaResult<Vec<NodeInfo>> {
+            self.inner.active_frontends().await
+        }
+
+        async fn active_datanodes(
+            &self,
+            filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+        ) -> MetaResult<Vec<NodeInfo>> {
+            let storage = self.metadata.table_route_manager().table_route_storage();
+            let table_id = self.region_id.table_id();
+            let current = storage.get_with_raw_bytes(table_id).await?.unwrap();
+            if let Some(leader_id) = self.leader_id {
+                let updated = current.update(vec![leader_region(self.region_id, leader_id)])?;
+                let (txn, _) = storage.build_update_txn(table_id, &current, &updated)?;
+                assert!(self.metadata.kv_backend().txn(txn).await?.succeeded);
+            } else {
+                let table_info = self
+                    .metadata
+                    .table_info_manager()
+                    .get(table_id)
+                    .await?
+                    .unwrap();
+                self.metadata
+                    .delete_table_metadata(
+                        table_id,
+                        &table_info.table_name(),
+                        &current,
+                        &HashMap::new(),
+                        None,
+                    )
+                    .await?;
+            }
+            self.inner.active_datanodes(filter).await
+        }
+
+        async fn active_flownodes(
+            &self,
+            filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+        ) -> MetaResult<Vec<NodeInfo>> {
+            self.inner.active_flownodes(filter).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drain_datanode_dispatches_migration() {
+        let env = TestEnv::new().await;
+        let region_id = RegionId::new(1024, 1);
+        env.create_table(vec![leader_region(region_id, 1)]).await;
+
+        let mut ctx = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::FailFast,
+        ));
+        let procedure_ctx = TestingEnv::procedure_context();
+
+        let (mut next, _) = DrainDatanodeStart
+            .next(&mut ctx, &procedure_ctx)
+            .await
+            .unwrap();
+        let status = run_until_done(&mut next, &mut ctx, &procedure_ctx)
+            .await
+            .unwrap();
+
+        let Status::Suspended {
+            subprocedures,
+            recovery,
+            persist,
+        } = status
+        else {
+            panic!("expected the dispatch state to suspend the procedure");
+        };
+        // Recovery resumes children independently and rebuilds the parent's plan.
+        assert!(!persist);
+        assert_eq!(common_procedure::SubprocedureRecovery::Detach, recovery);
+        assert_eq!(1, subprocedures.len());
+        // The region is only removed after its migration is settled.
+        assert_eq!(vec![region_id], leader_regions(&ctx));
+        assert!(next.as_any().downcast_ref::<Dispatch>().is_some());
     }
 }

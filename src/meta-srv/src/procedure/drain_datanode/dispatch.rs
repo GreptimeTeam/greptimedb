@@ -14,34 +14,43 @@
 
 use std::any::Any;
 
-use common_procedure::{Context as ProcedureContext, Status, SubprocedureRecovery, watcher};
+use common_procedure::{
+    Context as ProcedureContext, ProcedureContext as SubmissionContext, ProcedureWithId, Status,
+    SubprocedureRecovery, watcher,
+};
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
 use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
-use crate::procedure::drain_datanode::check_drained::CheckDrained;
-use crate::procedure::drain_datanode::utils;
-use crate::procedure::drain_datanode::{Context, DrainDatanodeStrategy, State, SubprocedureMeta};
+use crate::procedure::drain_datanode::cursor::DrainDatanodeCursor;
+use crate::procedure::drain_datanode::{
+    Context, DrainDatanodeStrategy, State, SubprocedureMeta, utils,
+};
+use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
 
-/// Migrates the leader regions off the drained datanode in batches.
-///
-/// The state first settles the previous batch, then dispatches the next one. Sub-procedures
-/// are tracked in this state, and the suspension is not persisted, so a metasrv
-/// restart rebuilds the plan by rescanning the datanode. Recovered migrations run
-/// independently and are excluded by the migration tracker; regions that already left
-/// the datanode are skipped by the route check in
-/// [`Context::build_migration_procedure`].
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// Submits the cursor's prepared batches as detached children and collects their results.
+/// Returns to the cursor after each round; recovered children retain their own lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Dispatch {
+    /// Prepared batches retained until all children have been built successfully.
+    #[serde(skip)]
+    pub(crate) batches: Vec<RegionMigrationTaskBatch>,
     /// Dispatched children whose results have not been collected yet.
     #[serde(skip)]
     inflight_subprocedures: Vec<SubprocedureMeta>,
 }
 
 impl Dispatch {
+    /// Creates a dispatch state for the batches prepared by the cursor.
+    pub(crate) fn new(batches: Vec<RegionMigrationTaskBatch>) -> Self {
+        Self {
+            batches,
+            inflight_subprocedures: vec![],
+        }
+    }
+
     /// Waits for every migration in the batch before applying the drain strategy.
     ///
     /// Keep the batch and its results unchanged until all fallible route checks succeed,
@@ -116,6 +125,74 @@ impl Dispatch {
             DrainDatanodeStrategy::FailFast => Ok(()),
         }
     }
+
+    /// Builds detached children from batches already selected by the cursor.
+    async fn dispatch_migrations(
+        &mut self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+    ) -> Result<Vec<ProcedureWithId>> {
+        let node_id = ctx.persistent_ctx.node_id;
+        let mut children = Vec::new();
+        let mut inflight = Vec::new();
+        let mut targets = Vec::new();
+        // Keep the prepared batches until construction succeeds, so retries do not
+        // consume work from the metadata cursor twice.
+        for task in self.batches.clone() {
+            let target_node_id = task.to_peer.id;
+            let region_ids = task.region_ids.clone();
+            let submission_context = match procedure_ctx.event_context.clone() {
+                Some(event_context) => SubmissionContext::from_event_context(event_context),
+                None => SubmissionContext::default(),
+            };
+            match ctx
+                .region_migration_manager
+                .build_batch_procedure(submission_context, task)
+                .await
+            {
+                Ok(batch) => {
+                    let result = batch.analysis;
+                    if !result.peer_conflict.is_empty() {
+                        let err = error::DrainDatanodeAbortSnafu {
+                            node_id,
+                            failed_regions: result.peer_conflict.clone(),
+                        }
+                        .build();
+                        ctx.handle_migration_error(err, &result.peer_conflict)?;
+                    }
+                    for region_id in region_ids.iter().filter(|id| !result.pending.contains(id)) {
+                        ctx.forget_leader_region(*region_id);
+                    }
+                    if !result.table_not_found.is_empty() {
+                        warn!(
+                            "Skipping dropped regions while draining datanode {}: {:?}",
+                            node_id, result.table_not_found
+                        );
+                    }
+                    if let Some(child) = batch.procedure {
+                        targets.push((target_node_id, result.pending.len()));
+                        inflight.push(SubprocedureMeta {
+                            region_ids: result.pending,
+                            procedure_id: child.id,
+                        });
+                        children.push(child);
+                    }
+                }
+                Err(e) => ctx.handle_migration_error(e, &region_ids)?,
+            }
+        }
+        self.batches.clear();
+        self.inflight_subprocedures = inflight;
+        for (target, count) in targets {
+            METRIC_META_REGION_MIGRATION_DATANODES
+                .with_label_values(&["src", &node_id.to_string()])
+                .inc_by(count as u64);
+            METRIC_META_REGION_MIGRATION_DATANODES
+                .with_label_values(&["desc", &target.to_string()])
+                .inc_by(count as u64);
+        }
+        Ok(children)
+    }
 }
 
 #[async_trait::async_trait]
@@ -126,135 +203,25 @@ impl State for Dispatch {
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        let node_id = ctx.persistent_ctx.node_id;
-
-        // Collect the previous batch's results before dispatching more migrations.
         if !self.inflight_subprocedures.is_empty() {
             self.wait_for_inflight_subprocedures(ctx, procedure_ctx, ctx.persistent_ctx.strategy)
                 .await?;
-            return Ok((Box::new(Dispatch::default()), Status::executing(false)));
+            return Ok((
+                Box::new(DrainDatanodeCursor::default()),
+                Status::executing(false),
+            ));
         }
-
         utils::ensure_drain_deadline(ctx)?;
-
-        let parallelism = ctx.persistent_ctx.parallelism;
-        let regions: Vec<RegionId> = ctx
-            .volatile_ctx
-            .leader_regions()
-            .iter()
-            .take(parallelism)
-            .copied()
-            .collect();
-        if regions.is_empty() {
-            return Ok((Box::new(CheckDrained), Status::executing(false)));
-        }
-
-        let mut children = Vec::with_capacity(regions.len());
-        let mut inflight = Vec::with_capacity(regions.len());
-        let mut targets = Vec::with_capacity(regions.len());
-        for region_id in regions {
-            match ctx
-                .build_migration_procedure(procedure_ctx, region_id)
-                .await
-            {
-                Ok(Some((child, target_node_id))) => {
-                    info!(
-                        "Dispatching migration of region {} off datanode {}, procedure id: {}",
-                        region_id, node_id, child.id
-                    );
-                    inflight.push(SubprocedureMeta {
-                        region_ids: vec![region_id],
-                        procedure_id: child.id,
-                    });
-                    targets.push(target_node_id);
-                    children.push(child);
-                }
-                Ok(None) => {
-                    info!(
-                        "Skipping region {}, it is no longer led by datanode {}",
-                        region_id, node_id
-                    );
-                    ctx.forget_leader_region(region_id);
-                }
-                Err(error::Error::MigrationRunning { .. }) => {
-                    // Another procedure is migrating the region already, for example a manual
-                    // migration submitted before this batch. Ignore it for this round; the
-                    // rescan adds it back when it is still led by the datanode.
-                    warn!(
-                        "A migration of region {} off datanode {} is already running, \
-                         skipping the region",
-                        region_id, node_id
-                    );
-                    ctx.forget_leader_region(region_id);
-                }
-                Err(
-                    e @ (error::Error::TableRouteNotFound { .. }
-                    | error::Error::TableInfoNotFound { .. }),
-                ) => {
-                    warn!(
-                        e;
-                        "Skipping region {} while draining datanode {}: table metadata is missing",
-                        region_id, node_id
-                    );
-                    ctx.forget_leader_region(region_id);
-                }
-                Err(e) => {
-                    // Another migration may finish between target selection and the
-                    // migration manager's route check, releasing its tracker guard.
-                    if matches!(
-                        e,
-                        error::Error::RegionMigrated { .. }
-                            | error::Error::LeaderPeerChanged { .. }
-                    ) && !utils::leads_region(&ctx.table_metadata_manager, node_id, region_id)
-                        .await?
-                    {
-                        info!(
-                            "Skipping region {}, it is no longer led by datanode {}",
-                            region_id, node_id
-                        );
-                        ctx.forget_leader_region(region_id);
-                        continue;
-                    }
-
-                    match ctx.persistent_ctx.strategy {
-                        // Nothing is committed yet, so the batch can be retried as a whole.
-                        DrainDatanodeStrategy::FailFast => return Err(e),
-                        DrainDatanodeStrategy::TryAll => {
-                            METRIC_META_REGION_MIGRATION_FAIL.inc();
-                            error!(
-                                e;
-                                "Gave up draining region {} off datanode {}",
-                                region_id,
-                                node_id
-                            );
-                            ctx.forget_leader_region(region_id);
-                            ctx.volatile_ctx.failed_regions.push(region_id);
-                        }
-                    }
-                }
-            }
-        }
-        self.inflight_subprocedures = inflight;
-
+        let children = self.dispatch_migrations(ctx, procedure_ctx).await?;
         if children.is_empty() {
-            // The whole batch was handled without a sub-procedure, so keep draining the
-            // remaining leaders instead of spending a rescan round on them.
-            return Ok((Box::new(Dispatch::default()), Status::executing(false)));
+            return Ok((
+                Box::new(DrainDatanodeCursor::default()),
+                Status::executing(false),
+            ));
         }
-
-        for target_node_id in targets {
-            METRIC_META_REGION_MIGRATION_DATANODES
-                .with_label_values(&["src", &node_id.to_string()])
-                .inc();
-            METRIC_META_REGION_MIGRATION_DATANODES
-                .with_label_values(&["desc", &target_node_id.to_string()])
-                .inc();
-        }
-
-        // Recovered children continue independently. The parent rebuilds its plan and
-        // consults the migration tracker instead of restoring the batch's child links.
         Ok((
             Box::new(Self {
+                batches: vec![],
                 inflight_subprocedures: std::mem::take(&mut self.inflight_subprocedures),
             }),
             Status::Suspended {
@@ -277,39 +244,38 @@ mod tests {
     use std::time::Duration;
 
     use crate::procedure::test_util::{procedure_context_with_receivers, procedure_state_receiver};
-    use api::v1::meta::heartbeat_request::NodeWorkloads;
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
-    use common_meta::cluster::NodeInfo;
-    use common_meta::error::Result as MetaResult;
     use common_meta::key::table_route::TableRouteKey;
-    use common_meta::key::{MetadataKey, TableMetadataManager, TableMetadataManagerRef};
+    use common_meta::key::{MetadataKey, TableMetadataManager};
     use common_meta::kv_backend::test_util::MockKvBackendBuilder;
-    use common_meta::peer::{Peer, PeerDiscovery, PeerDiscoveryRef};
-    use common_meta::rpc::store::BatchGetResponse;
-    use common_procedure::{Error as ProcedureError, ProcedureId, ProcedureState, Status};
+    use common_meta::peer::Peer;
+    use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse};
+    use common_procedure::{
+        Error as ProcedureError, ProcedureId, ProcedureState, Status, SubprocedureRecovery,
+    };
     use store_api::storage::RegionId;
     use tokio::sync::watch;
 
     use crate::error;
-    use crate::key::NodeSchedulingRole;
-    use crate::procedure::drain_datanode::check_drained::CheckDrained;
+    use crate::procedure::drain_datanode::cursor::DrainDatanodeCursor;
     use crate::procedure::drain_datanode::dispatch::Dispatch;
-    use crate::procedure::drain_datanode::drain_datanode_start::DrainDatanodeStart;
+    use crate::procedure::drain_datanode::test_util::create_kafka_table;
     use crate::procedure::drain_datanode::test_util::{
         TestEnv, follower_region, leader_region, leader_regions, new_persistent_context,
-        run_until_done, seed_plan,
+        set_leader_regions,
     };
     use crate::procedure::drain_datanode::{DrainDatanodeStrategy, State, SubprocedureMeta};
     use crate::procedure::region_migration::manager::{
-        RegionMigrationManager, RegionMigrationProcedureTask, RegionMigrationTriggerReason,
+        RegionMigrationManager, RegionMigrationTriggerReason,
     };
     use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
 
     #[tokio::test]
-    async fn test_drain_datanode_dispatch_transitions_to_check_drained() {
-        let mut dispatch = Dispatch::default();
+    async fn test_drain_datanode_dispatch_transitions_to_cursor() {
         let env = TestEnv::new().await;
+        let mut dispatch = Dispatch::new(vec![]);
         // Only a follower region: there is no leader region to migrate.
         env.create_table(vec![follower_region(RegionId::new(1024, 1), 2, 1)])
             .await;
@@ -319,130 +285,15 @@ mod tests {
             DrainDatanodeStrategy::FailFast,
         ));
         let procedure_ctx = TestingEnv::procedure_context();
-        seed_plan(&mut ctx, vec![]);
+        set_leader_regions(&mut ctx, vec![]);
         let (next, status) = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap();
 
-        assert!(next.as_any().downcast_ref::<CheckDrained>().is_some());
-        assert!(matches!(status, Status::Executing { persist: false, .. }));
-    }
-
-    #[tokio::test]
-    async fn test_drain_datanode_dispatches_migration() {
-        let env = TestEnv::new().await;
-        let region_id = RegionId::new(1024, 1);
-        env.create_table(vec![leader_region(region_id, 1)]).await;
-
-        let mut ctx = env.context(new_persistent_context(
-            Some(2),
-            DrainDatanodeStrategy::FailFast,
-        ));
-        let procedure_ctx = TestingEnv::procedure_context();
-
-        let (mut next, _) = DrainDatanodeStart
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
-        let status = run_until_done(&mut next, &mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
-
-        let Status::Suspended {
-            subprocedures,
-            recovery,
-            persist,
-        } = status
-        else {
-            panic!("expected the dispatch state to suspend the procedure");
-        };
-        // Recovery resumes children independently and rebuilds the parent's plan.
-        assert!(!persist);
-        assert_eq!(common_procedure::SubprocedureRecovery::Detach, recovery);
-        assert_eq!(1, subprocedures.len());
-        let dispatched = next.as_any().downcast_ref::<Dispatch>().unwrap();
-        assert_eq!(1, dispatched.inflight_subprocedures.len());
-        assert_eq!(
-            region_id,
-            dispatched.inflight_subprocedures[0].region_ids[0]
+        assert!(
+            next.as_any()
+                .downcast_ref::<DrainDatanodeCursor>()
+                .is_some()
         );
-        // The region is only removed after its migration is settled.
-        assert_eq!(vec![region_id], leader_regions(&ctx));
-        assert!(next.as_any().downcast_ref::<Dispatch>().is_some());
-    }
-
-    #[tokio::test]
-    async fn test_drain_datanode_dispatch_skips_region_moved_away() {
-        let mut dispatch = Dispatch::default();
-        let env = TestEnv::new().await;
-        let region_id = RegionId::new(1024, 1);
-        // The plan lists the region, but the table route says another datanode leads it.
-        env.create_table(vec![leader_region(region_id, 2)]).await;
-
-        let mut ctx = env.context(new_persistent_context(
-            Some(3),
-            DrainDatanodeStrategy::FailFast,
-        ));
-        seed_plan(&mut ctx, vec![region_id]);
-        let procedure_ctx = TestingEnv::procedure_context();
-
-        let (next, status) = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap();
-
-        assert!(matches!(status, Status::Executing { .. }));
-        assert!(next.as_any().downcast_ref::<Dispatch>().is_some());
-        assert!(leader_regions(&ctx).is_empty());
-        assert!(dispatch.inflight_subprocedures.is_empty());
-    }
-
-    /// Changes the route after the drain's first read, during target discovery.
-    struct ChangeRouteDuringDiscovery {
-        inner: PeerDiscoveryRef,
-        metadata: TableMetadataManagerRef,
-        region_id: RegionId,
-        leader_id: Option<u64>,
-    }
-
-    #[async_trait::async_trait]
-    impl PeerDiscovery for ChangeRouteDuringDiscovery {
-        async fn active_frontends(&self) -> MetaResult<Vec<NodeInfo>> {
-            self.inner.active_frontends().await
-        }
-
-        async fn active_datanodes(
-            &self,
-            filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-        ) -> MetaResult<Vec<NodeInfo>> {
-            let storage = self.metadata.table_route_manager().table_route_storage();
-            let table_id = self.region_id.table_id();
-            let current = storage.get_with_raw_bytes(table_id).await?.unwrap();
-            if let Some(leader_id) = self.leader_id {
-                let updated = current.update(vec![leader_region(self.region_id, leader_id)])?;
-                let (txn, _) = storage.build_update_txn(table_id, &current, &updated)?;
-                assert!(self.metadata.kv_backend().txn(txn).await?.succeeded);
-            } else {
-                let table_info = self
-                    .metadata
-                    .table_info_manager()
-                    .get(table_id)
-                    .await?
-                    .unwrap();
-                self.metadata
-                    .delete_table_metadata(
-                        table_id,
-                        &table_info.table_name(),
-                        &current,
-                        &HashMap::new(),
-                        None,
-                    )
-                    .await?;
-            }
-            self.inner.active_datanodes(filter).await
-        }
-
-        async fn active_flownodes(
-            &self,
-            filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-        ) -> MetaResult<Vec<NodeInfo>> {
-            self.inner.active_flownodes(filter).await
-        }
+        assert!(matches!(status, Status::Executing { persist: false, .. }));
     }
 
     #[tokio::test]
@@ -456,44 +307,28 @@ mod tests {
     }
 
     async fn assert_drop_after_route_read_is_skipped(strategy: DrainDatanodeStrategy) {
-        let mut dispatch = Dispatch::default();
         let env = TestEnv::new().await;
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
         let metadata = env.table_metadata_manager.clone();
-        // Only intercept the migration manager's reads. Return its route snapshot
-        // after deleting the table, so its following table-info read finds nothing.
+        // Return the route snapshot even after DROP removes the table. The following
+        // table-info batch read must see the deletion rather than abort the drain.
+        let route_key = TableRouteKey::new(region_id.table_id()).to_bytes();
+        let snapshot = metadata
+            .kv_backend()
+            .batch_get(BatchGetRequest {
+                keys: vec![route_key.clone()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(1, snapshot.kvs.len());
         let backend = MockKvBackendBuilder::default()
-            // This fixture has no node-address metadata to remap the route.
-            .batch_get_fn(Arc::new(|_| Ok(BatchGetResponse { kvs: vec![] })))
-            .range_async_fn(Arc::new(move |request| {
-                let metadata = metadata.clone();
-                Box::pin(async move {
-                    let response = metadata.kv_backend().range(request.clone()).await?;
-                    if request.key == TableRouteKey::new(region_id.table_id()).to_bytes() {
-                        let route = metadata
-                            .table_route_manager()
-                            .table_route_storage()
-                            .get_with_raw_bytes(region_id.table_id())
-                            .await?
-                            .unwrap();
-                        let info = metadata
-                            .table_info_manager()
-                            .get(region_id.table_id())
-                            .await?
-                            .unwrap();
-                        metadata
-                            .delete_table_metadata(
-                                region_id.table_id(),
-                                &info.table_name(),
-                                &route,
-                                &HashMap::new(),
-                                None,
-                            )
-                            .await?;
-                    }
-                    Ok(response)
-                })
+            .batch_get_fn(Arc::new(move |request| {
+                if request.keys.contains(&route_key) {
+                    Ok(snapshot.clone())
+                } else {
+                    Ok(BatchGetResponse { kvs: vec![] })
+                }
             }))
             .build()
             .unwrap();
@@ -506,18 +341,48 @@ mod tests {
         ));
         let mut ctx = env.context(new_persistent_context(Some(2), strategy));
         ctx.region_migration_manager = manager.clone();
-        seed_plan(&mut ctx, vec![region_id]);
+        set_leader_regions(&mut ctx, vec![region_id]);
+
+        let mut dispatch = Dispatch::new(vec![RegionMigrationTaskBatch {
+            region_ids: vec![region_id],
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_secs(10),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        }]);
+        let route = metadata
+            .table_route_manager()
+            .table_route_storage()
+            .get_with_raw_bytes(region_id.table_id())
+            .await
+            .unwrap()
+            .unwrap();
+        let info = metadata
+            .table_info_manager()
+            .get(region_id.table_id())
+            .await
+            .unwrap()
+            .unwrap();
+        metadata
+            .delete_table_metadata(
+                region_id.table_id(),
+                &info.table_name(),
+                &route,
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .unwrap();
 
         let (next, status) = dispatch
             .next(&mut ctx, &TestingEnv::procedure_context())
             .await
             .unwrap();
 
-        assert!(next.as_any().is::<Dispatch>());
+        assert!(next.as_any().is::<DrainDatanodeCursor>());
         assert!(matches!(status, Status::Executing { persist: false, .. }));
         assert!(leader_regions(&ctx).is_empty());
         assert!(ctx.volatile_ctx.failed_regions.is_empty());
-        assert!(dispatch.inflight_subprocedures.is_empty());
         assert_eq!(0, ctx.volatile_ctx.migrated);
         assert!(!manager.tracker().contains(region_id));
         assert!(
@@ -531,119 +396,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drain_datanode_dispatch_skips_region_moved_or_dropped_during_discovery() {
-        let mut dispatch = Dispatch::default();
-        for strategy in [
-            DrainDatanodeStrategy::FailFast,
-            DrainDatanodeStrategy::TryAll,
-        ] {
-            // Target 2 yields RegionMigrated; leader 3 yields LeaderPeerChanged;
-            // dropping the table yields TableRouteNotFound.
-            for leader_id in [Some(2), Some(3), None] {
-                let env = TestEnv::new().await;
-                let region_id = RegionId::new(1024, 1);
-                env.create_table(vec![leader_region(region_id, 1)]).await;
-                let mut ctx = env.context(new_persistent_context(Some(2), strategy));
-                ctx.selector_ctx.peer_discovery = Arc::new(ChangeRouteDuringDiscovery {
-                    inner: ctx.selector_ctx.peer_discovery.clone(),
-                    metadata: env.table_metadata_manager.clone(),
-                    region_id,
-                    leader_id,
-                });
-                seed_plan(&mut ctx, vec![region_id]);
-
-                let (next, status) = dispatch
-                    .next(&mut ctx, &TestingEnv::procedure_context())
-                    .await
-                    .unwrap();
-
-                assert!(next.as_any().is::<Dispatch>());
-                assert!(matches!(status, Status::Executing { persist: false, .. }));
-                assert!(leader_regions(&ctx).is_empty());
-                assert!(ctx.volatile_ctx.failed_regions.is_empty());
-                assert!(dispatch.inflight_subprocedures.is_empty());
-                assert_eq!(0, ctx.volatile_ctx.migrated);
-                assert!(!env.region_migration_manager.tracker().contains(region_id));
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_drain_datanode_skips_region_whose_migration_is_running() {
-        let mut dispatch = Dispatch::default();
-        let env = TestEnv::new().await;
-        let region_id = RegionId::new(1024, 1);
-        env.create_table(vec![leader_region(region_id, 1)]).await;
-
-        let mut ctx = env.context(new_persistent_context(
-            Some(2),
-            DrainDatanodeStrategy::FailFast,
-        ));
-        seed_plan(&mut ctx, vec![region_id]);
-        let procedure_ctx = TestingEnv::procedure_context();
-
-        // A manual migration of the same region is already running. Building it keeps the
-        // region in the running set of the migration manager until it is dropped.
-        let _child = env
-            .region_migration_manager
-            .build_subprocedure(
-                common_procedure::ProcedureContext::default(),
-                RegionMigrationProcedureTask::new(
-                    region_id,
-                    Peer::empty(1),
-                    Peer::empty(2),
-                    Duration::from_secs(10),
-                    RegionMigrationTriggerReason::Manual,
-                ),
-            )
-            .await
-            .expect("the manual migration should be buildable");
-
-        let (next, status) = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap();
-
-        // The region is ignored for this round instead of failing the drain: it leaves the plan
-        // and is neither migrated nor given up. The rescan re-adds it when the datanode still
-        // leads it.
-        assert!(matches!(status, Status::Executing { .. }));
-        assert!(next.as_any().downcast_ref::<Dispatch>().is_some());
-        assert!(leader_regions(&ctx).is_empty());
-        assert!(ctx.volatile_ctx.failed_regions.is_empty());
-        assert!(dispatch.inflight_subprocedures.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_drain_datanode_fail_fast_on_unschedulable_target() {
-        let env = TestEnv::new().await;
-        let region_id = RegionId::new(1024, 1);
-        env.create_table(vec![leader_region(region_id, 1)]).await;
-        env.node_scheduling_manager
-            .mark_unschedulable(NodeSchedulingRole::Datanode, 3)
-            .await
-            .unwrap();
-
-        let mut ctx = env.context(new_persistent_context(
-            Some(3),
-            DrainDatanodeStrategy::FailFast,
-        ));
-        let procedure_ctx = TestingEnv::procedure_context();
-
-        let (mut state, _) = DrainDatanodeStart
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
-        let error = run_until_done(&mut state, &mut ctx, &procedure_ctx)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, error::Error::DrainDatanodeAbort { .. }));
-        assert!(!error.is_retryable());
-        assert_eq!(vec![region_id], leader_regions(&ctx));
-    }
-
-    #[tokio::test]
     async fn test_drain_datanode_waits_for_migrated_batch() {
-        let mut dispatch = Dispatch::default();
         let env = TestEnv::new().await;
+        let mut dispatch = Dispatch::new(vec![]);
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
 
@@ -651,7 +406,7 @@ mod tests {
             Some(2),
             DrainDatanodeStrategy::FailFast,
         ));
-        seed_plan(&mut ctx, vec![region_id]);
+        set_leader_regions(&mut ctx, vec![region_id]);
         dispatch.inflight_subprocedures = vec![SubprocedureMeta {
             region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
@@ -661,29 +416,26 @@ mod tests {
             procedure_state_receiver(ProcedureState::Done { output: None }),
         )]));
 
-        let (mut next, status) = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap();
+        let (next, status) = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         assert!(matches!(status, Status::Executing { .. }));
-        assert!(next.as_any().downcast_ref::<Dispatch>().is_some());
+        assert!(next.as_any().is::<DrainDatanodeCursor>());
         assert_eq!(1, ctx.volatile_ctx.migrated);
         assert!(leader_regions(&ctx).is_empty());
         assert!(dispatch.inflight_subprocedures.is_empty());
-        // The next step checks the remaining regions.
-        let (next, _) = next.next(&mut ctx, &procedure_ctx).await.unwrap();
-        assert!(next.as_any().downcast_ref::<CheckDrained>().is_some());
     }
 
     #[tokio::test]
     async fn test_drain_datanode_exceeded_deadline() {
-        let mut dispatch = Dispatch::default();
         let env = TestEnv::new().await;
+        let mut dispatch = Dispatch::new(vec![]);
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
 
         let mut persistent_ctx = new_persistent_context(Some(2), DrainDatanodeStrategy::FailFast);
         persistent_ctx.deadline_ms = 0;
         let mut ctx = env.context(persistent_ctx);
-        seed_plan(&mut ctx, vec![region_id]);
+        set_leader_regions(&mut ctx, vec![region_id]);
         let procedure_ctx = TestingEnv::procedure_context();
 
         let error = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap_err();
@@ -695,15 +447,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_datanode_deadline_does_not_interrupt_batch() {
-        let mut dispatch = Dispatch::default();
         let env = TestEnv::new().await;
+        let mut dispatch = Dispatch::new(vec![]);
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
 
         let mut persistent_ctx = new_persistent_context(Some(2), DrainDatanodeStrategy::FailFast);
         persistent_ctx.deadline_ms = 0;
         let mut ctx = env.context(persistent_ctx);
-        seed_plan(&mut ctx, vec![region_id]);
+        set_leader_regions(&mut ctx, vec![region_id]);
         dispatch.inflight_subprocedures = vec![SubprocedureMeta {
             region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
@@ -714,17 +466,121 @@ mod tests {
         )]));
 
         // The in-flight batch is settled before the deadline is checked.
-        let (_, status) = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap();
+        let (mut next, status) = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap();
         assert!(matches!(status, Status::Executing { .. }));
         assert_eq!(1, ctx.volatile_ctx.migrated);
 
         // The next step observes the exceeded deadline.
-        let error = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap_err();
+        let error = next.next(&mut ctx, &procedure_ctx).await.unwrap_err();
         assert!(matches!(error, error::Error::ExceededDeadline { .. }));
     }
+
     #[tokio::test]
-    async fn test_drain_datanode_wait_failed_child_fail_fast() {
-        let mut dispatch = Dispatch::default();
+    async fn test_build_failure_releases_children_and_retains_prepared_batches() {
+        let env = TestEnv::new().await;
+        let first = RegionId::new(1024, 1);
+        let second = RegionId::new(1024, 2);
+        let mut second_route = leader_region(second, 1);
+        second_route.follower_peers.push(Peer::empty(3));
+        env.create_table(vec![leader_region(first, 1), second_route])
+            .await;
+        let mut ctx = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::FailFast,
+        ));
+        set_leader_regions(&mut ctx, vec![first, second]);
+        let batches = vec![
+            RegionMigrationTaskBatch {
+                region_ids: vec![first],
+                from_peer: Peer::empty(1),
+                to_peer: Peer::empty(2),
+                timeout: Duration::from_secs(10),
+                trigger_reason: RegionMigrationTriggerReason::Manual,
+            },
+            RegionMigrationTaskBatch {
+                region_ids: vec![second],
+                from_peer: Peer::empty(1),
+                to_peer: Peer::empty(2),
+                timeout: Duration::from_secs(10),
+                trigger_reason: RegionMigrationTriggerReason::Manual,
+            },
+        ];
+        let mut dispatch = Dispatch::new(batches);
+        assert_eq!(2, dispatch.batches.len());
+        // The first child is built before the second batch encounters a target conflict.
+        dispatch.batches[1].to_peer = Peer::empty(3);
+        let procedure_ctx = TestingEnv::procedure_context();
+        let error = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap_err();
+        assert!(matches!(error, error::Error::DrainDatanodeAbort { .. }));
+        assert_eq!(2, dispatch.batches.len());
+        assert_eq!(vec![first, second], leader_regions(&ctx));
+        let tracker = env.region_migration_manager.tracker();
+        assert!(!tracker.contains(first));
+        assert!(!tracker.contains(second));
+
+        dispatch.batches[1].to_peer = Peer::empty(2);
+        let (_, status) = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap();
+        let Status::Suspended { subprocedures, .. } = status else {
+            panic!("expected both retained batches to be submitted");
+        };
+        assert_eq!(2, subprocedures.len());
+        assert!(dispatch.batches.is_empty());
+        assert!(tracker.contains(first));
+        assert!(tracker.contains(second));
+        drop(subprocedures);
+        assert!(!tracker.contains(first));
+        assert!(!tracker.contains(second));
+    }
+
+    #[tokio::test]
+    async fn test_failed_batch_reconciles_each_region() {
+        for strategy in [
+            DrainDatanodeStrategy::FailFast,
+            DrainDatanodeStrategy::TryAll,
+        ] {
+            let env = TestEnv::new().await;
+            let pending = RegionId::new(1024, 1);
+            let moved = RegionId::new(1024, 2);
+            let removed = RegionId::new(2048, 1);
+            env.create_table(vec![leader_region(pending, 1), leader_region(moved, 2)])
+                .await;
+            let mut ctx = env.context(new_persistent_context(Some(2), strategy));
+            let regions = vec![pending, moved, removed];
+            set_leader_regions(&mut ctx, regions.clone());
+            let procedure_id = ProcedureId::random();
+            let mut dispatch = Dispatch::new(vec![]);
+            dispatch.inflight_subprocedures = vec![SubprocedureMeta {
+                region_ids: regions,
+                procedure_id,
+            }];
+            let procedure_ctx = procedure_context_with_receivers(HashMap::from([(
+                procedure_id,
+                procedure_state_receiver(ProcedureState::failed(Arc::new(
+                    ProcedureError::external(MockError::new(StatusCode::Internal)),
+                ))),
+            )]));
+            let result = dispatch
+                .wait_for_inflight_subprocedures(&mut ctx, &procedure_ctx, strategy)
+                .await;
+            if strategy == DrainDatanodeStrategy::FailFast {
+                let error::Error::DrainDatanodeAbort { failed_regions, .. } = result.unwrap_err()
+                else {
+                    panic!("unexpected error");
+                };
+                assert_eq!(vec![pending], failed_regions);
+                assert_eq!(vec![pending], leader_regions(&ctx));
+            } else {
+                result.unwrap();
+                assert_eq!(vec![pending], ctx.volatile_ctx.failed_regions);
+                assert!(leader_regions(&ctx).is_empty());
+            }
+            assert_eq!(2, ctx.volatile_ctx.migrated);
+            assert!(dispatch.inflight_subprocedures.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_successful_batch() {
         let env = TestEnv::new().await;
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
@@ -733,7 +589,43 @@ mod tests {
             Some(2),
             DrainDatanodeStrategy::FailFast,
         ));
-        seed_plan(&mut ctx, vec![region_id]);
+        set_leader_regions(&mut ctx, vec![region_id]);
+        let mut dispatch = Dispatch::new(vec![]);
+        dispatch.inflight_subprocedures = vec![SubprocedureMeta {
+            region_ids: vec![region_id],
+            procedure_id: ProcedureId::random(),
+        }];
+        let procedure_ctx = procedure_context_with_receivers(HashMap::from([(
+            dispatch.inflight_subprocedures[0].procedure_id,
+            procedure_state_receiver(ProcedureState::Done { output: None }),
+        )]));
+
+        dispatch
+            .wait_for_inflight_subprocedures(
+                &mut ctx,
+                &procedure_ctx,
+                DrainDatanodeStrategy::FailFast,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(1, ctx.volatile_ctx.migrated);
+        assert!(leader_regions(&ctx).is_empty());
+        assert!(dispatch.inflight_subprocedures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_drain_datanode_wait_failed_child_fail_fast() {
+        let env = TestEnv::new().await;
+        let region_id = RegionId::new(1024, 1);
+        env.create_table(vec![leader_region(region_id, 1)]).await;
+
+        let mut ctx = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::FailFast,
+        ));
+        set_leader_regions(&mut ctx, vec![region_id]);
+        let mut dispatch = Dispatch::new(vec![]);
         dispatch.inflight_subprocedures = vec![SubprocedureMeta {
             region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
@@ -763,7 +655,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_datanode_wait_failed_child_try_all() {
-        let mut dispatch = Dispatch::default();
         let env = TestEnv::new().await;
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
@@ -772,7 +663,8 @@ mod tests {
             Some(2),
             DrainDatanodeStrategy::FailFast,
         ));
-        seed_plan(&mut ctx, vec![region_id]);
+        set_leader_regions(&mut ctx, vec![region_id]);
+        let mut dispatch = Dispatch::new(vec![]);
         dispatch.inflight_subprocedures = vec![SubprocedureMeta {
             region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
@@ -800,7 +692,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_datanode_wait_failed_child_counts_migrated_when_moved() {
-        let mut dispatch = Dispatch::default();
         let env = TestEnv::new().await;
         let region_id = RegionId::new(1024, 1);
         // The route reports another datanode as the leader, which is what a failover that
@@ -811,7 +702,8 @@ mod tests {
             Some(2),
             DrainDatanodeStrategy::FailFast,
         ));
-        seed_plan(&mut ctx, vec![region_id]);
+        set_leader_regions(&mut ctx, vec![region_id]);
+        let mut dispatch = Dispatch::new(vec![]);
         dispatch.inflight_subprocedures = vec![SubprocedureMeta {
             region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
@@ -839,7 +731,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_datanode_wait_unknown_child_keeps_pending() {
-        let mut dispatch = Dispatch::default();
         let env = TestEnv::new().await;
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
@@ -848,7 +739,8 @@ mod tests {
             Some(2),
             DrainDatanodeStrategy::FailFast,
         ));
-        seed_plan(&mut ctx, vec![region_id]);
+        set_leader_regions(&mut ctx, vec![region_id]);
+        let mut dispatch = Dispatch::new(vec![]);
         dispatch.inflight_subprocedures = vec![SubprocedureMeta {
             region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
@@ -873,7 +765,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_datanode_waits_for_entire_batch() {
-        let mut dispatch = Dispatch::default();
         for strategy in [
             DrainDatanodeStrategy::FailFast,
             DrainDatanodeStrategy::TryAll,
@@ -890,9 +781,10 @@ mod tests {
                 Some(2),
                 DrainDatanodeStrategy::FailFast,
             ));
-            seed_plan(&mut ctx, vec![failed_region, succeeded_region]);
+            set_leader_regions(&mut ctx, vec![failed_region, succeeded_region]);
             let failed_id = ProcedureId::random();
             let pending_id = ProcedureId::random();
+            let mut dispatch = Dispatch::new(vec![]);
             dispatch.inflight_subprocedures = vec![
                 SubprocedureMeta {
                     region_ids: vec![failed_region],
@@ -937,7 +829,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_datanode_wait_preserves_batch_on_metadata_retry() {
-        let mut dispatch = Dispatch::default();
         use common_meta::key::TableMetadataManager;
         use common_meta::kv_backend::test_util::MockKvBackendBuilder;
 
@@ -957,9 +848,10 @@ mod tests {
                 Some(2),
                 DrainDatanodeStrategy::FailFast,
             ));
-            seed_plan(&mut ctx, vec![failed_region, succeeded_region]);
+            set_leader_regions(&mut ctx, vec![failed_region, succeeded_region]);
             let failed_id = ProcedureId::random();
             let succeeded_id = ProcedureId::random();
+            let mut dispatch = Dispatch::new(vec![]);
             dispatch.inflight_subprocedures = vec![
                 SubprocedureMeta {
                     region_ids: vec![succeeded_region],
@@ -1015,6 +907,59 @@ mod tests {
             }
             assert_eq!(1, ctx.volatile_ctx.migrated);
             assert!(dispatch.inflight_subprocedures.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_registers_and_releases_all_batch_regions() {
+        let env = TestEnv::new().await;
+        create_kafka_table(&env, 1024, 8, 2).await;
+        let mut persistent = new_persistent_context(Some(2), DrainDatanodeStrategy::FailFast);
+        persistent.parallelism = 3;
+        let mut ctx = env.context(persistent);
+        let regions = vec![
+            RegionId::new(1024, 0),
+            RegionId::new(1024, 2),
+            RegionId::new(1024, 4),
+        ];
+        set_leader_regions(&mut ctx, regions.clone());
+        let mut dispatch = Dispatch::new(vec![RegionMigrationTaskBatch {
+            region_ids: regions.clone(),
+            from_peer: Peer::empty(1),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_secs(10),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
+        }]);
+        let (next, status) = dispatch
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        let Status::Suspended {
+            subprocedures,
+            recovery,
+            persist,
+        } = status
+        else {
+            panic!("expected a detached batch");
+        };
+        assert!(matches!(recovery, SubprocedureRecovery::Detach));
+        assert!(!persist);
+        assert_eq!(1, subprocedures.len());
+        assert_eq!(
+            regions,
+            next.as_any()
+                .downcast_ref::<Dispatch>()
+                .unwrap()
+                .inflight_subprocedures[0]
+                .region_ids
+        );
+        let tracker = env.region_migration_manager.tracker();
+        for region_id in &regions {
+            assert!(tracker.contains(*region_id));
+        }
+        drop(subprocedures);
+        for region_id in regions {
+            assert!(!tracker.contains(region_id));
         }
     }
 }
