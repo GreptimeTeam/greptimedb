@@ -46,6 +46,7 @@ use promql::extension_plan::{
     AggregateFinalize, FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
 use promql::native::plan::{NativeExpr, NativeNode};
+use promql::vector_match::MatchingLabels;
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::QueryContext;
@@ -2848,6 +2849,53 @@ fn has_pair_node(plan: &LogicalPlan) -> bool {
         return true;
     }
     plan.inputs().into_iter().any(has_pair_node)
+}
+
+/// Computed operands with a dropped matching label are cut before matching, so the parent can
+/// repartition their evaluated frames by the remaining labels.
+#[tokio::test]
+async fn native_fused_segments_computed_matching_key_operands() {
+    for query in [
+        "(some_metric * 2) + on(__name__, tag_0) (some_metric * 2)",
+        "timestamp(some_metric) + on(__name__, tag_0) timestamp(some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let parent = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        assert_eq!(2, parent.inputs().len(), "{query}: {plan}");
+        assert!(
+            matches!(
+                input_locality(parent.tree().root()),
+                InputLocality::MatchingLocal(MatchingLabels::On(labels))
+                    if labels.iter().map(AsRef::as_ref).collect::<Vec<_>>() == ["__name__", "tag_0"]
+            ),
+            "{query}: {plan}"
+        );
+        let NativeExpr::Binary { left, right, .. } = &parent.tree().root().expr else {
+            panic!("{query}: expected parent binary: {plan}");
+        };
+        let (NativeExpr::Input(left), NativeExpr::Input(right)) = (&left.expr, &right.expr) else {
+            panic!("{query}: parent operands are not input boundaries: {plan}");
+        };
+        assert_eq!((0, 1), (left.source_index, right.source_index), "{query}");
+        for input in parent.inputs() {
+            let prefix = find_fused_series(input)
+                .unwrap_or_else(|| panic!("{query}: expected a cut prefix in {input}"));
+            assert!(
+                matches!(
+                    prefix.tree().root().output.samples(),
+                    Some(schema) if schema.eval_grid.is_some()
+                ),
+                "{query}: cut prefix must produce evaluated frames: {input}"
+            );
+            assert!(
+                matches!(
+                    input_locality(prefix.tree().root()),
+                    InputLocality::PartitionLocal | InputLocality::MatchingLocal(_)
+                ),
+                "{query}: prefix must remain parallel-local: {input}"
+            );
+        }
+    }
 }
 
 /// A nested three-source match segments its inner pair, then partitions the outer match.

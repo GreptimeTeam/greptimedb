@@ -1150,6 +1150,20 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
     }
 }
 
+/// Whether matching operands can be segmented as independent single-source computations and
+/// at least one fails to preserve the requested key.
+///
+/// This is the key-change case the planner can handle by cutting the operands before matching.
+/// A failed preservation proof alone does not establish that a key was changed. The planner and
+/// [`input_locality`] share this predicate so that this admission rule cannot drift from locality.
+pub fn matching_operands_drop_key(root: &NativeNode) -> bool {
+    matching_site(root).is_some_and(|(left, right, labels)| {
+        same_source(left).is_some()
+            && same_source(right).is_some()
+            && (!preserves_matching_key(left, labels) || !preserves_matching_key(right, labels))
+    })
+}
+
 /// Derives the partition contract from the bound root, not from a physical property registry.
 /// Whether `node` contains a vector-vector binary, which matches series of the whole vector.
 ///
@@ -1234,9 +1248,7 @@ pub fn input_locality(root: &NativeNode) -> InputLocality {
             return InputLocality::PartitionLocal;
         }
         if raw {
-            if let Some((left, right, labels)) = matching_site(root)
-                && (!preserves_matching_key(left, labels) || !preserves_matching_key(right, labels))
-            {
+            if matching_operands_drop_key(root) {
                 return InputLocality::SinglePartition;
             }
             return InputLocality::PartitionLocal;

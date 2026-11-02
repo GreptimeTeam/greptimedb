@@ -6485,6 +6485,130 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
     assert_eq!(rows, legacy, "native and legacy answers differ");
 }
 
+/// Checks a computed matching-key expression routes evaluated operands into multiple partitions.
+async fn assert_computed_matching_key_runtime_parallelism(
+    name: &str,
+    setup_sql: &str,
+    query: &str,
+) {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new(name).with_mito_config(config)).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, setup_sql, QueryContext::arc()).await;
+
+    let sql = format!("TQL EVAL (0, 1, '1s') {query}");
+    observer.clear();
+    let native_output = native_tql_output(&instance, &sql, true).await;
+    let native_rows = native_labelled_rows(native_output).await.1;
+    assert_eq!(
+        native_rows.len(),
+        8,
+        "one result per host and timestamp: {native_rows:?}"
+    );
+    for (ts, labels, value) in &native_rows {
+        let host = labels.get("host").expect("output retains host label");
+        let val = match host.as_str() {
+            "h0" => 1.0,
+            "h1" => 2.0,
+            "h2" => 3.0,
+            "h3" => 4.0,
+            other => panic!("unexpected host {other}"),
+        };
+        assert_eq!(*value, val * 4.0, "host={host}, ts={ts}");
+    }
+
+    fn walk(plan: &Arc<dyn ExecutionPlan>, found: &mut Vec<Arc<dyn ExecutionPlan>>) {
+        if plan.name() == "FusedSeriesExec" {
+            found.push(Arc::clone(plan));
+        }
+        for child in plan.children() {
+            walk(&child, found);
+        }
+    }
+
+    let mut plans = vec![observer.root_plan()];
+    plans.extend(observer.region_plans());
+    let mut fused = Vec::new();
+    for plan in &plans {
+        walk(plan, &mut fused);
+    }
+    let parent = fused
+        .iter()
+        .find(|plan| {
+            plan.children().len() == 2
+                && plan.children().iter().all(|child| {
+                    child
+                        .downcast_ref::<promql::extension_plan::SeriesRepartitionExec>()
+                        .is_some_and(|router| {
+                            router.routing_policy()
+                                == &promql::extension_plan::SeriesRouting::Matching(
+                                    promql::vector_match::MatchingLabels::On(vec![
+                                        Arc::from("__name__"),
+                                        Arc::from("host"),
+                                    ]),
+                                )
+                        })
+                })
+        })
+        .unwrap_or_else(|| panic!("native parent with matching routers not found: {plans:?}"));
+    let partition_count = parent.output_partitioning().partition_count();
+    assert!(
+        partition_count > 1,
+        "matching parent must stay parallel: {parent:?}"
+    );
+    let rows_by_partition = output_values_per_partition(parent)
+        .expect("fused native execution exposes per-partition output values");
+    let nonempty = rows_by_partition
+        .iter()
+        .filter(|&&row_count| row_count > 0)
+        .count();
+    assert!(
+        nonempty >= 2,
+        "at least two matching output partitions must produce rows; counts={rows_by_partition:?}"
+    );
+    eprintln!("{query}: output partition rows={rows_by_partition:?}");
+
+    let legacy_rows = native_labelled_rows(native_tql_output(&instance, &sql, false).await)
+        .await
+        .1;
+    assert_eq!(
+        native_rows, legacy_rows,
+        "native result must match legacy result"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_computed_matching_key_same_table_is_parallel() {
+    assert_computed_matching_key_runtime_parallelism(
+        "computed_matching_key_same_table",
+        "CREATE TABLE cmk_m (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO cmk_m VALUES ('h0', 0, 1), ('h1', 0, 2), ('h2', 0, 3), ('h3', 0, 4), \
+         ('h0', 1000, 1), ('h1', 1000, 2), ('h2', 1000, 3), ('h3', 1000, 4)",
+        "(cmk_m * 2) + on(__name__, host) (cmk_m * 2)",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_computed_matching_key_cross_table_is_parallel() {
+    assert_computed_matching_key_runtime_parallelism(
+        "computed_matching_key_cross_table",
+        "CREATE TABLE cmk_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         CREATE TABLE cmk_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO cmk_a VALUES ('h0', 0, 1), ('h1', 0, 2), ('h2', 0, 3), ('h3', 0, 4), \
+         ('h0', 1000, 1), ('h1', 1000, 2), ('h2', 1000, 3), ('h3', 1000, 4); \
+         INSERT INTO cmk_b VALUES ('h0', 0, 1), ('h1', 0, 2), ('h2', 0, 3), ('h3', 0, 4), \
+         ('h0', 1000, 1), ('h1', 1000, 2), ('h2', 1000, 3), ('h3', 1000, 4)",
+        "(cmk_a * 2) + on(__name__, host) (cmk_b * 2)",
+    )
+    .await;
+}
+
 /// A cross-table segmented expression matches exact legacy values and uses the segmented route.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_multi_source_segments_match_legacy_values() {

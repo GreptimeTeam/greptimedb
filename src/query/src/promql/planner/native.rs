@@ -51,7 +51,7 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
     AggregateFinalize, FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality,
-    RawSeriesSource, input_locality, tree_source_fields,
+    RawSeriesSource, input_locality, matching_operands_drop_key, tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -707,7 +707,12 @@ impl PromPlanner {
             && !multi_input
             && matches!(locality, InputLocality::SinglePartition)
             && has_nested_vector_match(root);
-        if !per_partition || needs_nested_match_segmentation {
+        // A vector match whose operands changed a requested key is conservatively single-partition
+        // as a bare tree. Cut those computed operands first: the parent can then route their actual
+        // output labels with the unchanged matching key (missing labels naturally drop out).
+        let needs_matching_key_segmentation =
+            matches!(locality, InputLocality::SinglePartition) && matching_operands_drop_key(root);
+        if !per_partition || needs_nested_match_segmentation || needs_matching_key_segmentation {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather
             // than whole samples, so it moves less between the two halves than a sample boundary
             // would. The general segmentation below is the fallback for the trees it declines,
@@ -746,12 +751,10 @@ impl PromPlanner {
                     single_input_context,
                 )));
             }
-            // A statement naming several selectors declines unless those selectors read more than
-            // one table. Without that, the count alone says nothing about whether the tree has more
-            // than one input to place, and the shapes it would admit - one metric named twice under
-            // a fold, such as `sum(m) / m` or `m + sum(m)` - are a plan the existing path already
-            // answers. A cut carrying two sources is declined in `build_inner_segment`.
-            if selectors.len() != 1 && !cross_table {
+            // Same-table repeated selectors normally retain their established planner route; only
+            // the computed matching-key case needs separate source segments for safe routing.
+            // `build_inner_segment` binds each cut's sources, including multiple raw sources.
+            if selectors.len() != 1 && !cross_table && !needs_matching_key_segmentation {
                 return Ok(None);
             }
             let segment_metric = if cross_table { None } else { metric.clone() };
