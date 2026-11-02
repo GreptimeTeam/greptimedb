@@ -1137,20 +1137,25 @@ fn claim_evidence(
     partition: usize,
     partitions: usize,
     pool: &Arc<dyn MemoryPool>,
-) -> Arc<DuplicateEvidence> {
+) -> DataFusionResult<Arc<DuplicateEvidence>> {
     let mut generations = slot.lock().unwrap_or_else(|e| e.into_inner());
-    if generations.evidence.is_none()
-        || generations.issued.get(partition).copied().unwrap_or(true)
-        || generations
-            .evidence
-            .as_ref()
-            .is_some_and(|evidence| evidence.finished())
+    let evidence = generations.evidence.as_ref();
+    // An aborted generation is dead even while claims remain: otherwise a dropped execution
+    // would strand later partitions in its incomplete generation.
+    if evidence.is_none()
+        || evidence.is_some_and(|evidence| evidence.finished() || evidence.aborted())
     {
         generations.evidence = Some(Arc::new(DuplicateEvidence::new(pool, partitions)));
         generations.issued = vec![false; partitions];
+    } else if generations.issued.get(partition).copied().unwrap_or(false) {
+        // Repeated claims cannot safely infer an execution boundary from call order: cancellation
+        // followed by reuse can interleave partitions from two executions into one generation.
+        return Err(DataFusionError::Execution(
+            "FusedSeries plan instance was executed more than once for the same partition".into(),
+        ));
     }
     generations.issued[partition] = true;
-    Arc::clone(generations.evidence.as_ref().unwrap())
+    Ok(Arc::clone(generations.evidence.as_ref().unwrap()))
 }
 
 /// The physical node that runs a compiled native tree over its input's raw series.
@@ -1477,7 +1482,7 @@ impl ExecutionPlan for FusedSeriesExec {
                 partition,
                 partitions,
                 &context.runtime_env().memory_pool,
-            ))
+            )?)
         } else {
             None
         };

@@ -796,7 +796,7 @@ fn binary_field(
         // allocates, it is charged by the block it takes as it grows, and it is dropped with the
         // scan, so the next group's list replaces it.
         let mut duplicate_at: Option<usize> = None;
-        let group_key = Arc::new(key.clone());
+        let mut group_key: Option<Arc<GroupKey>> = None;
         overlap(
             one,
             members,
@@ -818,7 +818,7 @@ fn binary_field(
                         evidence.field,
                         point,
                         0,
-                        Arc::clone(&group_key),
+                        Arc::clone(group_key.get_or_insert_with(|| Arc::new(key.clone()))),
                         side,
                         timestamp_at(point),
                     )?;
@@ -1661,6 +1661,11 @@ impl DuplicateEvidence {
     /// Whether every output partition has completed or aborted this evidence generation.
     pub fn finished(&self) -> bool {
         self.remaining.load(std::sync::atomic::Ordering::Acquire) == 0
+    }
+
+    /// Whether any claim in this generation was aborted.
+    pub fn aborted(&self) -> bool {
+        self.aborted.load(std::sync::atomic::Ordering::Acquire)
     }
 
     #[cfg(test)]

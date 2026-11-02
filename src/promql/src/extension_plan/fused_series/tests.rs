@@ -4719,16 +4719,69 @@ fn duplicate_evidence_claims_share_generation_and_reset_finished_or_reissued_par
         evidence: None,
         issued: Vec::new(),
     });
-    let first = claim_evidence(&slot, 0, 2, &pool);
-    let second = claim_evidence(&slot, 1, 2, &pool);
+    let first = claim_evidence(&slot, 0, 2, &pool).unwrap();
+    let second = claim_evidence(&slot, 1, 2, &pool).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
     first.complete();
     second.complete();
 
-    let after_finished = claim_evidence(&slot, 0, 2, &pool);
+    let after_finished = claim_evidence(&slot, 0, 2, &pool).unwrap();
     assert!(!Arc::ptr_eq(&first, &after_finished));
-    let after_reclaim = claim_evidence(&slot, 0, 2, &pool);
-    assert!(!Arc::ptr_eq(&after_finished, &after_reclaim));
+    after_finished.abort();
+    let after_aborted = claim_evidence(&slot, 0, 2, &pool).unwrap();
+    assert!(!Arc::ptr_eq(&after_finished, &after_aborted));
+}
+
+#[tokio::test]
+async fn duplicate_evidence_reclaims_partition_after_an_abandoned_execution() {
+    let exec = duplicate_evidence_partitioned_exec(
+        vec![
+            vec![
+                match_series("k", "right-a", GRID_START - 1, 1.0),
+                match_series("k", "right-b", GRID_START - 1, 2.0),
+            ],
+            vec![match_series("k", "left", GRID_START, 3.0)],
+        ],
+        0,
+        GRID_STEP,
+    );
+    let context = SessionContext::default().task_ctx();
+    drop(exec.execute(0, Arc::clone(&context)).unwrap());
+
+    let partition_one = exec.execute(1, Arc::clone(&context)).unwrap();
+    let partition_zero = exec.execute(0, context).unwrap();
+
+    let (one, zero) = tokio::join!(
+        partition_one.try_collect::<Vec<_>>(),
+        partition_zero.try_collect::<Vec<_>>()
+    );
+    let errors = [one.err(), zero.err()]
+        .into_iter()
+        .flatten()
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("found duplicate series for the match group")),
+        "{errors:?}"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_evidence_rejects_concurrent_reissue_of_one_partition() {
+    let exec = duplicate_evidence_partitioned_exec(vec![vec![], vec![]], 0, 0);
+    let context = SessionContext::default().task_ctx();
+    let stream = exec.execute(0, Arc::clone(&context)).unwrap();
+    let error = exec
+        .execute(0, context)
+        .err()
+        .expect("duplicate claim is rejected");
+    assert!(
+        error.to_string().contains("executed more than once"),
+        "{error}"
+    );
+    drop(stream);
 }
 
 fn duplicate_evidence_partitioned_exec(
