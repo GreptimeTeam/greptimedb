@@ -164,7 +164,7 @@ impl CatalogInfo for CatalogManagerWrapper {
         if self.catalog_name == DEFAULT_CATALOG_NAME {
             CatalogManager::catalog_names(self.catalog_manager()?.as_ref())
                 .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))
+                .map_err(DataFusionError::from)
         } else {
             Ok(vec![self.catalog_name.clone()])
         }
@@ -178,7 +178,7 @@ impl CatalogInfo for CatalogManagerWrapper {
             .schema_names(catalog_name, None)
             .await
             .map(Some)
-            .map_err(|e| DataFusionError::External(Box::new(e)))
+            .map_err(DataFusionError::from)
     }
 
     async fn table_names(
@@ -190,7 +190,7 @@ impl CatalogInfo for CatalogManagerWrapper {
             .table_names(catalog_name, schema_name, None)
             .await
             .map(Some)
-            .map_err(|e| DataFusionError::External(Box::new(e)))
+            .map_err(DataFusionError::from)
     }
 
     async fn table_schema(
@@ -203,7 +203,7 @@ impl CatalogInfo for CatalogManagerWrapper {
             .catalog_manager()?
             .table(catalog_name, schema_name, table_name, None)
             .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            .map_err(DataFusionError::from)?;
 
         Ok(table.map(|t| t.schema().arrow_schema().clone()))
     }
@@ -218,7 +218,7 @@ impl CatalogInfo for CatalogManagerWrapper {
             .catalog_manager()?
             .table(catalog_name, schema_name, table_name, None)
             .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            .map_err(DataFusionError::from)?;
 
         Ok(table.map(|t| t.table_type().into()))
     }

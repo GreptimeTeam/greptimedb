@@ -166,6 +166,14 @@ impl RecordingRegionService {
                 .rows
                 .as_ref()
                 .map_or(1, |rows| rows.rows.len()),
+            Some(Body::BulkInsert(BulkInsertRequest {
+                body: Some(bulk_insert_request::Body::ArrowIpc(ipc)),
+                ..
+            })) => FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                .unwrap()
+                .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                .unwrap()
+                .num_rows(),
             _ => 1,
         };
         self.requests.lock().unwrap().push(request);
@@ -2366,6 +2374,157 @@ async fn test_tracked_batches_preserve_peers_and_headers() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn test_tracked_writes_retry_independently() {
+    for hint in [RetryHint::Retryable, RetryHint::RetryAfterRouteRefresh] {
+        for (shared, mismatched) in [(false, false), (true, false), (false, true)] {
+            let server = RegionTestServer::start().await;
+            server.fail_region(2, [hint]);
+            if mismatched {
+                *server.service.response_rows.lock().unwrap() = Some(1);
+            } else {
+                server.fail_region(1, [RetryHint::NonRetryable]);
+            }
+            let backend = test_util::prepare_mocked_backend().await;
+            test_util::create_partition_rule_manager(backend.clone()).await;
+            update_table_leader(&backend, &server.peer).await;
+            let (partition_manager, _, registry, catalog_manager) = create_routing_caches(backend);
+            let invalidator = Arc::new(RecordingCacheInvalidator {
+                inner: Some(registry),
+                ..Default::default()
+            });
+            let dispatcher =
+                WriteDispatcher::new(Arc::new(NodeClients::default()), partition_manager)
+                    .with_retry(build_retry_options(2), catalog_manager, invalidator.clone());
+            let writes = vec![
+                TrackedWrite {
+                    request: build_partitioned_request(WriteKind::Insert, 1, None, &[101, 102]),
+                    owners: vec![0, 0],
+                },
+                TrackedWrite {
+                    request: build_partitioned_request(
+                        if shared {
+                            WriteKind::BulkInsert
+                        } else {
+                            WriteKind::Insert
+                        },
+                        2,
+                        None,
+                        if shared { &[11, 12] } else { &[11] },
+                    ),
+                    owners: if shared { vec![0, 1] } else { vec![1] },
+                },
+                TrackedWrite {
+                    request: build_partitioned_request(WriteKind::Insert, 3, None, &[1]),
+                    owners: vec![1],
+                },
+            ];
+            let progress = dispatcher.dispatch_tracked(writes, 2, None).await;
+            assert_eq!(progress[0].affected_rows, usize::from(shared));
+            let error = progress[0].error.as_ref().unwrap();
+            assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
+            assert_eq!(
+                error.status_code(),
+                if mismatched {
+                    StatusCode::Unexpected
+                } else {
+                    StatusCode::InvalidArguments
+                }
+            );
+            assert_eq!(progress[1].affected_rows, 2);
+            assert!(progress[1].error.is_none(), "{:?}", progress[1].error);
+            assert_eq!(
+                server.attempt_counts(),
+                HashMap::from([
+                    (RegionId::new(1, 1).as_u64(), 1),
+                    (RegionId::new(1, 2).as_u64(), 2),
+                    (RegionId::new(1, 3).as_u64(), 1),
+                ])
+            );
+            assert_eq!(
+                invalidator.calls.lock().unwrap().len(),
+                if hint == RetryHint::RetryAfterRouteRefresh {
+                    2
+                } else {
+                    0
+                }
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_tracked_batches_validate_all_failed_acknowledgements() {
+    for malformed in [false, true] {
+        let server = RegionTestServer::start().await;
+        *server.service.response_rows.lock().unwrap() = malformed.then_some(2);
+        for region in [1, 2] {
+            server.fail_region(region, [RetryHint::Retryable]);
+        }
+        let dispatcher = server.create_dispatcher(2).await;
+        let writes = [1, 2]
+            .into_iter()
+            .map(|region| TrackedWrite {
+                request: build_partitioned_request(WriteKind::Insert, region, None, &[20]),
+                owners: vec![0],
+            })
+            .collect();
+        let progress = dispatcher.dispatch_tracked(writes, 1, None).await;
+        assert_eq!(progress[0].affected_rows, if malformed { 0 } else { 2 });
+        if malformed {
+            let error = progress[0].error.as_ref().unwrap();
+            assert!(error.to_string().contains("cannot attribute"), "{error:?}");
+            assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
+        } else {
+            assert!(progress[0].error.is_none());
+        }
+        assert_eq!(
+            *server.service.request_sizes.lock().unwrap(),
+            if malformed { vec![2] } else { vec![2, 2] }
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_tracked_batches_invalid_acknowledgement_is_local_to_rpc() {
+    let first = RegionTestServer::start().await;
+    let second = RegionTestServer::start().await;
+    *first.service.response_rows.lock().unwrap() = Some(2);
+    first.fail_region(2, [RetryHint::Retryable]);
+    second.fail_region(3, [RetryHint::Retryable]);
+    let dispatcher = first.create_dispatcher(2).await;
+    let requests = [1, 2, 3]
+        .into_iter()
+        .map(|region| TrackedWrite {
+            request: build_partitioned_request(WriteKind::Insert, region, None, &[20]),
+            owners: vec![0],
+        })
+        .collect();
+    let (mut writes, progress) = dispatcher.prepare_tracked(requests, 1).await;
+    for write in &mut writes {
+        if write_region_id(&write.request).unwrap().region_number() == 3 {
+            write.peer = Arc::new(second.peer.clone());
+        }
+    }
+    let progress = dispatcher
+        .execute_tracked(writes, progress, None, None)
+        .await;
+    assert_eq!(progress[0].affected_rows, 1);
+    let error = progress[0].error.as_ref().unwrap();
+    assert!(error.to_string().contains("cannot attribute"), "{error:?}");
+    assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
+    assert_eq!(*first.service.request_sizes.lock().unwrap(), [2]);
+    assert_eq!(*second.service.request_sizes.lock().unwrap(), [1, 1]);
+    assert_eq!(
+        first.attempt_counts(),
+        HashMap::from([
+            (RegionId::new(1, 1).as_u64(), 1),
+            (RegionId::new(1, 2).as_u64(), 1),
+        ])
+    );
+    assert_eq!(second.attempt_counts()[&RegionId::new(1, 3).as_u64()], 2);
 }
 
 #[tokio::test]

@@ -109,7 +109,7 @@ impl SystemTable for InformationSchemaProcessList {
                 make_process_list(process_manager, request)
                     .await
                     .map(RecordBatch::into_df_record_batch)
-                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))
+                    .map_err(datafusion::error::DataFusionError::from)
             }),
         ));
 

@@ -415,10 +415,35 @@ impl WriteDispatcher {
         let mut owners = owners.into_iter();
         match error {
             Error::PartialRegion { response } => {
+                let mut failures: HashMap<_, _> = response.failures.into_iter().collect();
+                if !owners.as_slice().is_empty() {
+                    let expected_rows = owners
+                        .as_slice()
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| !failures.contains_key(index))
+                        .map(|(_, owners)| owners.len())
+                        .sum::<usize>();
+                    // An inconsistent acknowledgement makes this RPC unsafe to attribute or retry.
+                    if response.affected_rows != expected_rows {
+                        return vec![(
+                            owners.flatten().collect(),
+                            WriteAttempt::Failed {
+                                error: UnexpectedSnafu {
+                                    err_msg: format!(
+                                        "Write acknowledged {} rows, expected {expected_rows}; cannot attribute this acknowledgement",
+                                        response.affected_rows
+                                    ),
+                                }
+                                .build(),
+                                request: None,
+                            },
+                        )];
+                    }
+                }
                 if let Some(progress) = progress {
                     progress.add_written(response.affected_rows);
                 }
-                let mut failures: HashMap<_, _> = response.failures.into_iter().collect();
                 let mut attempts = Vec::new();
                 let mut success_owners = Vec::new();
                 for (index, request) in requests.into_iter().enumerate() {

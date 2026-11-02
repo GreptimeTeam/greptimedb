@@ -358,6 +358,7 @@ mod tests {
 
     use base64::Engine;
     use base64::prelude::BASE64_STANDARD;
+    use common_error::ext::{BoxedError, ErrorExt};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::physical_expr::expressions::{BinaryExpr, Column, InListExpr, lit};
     use datafusion::physical_plan::expressions::col;
@@ -654,8 +655,9 @@ mod tests {
         let DataFusionError::External(error) = err else {
             panic!("expected external common query error, got: {err:?}");
         };
+        let error = error.downcast_ref::<BoxedError>().unwrap();
         assert!(matches!(
-            error.downcast_ref::<CommonQueryError>(),
+            error.as_any().downcast_ref::<CommonQueryError>(),
             Some(CommonQueryError::DynFilterPayloadTooLarge { .. })
         ));
     }

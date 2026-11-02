@@ -45,6 +45,7 @@ struct TrackedBatch {
 impl WriteDispatcher {
     /// Collects acknowledgements per input across shared flushes and repartition retries.
     /// Records each datanode send attempt, including retries, in the optional histogram.
+    /// Continues retryable writes after a sibling fails, retaining each input's error and confirmed rows.
     pub async fn dispatch_tracked(
         &self,
         requests: Vec<TrackedWrite>,
@@ -152,7 +153,6 @@ impl WriteDispatcher {
             };
             pending = Vec::new();
             let mut refresh = Vec::new();
-            let mut terminal = false;
             for (owners, attempt) in attempts {
                 match attempt {
                     WriteAttempt::Success(response) if response.affected_rows == owners.len() => {
@@ -161,7 +161,6 @@ impl WriteDispatcher {
                         }
                     }
                     WriteAttempt::Success(response) => {
-                        terminal = true;
                         record_failure(&mut progress, &owners, UnexpectedSnafu {
                             err_msg: format!("Write acknowledged {} rows, expected {}; cannot attribute this acknowledgement", response.affected_rows, owners.len()),
                         }.build());
@@ -181,7 +180,6 @@ impl WriteDispatcher {
                         error,
                         request: None,
                     } => {
-                        terminal = true;
                         record_failure(&mut progress, &owners, error);
                     }
                 }
@@ -189,9 +187,7 @@ impl WriteDispatcher {
             if failures.is_empty() {
                 break;
             }
-            let delay = (!terminal)
-                .then(|| backoff.as_mut().and_then(Iterator::next))
-                .flatten();
+            let delay = backoff.as_mut().and_then(Iterator::next);
             let (Some(delay), Some(retry)) = (delay, &self.retry) else {
                 break;
             };

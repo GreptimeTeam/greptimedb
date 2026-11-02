@@ -15,10 +15,11 @@
 use std::any::Any;
 use std::fmt::Debug;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_query::error::datafusion_status_code;
+use common_recordbatch::error::datafusion_retry_hint;
 use datafusion::error::DataFusionError;
 use snafu::{Location, Snafu};
 
@@ -383,19 +384,78 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::GetTableCache { source, .. }
+            | Error::GetViewCache { source, .. }
+            | Error::TableMetadataManager { source, .. }
+            | Error::HandleQuery { source, .. } => source.retry_hint(),
+            Error::ListCatalogs { source, .. }
+            | Error::ListSchemas { source, .. }
+            | Error::ListTables { source, .. }
+            | Error::ListNodes { source, .. }
+            | Error::ListRegionStats { source, .. }
+            | Error::ListFlowStats { source, .. }
+            | Error::ListFlows { source, .. }
+            | Error::ListProcedures { source, .. }
+            | Error::ConvertProtoData { source, .. }
+            | Error::Internal { source, .. } => source.retry_hint(),
+            Error::FindPartitions { source } | Error::FindRegionRoutes { source } => {
+                source.retry_hint()
+            }
+            Error::CreateRecordBatch { source, .. } => source.retry_hint(),
+            Error::DecodePlan { source, .. } => source.retry_hint(),
+            Error::InvokeFrontend { source, .. } => source.retry_hint(),
+            Error::Datafusion { error, .. } | Error::ProjectViewColumns { error, .. } => {
+                datafusion_retry_hint::<Self>(error)
+            }
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> Self {
-        DataFusionError::External(Box::new(e))
+        DataFusionError::External(Box::new(BoxedError::new(e)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use snafu::GenerateImplicitData;
+    use std::sync::Arc;
+
+    use common_error::mock::MockError;
+    use snafu::{GenerateImplicitData, IntoError};
 
     use super::*;
+
+    #[test]
+    fn test_cache_error_preserves_retry_hint() {
+        let source =
+            common_meta::error::GetLatestCacheRetryExceededSnafu { attempts: 3_usize }.build();
+        let error = GetTableCacheSnafu.into_error(source);
+        assert_eq!(error.retry_hint(), RetryHint::Retryable);
+
+        for hint in [
+            RetryHint::NonRetryable,
+            RetryHint::Retryable,
+            RetryHint::RetryAfterRouteRefresh,
+        ] {
+            let source = common_meta::error::Error::GetCache {
+                source: Arc::new(common_meta::error::Error::External {
+                    source: BoxedError::new(
+                        MockError::new(StatusCode::RegionBusy).with_retry_hint(hint),
+                    ),
+                    location: Location::default(),
+                }),
+            };
+            let error = GetTableCacheSnafu.into_error(source);
+            assert_eq!(error.retry_hint(), hint);
+            let error = DatafusionSnafu.into_error(DataFusionError::from(error));
+            assert_eq!(error.retry_hint(), hint);
+        }
+    }
 
     #[test]
     pub fn test_errors_to_datafusion_error() {
