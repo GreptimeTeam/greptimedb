@@ -386,7 +386,7 @@ fn is_variant_leaf(leaf_col: &ColumnDescriptor) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use parquet::basic::{ConvertedType, LogicalType, Repetition};
+    use parquet::basic::{ConvertedType, LogicalType, Repetition, VariantType};
     use parquet::errors::ParquetError;
     use parquet::schema::types::Type;
 
@@ -816,9 +816,9 @@ mod tests {
         let remainder = Arc::new(
             Type::group_type_builder(JSON2_REMAINDER_FIELD_NAME)
                 .with_repetition(Repetition::OPTIONAL)
-                .with_logical_type(Some(LogicalType::Variant {
+                .with_logical_type(Some(LogicalType::Variant(VariantType {
                     specification_version: None,
-                }))
+                })))
                 .with_fields(vec![metadata, value])
                 .build()?,
         );

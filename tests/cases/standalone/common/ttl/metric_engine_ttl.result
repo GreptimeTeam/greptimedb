@@ -43,8 +43,10 @@ ADMIN compact_table('phy');
 --- should be expired --
 SELECT val, host FROM test_ttl;
 
-++
-++
++-----+------+
+| val | host |
++-----+------+
++-----+------+
 
 ALTER TABLE phy SET ttl = '1 day';
 

@@ -277,6 +277,10 @@ impl App for Instance {
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
+    /// The address to bind the dedicated public HTTP API server. Setting this
+    /// flag also enables the API server.
+    #[clap(long)]
+    http_api_server_addr: Option<String>,
     #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "rpc-addr")]
     grpc_bind_addr: Option<String>,
     #[clap(long)]
@@ -365,6 +369,11 @@ impl StartCommand {
 
         if let Some(addr) = &self.http_addr {
             opts.http.addr.clone_from(addr);
+        }
+
+        if let Some(addr) = &self.http_api_server_addr {
+            opts.http.api_server_addr.clone_from(addr);
+            opts.http.enable_api_server = true;
         }
 
         if let Some(data_home) = &self.data_home {
@@ -1363,6 +1372,38 @@ mod tests {
                 assert_eq!(fe_opts.grpc.bind_addr, GrpcOptions::default().bind_addr);
             },
         );
+    }
+
+    #[test]
+    fn test_http_api_server_cli_overrides_config() {
+        // Regression for the monitor startup failure in #10073 with Operator v1.3.0.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+            [http]
+            addr = "127.0.0.1:14000"
+            enable_api_server = false
+            api_server_addr = "127.0.0.1:14006"
+            "#
+        )
+        .unwrap();
+        let command = StartCommand::try_parse_from([
+            "standalone",
+            "--config-file",
+            file.path().to_str().unwrap(),
+            "--http-api-server-addr",
+            "127.0.0.1:24006",
+        ])
+        .unwrap();
+        let opts = command
+            .load_options(&GlobalOptions::default())
+            .unwrap()
+            .component;
+
+        assert_eq!(opts.http.addr, "127.0.0.1:14000");
+        assert!(opts.http.enable_api_server);
+        assert_eq!(opts.http.api_server_addr, "127.0.0.1:24006");
     }
 
     #[test]

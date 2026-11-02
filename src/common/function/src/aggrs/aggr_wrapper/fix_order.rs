@@ -144,7 +144,6 @@ fn rewrite_expr(
     let Some(old_state_wrapper) = aggregate_function
         .func
         .inner()
-        .as_any()
         .downcast_ref::<StateWrapper>()
     else {
         return Ok(Transformed::no(Expr::AggregateFunction(aggregate_function)));

@@ -179,9 +179,6 @@ impl NameAwareCatalogList {
 }
 
 impl CatalogProviderList for NameAwareCatalogList {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn register_catalog(
         &self,
         _name: String,
@@ -203,9 +200,6 @@ struct NameAwareCatalogProvider {
 }
 
 impl CatalogProvider for NameAwareCatalogProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn schema_names(&self) -> Vec<String> {
         vec![]
     }
@@ -229,9 +223,6 @@ impl std::fmt::Debug for NameAwareSchemaProvider {
 
 #[async_trait::async_trait]
 impl SchemaProvider for NameAwareSchemaProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn table_names(&self) -> Vec<String> {
         vec![]
     }

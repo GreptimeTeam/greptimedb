@@ -58,7 +58,8 @@ SELECT a FROM v1;
 
 SELECT n FROM v1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: No field named n. Valid fields are v1.a.
+Error: 3000(PlanQuery), Failed to plan SQL: No field named n.
+Valid fields are v1.a.
 
 CREATE OR REPLACE VIEW v1 (a, b) AS SELECT n, n+1 FROM t1;
 
@@ -167,11 +168,13 @@ SELECT a,b FROM v1;
 
 SELECT n FROM v1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: No field named n. Valid fields are v1.a, v1.b.
+Error: 3000(PlanQuery), Failed to plan SQL: No field named n.
+Valid fields are v1.a, v1.b.
 
 SELECT * FROM v1 WHERE n > 5;
 
-Error: 3000(PlanQuery), Failed to plan SQL: No field named n. Valid fields are v1.a, v1.b.
+Error: 3000(PlanQuery), Failed to plan SQL: No field named n.
+Valid fields are v1.a, v1.b.
 
 -- test view after altering table t1 --
 CREATE OR REPLACE VIEW v1 AS SELECT n, ts FROM t1 LIMIT 5;
@@ -212,7 +215,8 @@ Affected Rows: 0
 
 SELECT * FROM v1;
 
-Error: 1002(Unexpected), Failed to decode DataFusion plan: No field named n. Valid fields are greptime.public.t1.ts, greptime.public.t1.s.
+Error: 1002(Unexpected), Failed to decode DataFusion plan: No field named n.
+Valid fields are greptime.public.t1.ts, greptime.public.t1.s.
 
 DROP VIEW v1;
 

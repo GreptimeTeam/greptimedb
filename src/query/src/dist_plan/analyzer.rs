@@ -250,7 +250,9 @@ fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<Logical
 impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
-        let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
+        // DF55 can leave nested scalar subqueries for physical execution, so their
+        // table scans must also be wrapped in MergeScan at every depth.
+        let plan = plan.transform_with_subqueries(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();
         let result = plan.data.rewrite(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
@@ -648,13 +650,9 @@ impl PlanRewriter {
         }
 
         if let LogicalPlan::TableScan(table_scan) = plan
-            && let Some(source) = table_scan
-                .source
-                .as_any()
-                .downcast_ref::<DefaultTableSource>()
+            && let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>()
             && let Some(provider) = source
                 .table_provider
-                .as_any()
                 .downcast_ref::<DfTableProviderAdapter>()
         {
             let table = provider.table();

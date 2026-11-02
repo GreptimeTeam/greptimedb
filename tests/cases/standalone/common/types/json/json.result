@@ -131,8 +131,10 @@ Error: 3001(EngineExecuteQuery), Execution error: cannot parse 'Morning my frien
 
 SELECT json_to_string(j), t FROM jsons;
 
-++
-++
++-------------------------+---+
+| json_to_string(jsons.j) | t |
++-------------------------+---+
++-------------------------+---+
 
 CREATE TABLE json_empty (j JSON, t timestamp time index);
 

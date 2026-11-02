@@ -22,8 +22,10 @@ Affected Rows: 3
 -- SQLNESS ARG restart=true
 SELECT * FROM system_metrics;
 
-++
-++
++------+-----+----------+-------------+-----------+----+
+| host | idc | cpu_util | memory_util | disk_util | ts |
++------+-----+----------+-------------+-----------+----+
++------+-----+----------+-------------+-----------+----+
 
 INSERT INTO system_metrics
 VALUES

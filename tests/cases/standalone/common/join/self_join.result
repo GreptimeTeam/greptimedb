@@ -44,8 +44,10 @@ JOIN employees_self m ON e.manager_id = m."id"
 WHERE e.salary > m.salary
 ORDER BY e."name";
 
-++
-++
++----------+--------+---------+----------------+
+| employee | salary | manager | manager_salary |
++----------+--------+---------+----------------+
++----------+--------+---------+----------------+
 
 -- Self join to find colleagues (same manager)
 SELECT e1."name" as employee1, e2."name" as employee2, m."name" as shared_manager

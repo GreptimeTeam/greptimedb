@@ -47,7 +47,9 @@ mod test {
     use common_telemetry::tracing_context::TracingContext;
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{Int32Vector, StringVector, TimestampMillisecondVector};
+    use datatypes::vectors::{
+        Int32Vector, StringVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    };
     use futures_util::{Stream, StreamExt};
     use hyper_util::rt::TokioIo;
     use itertools::Itertools;
@@ -518,6 +520,82 @@ mod test {
             !region_watermark_map.is_empty(),
             "standalone affected-rows output should contain at least one region watermark"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_bulk_widen_partitioned_time_index() {
+        // https://github.com/GreptimeTeam/greptimedb/issues/9747
+        // Bulk writes route through `MultiDimPartitionRule::split_record_batch`,
+        // which evaluates the persisted partition bounds against the batch. The
+        // bounds keep the unit they were created with, so widening the time
+        // index unit must not mix timestamp units during that evaluation.
+        common_telemetry::init_default_ut_logging();
+
+        let (db, server) = setup_grpc_server(
+            StorageType::File,
+            "test_flight_bulk_widen_partitioned_time_index",
+        )
+        .await;
+        let addr = server.bind_addr().unwrap().to_string();
+
+        let client = Client::with_urls(vec![addr]);
+        let client = Database::new_with_dbname("greptime-public", client);
+
+        client
+            .sql(
+                "CREATE TABLE foo (host STRING, ts TIMESTAMP TIME INDEX) \
+                 PARTITION ON COLUMNS (ts) (\
+                   ts < '2024-01-02 00:00:00', \
+                   ts >= '2024-01-02 00:00:00'\
+                 )",
+            )
+            .await
+            .unwrap();
+        client
+            .sql("ALTER TABLE foo MODIFY COLUMN ts TIMESTAMP_NS")
+            .await
+            .unwrap();
+
+        // 2024-01-02 00:00:00 UTC == 1704153600000 ms; rows below and above the
+        // bound, expressed in the widened nanosecond unit ("c" only exists in ns).
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let batch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(StringVector::from_vec(vec![
+                    "a".to_string(),
+                    "b".to_string(),
+                    "c".to_string(),
+                ])) as VectorRef,
+                Arc::new(TimestampNanosecondVector::from_vec(vec![
+                    1_704_153_599_500_000_000,
+                    1_704_153_600_000_000_000,
+                    1_704_153_600_000_000_001,
+                ])) as VectorRef,
+            ],
+        )
+        .unwrap();
+
+        test_put_record_batches(&client, vec![batch]).await;
+
+        let sql = "select host, ts from foo order by ts";
+        let expected = "\
++------+-------------------------------+
+| host | ts                            |
++------+-------------------------------+
+| a    | 2024-01-01T23:59:59.500       |
+| b    | 2024-01-02T00:00:00           |
+| c    | 2024-01-02T00:00:00.000000001 |
++------+-------------------------------+";
+        query_and_expect(db.frontend().as_ref(), sql, expected).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

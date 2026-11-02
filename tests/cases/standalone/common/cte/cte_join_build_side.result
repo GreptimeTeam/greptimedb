@@ -59,16 +59,15 @@ GROUP BY t."db" ORDER BY c DESC, t."db";
 | logical_plan  | Sort: c DESC NULLS FIRST, t.db ASC NULLS LAST                                                            |
 |               |   Projection: t.db, count(Int64(1)) AS count(*) AS c                                                     |
 |               |     Aggregate: groupBy=[[t.db]], aggr=[[count(Int64(1))]]                                                |
-|               |       Projection: t.db                                                                                   |
-|               |         Inner Join: t.db = td.db                                                                         |
-|               |           Projection: t.db                                                                               |
-|               |             MergeScan [is_placeholder=false, remote_input=[                                              |
+|               |       LeftSemi Join: t.db = td.db                                                                        |
+|               |         Projection: t.db                                                                                 |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                |
 |               | SubqueryAlias: t                                                                                         |
 |               |   Filter: cte_join_logs.db IS NOT NULL                                                                   |
 |               |     TableScan: cte_join_logs, partial_filters=[cte_join_logs.db IS NOT NULL]                             |
 |               | ]]                                                                                                       |
-|               |           Projection: td.db                                                                              |
-|               |             MergeScan [is_placeholder=false, remote_input=[                                              |
+|               |         Projection: td.db                                                                                |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                |
 |               | SubqueryAlias: td                                                                                        |
 |               |   SubqueryAlias: top_dbs                                                                                 |
 |               |     Filter: cte_join_logs.db IS NOT NULL                                                                 |
@@ -78,13 +77,13 @@ GROUP BY t."db" ORDER BY c DESC, t."db";
 |               |             Aggregate: groupBy=[[cte_join_logs.db]], aggr=[[count(cte_join_logs.ts) AS count(Int64(1))]] |
 |               |               TableScan: cte_join_logs                                                                   |
 |               | ]]                                                                                                       |
-| physical_plan | SortPreservingMergeExec: [c@1 DESC, db@0 ASC NULLS LAST]                                                 |
-|               |   SortExec: expr=[c@1 DESC, db@0 ASC NULLS LAST], preserve_REDACTED
-|               |     ProjectionExec: expr=[db@0 as db, count(Int64(1))@1 as c]                                            |
+| physical_plan | ProjectionExec: expr=[db@0 as db, count(Int64(1))@1 as c]                                                |
+|               |   SortPreservingMergeExec: [count(Int64(1))@1 DESC, db@0 ASC NULLS LAST]                                 |
+|               |     SortExec: expr=[count(Int64(1))@1 DESC, db@0 ASC NULLS LAST], preserve_REDACTED
 |               |       AggregateExec: mode=FinalPartitioned, gby=[db@0 as db], aggr=[count(Int64(1))]                     |
 |               |         RepartitionExec: REDACTED
 |               |           AggregateExec: mode=Partial, gby=[db@0 as db], aggr=[count(Int64(1))]                          |
-|               |             HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(db@0, db@0)], projection=[db@1]        |
+|               |             HashJoinExec: mode=CollectLeft, join_type=RightSemi, on=[(db@0, db@0)]                       |
 |               |               ProjectionExec: expr=[db@0 as db]                                                          |
 |               |                 MergeScanExec: REDACTED
 |               |               RepartitionExec: REDACTED

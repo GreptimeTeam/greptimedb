@@ -55,12 +55,10 @@ impl ParallelizeScan {
 
         let result = plan
             .transform_down(|plan| {
-                if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
+                if let Some(sort_exec) = plan.downcast_ref::<SortExec>() {
                     // save the first order expr
                     first_order_expr = Some(sort_exec.expr().first()).cloned();
-                } else if let Some(region_scan_exec) =
-                    plan.as_any().downcast_ref::<RegionScanExec>()
-                {
+                } else if let Some(region_scan_exec) = plan.downcast_ref::<RegionScanExec>() {
                     let expected_partition_num = config.execution.target_partitions;
                     if region_scan_exec.is_partition_set()
                         || region_scan_exec.scanner_type().as_str() == "SinglePartition"

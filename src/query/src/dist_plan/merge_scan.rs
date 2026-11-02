@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 #[cfg(test)]
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
@@ -40,9 +39,10 @@ use datafusion::physical_plan::metrics::{
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream,
+    SendableRecordBatchStream, apply_expression_roots,
 };
 use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, Statistics};
 use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
@@ -67,6 +67,7 @@ use crate::dist_plan::dyn_filter_bridge::{
     CapturedDynFilter, capture_remote_dyn_filters_for_pushdown,
     query_context_with_refreshed_initial_dyn_filter_regs,
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
+    resolve_scalar_subquery_dyn_filters,
 };
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
@@ -122,6 +123,22 @@ fn remote_plan_row_bound(plan: &LogicalPlan) -> Option<usize> {
             }
         }
         _ => None,
+    }
+}
+
+fn pushdown_phase_slot(phase: FilterPushdownPhase) -> usize {
+    match phase {
+        FilterPushdownPhase::Pre => 0,
+        FilterPushdownPhase::Post => 1,
+    }
+}
+
+/// Producer-local ordinals must be unique across phases because they are part of the
+/// remote filter id; pre-phase filters use the upper half of the `u32` ordinal space.
+fn first_producer_local_ordinal(phase: FilterPushdownPhase) -> usize {
+    match phase {
+        FilterPushdownPhase::Pre => 1 << 31,
+        FilterPushdownPhase::Post => 0,
     }
 }
 
@@ -482,7 +499,10 @@ pub struct MergeScanExec {
     query_ctx: QueryContextRef,
     /// Optional because RDF must fail open: missing ids skip RDF but keep normal query execution.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
-    captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
+    /// Filters captured by each filter pushdown phase, indexed by [`pushdown_phase_slot`].
+    /// The pre-optimization phase carries `FilterExec` predicates (e.g. scalar subquery
+    /// filters) and the post-optimization phase carries dynamic filters from joins and TopK.
+    captured_remote_dyn_filters: Arc<Mutex<[Vec<CapturedDynFilter>; 2]>>,
     target_partition: usize,
     enable_per_region_metrics: bool,
 }
@@ -615,6 +635,7 @@ impl MergeScanExec {
         } else {
             Vec::new()
         };
+        resolve_scalar_subquery_dyn_filters(&captured_remote_dyn_filters);
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
@@ -888,7 +909,7 @@ impl MergeScanExec {
     }
 
     fn captured_remote_dyn_filters(&self) -> Vec<CapturedDynFilter> {
-        self.captured_remote_dyn_filters.lock().unwrap().clone()
+        self.captured_remote_dyn_filters.lock().unwrap().concat()
     }
 
     pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
@@ -1049,10 +1070,6 @@ impl Drop for PartitionMetrics {
 }
 
 impl ExecutionPlan for MergeScanExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> ArrowSchemaRef {
         self.arrow_schema.clone()
     }
@@ -1063,6 +1080,24 @@ impl ExecutionPlan for MergeScanExec {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(
+            &Arc<dyn datafusion_physical_expr::PhysicalExpr>,
+        ) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        let captured_remote_dyn_filters = self.captured_remote_dyn_filters();
+        apply_expression_roots(
+            captured_remote_dyn_filters
+                .into_iter()
+                .map(|captured_dyn_filter| {
+                    captured_dyn_filter.alive_dyn_filter
+                        as Arc<dyn datafusion_physical_expr::PhysicalExpr>
+                }),
+            f,
+        )
     }
 
     // DataFusion will swap children unconditionally.
@@ -1076,7 +1111,7 @@ impl ExecutionPlan for MergeScanExec {
 
     fn handle_child_pushdown_result(
         &self,
-        _phase: FilterPushdownPhase,
+        phase: FilterPushdownPhase,
         child_pushdown_result: ChildPushdownResult,
         _config: &datafusion::config::ConfigOptions,
     ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
@@ -1090,7 +1125,7 @@ impl ExecutionPlan for MergeScanExec {
             // Reject remote pushdown instead of pretending success: this keeps
             // DataFusion/local dynamic filter semantics intact while disabling
             // only FE -> DN remote dynamic filter propagation.
-            self.captured_remote_dyn_filters.lock().unwrap().clear();
+            self.captured_remote_dyn_filters.lock().unwrap()[pushdown_phase_slot(phase)].clear();
             let new_self = Arc::new(self.clone());
 
             return Ok(FilterPushdownPropagation {
@@ -1104,7 +1139,7 @@ impl ExecutionPlan for MergeScanExec {
             common_telemetry::warn!(
                 "MergeScan remote dynamic filter producer id is not assigned; skipping remote dynamic filter pushdown"
             );
-            self.captured_remote_dyn_filters.lock().unwrap().clear();
+            self.captured_remote_dyn_filters.lock().unwrap()[pushdown_phase_slot(phase)].clear();
             let new_self = Arc::new(self.clone());
 
             return Ok(FilterPushdownPropagation {
@@ -1112,24 +1147,20 @@ impl ExecutionPlan for MergeScanExec {
                 updated_node: Some(new_self),
             });
         };
-        let remote_dyn_filter_pushdown =
-            capture_remote_dyn_filters_for_pushdown(remote_dyn_filter_producer_id, parent_filters);
-        *self.captured_remote_dyn_filters.lock().unwrap() =
-            remote_dyn_filter_pushdown.captured_dyn_filters;
+        let slot = pushdown_phase_slot(phase);
+        let mut captured_remote_dyn_filters = self.captured_remote_dyn_filters.lock().unwrap();
+        let remote_dyn_filter_pushdown = capture_remote_dyn_filters_for_pushdown(
+            remote_dyn_filter_producer_id,
+            first_producer_local_ordinal(phase),
+            &captured_remote_dyn_filters[1 - slot],
+            parent_filters,
+        );
+        captured_remote_dyn_filters[slot] = remote_dyn_filter_pushdown.captured_dyn_filters;
+        drop(captured_remote_dyn_filters);
         let new_self = Arc::new(self.clone());
 
         Ok(FilterPushdownPropagation {
-            filters: remote_dyn_filter_pushdown
-                .pushed_down
-                .into_iter()
-                .map(|pushdown_ready| {
-                    if pushdown_ready {
-                        PushedDown::Yes
-                    } else {
-                        PushedDown::No
-                    }
-                })
-                .collect(),
+            filters: remote_dyn_filter_pushdown.pushed_down,
             updated_node: Some(new_self),
         })
     }
@@ -1146,14 +1177,14 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
         if partition.is_some() {
-            return Ok(Statistics::new_unknown(&self.arrow_schema));
+            return Ok(Arc::new(Statistics::new_unknown(&self.arrow_schema)));
         }
 
         let mut statistics = Statistics::new_unknown(&self.arrow_schema);
         statistics.num_rows = self.estimated_num_rows();
-        Ok(statistics)
+        Ok(Arc::new(statistics))
     }
 
     fn name(&self) -> &str {
@@ -1317,9 +1348,10 @@ mod tests {
     };
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
-    use datafusion::physical_plan::Partitioning;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
+    use datafusion::physical_plan::{Partitioning, StatisticsArgs, StatisticsContext};
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
+    use datafusion_physical_expr::PhysicalExpr;
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
@@ -1393,6 +1425,12 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    fn merge_scan_statistics(exec: &MergeScanExec) -> Arc<Statistics> {
+        StatisticsContext::new()
+            .compute(exec, &StatisticsArgs::new())
+            .unwrap()
     }
 
     fn task_context_with_engine_state(
@@ -1546,9 +1584,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(regions.clone(), limited, 10)
-                .partition_statistics(None)
-                .unwrap()
+            merge_scan_statistics(&merge_scan_exec_with_plan(regions.clone(), limited, 10))
                 .num_rows,
             Precision::Inexact(100)
         );
@@ -1562,10 +1598,12 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(vec![RegionId::new(1024, 1)], large_limit, 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(
+                vec![RegionId::new(1024, 1)],
+                large_limit,
+                10,
+            ))
+            .num_rows,
             Precision::Inexact(large_bound)
         );
 
@@ -1575,17 +1613,16 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(regions.clone(), uncapped.clone(), 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(
+                regions.clone(),
+                uncapped.clone(),
+                10,
+            ))
+            .num_rows,
             Precision::Absent
         );
         assert_eq!(
-            merge_scan_exec_with_plan(Vec::new(), uncapped, 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(Vec::new(), uncapped, 10)).num_rows,
             Precision::Inexact(0)
         );
 
@@ -1599,10 +1636,12 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(regions.clone(), global_aggregate, 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(
+                regions.clone(),
+                global_aggregate,
+                10,
+            ))
+            .num_rows,
             Precision::Inexact(2)
         );
 
@@ -1622,10 +1661,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            merge_scan_exec_with_plan(regions, grouping_sets, 10)
-                .partition_statistics(None)
-                .unwrap()
-                .num_rows,
+            merge_scan_statistics(&merge_scan_exec_with_plan(regions, grouping_sets, 10)).num_rows,
             Precision::Absent
         );
     }
@@ -1683,6 +1719,8 @@ mod tests {
         )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>;
         let captured = capture_remote_dyn_filters_for_pushdown(
             RemoteDynFilterProducerId::new(42),
+            0,
+            &[],
             vec![dyn_filter],
         );
         assert_eq!(captured.captured_dyn_filters.len(), 1);
@@ -3141,6 +3179,24 @@ mod tests {
         .unwrap();
         assert_eq!(batches.len(), 1);
         assert_int64_batch(&batches[0], (11, 12));
+    }
+
+    #[test]
+    fn merge_scan_apply_expressions_exposes_remote_dyn_filter_id() {
+        let query_ctx = QueryContext::arc();
+        let exec =
+            remote_dyn_filter_test_exec(Arc::new(TestRegionQueryHandler::default()), query_ctx);
+        let dyn_filter = install_remote_dyn_filter(&exec);
+        let expected_expression_id = dyn_filter.expression_id();
+        let mut expression_ids = Vec::new();
+
+        exec.apply_expressions(&mut |expr| {
+            expression_ids.push(expr.expression_id());
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+
+        assert_eq!(expression_ids, vec![expected_expression_id]);
     }
 
     #[test]

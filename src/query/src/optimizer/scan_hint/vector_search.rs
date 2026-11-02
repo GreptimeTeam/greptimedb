@@ -18,11 +18,10 @@ use common_function::scalars::vector::distance::{
     VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
 };
 use common_telemetry::debug;
-use datafusion_common::ScalarValue;
+use datafusion_common::{ScalarValue, TableReference};
 use datafusion_expr::logical_plan::FetchType;
 use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{Expr, SortExpr};
-use datafusion_sql::TableReference;
 use datatypes::types::parse_string_to_vector_type_value;
 use store_api::storage::{VectorDistanceMetric, VectorSearchRequest};
 
@@ -488,11 +487,8 @@ mod tests {
         let mut request = None;
         plan.apply_with_subqueries(|node| {
             if let LogicalPlan::TableScan(scan) = node
-                && let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
-                && let Some(provider) = source
-                    .table_provider
-                    .as_any()
-                    .downcast_ref::<DummyTableProvider>()
+                && let Some(source) = scan.source.downcast_ref::<DefaultTableSource>()
+                && let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>()
             {
                 request = Some(provider.scan_request());
             }

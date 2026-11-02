@@ -31,7 +31,7 @@ use datafusion_common::tree_node::{
 use datafusion_common::{
     Column, DFSchema, DataFusionError, NullEquality, ScalarValue, TableReference,
 };
-use datafusion_expr::logical_plan::{Aggregate, TableScan};
+use datafusion_expr::logical_plan::{Aggregate, TableScanBuilder};
 use datafusion_expr::{
     Distinct, ExprSchemable, JoinType, LogicalPlan, LogicalPlanBuilder, Operator, Projection, and,
     binary_expr, bitwise_and, bitwise_or, bitwise_xor, is_null, or, when,
@@ -657,17 +657,15 @@ pub async fn rewrite_incremental_aggregate_with_sink_merge(
     let table_provider = Arc::new(DfTableProviderAdapter::new(sink_table));
     let table_source = Arc::new(DefaultTableSource::new(table_provider));
     let sink_scan = LogicalPlan::TableScan(
-        TableScan::try_new(
+        TableScanBuilder::new(
             TableReference::Full {
                 catalog: sink_table_name[0].clone().into(),
                 schema: sink_table_name[1].clone().into(),
                 table: sink_table_name[2].clone().into(),
             },
             table_source,
-            None,
-            vec![],
-            None,
         )
+        .build()
         .with_context(|_| DatafusionSnafu {
             context: "Failed to build sink table scan for incremental sink merge".to_string(),
         })?,

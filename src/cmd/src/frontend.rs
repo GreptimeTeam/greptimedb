@@ -212,6 +212,10 @@ pub struct StartCommand {
     internal_grpc_server_addr: Option<String>,
     #[clap(long)]
     http_addr: Option<String>,
+    /// The address to bind the dedicated public HTTP API server. Setting this
+    /// flag also enables the API server.
+    #[clap(long)]
+    http_api_server_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
     #[clap(long)]
@@ -299,6 +303,11 @@ impl StartCommand {
 
         if let Some(disable_dashboard) = self.disable_dashboard {
             opts.http.disable_dashboard = disable_dashboard;
+        }
+
+        if let Some(addr) = &self.http_api_server_addr {
+            opts.http.api_server_addr.clone_from(addr);
+            opts.http.enable_api_server = true;
         }
 
         if let Some(addr) = &self.grpc_bind_addr {
@@ -788,6 +797,38 @@ mod tests {
         assert!(opts.opentsdb.enable);
 
         assert!(!opts.influxdb.enable);
+    }
+
+    #[test]
+    fn test_http_api_server_cli_overrides_config() {
+        // The frontend receives the same Operator flag as the monitor in #10073.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+            [http]
+            addr = "127.0.0.1:14000"
+            enable_api_server = false
+            api_server_addr = "127.0.0.1:14006"
+            "#
+        )
+        .unwrap();
+        let command = StartCommand::try_parse_from([
+            "frontend",
+            "--config-file",
+            file.path().to_str().unwrap(),
+            "--http-api-server-addr",
+            "127.0.0.1:24006",
+        ])
+        .unwrap();
+        let opts = command
+            .load_options(&GlobalOptions::default())
+            .unwrap()
+            .component;
+
+        assert_eq!(opts.http.addr, "127.0.0.1:14000");
+        assert!(opts.http.enable_api_server);
+        assert_eq!(opts.http.api_server_addr, "127.0.0.1:24006");
     }
 
     #[test]

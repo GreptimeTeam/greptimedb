@@ -30,8 +30,9 @@ use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion::prelude::SessionContext;
 use datafusion_common::tree_node::TreeNodeRecursion;
-use datafusion_common::{ExprSchema, JoinType, ScalarValue};
+use datafusion_common::{ExprSchema, JoinType, ScalarValue, TableReference};
 use datafusion_expr::expr::{Exists, ScalarFunction};
+use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, Extension, LogicalPlanBuilder, Operator, Subquery,
     binary_expr, col, lit,
@@ -39,7 +40,6 @@ use datafusion_expr::{
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
 use datafusion_functions::unicode::expr_fn::substring;
-use datafusion_sql::TableReference;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::Stream;
@@ -301,6 +301,53 @@ fn find_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
     }
 
     plan.inputs().into_iter().find_map(find_merge_scan)
+}
+
+fn find_table_scan<'a>(
+    plan: &'a LogicalPlan,
+    table_name: &str,
+) -> Option<&'a datafusion_expr::logical_plan::TableScan> {
+    if let LogicalPlan::TableScan(table_scan) = plan
+        && table_scan.table_name.to_string() == table_name
+    {
+        return Some(table_scan);
+    }
+
+    plan.inputs()
+        .into_iter()
+        .find_map(|input| find_table_scan(input, table_name))
+}
+
+fn find_merge_scan_for_table<'a>(
+    plan: &'a LogicalPlan,
+    table_name: &str,
+) -> Option<&'a MergeScanLogicalPlan> {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+        && find_table_scan(merge_scan.input(), table_name).is_some()
+    {
+        return Some(merge_scan);
+    }
+
+    plan.inputs()
+        .into_iter()
+        .find_map(|input| find_merge_scan_for_table(input, table_name))
+}
+
+fn has_filter_above_table_scan(plan: &LogicalPlan, table_name: &str, predicate: &Expr) -> bool {
+    if let LogicalPlan::Filter(filter) = plan
+        && split_conjunction(&filter.predicate).contains(&predicate)
+        && find_table_scan(filter.input.as_ref(), table_name).is_some()
+    {
+        return true;
+    }
+
+    plan.inputs()
+        .into_iter()
+        .any(|input| has_filter_above_table_scan(input, table_name, predicate))
 }
 
 #[test]
@@ -2672,34 +2719,37 @@ fn test_join_side_local_filter_pushdown_into_merge_scan() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     assert_remote_table_scan_filters_are_safe(&result);
 
-    let plan_str = result.to_string();
-    // After PushDownFilter runs, the predicate `t1.pk1 = Utf8("v")` should appear
-    // inside the left MergeScan's remote_input. The pre-MergeScan optimizer may
-    // combine it with join-derived IS NOT NULL pushdowns, so it may not appear as
-    // a standalone Filter: line. It must still be in TableScan partial_filters
-    // and below the Inner Join.
+    let predicate = col("t1.pk1").eq(lit("v"));
+    let t1_remote_input = find_merge_scan_for_table(&result, "t1")
+        .expect("expected MergeScan for t1")
+        .input();
+    let t1_scan = find_table_scan(t1_remote_input, "t1").expect("expected t1 TableScan");
     assert!(
-        plan_str.contains("t1.pk1 = Utf8(\"v\")"),
-        "Expected predicate t1.pk1 = Utf8(\"v\") in plan, got:\n{plan_str}"
-    );
-    assert!(
-        plan_str.contains(
-            "TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]"
-        ),
-        "Expected t1 TableScan partial_filters to contain pushed predicate, got:\n{plan_str}"
+        t1_scan
+            .filters
+            .iter()
+            .flat_map(|filter| split_conjunction(filter))
+            .any(|filter| filter == &predicate),
+        "expected t1 TableScan to contain the pushed predicate: {t1_remote_input}"
     );
 
-    // Find the position of the filter and verify it appears after a MergeScan
-    // opening (i.e., inside remote_input) rather than before the Join.
-    let filter_pos = plan_str
-        .find("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]")
-        .unwrap();
-    let join_pos = plan_str.find("Inner Join").unwrap();
-    // The filter should be after the Join (meaning it was pushed down below the Join,
-    // into a MergeScan's remote_input)
+    // Inexact provider pushdown must retain the predicate in an ancestor Filter.
     assert!(
-        filter_pos > join_pos,
-        "Filter should be pushed below Join (into MergeScan remote_input), but found before Join"
+        has_filter_above_table_scan(t1_remote_input, "t1", &predicate),
+        "expected an ancestor Filter for t1 to retain the pushed predicate: {t1_remote_input}"
+    );
+
+    let t2_remote_input = find_merge_scan_for_table(&result, "t2")
+        .expect("expected MergeScan for t2")
+        .input();
+    assert!(
+        !find_table_scan(t2_remote_input, "t2")
+            .expect("expected t2 TableScan")
+            .filters
+            .iter()
+            .flat_map(|filter| split_conjunction(filter))
+            .any(|filter| filter == &predicate),
+        "t2 TableScan must not contain t1's predicate: {t2_remote_input}"
     );
 }
 
@@ -3017,4 +3067,78 @@ fn scheduled_none_falls_back_to_wall_clock() {
         remote_section.contains("TimestampNanosecond("),
         "Remote should contain TimestampNanosecond:\n{result_str}"
     );
+}
+
+/// Regression test for https://github.com/GreptimeTeam/greptimedb/issues/9260:
+/// every scalar subquery level must get its own MergeScan, even when nested
+/// inside another scalar subquery.
+#[test]
+fn expand_nested_scalar_subquery() {
+    init_default_ut_logging();
+    let table_source = || {
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(TestTable::table_with_name(0, "t".to_string())),
+        ))) as _
+    };
+
+    // Innermost: SELECT max(t.number) FROM t
+    let innermost = LogicalPlanBuilder::scan_with_filters("t", table_source(), None, vec![])
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![max(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+    // Middle: SELECT max(t.number) FROM t WHERE t.number > (<innermost>)
+    let middle = LogicalPlanBuilder::scan_with_filters("t", table_source(), None, vec![])
+        .unwrap()
+        .filter(col("number").gt(Expr::ScalarSubquery(Subquery {
+            subquery: Arc::new(innermost),
+            outer_ref_columns: vec![],
+            spans: Default::default(),
+        })))
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![max(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+    // Outermost projection: SELECT (<middle>) AS m FROM t
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source(), None, vec![])
+        .unwrap()
+        .project(vec![
+            Expr::ScalarSubquery(Subquery {
+                subquery: Arc::new(middle),
+                outer_ref_columns: vec![],
+                spans: Default::default(),
+            })
+            .alias("m"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result_str = result.to_string();
+
+    // The main scan and both subquery levels must each be wrapped in a MergeScan.
+    let merge_scan_count = result_str
+        .matches("MergeScan [is_placeholder=false")
+        .count();
+    assert_eq!(
+        3, merge_scan_count,
+        "expected 3 MergeScan nodes (main + 2 subquery levels) in plan:\n{result_str}"
+    );
+    // No bare TableScan may remain outside a MergeScan remote input. The
+    // subquery-aware walk still visits subquery plans, but cannot see into a
+    // MergeScan's hidden remote input (`MergeScanLogicalPlan::inputs()` is
+    // empty), so any TableScan it reaches was not wrapped.
+    result
+        .apply_with_subqueries(|node| {
+            assert!(
+                !matches!(node, LogicalPlan::TableScan(_)),
+                "unwrapped TableScan in plan:\n{result_str}"
+            );
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
 }

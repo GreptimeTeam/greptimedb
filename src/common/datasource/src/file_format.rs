@@ -35,7 +35,7 @@ use datafusion::datasource::file_format::file_compression_type::FileCompressionT
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
-    FileGroup, FileOpenFuture, FileScanConfigBuilder, FileSource, FileStream,
+    FileGroup, FileOpenFuture, FileScanConfigBuilder, FileSource, FileStreamBuilder,
 };
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::SendableRecordBatchStream;
@@ -321,7 +321,11 @@ pub async fn file_to_stream(
 
     let store = Arc::new(object_store_opendal::OpendalStore::new(store.clone()));
     let file_opener = config.file_source().create_file_opener(store, &config, 0)?;
-    let stream = FileStream::new(&config, 0, file_opener, &ExecutionPlanMetricsSet::new())?;
+    let stream = FileStreamBuilder::new(&config)
+        .with_partition(0)
+        .with_file_opener(file_opener)
+        .with_metrics(&ExecutionPlanMetricsSet::new())
+        .build()?;
 
     Ok(Box::pin(stream))
 }

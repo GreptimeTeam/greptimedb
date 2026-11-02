@@ -24,8 +24,10 @@ SHOW CHARACTER SET LIKE 'utf8';
 
 SHOW CHARACTER SET LIKE 'latin1';
 
-++
-++
++---------+-------------+-------------------+--------+
+| Charset | Description | Default collation | Maxlen |
++---------+-------------+-------------------+--------+
++---------+-------------+-------------------+--------+
 
 SHOW CHARSET LIKE 'utf8';
 
@@ -53,6 +55,8 @@ SHOW CHARSET WHERE Charset = 'utf8';
 
 SHOW CHARSET WHERE Charset = 'latin1';
 
-++
-++
++---------+-------------+-------------------+--------+
+| Charset | Description | Default collation | Maxlen |
++---------+-------------+-------------------+--------+
++---------+-------------+-------------------+--------+
 

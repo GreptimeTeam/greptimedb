@@ -57,12 +57,12 @@ GROUP BY key_id ORDER BY key_id;
 |               |         MergeScan [is_placeholder=false, remote_input=[                                                                               |
 |               | SubqueryAlias: __correlated_sq_1                                                                                                      |
 |               |   Projection: merge_semi_data.key_id                                                                                                  |
-|               |     Filter: merge_semi_data.key_id IS NOT NULL AND merge_semi_data.is_match                                                           |
-|               |       TableScan: merge_semi_data, partial_filters=[merge_semi_data.key_id IS NOT NULL, merge_semi_data.is_match]                      |
+|               |     Filter: merge_semi_data.is_match AND merge_semi_data.key_id IS NOT NULL                                                           |
+|               |       TableScan: merge_semi_data, partial_filters=[merge_semi_data.is_match, merge_semi_data.key_id IS NOT NULL]                      |
 |               | ]]                                                                                                                                    |
 | physical_plan | SortPreservingMergeExec: [key_id@0 ASC NULLS LAST]                                                                                    |
-|               |   SortExec: expr=[key_id@0 ASC NULLS LAST], preserve_partitioning=[true]                                                              |
-|               |     ProjectionExec: expr=[key_id@0 as key_id, min(merge_semi_data.ts)@1 as first_ts]                                                  |
+|               |   ProjectionExec: expr=[key_id@0 as key_id, min(merge_semi_data.ts)@1 as first_ts]                                                    |
+|               |     SortExec: expr=[key_id@0 ASC NULLS LAST], preserve_partitioning=[true]                                                            |
 |               |       AggregateExec: mode=SinglePartitioned, gby=[key_id@1 as key_id], aggr=[min(merge_semi_data.ts)]                                 |
 |               |         HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(key_id@1, key_id@0)]                                                 |
 |               |           RepartitionExec: partitioning=Hash([key_id@1], 4), input_partitions=4                                                       |
