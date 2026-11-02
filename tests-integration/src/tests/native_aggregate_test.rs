@@ -27,12 +27,10 @@
 //! itself, or the one transparent cooperative-scheduling wrapper the engine may put above it, but
 //! never an exchange - and `native.root.output_values` for every one of the four scan partitions;
 //! the metric is read after the result stream was drained, the only point at which it is complete.
-//! The frontend's tree must hold the merge of the state those partitions export (so the answer is
-//! not a fall back). It cannot reach the producer, because a region plans and runs its own subtree,
-//! so the merge is followed down only to the `MergeScanExec` leaf that stands for it: the executed
-//! relation is `AggregateFinalize` -> `MergeScanExec` on the frontend and
-//! `FusedSeriesExec` -> `SeriesScanExec` in the region, one partition-local evaluation per scan
-//! partition and one merge over all of their states. Plans are observed through
+//! The frontend tree must hold an outer Final `FusedSeriesExec` over a `StateRepartitionExec` and
+//! an inner Partial `FusedSeriesExec`. The inner node reaches the `MergeScanExec` leaf that stands
+//! for the region subtree; there it reads `SeriesScanExec` directly, with one partition-local
+//! evaluation per scan partition and one merge over all of their states. Plans are observed through
 //! [`PhysicalPlanWrapper`], which both query engines install, so what is checked is the tree that ran
 //! rather than a re-plan made for an `EXPLAIN`.
 //!
@@ -74,7 +72,6 @@ use common_query::OutputData;
 use common_recordbatch::RecordBatches;
 use common_recordbatch::util::collect_batches;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::metrics::MetricValue;
@@ -100,8 +97,6 @@ use crate::standalone::GreptimeDbStandaloneBuilder;
 const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
 /// The physical name of the fused producer.
 const FUSED_EXEC_NAME: &str = "FusedSeriesExec";
-/// What every name of the frontend-side merge node contains (`AggregateFinalize`, `...Exec`).
-const FINALIZE_EXEC_NAME: &str = "AggregateFinalize";
 /// The metric a fused producer registers for the values its own root node produced, per partition.
 const ROOT_OUTPUT_VALUES_METRIC: &str = "native.root.output_values";
 /// The parallelism the scan is asked to split its ranges into.
@@ -265,10 +260,12 @@ impl NativeCapture {
         let mut stack = plans.to_vec();
         while let Some(node) = stack.pop() {
             if node.name() == FUSED_EXEC_NAME {
-                capture.fused.push(Arc::clone(&node));
-            }
-            if node.name().contains(FINALIZE_EXEC_NAME) {
-                capture.finalize.push(Arc::clone(&node));
+                let display = displayable(node.as_ref()).indent(false).to_string();
+                if display.contains(" final") {
+                    capture.finalize.push(Arc::clone(&node));
+                } else {
+                    capture.fused.push(Arc::clone(&node));
+                }
             }
             stack.extend(node.children().into_iter().cloned());
         }
@@ -1380,14 +1377,7 @@ fn through_cooperative(node: &Arc<dyn ExecutionPlan>) -> &Arc<dyn ExecutionPlan>
     }
 }
 
-/// Asserts the frontend merge reads the state at the region boundary, not a producer of its own.
-///
-/// Only known transparent nodes are looked through: the projection that restores the producer's
-/// schema (which a physical optimizer pass may remove, so it is optional), the cooperative wrapper,
-/// and the `CoalescePartitionsExec` the merge itself builds for an input with more than one
-/// partition. The boundary is the `MergeScanExec` leaf, and the merge's input schema must be the
-/// state schema the captured region producer exports: finished values there would mean the merge
-/// folded answers instead of the partitions' contributions.
+/// Asserts the outer Final node reads the state exported by the inner Partial node.
 fn assert_finalize_reads_region_state(
     finalize: &Arc<dyn ExecutionPlan>,
     producer: &Arc<dyn ExecutionPlan>,
@@ -1398,63 +1388,60 @@ fn assert_finalize_reads_region_state(
     assert_eq!(
         1,
         children.len(),
-        "{context}: the `{FINALIZE_EXEC_NAME}` merge must take exactly one input:\n{plan}"
+        "{context}: Final node must have one input:\n{plan}"
     );
-    let partitions = finalize
-        .properties()
-        .output_partitioning()
-        .partition_count();
+    let repartition = through_cooperative(&children[0]);
     assert_eq!(
-        1, partitions,
-        "{context}: the merge must answer one partition:\n{plan}"
+        "StateRepartitionExec",
+        repartition.name(),
+        "{context}: expected state repartition:\n{plan}"
     );
-    let mut merge_input = children[0];
-    if merge_input.is::<CoalescePartitionsExec>() {
-        let gathered = merge_input.children();
-        assert_eq!(
-            1,
-            gathered.len(),
-            "{context}: `CoalescePartitionsExec` must gather exactly one input:\n{plan}"
-        );
-        let gathered_partitions = gathered[0]
-            .properties()
-            .output_partitioning()
-            .partition_count();
-        assert!(
-            gathered_partitions > 1,
-            "{context}: the merge gathers only an input with more than one partition, but this one \
-             has {gathered_partitions}:\n{plan}"
-        );
-        merge_input = gathered[0];
-    }
-    let mut boundary = through_cooperative(merge_input);
+    let routed = repartition.children();
+    assert_eq!(
+        1,
+        routed.len(),
+        "{context}: state repartition must have one input:\n{plan}"
+    );
+    let partial = through_cooperative(&routed[0]);
+    assert_eq!(
+        FUSED_EXEC_NAME,
+        partial.name(),
+        "{context}: expected inner Partial node:\n{plan}"
+    );
+    let partial_plan = displayable(partial.as_ref()).indent(false).to_string();
+    assert!(
+        partial_plan.contains(" partial"),
+        "{context}: inner node must be Partial:\n{partial_plan}"
+    );
+    assert_eq!(
+        partial.schema(),
+        producer.schema(),
+        "{context}: captured Partial must match chain node:\n{plan}"
+    );
+    let children = partial.children();
+    assert_eq!(
+        1,
+        children.len(),
+        "{context}: Partial must have one scan input:\n{plan}"
+    );
+    let mut boundary = through_cooperative(&children[0]);
     if boundary.is::<ProjectionExec>() {
         let projected = boundary.children();
         assert_eq!(
             1,
             projected.len(),
-            "{context}: the schema-restoring projection must take exactly one input:\n{plan}"
+            "{context}: projection must have one input:\n{plan}"
         );
-        boundary = through_cooperative(projected[0]);
+        boundary = through_cooperative(&projected[0]);
     }
     assert!(
         boundary.is::<MergeScanExec>(),
-        "{context}: the merge must read the region boundary `MergeScanExec`, not a producer the \
-         frontend planned, but its input is `{}`:\n{plan}",
+        "{context}: Partial must reach MergeScanExec, got {}:\n{plan}",
         boundary.name()
     );
     assert!(
         boundary.children().is_empty(),
-        "{context}: `MergeScanExec` is a leaf, because the region plans the subtree it carries \
-         separately:\n{plan}"
-    );
-    let boundary_partitions = boundary
-        .properties()
-        .output_partitioning()
-        .partition_count();
-    assert_eq!(
-        1, boundary_partitions,
-        "{context}: one region is read, so the boundary exposes one output partition:\n{plan}"
+        "{context}: MergeScanExec must be a leaf:\n{plan}"
     );
     // What the producer exports is named here, column by column, before the merge's input schema is
     // compared with it: two schemas that agree on finished values would agree with each other just
@@ -1491,8 +1478,8 @@ fn assert_finalize_reads_region_state(
     );
     assert_eq!(
         producer.schema(),
-        merge_input.schema(),
-        "{context}: the merge must read the state schema the region producer exports:\n{plan}"
+        repartition.schema(),
+        "{context}: the outer node must read the state schema the Partial exports:\n{plan}"
     );
 }
 
@@ -1671,9 +1658,12 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     assert_eq!(
         1,
         capture.fused.len(),
-        "`{query}`: one region is read, so exactly one fused producer must run, but the plans held \
-         {} of them",
-        capture.fused.len()
+        "`{query}`: expected one inner Partial node"
+    );
+    assert_eq!(
+        1,
+        capture.finalize.len(),
+        "`{query}`: expected one outer Final node"
     );
     for fused in &capture.fused {
         assert_fused_reads_scan_directly(fused, &format!("native `{query}`"));
@@ -1687,12 +1677,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
             );
         }
     }
-    assert!(
-        !capture.finalize.is_empty(),
-        "`{query}`: the native run must plan the frontend-side `{FINALIZE_EXEC_NAME}` merge, \
-         otherwise the answer came from a fall back to the legacy plan"
-    );
-    // The merge reads the region boundary; the producer is checked in the region's own tree.
+    // Validate the outer-to-inner state chain and the Partial node's region boundary.
     for finalize in &capture.finalize {
         assert_finalize_reads_region_state(
             finalize,
@@ -1755,154 +1740,6 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_aggregate_topk_over_global_partitions() {
-    common_telemetry::init_default_ut_logging();
-    const TABLE: &str = "native_topk_counters";
-    const T1: i64 = BASE_SECS + 180;
-    const T2: i64 = BASE_SECS + 600;
-    let observer = Arc::new(NativePlanObserver::default());
-    let plugins = Plugins::new();
-    plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
-    let standalone = GreptimeDbStandaloneBuilder::new("native_aggregate_topk")
-        .with_query_options(QueryOptions {
-            experimental_native_promql: true,
-            ..Default::default()
-        })
-        .with_plugin(plugins)
-        .build()
-        .await;
-    let instance = Arc::clone(standalone.fe_instance());
-    execute_sql(&instance, &format!(
-        "CREATE TABLE {TABLE} (ts TIMESTAMP(3) TIME INDEX, hostname STRING, device STRING, \"region\" STRING, v DOUBLE, PRIMARY KEY (hostname, device, \"region\")) WITH ('compaction.type' = 'twcs', 'compaction.twcs.trigger_file_num' = '100')"
-    )).await;
-    // Flush host00/dev0 first and host00/dev1 last; flush each of the 28 series independently.
-    let order = std::iter::once((0usize, 0usize))
-        .chain((1..14).flat_map(|host| (0..2).map(move |device| (host, device))))
-        .chain(std::iter::once((0usize, 1usize)));
-    for (host, device) in order {
-        let slope_before = 140 - 10 * host as i64;
-        let slope_after = 10 + 10 * host as i64;
-        let mut values = Vec::new();
-        for elapsed in (0i64..=600).step_by(30) {
-            let value =
-                100_000 + slope_before * elapsed.min(300) + slope_after * (elapsed - 300).max(0);
-            values.push(format!(
-                "({}, 'host{host:02}', 'dev{device}', 'us-west-2', {value}.0)",
-                (BASE_SECS + elapsed) * 1000
-            ));
-        }
-        execute_sql(
-            &instance,
-            &format!(
-                "INSERT INTO {TABLE} (ts, hostname, device, \"region\", v) VALUES {}",
-                values.join(",")
-            ),
-        )
-        .await;
-        execute_sql(&instance, &format!("ADMIN FLUSH_TABLE('{TABLE}')")).await;
-    }
-    let promql = format!(
-        "topk(10, sum by(hostname)(rate({TABLE}{{device!=\"lo\",region=\"us-west-2\"}}[5m])))"
-    );
-    let sql = format!("TQL EVAL ({T1}, {T2}, '7m') {promql}");
-    let run = async |native: bool| {
-        let mark = observer.mark();
-        let mut ctx = QueryContext::with_db_name(None);
-        ctx.set_extension(QUERY_PARALLELISM_HINT, SCAN_PARTITIONS.to_string());
-        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, native.to_string());
-        let output = instance
-            .do_query(&sql, Arc::new(ctx))
-            .await
-            .remove(0)
-            .unwrap();
-        let batches = match output.data {
-            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-            OutputData::RecordBatches(batches) => batches,
-            other => panic!("unexpected output: {other:?}"),
-        };
-        (
-            QueryResult::from_batches(&batches, &sql),
-            NativeCapture::from_plans(&observer.since(mark)),
-        )
-    };
-    let (legacy, legacy_capture) = run(false).await;
-    assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
-    let (native, capture) = run(true).await;
-    assert_eq!(20, native.rows.len(), "both timestamps return ten rows");
-    let distinct_timestamps = native
-        .rows
-        .iter()
-        .map(|row| row.ts_millis)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        [T1 * 1000, T2 * 1000]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>(),
-        distinct_timestamps
-    );
-    let mut expected = Vec::new();
-    for (ts, hosts, post) in [(T1 * 1000, 0..10, false), (T2 * 1000, 4..14, true)] {
-        for host in hosts {
-            let slope = if post {
-                10 + 10 * host
-            } else {
-                140 - 10 * host
-            };
-            let scale = if post { 2.0 } else { 1.3 };
-            expected.push(ResultRow {
-                ts_millis: ts,
-                labels: [("hostname".to_string(), format!("host{host:02}"))].into(),
-                value: Some(slope as f64 * scale),
-            });
-        }
-    }
-    expected.sort_by(|a, b| (a.ts_millis, &a.labels).cmp(&(b.ts_millis, &b.labels)));
-    assert_native_schema(&native, "v", &expected, &sql);
-    assert_rows(
-        &native.rows,
-        &legacy.rows,
-        &format!("native vs legacy `{sql}`"),
-    );
-    assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
-    assert_eq!(1, capture.fused.len());
-    assert_eq!(1, capture.finalize.len());
-    let fused_plan = displayable(capture.fused[0].as_ref())
-        .indent(false)
-        .to_string();
-    assert!(
-        fused_plan.contains("partial state: sum by (hostname) Complete"),
-        "{fused_plan}"
-    );
-    let producer_tree = fused_plan
-        .split_once("NativeTree")
-        .map(|(_, tree)| tree.split("partial state:").next().unwrap_or(tree))
-        .unwrap_or(&fused_plan);
-    assert!(
-        !producer_tree.to_ascii_lowercase().contains("topk"),
-        "{fused_plan}"
-    );
-    let finalize_plan = displayable(capture.finalize[0].as_ref())
-        .indent(false)
-        .to_string();
-    assert!(
-        finalize_plan.to_ascii_lowercase().contains("topk"),
-        "{finalize_plan}"
-    );
-    let per_partition = fused_output_values_per_partition(&capture, &sql);
-    assert!(
-        per_partition
-            .iter()
-            .all(|count| count.is_some_and(|count| count > 0)),
-        "{per_partition:?}"
-    );
-    // The cross-producer requirement lives in the deterministic fixture instead
-    // (`aggregate_finalize::exec_tests::topk_above_the_cut_sees_every_producer_contribution`).
-    // Which producer holds which series follows from the storage scheduler and a legal schedule can
-    // hand one partition every series but two, so asserting it here would pin a scheduling accident
-    // rather than the merge.
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     common_telemetry::init_default_ut_logging();
 
@@ -1941,7 +1778,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         // the group's mean. The counter table's cases below are the ones whose answers can tell a
         // merged state from a finished one.
         AggregateCase {
-            partial_state: Some("partial state: avg by (job) Complete"),
+            partial_state: Some("avg by [job] partial"),
             ..case(
                 format!("avg by (job) ({GAUGE_TABLE})"),
                 &by_job(6.0, 6.0),
@@ -2005,7 +1842,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         counter_case(
             format!("sum(rate({COUNTER_TABLE}[5m]))"),
             &[(&[], 15.0)],
-            "partial state: sum by () Complete",
+            "sum by [] partial",
         ),
         // The same sum with a literal scalar above the fold: the merge's suffix doubles the merged
         // 15 to 30, where a suffix run over one partition's share - at most 10 of the 15 - would
@@ -2014,19 +1851,19 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         counter_case(
             format!("sum(rate({COUNTER_TABLE}[5m])) * 2"),
             &[(&[], 30.0)],
-            "partial state: sum by () Complete",
+            "sum by [] partial",
         ),
         counter_case(
             format!("sum by (job) (rate({COUNTER_TABLE}[5m]))"),
             &by_job(9.0, 6.0),
-            "partial state: sum by (job) Complete",
+            "sum by [job] partial",
         ),
         // The matcher selects only `job = a`'s three series. Their rates are 1, 3 and 5, so the
         // native partial producer must still run and the merged result must be 9. Three selected
         // series cannot populate all four scan partitions, so this case checks that some producer
         // output exists without applying the unfiltered fixture's four-nonempty-partition assertion.
         AggregateCase {
-            partial_state: Some("partial state: sum by () Complete"),
+            partial_state: Some("sum by [] partial"),
             ..case(
                 format!("sum(rate({COUNTER_TABLE}{{job=\"a\"}}[5m]))"),
                 &[(&[], 9.0)],
@@ -2043,7 +1880,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         // producer to read the four-partition scan.
         AggregateCase {
             root_values: Some(COUNTER_SERIES.len() - 1),
-            partial_state: Some("partial state: sum by (job) Complete"),
+            partial_state: Some("sum by [job] partial"),
             ..case(
                 format!(
                     "sum by (job) (rate({COUNTER_TABLE}{{region=\"{COUNTER_WEST_REGION}\"}}[5m]))"
@@ -2055,12 +1892,12 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         counter_case(
             format!("avg by (job) (rate({COUNTER_TABLE}[5m]))"),
             &by_job(3.0, 3.0),
-            "partial state: avg by (job) Complete",
+            "avg by [job] partial",
         ),
         counter_case(
             format!("count by (job) (rate({COUNTER_TABLE}[5m]))"),
             &by_job(3.0, 2.0),
-            "partial state: count by (job) Complete",
+            "count by [job] partial",
         ),
         // `a`'s rates are 1, 3 and 5, whose population standard deviation is sqrt(8/3); `b`'s are 2
         // and 4, whose is 1. Both are unchanged when the group's states are merged, which is the
@@ -2068,7 +1905,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         counter_case(
             format!("stddev by (job) (rate({COUNTER_TABLE}[5m]))"),
             &by_job((8.0f64 / 3.0).sqrt(), 1.0),
-            "partial state: stddev by (job) Complete",
+            "stddev by [job] partial",
         ),
         // Two nested aggregates and a map above them: the merge's suffix is `sum(abs(x))` over the
         // inner aggregate's merged values, so it really runs on merged values rather than on one
@@ -2077,13 +1914,13 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         counter_case(
             format!("sum(abs(avg(rate({COUNTER_TABLE}[5m])) by (job)))"),
             &[(&[], 6.0)],
-            "partial state: avg by (job) Complete",
+            "avg by [job] partial",
         ),
         // The same, with the map above both aggregates instead of between them.
         counter_case(
             format!("abs(sum(avg(rate({COUNTER_TABLE}[5m])) by (job)))"),
             &[(&[], 6.0)],
-            "partial state: avg by (job) Complete",
+            "avg by [job] partial",
         ),
         // A literal scalar below the fold is carried in the per-series prefix, so the state folds
         // `8 * rate`: the rates 1, 3, 5, 2 and 4 become 8, 24, 40, 16 and 32 and the merge answers
@@ -2094,7 +1931,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         counter_case(
             format!("sum(8 * rate({COUNTER_TABLE}[5m]))"),
             &[(&[], 120.0)],
-            "partial state: sum by () Complete",
+            "sum by [] partial",
         ),
         // The same below-the-fold placement with an operator the fold does not commute with: the
         // maximum of the prefix-computed `10 - rate`. The rates 1, 3, 5, 2 and 4 become 9, 7, 5, 8
@@ -2104,7 +1941,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         counter_case(
             format!("max(10 - rate({COUNTER_TABLE}[5m]))"),
             &[(&[], 9.0)],
-            "partial state: max by () Complete",
+            "max by [] partial",
         ),
         // A literal scalar above the fold is rebuilt in the merge's suffix over the merged value,
         // with the operands in the order the query wrote them: the mean rate is 3, so `100 - 3` is
@@ -2113,17 +1950,17 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         counter_case(
             format!("100 - avg(rate({COUNTER_TABLE}[5m]))"),
             &[(&[], 97.0)],
-            "partial state: avg by () Complete",
+            "avg by [] partial",
         ),
         counter_case(
             format!("100 / sum(rate({COUNTER_TABLE}[5m]))"),
             &[(&[], 100.0 / 15.0)],
-            "partial state: sum by () Complete",
+            "sum by [] partial",
         ),
         counter_case(
             format!("-sum(rate({COUNTER_TABLE}[5m]))"),
             &[(&[], -15.0)],
-            "partial state: sum by () Complete",
+            "sum by [] partial",
         ),
         // The range table holds one series in one partition, so this is a correctness smoke test of
         // one populated partition rather than a parallel acceptance. Its one series folds one

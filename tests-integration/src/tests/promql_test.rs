@@ -5186,15 +5186,21 @@ async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
     assert_eq!(native_rows, legacy_rows);
 }
 
-/// What every name of the frontend-side merge a split aggregate runs in front of contains.
-const FINALIZE_EXEC_NAME: &str = "AggregateFinalize";
-
-/// Whether any node of `plan` is the merge a split aggregate runs in front of.
+/// Whether a Final fused node routes its aggregate state through StateRepartitionExec.
 fn holds_split_merge(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> bool {
     let mut stack = vec![plan.clone()];
     while let Some(node) = stack.pop() {
-        if node.name().contains(FINALIZE_EXEC_NAME) {
-            return true;
+        let display = datafusion::physical_plan::displayable(node.as_ref())
+            .indent(false)
+            .to_string();
+        if node.name() == "FusedSeriesExec" && display.contains(" final") {
+            let mut descendants = node.children().into_iter().cloned().collect::<Vec<_>>();
+            while let Some(child) = descendants.pop() {
+                if child.name() == "StateRepartitionExec" {
+                    return true;
+                }
+                descendants.extend(child.children().into_iter().cloned());
+            }
         }
         stack.extend(node.children().into_iter().cloned());
     }
@@ -7408,11 +7414,7 @@ async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bound
     let mut stack = vec![legacy_root.clone()];
     while let Some(node) = stack.pop() {
         assert_ne!(node.name(), "FusedSeriesExec", "legacy plan must not fuse");
-        assert_ne!(
-            node.name(),
-            "AggregateFinalizeExec",
-            "legacy plan must not finalize"
-        );
+
         stack.extend(node.children().into_iter().cloned());
     }
     assert_eq!(legacy_rows, vec![(60_000, 20.0), (120_000, 15.0)]);
@@ -7556,11 +7558,7 @@ async fn native_promql_cross_table_range_aggregate_segments_keep_windows() {
     let mut stack = vec![legacy_root];
     while let Some(node) = stack.pop() {
         assert_ne!(node.name(), "FusedSeriesExec", "legacy plan must not fuse");
-        assert_ne!(
-            node.name(),
-            "AggregateFinalizeExec",
-            "legacy plan must not finalize"
-        );
+
         stack.extend(node.children().into_iter().cloned());
     }
     assert_eq!(legacy_rows, vec![(60_000, 2.0), (120_000, 4.0 / 3.0)]);
@@ -8194,12 +8192,12 @@ async fn native_promql_corpus_route_matrix() {
             })
             .collect::<Vec<_>>();
         let fused = !fused_nodes_in_root(&root).is_empty();
-        let split = root_display.contains("AggregateFinalizeExec")
+        let split = holds_split_merge(&root)
             && regions.iter().any(|p| {
                 let d = datafusion::physical_plan::displayable(p.as_ref())
                     .indent(true)
                     .to_string();
-                d.contains("FusedSeriesExec") && d.contains("partial state:")
+                d.contains("FusedSeriesExec") && d.contains(" partial")
             });
         // `segmented` means the frontend's native node consumes what a region's native node
         // produced. A `MergeScan` alone does not show that: its region side can be a plain scan
