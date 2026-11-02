@@ -261,6 +261,7 @@ mod tests {
     use common_batcher::request_limiter::RequestLimiter;
     use common_batcher::worker_registry::WorkerRegistry;
     use common_catalog::consts::default_engine;
+    use common_error::ext::StackError;
     use common_grpc::flight::FlightDecoder;
     use common_meta::error::Result as MetaResult;
     use common_meta::peer::Peer;
@@ -280,6 +281,7 @@ mod tests {
         create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
     };
     use session::context::{Channel, QueryContext};
+    use session::write_progress::WriteProgress;
     use store_api::storage::RegionId;
     use table::dist_table::DistTable;
     use table::metadata::TableInfoRef;
@@ -291,7 +293,143 @@ mod tests {
     use crate::batcher::table::pending_batch::PendingBatch;
     use crate::batcher::table::pending_worker::{WorkerCommand, start_worker};
     use crate::batcher::table::{PendingWorkers, TablePendingRowsBatcher, batch_key_from_ctx};
-    use crate::batcher::test_util::mock_table_flownode_cache;
+    use crate::batcher::test_util::{RecordingBulkHandler, mock_table_flownode_cache};
+
+    #[tokio::test]
+    async fn test_flow_notifications_use_submission_progress() {
+        use crate::batcher::table::batch::{Batch, flush_batch};
+
+        for tracked in [false, true] {
+            for (failed_regions, short_regions, written, timestamps) in [
+                (vec![], vec![], 5, vec![1070, 1020, 1080, 1030, 1030]),
+                (vec![1], vec![], 3, vec![1070, 1020, 1030, 1030]),
+                (vec![1, 2], vec![], 0, vec![]),
+                (vec![], vec![1, 2], 0, vec![]),
+            ] {
+                let handler = RecordingBulkHandler {
+                    failed_regions,
+                    short_regions,
+                    ..Default::default()
+                };
+                let partitions =
+                    create_partition_rule_manager(prepare_mocked_backend().await).await;
+                let inserter = Arc::new(Inserter::new(
+                    MemoryCatalogManager::new(),
+                    partitions,
+                    Arc::new(MockDatanodeManager::new(handler.clone())),
+                    mock_table_flownode_cache(1, vec![]).await,
+                    true,
+                ));
+                let mut batcher = TablePendingRowsBatcher::try_new(
+                    Duration::from_secs(3600),
+                    5,
+                    1,
+                    3,
+                    3,
+                    NonZeroUsize::new(1).unwrap(),
+                    inserter.clone(),
+                )
+                .unwrap();
+                Arc::get_mut(&mut batcher).unwrap().pending_rows_batch_sync = true;
+                let observed = Arc::new(AtomicUsize::new(0));
+                let counter = observed.clone();
+                let parent = Arc::new(WriteProgress::default().with_observer(move |rows| {
+                    counter.fetch_add(rows as usize, Ordering::Relaxed);
+                }));
+                // Earlier writes by this caller must not make failed submissions eligible.
+                parent.add_written(7);
+                let mut ctx = QueryContext::with("greptime", "public");
+                if tracked {
+                    ctx.set_write_progress(parent.clone());
+                }
+                let ctx = Arc::new(ctx);
+                let table = Arc::new(new_test_table_info(1, "table_1", [1, 2, 3].into_iter()));
+                let (_, receiver) = batcher
+                    .workers
+                    .get_or_create(batch_key_from_ctx(&table.name, &ctx), 3)
+                    .await;
+                let mut receiver = receiver.unwrap();
+                let mut submissions = Vec::new();
+                let mut clients = Vec::new();
+                for (index, values) in [vec![70, 20], vec![80], vec![30, 30]]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut input = rows(values[0]);
+                    input.rows = values
+                        .into_iter()
+                        .flat_map(|value| rows(value).rows)
+                        .collect();
+                    let batch = rows_to_record_batch(&input, &table).unwrap();
+                    let permit = batcher.acquire().await.unwrap();
+                    let (submitter, table, ctx) = (batcher.clone(), table.clone(), ctx.clone());
+                    let client =
+                        tokio::spawn(
+                            async move { submitter.submit(table, batch, ctx, permit).await },
+                        );
+                    let WorkerCommand::Submit(pending) = timeout(WORKER_TIMEOUT, receiver.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    submissions.push(pending);
+                    if index == 0 {
+                        // The partial submission must notify even after its client disappears.
+                        client.abort();
+                        assert!(client.await.unwrap_err().is_cancelled());
+                    } else {
+                        clients.push(client);
+                    }
+                }
+                assert_eq!(parent.written(), 7);
+                if tracked {
+                    assert!(futures::poll!(Box::pin(parent.wait())).is_pending());
+                }
+                let (notifier, mut notifications) = FlowNotifier::test_channel(1);
+                flush_batch(
+                    Batch {
+                        submissions,
+                        total_rows: 5,
+                    },
+                    inserter,
+                    notifier,
+                )
+                .await;
+                for (client, (region, expected_rows)) in clients.into_iter().zip([(1, 1), (2, 2)]) {
+                    let result = timeout(WORKER_TIMEOUT, client).await.unwrap().unwrap();
+                    if !handler.failed_regions.contains(&region)
+                        && !handler.short_regions.contains(&region)
+                    {
+                        assert_eq!(result.unwrap().extract_rows_and_cost().0, expected_rows);
+                    } else {
+                        let error = result.unwrap_err();
+                        let error = error.last().to_string();
+                        assert!(
+                            error.contains(if handler.short_regions.is_empty() {
+                                "injected bulk failure"
+                            } else {
+                                "cannot attribute"
+                            }),
+                            "{error}"
+                        );
+                    }
+                }
+                timeout(WORKER_TIMEOUT, parent.wait()).await.unwrap();
+                let expected = 7 + if tracked { written } else { 0 };
+                assert_eq!(parent.written(), expected);
+                assert_eq!(observed.load(Ordering::Relaxed), expected as usize);
+                if !timestamps.is_empty() {
+                    let notification = notifications.try_recv().unwrap();
+                    assert_eq!(notification.table_id, 1);
+                    assert_eq!(notification.timestamps, timestamps);
+                }
+                assert!(notifications.try_recv().is_err());
+                assert_eq!(
+                    *handler.attempts.lock().unwrap(),
+                    HashMap::from([(1, 1), (2, 1)])
+                );
+            }
+        }
+    }
 
     #[derive(Clone)]
     struct BulkHandler {

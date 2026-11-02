@@ -53,13 +53,14 @@ pub(in crate::batcher::table) async fn flush_batch(
                 FLUSH_ROWS.observe(batch.total_rows as f64);
             }
             if let Some(first) = batch.submissions.first() {
+                // Counts cannot identify successful rows, so include every timestamp of eligible submissions.
                 notifier.notify(
                     first.table_info.clone(),
                     batch
                         .submissions
                         .iter()
                         .zip(&progress)
-                        .filter(|(_, result)| result.error.is_none())
+                        .filter(|(_, result)| result.error.is_none() || result.affected_rows > 0)
                         .map(|(pending, _)| &pending.batch),
                 );
             }

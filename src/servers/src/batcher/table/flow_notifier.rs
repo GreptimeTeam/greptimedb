@@ -87,6 +87,16 @@ impl FlowNotifier {
     fn enqueue(&self, notification: FlowNotification) {
         self.notifier.try_notify(notification);
     }
+
+    /// Creates a notification queue without starting delivery.
+    #[cfg(test)]
+    pub(crate) fn test_channel(
+        capacity: usize,
+    ) -> (Self, tokio::sync::mpsc::Receiver<FlowNotification>) {
+        let (notifier, receiver) =
+            NotificationQueue::try_new(capacity, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
+        (Self { notifier }, receiver)
+    }
 }
 
 #[cfg(test)]
@@ -131,7 +141,7 @@ mod tests {
     use crate::batcher::test_util::mock_table_flownode_cache;
 
     #[tokio::test]
-    async fn test_flush_coalesces_notifications_for_successful_submissions() {
+    async fn test_flush_coalesces_notifications_for_submissions_with_confirmed_rows() {
         #[derive(Clone)]
         struct PartialHandler;
 
@@ -190,7 +200,7 @@ mod tests {
             (
                 vec![vec![1, 20], vec![2], vec![3]],
                 vec![(1, true), (1, false), (1, false)],
-                vec![120_000, 180_000],
+                vec![60_000, 1_200_000, 120_000, 180_000],
                 false,
             ),
             (
