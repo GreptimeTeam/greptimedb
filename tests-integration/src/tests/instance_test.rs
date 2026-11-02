@@ -4746,6 +4746,68 @@ async fn test_exemplar_unpinned_batches(#[case] kind: &str, #[values(false, true
     .await;
 }
 
+#[rstest]
+#[case::lowercase("sparse", true, true)]
+#[case::uppercase("SPARSE", true, true)]
+#[case::mixed_case("SpArSe", true, true)]
+#[case::dense("dense", true, false)]
+#[case::not_append_only("sparse", false, false)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_precreated_table_options(
+    #[case] encoding: &str,
+    #[case] append_mode: bool,
+    #[case] accepted: bool,
+) {
+    use std::collections::BTreeMap;
+
+    use servers::exemplar::{Exemplar, into_rows};
+    use servers::query_handler::PromStoreProtocolHandler;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+
+    let instance = GreptimeDbStandaloneBuilder::new("exemplar_precreated_table_options")
+        .build()
+        .await;
+    let frontend = instance.fe_instance();
+    execute_sql(&frontend, "CREATE TABLE source_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
+    execute_sql(&frontend, "CREATE TABLE metric_source (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('on_physical_table'='source_physical')").await;
+    execute_sql(&frontend, &format!(
+        "CREATE TABLE metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) ENGINE=mito WITH ('append_mode'='{append_mode}', 'primary_key_encoding'='{encoding}', 'compaction.type'='twcs')"
+    )).await;
+    let (request, _) = into_rows(vec![Exemplar {
+        metric: "metric_source".into(),
+        series_labels: BTreeMap::new(),
+        timestamp: 1,
+        value: 2.0,
+        labels: BTreeMap::new(),
+    }])
+    .unwrap();
+    let result = frontend
+        .write_exemplars_prepared(request, QueryContext::arc())
+        .await;
+    if accepted {
+        assert_eq!(result.unwrap().extract_rows_and_cost().0, 1);
+    } else {
+        let error = result.unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert!(
+            error.output_msg().contains(
+                "metrics_exemplars requires Mito, append_mode=true and primary_key_encoding=sparse"
+            ),
+            "{error:?}"
+        );
+    }
+    let output = execute_sql(&frontend, "SELECT count(*) FROM metrics_exemplars").await;
+    check_output_stream(
+        output.data,
+        &format!(
+            "+----------+\n| count(*) |\n+----------+\n| {}        |\n+----------+",
+            usize::from(accepted)
+        ),
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_exemplar_source_identity_policy() {
     use std::collections::BTreeMap;

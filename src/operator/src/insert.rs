@@ -2207,7 +2207,7 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
                 .is_some_and(|v| v.eq_ignore_ascii_case("true"))
             && options
                 .get(store_api::metric_engine_consts::PRIMARY_KEY_ENCODING)
-                .is_some_and(|v| v == "sparse"),
+                .is_some_and(|v| v.eq_ignore_ascii_case("sparse")),
         InvalidInsertRequestSnafu {
             reason: "metrics_exemplars requires Mito, append_mode=true and primary_key_encoding=sparse"
         }
