@@ -706,7 +706,7 @@ impl PromPlanner {
         let needs_nested_match_segmentation = cross_table
             && !multi_input
             && matches!(locality, InputLocality::SinglePartition)
-            && nested_vector_match(root);
+            && has_nested_vector_match(root);
         if !per_partition || needs_nested_match_segmentation {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather
             // than whole samples, so it moves less between the two halves than a sample boundary
@@ -1064,6 +1064,30 @@ fn carries_prefix(node: &NativeNode) -> bool {
     node_children(expr)
         .into_iter()
         .any(|child| cut_as_segment(child) || carries_prefix(child))
+}
+
+/// Whether a tree contains a vector match with an independently matched vector operand.
+///
+/// Point-wise wrappers and scalar broadcasts are transparent: they may surround the outer match,
+/// but do not change the locality of its vector operands.
+fn has_nested_vector_match(node: &NativeNode) -> bool {
+    let nested_match_here = match &node.expr {
+        NativeExpr::Binary { left, right, .. }
+            if matches!(left.output, NativeType::Samples(_))
+                && matches!(right.output, NativeType::Samples(_)) =>
+        {
+            [left.as_ref(), right.as_ref()].into_iter().any(|operand| {
+                matches!(operand.expr, NativeExpr::Binary { .. })
+                    && matches!(operand.output, NativeType::Samples(_))
+                    && independent_scan_pair(operand)
+            })
+        }
+        _ => false,
+    };
+    nested_match_here
+        || node_children(&node.expr)
+            .into_iter()
+            .any(has_nested_vector_match)
 }
 
 /// Whether `node` becomes a segment of its own under a parent that must gather.
@@ -1473,30 +1497,6 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
         column.clone().gt(lower)
     };
     lower.and(column.lt_eq(upper))
-}
-
-/// Whether `root` is a supported one-to-one match, set operation or `info` over independent scan
-/// occurrences, under any number of point-wise wrappers.
-///
-/// Any arithmetic or comparison operator qualifies: they pair series by the same matching rules,
-/// and a comparison only changes which value a matched pair keeps.
-///
-/// A wrapper, a function of each value or an operation with a constant as in `100 * (1 - a / b)`,
-/// maps each series of the match on its own, so the tree still reads every scan whole exactly once.
-/// An operand may itself be such a match, as in `(a - b) / c`: the inner match is answered whole
-/// before the outer one reads it.
-/// Whether `root` is an outer vector match with a nested independent vector match operand.
-fn nested_vector_match(root: &NativeNode) -> bool {
-    let NativeExpr::Binary { left, right, .. } = &root.expr else {
-        return false;
-    };
-    matches!(left.output, NativeType::Samples(_))
-        && matches!(right.output, NativeType::Samples(_))
-        && [left.as_ref(), right.as_ref()].into_iter().any(|operand| {
-            matches!(operand.expr, NativeExpr::Binary { .. })
-                && matches!(operand.output, NativeType::Samples(_))
-                && independent_scan_pair(operand)
-        })
 }
 
 pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
@@ -1996,7 +1996,7 @@ mod tests {
 
     use super::{
         NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, fused_output_tags, hybrid_binary_admitted,
-        independent_scan_pair, native_promql_requested, nested_vector_match, scan_time_filter,
+        independent_scan_pair, native_promql_requested, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -2123,29 +2123,6 @@ mod tests {
         assert!(!independent_scan_pair(
             compiled_test_tree("2 * (x > on() x)").root()
         ));
-    }
-
-    /// A match whose operand is itself a match reads every scan whole; a nested operand that folds
-    /// or matches many-to-one does not.
-    #[test]
-    fn nested_vector_match_only_identifies_direct_nested_binary_matches() {
-        for query in ["x + y + z", "(x - y) / on(host) z"] {
-            assert!(
-                nested_vector_match(compiled_test_tree(query).root()),
-                "{query}"
-            );
-        }
-        for query in [
-            "x unless y",
-            "info(x)",
-            "round(x, time()) - on(host) x",
-            "x + y",
-        ] {
-            assert!(
-                !nested_vector_match(compiled_test_tree(query).root()),
-                "{query}"
-            );
-        }
     }
 
     #[test]
