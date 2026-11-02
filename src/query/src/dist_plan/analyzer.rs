@@ -445,15 +445,12 @@ enum RewriterStatus {
 
 #[derive(Debug, Default)]
 struct PlanRewriter {
-    /// Whether the whole plan this rewriter walks can be encoded to Substrait.
-    /// Used by [`PlanRewriter::should_expand`] to skip the per-node encoding check.
-    ///
-    /// Used for the ordinary standalone fast path when the root plan is encodable. It is not
-    /// needed when the root itself is the in-process `FusedSeries` exception.
+    /// Whether the whole plan encodes, allowing per-node checks to be skipped.
     whole_plan_encodable: bool,
-    /// In-process transport skips the encodability gate only when the rewritten root is the native
-    /// route's whole plan: a `FusedSeries` node, or the `AggregateFinalize` merge of one's state.
-    skip_encodability_gate: bool,
+    /// In-process root shapes can contain AggregateFinalize, which has no Substrait serializer.
+    skip_in_process_encodability: bool,
+    /// Whether an in-process root fused plan was recognized for placement-gate evaluation.
+    in_process_fused_root: bool,
     /// Current level in the tree
     level: usize,
     /// Simulated stack for the `rewrite` recursion
@@ -620,15 +617,17 @@ impl PlanRewriter {
             LogicalPlan::Analyze(analyze) => analyze.input.as_ref(),
             _ => plan,
         };
-        let skip_encodability_gate = in_process_region_transport && is_in_process_plan(native_root);
+        let in_process_fused_root = in_process_region_transport && is_in_process_plan(native_root);
+        let skip_in_process_encodability = in_process_fused_root
+            && DFLogicalSubstraitConvertor
+                .encode(plan, DefaultSerializer)
+                .is_err();
         Self {
-            // Preserve the ordinary whole-plan fast path unless this is the in-process root
-            // exception: no node in that tree needs an encoding check.
-            skip_encodability_gate,
-            whole_plan_encodable: !skip_encodability_gate
-                && DFLogicalSubstraitConvertor
-                    .encode(plan, DefaultSerializer)
-                    .is_ok(),
+            in_process_fused_root,
+            skip_in_process_encodability,
+            whole_plan_encodable: DFLogicalSubstraitConvertor
+                .encode(plan, DefaultSerializer)
+                .is_ok(),
             ..Default::default()
         }
     }
@@ -661,13 +660,7 @@ impl PlanRewriter {
         // When the root does not encode, the plan holds at least one node that has to stay
         // on the frontend and only the per-node check locates it.
         //
-        // For the in-process root `FusedSeries` exception, encodability says nothing about where
-        // a node may run, and asking it would cut the plan at the first node with no serializer
-        // branch before `check_plan` could decide. Skipping it only removes a reason to expand: every
-        // check below still runs, and a node they call `NonCommutative`/`Unimplemented`/
-        // `Unsupported` still expands, so a node no serializer lists only rides to a region when
-        // the categorizer places it there.
-        if !self.skip_encodability_gate
+        if !self.skip_in_process_encodability
             && !self.whole_plan_encodable
             && let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer)
         {
@@ -926,9 +919,9 @@ impl PlanRewriter {
             // if there is a new child plan, use it as the new root
             on_node = new_child_plan;
         }
-        let bypass_multi_input_gate =
-            self.skip_encodability_gate && is_admitted_pair_plan(&on_node);
-        if bypass_multi_input_gate {
+        let has_fused_pair_placement_proof =
+            self.in_process_fused_root && is_admitted_pair_plan(&on_node);
+        if has_fused_pair_placement_proof {
             self.column_requirements.clear();
         } else {
             let mut rewriter = EnforceDistRequirementRewriter::new(

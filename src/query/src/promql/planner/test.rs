@@ -2754,6 +2754,25 @@ async fn native_fused_whole_vector_operation_falls_back() {
 }
 
 #[tokio::test]
+async fn native_fused_depth_limit_falls_back_to_legacy_plan() {
+    let query = std::iter::repeat_n("time()", 70)
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let native = build_native_fused_plan(&query, true).await;
+    let legacy = build_native_fused_plan(&query, false).await;
+    let display = native.display_indent().to_string();
+    assert!(
+        !display.contains("FusedSeries"),
+        "70 time() terms compile to 139 native nodes, exceeding the 64-node cap: {display}"
+    );
+    assert_eq!(
+        display,
+        legacy.display_indent().to_string(),
+        "139 native nodes exceed the 64-node cap, so planning must preserve the legacy plan"
+    );
+}
+
+#[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
     let query = "sum_over_time(rate(some_metric[5m])[1h:])";
     let plan = build_native_fused_plan(query, true).await;
