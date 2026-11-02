@@ -31,6 +31,7 @@ use crate::error::Result;
 use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
 use crate::query_handler::CopyInHandlerRef;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
+use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::ReloadableTlsServerConfig;
@@ -42,6 +43,8 @@ pub struct PostgresServer {
     keep_alive_secs: u64,
     batching_enabled: bool,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
+    otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
+    otlp_with_metric_engine: bool,
     bind_addr: Option<SocketAddr>,
     process_manager: Option<ProcessManagerRef>,
 }
@@ -80,6 +83,8 @@ impl PostgresServer {
             keep_alive_secs,
             batching_enabled: false,
             influxdb_handler: None,
+            otlp_handler: None,
+            otlp_with_metric_engine: false,
             bind_addr: None,
             process_manager,
         }
@@ -100,6 +105,21 @@ impl PostgresServer {
         self
     }
 
+    /// Wires the OTLP handler used by table-less
+    /// `COPY FROM STDIN WITH (FORMAT otlp)` — the same handler the
+    /// OTLP/HTTP endpoints use, so the payload runs through the
+    /// identical pipeline. `with_metric_engine` carries the same flag
+    /// the HTTP wiring passes from its options.
+    pub fn with_otlp_handler(
+        mut self,
+        handler: OpenTelemetryProtocolHandlerRef,
+        with_metric_engine: bool,
+    ) -> Self {
+        self.otlp_handler = Some(handler);
+        self.otlp_with_metric_engine = with_metric_engine;
+        self
+    }
+
     fn accept(
         &self,
         io_runtime: Runtime,
@@ -115,6 +135,8 @@ impl PostgresServer {
             query_handler: make_handler.query_handler.clone(),
             copy_in_handler: make_handler.copy_in_handler.clone(),
             influxdb_handler: self.influxdb_handler.clone(),
+            otlp_handler: self.otlp_handler.clone(),
+            otlp_with_metric_engine: self.otlp_with_metric_engine,
             user_provider: make_handler.user_provider.clone(),
             param_provider: make_handler.param_provider.clone(),
             force_tls: make_handler.force_tls,

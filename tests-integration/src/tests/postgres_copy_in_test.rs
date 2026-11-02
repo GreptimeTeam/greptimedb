@@ -819,3 +819,357 @@ async fn test_postgres_copy_in_influxdb_invalid_utf8_and_trailing_record() {
 
     server.shutdown().await.unwrap();
 }
+
+/// `COPY FROM STDIN WITH (FORMAT otlp)` ingests one binary OTLP
+/// ExportMetricsServiceRequest through the same pipeline as the OTLP/HTTP
+/// endpoint — and validates binary (format code 1) COPY support, including
+/// payloads split across CopyData chunks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_binary() {
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::any_value;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue};
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric,
+    };
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "copy_otlp_gauge".into(),
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: vec![
+                            NumberDataPoint {
+                                time_unix_nano: 1_700_000_000_000_000_000,
+                                value: Some(Value::AsDouble(1.5)),
+                                attributes: vec![KeyValue {
+                                    key: "host".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(any_value::Value::StringValue("a".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            },
+                            NumberDataPoint {
+                                time_unix_nano: 1_700_000_001_000_000_000,
+                                value: Some(Value::AsDouble(2.5)),
+                                attributes: vec![KeyValue {
+                                    key: "host".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(any_value::Value::StringValue("b".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            },
+                        ],
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = request.encode_to_vec();
+
+    // Feed the binary payload in small chunks: the message spans CopyData
+    // boundaries exactly like a large text payload would.
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp)",
+        body.chunks(9).map(Bytes::copy_from_slice).collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
+
+    let messages = client
+        .simple_query("SELECT host, greptime_value FROM copy_otlp_gauge ORDER BY host")
+        .await
+        .unwrap();
+    let rows: Vec<(String, String)> = messages
+        .iter()
+        .filter_map(|m| {
+            let tokio_postgres::SimpleQueryMessage::Row(row) = m else {
+                return None;
+            };
+            Some((
+                row.get(0).unwrap_or("").to_string(),
+                row.get(1).unwrap_or("").to_string(),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![("a".into(), "1.5".into()), ("b".into(), "2.5".into())]
+    );
+
+    // Garbage bytes fail the copy and the connection stays usable.
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp)",
+        vec![Bytes::from_static(b"\xff\xff\xff\xff")],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .as_db_error()
+            .map(|d| d.message().contains("invalid OTLP payload"))
+            .unwrap_or(false),
+        "unexpected error: {error}"
+    );
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+/// `COPY FROM STDIN WITH (FORMAT otlp, signal 'traces')` ingests one
+/// binary ExportTraceServiceRequest through the same pipeline as the
+/// OTLP/HTTP traces endpoint, honoring the trace-table-name option.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_traces() {
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use prost::Message;
+    use serde_json::json;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp_traces").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request: ExportTraceServiceRequest = serde_json::from_value(json!({
+        "resourceSpans": [{
+            "resource": {"attributes": [
+                {"key": "service.name", "value": {"stringValue": "copy-svc"}}
+            ]},
+            "scopeSpans": [{"spans": [{
+                "traceId": "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                "spanId": "9630f2916e2f7909",
+                "name": "copy-op",
+                "kind": 2,
+                "startTimeUnixNano": "1736480942444376000",
+                "endTimeUnixNano": "1736480942444499000"
+            }]}]
+        }]
+    }))
+    .unwrap();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp, signal 'traces', table_name 'copy_traces', pipeline_name 'greptime_trace_v2')",
+        vec![Bytes::from(request.encode_to_vec())],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT count(*) FROM copy_traces WHERE service_name = 'copy-svc'")
+        .await
+        .unwrap();
+    let count: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(count, vec!["1".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// `COPY FROM STDIN WITH (FORMAT otlp, signal 'logs')` ingests one
+/// binary ExportLogsServiceRequest through the same pipeline as the
+/// OTLP/HTTP logs endpoint, with the default log table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_logs() {
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use prost::Message;
+    use serde_json::json;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp_logs").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request: ExportLogsServiceRequest = serde_json::from_value(json!({
+        "resourceLogs": [{
+            "resource": {"attributes": []},
+            "scopeLogs": [{"logRecords": [{
+                "timeUnixNano": "1736413568497632000",
+                "severityNumber": 9,
+                "severityText": "Info",
+                "body": {"stringValue": "copied via postgres"},
+                "traceId": "f665100a612542b69cc362fe2ae9d3bf",
+                "spanId": "e58f01c4c69f4488"
+            }]}]
+        }]
+    }))
+    .unwrap();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp, signal 'logs')",
+        vec![Bytes::from(request.encode_to_vec())],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT count(*) FROM opentelemetry_logs WHERE body = 'copied via postgres'")
+        .await
+        .unwrap();
+    let count: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(count, vec!["1".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// A metrics COPY honors the header-equivalent options: promoting all
+/// resource attributes adds them as columns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_metrics_options() {
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp_mopts").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![otel_arrow_rust::proto::opentelemetry::metrics::v1::ResourceMetrics {
+            resource: Some(otel_arrow_rust::proto::opentelemetry::resource::v1::Resource {
+                attributes: vec![otel_arrow_rust::proto::opentelemetry::common::v1::KeyValue {
+                    key: "deployment.environment".into(),
+                    value: Some(otel_arrow_rust::proto::opentelemetry::common::v1::AnyValue {
+                        value: Some(
+                            otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value::StringValue("prod".into()),
+                        ),
+                    }),
+                }],
+                ..Default::default()
+            }),
+            scope_metrics: vec![otel_arrow_rust::proto::opentelemetry::metrics::v1::ScopeMetrics {
+                metrics: vec![otel_arrow_rust::proto::opentelemetry::metrics::v1::Metric {
+                    name: "copy_opt_gauge".into(),
+                    data: Some(otel_arrow_rust::proto::opentelemetry::metrics::v1::metric::Data::Gauge(
+                        otel_arrow_rust::proto::opentelemetry::metrics::v1::Gauge {
+                            data_points: vec![otel_arrow_rust::proto::opentelemetry::metrics::v1::NumberDataPoint {
+                                time_unix_nano: 1_700_000_000_000_000_000,
+                                value: Some(otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value::AsDouble(42.0)),
+                                ..Default::default()
+                            }],
+                        },
+                    )),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp, signal 'metrics', promote_all_resource_attrs)",
+        vec![Bytes::from(request.encode_to_vec())],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT count(*) FROM copy_opt_gauge WHERE deployment_environment = 'prod'")
+        .await
+        .unwrap();
+    let count: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(count, vec!["1".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// A payload whose data points are all rejected fails the copy with the
+/// pipeline's reason — the same failure semantics as the HTTP route —
+/// and the connection stays usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_all_rejected() {
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        AggregationTemporality, Histogram, HistogramDataPoint, Metric, ResourceMetrics,
+        ScopeMetrics, metric,
+    };
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp_rej").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // A delta histogram cannot be stored as-is: its single point is
+    // rejected — the same trigger the OTLP suite uses for the HTTP
+    // route's failure outcome.
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "copy_rejected_histogram".into(),
+                    data: Some(metric::Data::Histogram(Histogram {
+                        data_points: vec![HistogramDataPoint {
+                            count: 1,
+                            bucket_counts: vec![1],
+                            explicit_bounds: vec![1.0, 2.0],
+                            ..Default::default()
+                        }],
+                        aggregation_temporality: AggregationTemporality::Delta as i32,
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp)",
+        vec![Bytes::from(request.encode_to_vec())],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .as_db_error()
+            .map(|d| d.message().contains("rejected all"))
+            .unwrap_or(false),
+        "unexpected error: {error}"
+    );
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}
