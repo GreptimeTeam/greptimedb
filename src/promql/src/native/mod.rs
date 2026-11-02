@@ -29,7 +29,6 @@
 
 mod aggregate;
 pub mod batch;
-pub mod canonicalize;
 mod display;
 pub mod execute;
 pub mod metrics;
