@@ -22,7 +22,7 @@ use crate::series::SeriesLabels;
 use crate::series::time::TimeAxis;
 
 /// Aggregate whose accumulator is represented by a state frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum AggregateStateKind {
     Sum,
     Count,
@@ -82,7 +82,7 @@ impl AggregateStateKind {
 }
 
 /// One named accumulator column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum StateComponent {
     Value,
     Mean,
@@ -194,6 +194,7 @@ fn invalid<T>(reason: &str) -> Result<T> {
 
 /// Columnar state fields retained in Arrow form so consumers can read component values in place.
 /// Null items are field-local holes, not zero-valued states.
+#[derive(Clone, Debug)]
 pub struct StateFieldsBatch {
     kind: AggregateStateKind,
     components: Arc<[StateComponent]>,

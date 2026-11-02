@@ -58,6 +58,7 @@ impl Drop for NativeNodeDepthGuard {
 }
 
 use datafusion::error::{DataFusionError, Result};
+use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use datatypes::series::{SeriesLabels, SeriesOrdering};
@@ -388,10 +389,49 @@ impl NativeType {
 pub struct AggregateStateSchema {
     /// How the groups its rows are indexed by are identified.
     pub group: Grouping,
+    /// Aggregate whose partial accumulator this state carries.
+    pub kind: AggregateStateKind,
+    /// Ordered accumulator components, shared with the kernel layout.
+    pub components: Arc<[StateComponent]>,
     /// The accumulator columns, one per aggregated field.
     pub accumulators: Arc<[FieldSpec]>,
     /// The grid the state is indexed on.
     pub grid: Arc<EvalGrid>,
+}
+
+/// Returns the state type implied by an aggregate, if its kernel has a mergeable state.
+///
+/// The component list comes from the accumulator implementation rather than a second mapping:
+/// changing a kernel's state fields therefore changes the native binding in lockstep. A quantile
+/// has no partial kernel and cannot be represented by this state family.
+pub(crate) fn aggregate_state_binding(
+    kind: AggregateKind,
+) -> Option<(AggregateStateKind, Vec<StateComponent>)> {
+    use crate::aggregate::{AggregateOp, StateField};
+
+    let (state_kind, op) = match kind {
+        AggregateKind::Sum => (AggregateStateKind::Sum, AggregateOp::Sum),
+        AggregateKind::Count => (AggregateStateKind::Count, AggregateOp::Count),
+        AggregateKind::Avg => (AggregateStateKind::Avg, AggregateOp::Avg),
+        AggregateKind::Min => (AggregateStateKind::Min, AggregateOp::Min),
+        AggregateKind::Max => (AggregateStateKind::Max, AggregateOp::Max),
+        AggregateKind::Group => (AggregateStateKind::Group, AggregateOp::Group),
+        AggregateKind::Stddev => (AggregateStateKind::Stddev, AggregateOp::Stddev),
+        AggregateKind::Stdvar => (AggregateStateKind::Stdvar, AggregateOp::Stdvar),
+        AggregateKind::Quantile { .. } => return None,
+    };
+    let components = op
+        .state_fields()
+        .iter()
+        .map(|field| match field {
+            StateField::Value => StateComponent::Value,
+            StateField::Mean => StateComponent::Mean,
+            StateField::Compensation => StateComponent::Compensation,
+            StateField::Count => StateComponent::Count,
+            StateField::IncrementalMean => StateComponent::IncrementalMean,
+        })
+        .collect();
+    Some((state_kind, components))
 }
 
 /// A scan or exchange boundary bound as a node input.
@@ -1220,6 +1260,26 @@ impl NativeNode {
                             input_schema.fields.len(),
                             "a partial aggregate",
                         )?;
+                        let Some((expected_kind, expected_components)) =
+                            aggregate_state_binding(op.kind)
+                        else {
+                            return Err(DataFusionError::NotImplemented(format!(
+                                "aggregate state is not defined for {:?}",
+                                op.kind
+                            )));
+                        };
+                        if state.kind != expected_kind
+                            || state.components.as_ref() != expected_components
+                        {
+                            return Err(DataFusionError::NotImplemented(format!(
+                                "partial {:?} aggregate requires state kind {:?} with components {:?}, found {:?} with {:?}",
+                                op.kind,
+                                expected_kind,
+                                expected_components,
+                                state.kind,
+                                state.components
+                            )));
+                        }
                         if state.grid.spec() != input_grid.spec() {
                             return Err(invalid(
                                 "aggregate state is indexed on a grid the input does not produce",
@@ -1241,6 +1301,26 @@ impl NativeNode {
                                 input.output.describe()
                             )));
                         };
+                        let Some((expected_kind, expected_components)) =
+                            aggregate_state_binding(op.kind)
+                        else {
+                            return Err(DataFusionError::NotImplemented(format!(
+                                "aggregate state is not defined for {:?}",
+                                op.kind
+                            )));
+                        };
+                        if state.kind != expected_kind
+                            || state.components.as_ref() != expected_components
+                        {
+                            return Err(DataFusionError::NotImplemented(format!(
+                                "final {:?} aggregate requires state kind {:?} with components {:?}, found {:?} with {:?}",
+                                op.kind,
+                                expected_kind,
+                                expected_components,
+                                state.kind,
+                                state.components
+                            )));
+                        }
                         if state.group != op.group {
                             return Err(invalid(
                                 "aggregate state groups differ from the binding: state built for \

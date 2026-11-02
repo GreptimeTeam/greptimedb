@@ -80,7 +80,7 @@ use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, ListArray, StringArray,
     StructArray, UInt32Array, UInt64Array,
 };
-use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
+use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::compute::{concat, take};
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -1180,32 +1180,37 @@ impl SeriesFrameCursor {
         {
             return invalid_series("aggregate state chunk grid does not match schema");
         }
-        let mut contributing = Vec::new();
-        for i in 0..series.time.len() {
-            let any = state.kind == crate::series::aggregate_state::AggregateStateKind::Group
-                || series.states.iter().any(|field| field[i].is_some());
-            if any {
-                contributing.push(i);
+        let mut states = series.states;
+        // A position is carried when some field of it was folded, which is what the axis says. When
+        // every position is carried - the shape a fold produces whenever each group has a sample at
+        // each of its points - the axis and the states are already the ones this walk reads, so
+        // nothing is rebuilt. Deciding that first keeps the common case free of a mask, a position
+        // list and a second axis.
+        let every_position_carried = state.kind
+            == crate::series::aggregate_state::AggregateStateKind::Group
+            || (0..series.time.len()).all(|row| states.iter().any(|field| field[row].is_some()));
+        let time = if every_position_carried {
+            series.time
+        } else {
+            let contributing = (0..series.time.len())
+                .map(|row| states.iter().any(|field| field[row].is_some()))
+                .collect::<Vec<_>>();
+            let carried = series
+                .time
+                .positions()
+                .filter_map(|(position, row)| contributing[row].then_some(position))
+                .collect::<Vec<_>>();
+            let spans = positions_to_spans(&carried);
+            for field in &mut states {
+                let mut row = 0;
+                field.retain(|_| {
+                    let keep = contributing[row];
+                    row += 1;
+                    keep
+                });
             }
-        }
-        let carried = series
-            .time
-            .positions()
-            .filter_map(|(position, row)| contributing.contains(&row).then_some(position))
-            .collect::<Vec<_>>();
-        let spans = positions_to_spans(&carried);
-        let time =
-            TimeAxis::from_grid_spans(series.time.grid().expect("validated grid").clone(), spans)?;
-        let states = series
-            .states
-            .iter()
-            .map(|field| {
-                contributing
-                    .iter()
-                    .map(|row| field[*row])
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+            TimeAxis::from_grid_spans(series.time.grid().expect("validated grid").clone(), spans)?
+        };
         let runs: Vec<GridRun> = time.runs().collect();
         let series = StateSeries {
             metric: series.metric,
@@ -1276,7 +1281,7 @@ impl StateWalk {
             return Ok(None);
         }
         self.done = true;
-        let states = self.series.states.clone();
+        let states = std::mem::take(&mut self.series.states);
         let time = RowTime::Spans(
             self.runs
                 .iter()
@@ -1879,68 +1884,71 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
             let DataType::Struct(components) = item.data_type() else {
                 return invalid_series("state list item is not a component struct");
             };
-            let present: Vec<bool> = rows
-                .iter()
-                .flat_map(|row| {
-                    let RowPayload::States(fields) = &row.payload else {
-                        return Vec::new().into_iter();
-                    };
-                    fields[index]
-                        .iter()
-                        .map(Option::is_some)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                })
-                .collect();
+            // Absence lives on the item, so the child struct's validity is one flag per position.
+            // A row of a state frame always carries states; a caller that hands in the wrong payload
+            // is refused here rather than panicking inside an iterator.
+            let mut present = Vec::with_capacity(positions);
+            for row in rows {
+                let RowPayload::States(fields) = &row.payload else {
+                    return invalid_series("state frame row carries sample payload");
+                };
+                present.extend(fields[index].iter().map(Option::is_some));
+            }
             debug_assert_eq!(present.len(), positions);
 
+            // Every component of a field is absent at exactly the same positions - the field's own -
+            // so they share the one mask, which the child struct already needs.
+            let nulls = present
+                .iter()
+                .any(|present| !present)
+                .then(|| NullBuffer::from(present.clone()));
             let arrays: Vec<ArrayRef> = components
                 .iter()
                 .map(|component| {
-                    let mut floats: Vec<Option<f64>> = Vec::with_capacity(positions);
-                    let mut booleans: Vec<Option<bool>> = Vec::with_capacity(positions);
-                    for row in rows {
-                        let RowPayload::States(fields) = &row.payload else {
-                            return invalid_series("state frame row carries sample payload");
-                        };
-                        for value in &fields[index] {
-                            match (component.name().as_str(), value) {
-                                ("value", Some(state)) => {
-                                    floats.push(Some(state.value));
-                                    booleans.push(None);
+                    let component_name = component.name();
+                    let array: ArrayRef = match component_name.as_str() {
+                        "value" | "mean" | "compensation" | "count" => {
+                            let mut floats = Vec::with_capacity(positions);
+                            for row in rows {
+                                let RowPayload::States(fields) = &row.payload else {
+                                    return invalid_series(
+                                        "state frame row carries sample payload",
+                                    );
+                                };
+                                for value in &fields[index] {
+                                    // A missing position's value is unreadable, so it holds the same
+                                    // zero a null slot has always held here.
+                                    floats.push(value.map_or(0.0, |state| {
+                                        match component_name.as_str() {
+                                            "value" => state.value,
+                                            "mean" => state.mean,
+                                            "compensation" => state.compensation,
+                                            "count" => state.count,
+                                            _ => unreachable!(),
+                                        }
+                                    }));
                                 }
-                                ("mean", Some(state)) => {
-                                    floats.push(Some(state.mean));
-                                    booleans.push(None);
-                                }
-                                ("compensation", Some(state)) => {
-                                    floats.push(Some(state.compensation));
-                                    booleans.push(None);
-                                }
-                                ("count", Some(state)) => {
-                                    floats.push(Some(state.count));
-                                    booleans.push(None);
-                                }
-                                ("incremental_mean", Some(state)) => {
-                                    floats.push(None);
-                                    booleans.push(Some(state.incremental_mean));
-                                }
-                                (
-                                    "value" | "mean" | "compensation" | "count"
-                                    | "incremental_mean",
-                                    None,
-                                ) => {
-                                    floats.push(None);
-                                    booleans.push(None);
-                                }
-                                _ => return invalid_series("unknown state component"),
                             }
+                            Arc::new(Float64Array::new(ScalarBuffer::from(floats), nulls.clone()))
                         }
-                    }
-                    let array: ArrayRef = if component.name().as_str() == "incremental_mean" {
-                        Arc::new(BooleanArray::from(booleans))
-                    } else {
-                        Arc::new(Float64Array::from(floats))
+                        "incremental_mean" => {
+                            let mut booleans = Vec::with_capacity(positions);
+                            for row in rows {
+                                let RowPayload::States(fields) = &row.payload else {
+                                    return invalid_series(
+                                        "state frame row carries sample payload",
+                                    );
+                                };
+                                booleans.extend(fields[index].iter().map(|value| {
+                                    value.is_some_and(|state| state.incremental_mean)
+                                }));
+                            }
+                            Arc::new(BooleanArray::new(
+                                BooleanBuffer::from(booleans),
+                                nulls.clone(),
+                            ))
+                        }
+                        _ => return invalid_series("unknown state component"),
                     };
                     Ok(array)
                 })
@@ -2456,6 +2464,45 @@ impl SeriesFrameDecoder {
         })
     }
 
+    /// Reads only the explicit labels of each aggregate-state row.
+    ///
+    /// This validates the declared frame schema and label columns without inspecting time or state.
+    pub fn decode_aggregate_state_labels(&self, batch: &RecordBatch) -> Result<Vec<SeriesLabels>> {
+        if self.shape.labels != FrameLabelMode::Explicit {
+            return invalid_series("aggregate state routing requires explicit labels");
+        }
+        let cols = batch.columns();
+        let names = down::<StringArray>(&cols[4], "name")?;
+        let labels = down::<ListArray>(&cols[5], "labels")?;
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            if labels.is_null(row) {
+                return invalid_series("null required aggregate state label");
+            }
+            let values = labels.value(row);
+            let label_struct = down::<StructArray>(&values, "labels")?;
+            if label_struct.null_count() != 0 {
+                return invalid_series("null label struct element");
+            }
+            let label_names = down::<StringArray>(label_struct.column(0), "label names")?;
+            let label_values = down::<StringArray>(label_struct.column(1), "label values")?;
+            if label_names.null_count() != 0 || label_values.null_count() != 0 {
+                return invalid_series("null label element");
+            }
+            let tags = (0..label_names.len())
+                .map(|i| Label {
+                    name: Arc::from(label_names.value(i)),
+                    value: Arc::from(label_values.value(i)),
+                })
+                .collect();
+            // An aggregation drops the metric name, and the frame says so by leaving it null. That
+            // is an identity with no name, not a malformed row.
+            let name = (!names.is_null(row)).then(|| Arc::from(names.value(row)));
+            rows.push(SeriesLabels::try_new(name, tags)?);
+        }
+        Ok(rows)
+    }
+
     /// Decodes one aggregate-state row without materializing its accumulator values.
     pub fn decode_aggregate_state(&self, batch: &RecordBatch) -> Result<Vec<StateFrameRow>> {
         let state = self
@@ -2872,4 +2919,126 @@ fn err(reason: impl Into<String>) -> crate::error::Error {
 
 fn arrow<T>(result: std::result::Result<T, arrow::error::ArrowError>) -> Result<T> {
     result.map_err(|e| err(e.to_string()))
+}
+
+#[cfg(test)]
+mod aggregate_state_contribution_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::series::aggregate_state::{
+        AggregateStateKind as Kind, AggregateStateValues as Values, StateComponent as Component,
+    };
+    use crate::series::samples::FieldSpec;
+
+    fn schema(len: usize) -> SeriesSchema {
+        SeriesSchema {
+            fields: ["a", "b"]
+                .into_iter()
+                .map(|name| FieldSpec {
+                    name: Arc::from(name),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            eval_grid: Some(Arc::new(
+                EvalGrid::try_new(GridSpec::try_new(0, 1, len as u64).unwrap()).unwrap(),
+            )),
+        }
+    }
+
+    fn cursor(
+        kind: Kind,
+        schema: &SeriesSchema,
+        spans: Vec<GridSpan>,
+        states: Vec<Vec<Option<Values>>>,
+    ) -> SeriesFrameCursor {
+        let components = match kind {
+            Kind::Group => vec![],
+            _ => vec![Component::Value, Component::Compensation],
+        };
+        let state = AggregateStateSchema::try_new(kind, components).unwrap();
+        SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            schema,
+            StateSeries {
+                metric: SeriesLabels::try_new(None, vec![]).unwrap(),
+                time: TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap(),
+                states,
+            },
+            true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sparse_rows_are_filtered_and_group_keeps_all_rows() {
+        let schema = schema(12);
+        let sparse = cursor(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 5), GridSpan::new(7, 4)],
+            vec![
+                vec![
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                vec![
+                    None,
+                    None,
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                ],
+            ],
+        );
+        let ChunkWalk::State(walk) = sparse.walk else {
+            panic!("expected state walk")
+        };
+        assert_eq!(
+            walk.series.time.positions().collect::<Vec<_>>(),
+            vec![(1, 0), (3, 1), (4, 2), (8, 3)]
+        );
+        assert_eq!(
+            walk.series
+                .time
+                .runs()
+                .map(|run| (run.position, run.len))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (3, 2), (8, 1)]
+        );
+        assert_eq!(
+            walk.series.states[0],
+            vec![Some(Values::default()), None, Some(Values::default()), None]
+        );
+        assert_eq!(
+            walk.series.states[1],
+            vec![None, Some(Values::default()), None, Some(Values::default())]
+        );
+
+        let group = cursor(
+            Kind::Group,
+            &schema,
+            vec![GridSpan::new(2, 3), GridSpan::new(8, 2)],
+            vec![vec![None; 5], vec![None; 5]],
+        );
+        let ChunkWalk::State(walk) = group.walk else {
+            panic!("expected state walk")
+        };
+        assert_eq!(
+            walk.series.time.positions().collect::<Vec<_>>(),
+            vec![(2, 0), (3, 1), (4, 2), (8, 3), (9, 4)]
+        );
+        assert_eq!(walk.series.states, vec![vec![None; 5], vec![None; 5]]);
+    }
 }

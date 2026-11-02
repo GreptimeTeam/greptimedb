@@ -28,6 +28,7 @@ use crate::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchB
 use crate::series::samples::{
     DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema,
 };
+use crate::series::time::GridRange;
 use crate::series::{Label, SeriesLabels};
 
 fn test_schema(names: &[&str]) -> SeriesSchema {
@@ -4880,6 +4881,404 @@ mod aggregate_state_acceptance {
                 }
             }
         }
+    }
+
+    #[test]
+    fn aggregate_state_all_kinds_keep_values_and_presence_through_ipc_slicing_and_concat() {
+        let kinds = [
+            Kind::Sum,
+            Kind::Count,
+            Kind::Avg,
+            Kind::Min,
+            Kind::Max,
+            Kind::Group,
+            Kind::Stddev,
+            Kind::Stdvar,
+        ];
+        let components = [
+            Component::Value,
+            Component::Mean,
+            Component::Compensation,
+            Component::Count,
+            Component::IncrementalMean,
+        ];
+
+        for kind in kinds {
+            let schema = state_schema(&["x", "y"], 5);
+            let source_values = values(4, 3.0);
+            let states = || {
+                vec![
+                    source_values.clone(),
+                    vec![
+                        None,
+                        source_values[1],
+                        Some(values(4, 30.0)[2].unwrap()),
+                        None,
+                    ],
+                ]
+            };
+            // Two rows, so slicing and re-concatenating at an offset has something to shift: with
+            // one row, a decoder that ignored the offset would still agree with the baseline.
+            let (first, decoder) = state_frame(
+                kind,
+                &schema,
+                vec![GridSpan::new(0, 3), GridSpan::new(4, 1)],
+                states(),
+                false,
+            );
+            let (second, _) = state_frame(
+                kind,
+                &schema,
+                vec![GridSpan::new(0, 3), GridSpan::new(4, 1)],
+                states(),
+                true,
+            );
+            let batch = concat_batches(&first.schema(), &[first, second]).unwrap();
+            let baseline = decoder.decode_aggregate_state(&batch).unwrap();
+            assert_eq!(baseline.len(), 2);
+
+            // This migrates #10080's property: IPC bytes plus batch concatenation must not change
+            // field-local presence, accumulator values, labels, axis, or finality.
+            let mut ipc = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut ipc, &batch.schema()).unwrap();
+                writer.write(&batch).unwrap();
+                writer.finish().unwrap();
+            }
+            let read_back = StreamReader::try_new(std::io::Cursor::new(ipc), None)
+                .unwrap()
+                .map(|batch| batch.unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(read_back.len(), 1);
+            let ipc_batch = &read_back[0];
+            assert_eq!(ipc_batch.num_rows(), baseline.len());
+            // Both halves carry a non-zero offset after concatenation, so the decoder has to honour
+            // the child arrays' offsets rather than reading from their first element.
+            let sliced = vec![ipc_batch.slice(1, 1), ipc_batch.slice(0, 1)];
+            let joined = concat_batches(&batch.schema(), &sliced).unwrap();
+            assert_eq!(
+                joined.num_rows(),
+                baseline.len(),
+                "{kind:?}: every row survives slicing and concatenation"
+            );
+
+            let check = |rows: &[StateFrameRow], expected: &[&StateFrameRow], context: &str| {
+                assert_eq!(rows.len(), expected.len(), "{context}: row count");
+                for (row, expected) in rows.iter().zip(expected) {
+                    let expected: &StateFrameRow = expected;
+                    assert_eq!(row.metric(), expected.metric(), "{context}: labels");
+                    assert_eq!(row.is_last(), expected.is_last(), "{context}: finality");
+                    assert_eq!(
+                        row.time().positions().collect::<Vec<_>>(),
+                        expected.time().positions().collect::<Vec<_>>(),
+                        "{context}: positions"
+                    );
+                    let actual_fields = row.fields().unwrap();
+                    let expected_fields = expected.fields().unwrap();
+                    assert_eq!(
+                        actual_fields.kind(),
+                        expected_fields.kind(),
+                        "{context}: kind"
+                    );
+                    assert_eq!(
+                        actual_fields.components(),
+                        expected_fields.components(),
+                        "{context}: components"
+                    );
+                    if kind == Kind::Avg {
+                        // Pin the full set once, so iterating a candidate list cannot silently
+                        // skip every component a kind does not have.
+                        assert_eq!(
+                            actual_fields.components(),
+                            &components,
+                            "{context}: av components"
+                        );
+                    }
+                    for field in 0..expected_fields.len() {
+                        let positions = expected_fields
+                            .field(field)
+                            .expect("a declared field has an item array")
+                            .len();
+                        for position in 0..positions {
+                            assert_eq!(
+                                actual_fields.is_present(field, position).unwrap(),
+                                expected_fields.is_present(field, position).unwrap(),
+                                "{context}: presence {kind:?} field {field} position {position}"
+                            );
+                        }
+                        for component in components {
+                            // Only the incremental mean is boolean; the rest are float64. Asking
+                            // for the wrong one is itself an error, so the branch is by component.
+                            if component == Component::IncrementalMean {
+                                let expected_values =
+                                    expected_fields.field_bool_values(field, component).unwrap();
+                                let actual_values =
+                                    actual_fields.field_bool_values(field, component).unwrap();
+                                match (expected_values, actual_values) {
+                                    (Some(expected_values), Some(actual_values)) => {
+                                        for position in 0..expected_values.len() {
+                                            if expected_fields.is_present(field, position).unwrap()
+                                            {
+                                                assert_eq!(
+                                                    actual_values.value(position),
+                                                    expected_values.value(position),
+                                                    "{context}: {kind:?} {component:?} \
+                                                     field {field} position {position}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    (None, None) => {}
+                                    _ => panic!(
+                                        "{context}: {kind:?} {component:?} component changed"
+                                    ),
+                                }
+                                continue;
+                            }
+                            let expected_values =
+                                expected_fields.field_values(field, component).unwrap();
+                            let actual_values =
+                                actual_fields.field_values(field, component).unwrap();
+                            match (expected_values, actual_values) {
+                                (Some(expected_values), Some(actual_values)) => {
+                                    for position in 0..expected_values.len() {
+                                        if expected_fields.is_present(field, position).unwrap() {
+                                            assert_eq!(
+                                                actual_values.value(position),
+                                                expected_values.value(position),
+                                                "{context}: {kind:?} {component:?} field {field} \
+                                                 position {position}"
+                                            );
+                                        }
+                                    }
+                                }
+                                (None, None) => {}
+                                _ => panic!("{context}: {kind:?} {component:?} component changed"),
+                            }
+                        }
+                    }
+                }
+            };
+            // The slices are concatenated in reverse row order on purpose: the decoded order must
+            // follow the concatenation, not the batch the rows came from.
+            check(
+                &decoder.decode_aggregate_state(&joined).unwrap(),
+                &[&baseline[1], &baseline[0]],
+                "ipc+concat",
+            );
+            // A slice of the joined batch: the decoder must honour the offset rather than reading
+            // the first rows of the underlying arrays.
+            let tail = joined.slice(1, joined.num_rows() - 1);
+            check(
+                &decoder.decode_aggregate_state(&tail).unwrap(),
+                &[&baseline[0]],
+                "sliced",
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_state_cursor_moves_dense_states_without_filtering() {
+        let schema = state_schema(&["a", "b"], 4);
+        let state = AggregateStateSchema::try_new(
+            Kind::Avg,
+            vec![
+                Component::Value,
+                Component::Mean,
+                Component::Compensation,
+                Component::Count,
+                Component::IncrementalMean,
+            ],
+        )
+        .unwrap();
+        let states = vec![values(4, 1.0), values(4, 5.0)];
+        let allocation = states[0].as_ptr();
+        // A grid axis rather than a span axis, so the test can tell the chunk's own axis from a
+        // rebuilt one.
+        let time =
+            TimeAxis::Grid(GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 4).unwrap());
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            &schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states,
+            },
+            true,
+        )
+        .unwrap();
+        let ChunkWalk::State(walk) = cursor.walk else {
+            panic!("expected state walk")
+        };
+        // The dense fast path preserves the caller's field allocation and values verbatim.
+        assert_eq!(walk.series.states[0].as_ptr(), allocation);
+        assert_eq!(walk.series.states, vec![values(4, 1.0), values(4, 5.0)]);
+        assert_eq!(
+            walk.series
+                .time
+                .positions()
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        // And it keeps the axis it was handed. A rebuilt axis always states spans, so a grid axis
+        // surviving here is what says the dense case did not rebuild one.
+        assert!(
+            matches!(walk.series.time, TimeAxis::Grid(_)),
+            "a dense chunk kept its own axis: {:?}",
+            walk.series.time
+        );
+    }
+
+    /// Every component of one field is absent exactly where that field is, so they share one mask.
+    ///
+    /// A position is carried when any field has a state there, so a hole needs a second field: the
+    /// two fields below cover each other's positions and each is absent where the other is present.
+    #[test]
+    fn state_components_share_their_fields_presence_mask() {
+        let schema = state_schema(&["x", "y"], 4);
+        let values = values(3, 1.0);
+        let (batch, decoder) = state_frame(
+            Kind::Avg,
+            &schema,
+            vec![GridSpan::new(0, 3)],
+            vec![
+                vec![Some(values[0].unwrap()), None, Some(values[2].unwrap())],
+                vec![None, Some(values[1].unwrap()), None],
+            ],
+            true,
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_eq!(rows.len(), 1);
+        let fields = rows[0].fields().unwrap();
+        assert_eq!(fields.len(), 2);
+        let mut masks = Vec::new();
+        // Field 0 is present at {0,2} and field 1 at {1}, so their masks differ in both content and
+        // hole count.
+        for (field, holes) in [1usize, 2].into_iter().enumerate() {
+            for component in [
+                Component::Value,
+                Component::Mean,
+                Component::Compensation,
+                Component::Count,
+            ] {
+                let array = fields.field_values(field, component).unwrap().unwrap();
+                let nulls = array.nulls().expect("a hole in this field");
+                assert_eq!(nulls.null_count(), holes, "field {field} {component:?}");
+                masks.push(nulls.inner().inner().as_ptr());
+            }
+            let boolean = fields
+                .field_bool_values(field, Component::IncrementalMean)
+                .unwrap()
+                .expect("avg declares the incremental mean");
+            masks.push(
+                boolean
+                    .nulls()
+                    .expect("the same hole")
+                    .inner()
+                    .inner()
+                    .as_ptr(),
+            );
+        }
+        // One mask per field, shared by that field's components: five components of field 0 agree,
+        // then five of field 1.
+        assert!(
+            masks[..5].windows(2).all(|pair| pair[0] == pair[1])
+                && masks[5..].windows(2).all(|pair| pair[0] == pair[1]),
+            "one mask per field, shared by its components: {masks:?}"
+        );
+        assert_ne!(
+            masks[0], masks[5],
+            "two fields with different holes are two masks"
+        );
+    }
+
+    /// A field with no hole states no mask at all, which is what a null buffer builder produces.
+    #[test]
+    fn a_field_without_holes_carries_no_null_buffer() {
+        let schema = state_schema(&["x"], 3);
+        let (batch, decoder) = state_frame(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 3)],
+            vec![values(3, 1.0)],
+            true,
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        let fields = rows[0].fields().unwrap();
+        let array = fields
+            .field_values(0, Component::Value)
+            .unwrap()
+            .expect("sum declares the value");
+        assert!(array.nulls().is_none());
+        let mean = fields
+            .field_bool_values(0, Component::IncrementalMean)
+            .unwrap();
+        assert!(mean.is_none(), "sum declares no incremental mean");
+    }
+
+    #[test]
+    fn aggregate_state_cursor_compacts_sparse_fields_and_preserves_runs() {
+        let schema = state_schema(&["a", "b"], 7);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let a = values(4, 1.0);
+        let b = values(4, 5.0);
+        let input = vec![
+            vec![Some(a[0].unwrap()), None, Some(a[2].unwrap()), None],
+            vec![None, Some(b[1].unwrap()), None, Some(b[3].unwrap())],
+        ];
+        let time = TimeAxis::from_grid_spans(
+            schema.eval_grid.clone().unwrap(),
+            vec![
+                GridSpan::new(0, 1),
+                GridSpan::new(2, 1),
+                GridSpan::new(4, 1),
+                GridSpan::new(6, 1),
+            ],
+        )
+        .unwrap();
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            &schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states: input,
+            },
+            false,
+        )
+        .unwrap();
+        let ChunkWalk::State(walk) = cursor.walk else {
+            panic!("expected state walk")
+        };
+        assert_eq!(
+            walk.series
+                .time
+                .positions()
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 4, 6]
+        );
+        assert_eq!(
+            walk.runs
+                .iter()
+                .map(|run| (run.position, run.len))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (2, 1), (4, 1), (6, 1)]
+        );
+        assert_eq!(
+            walk.series.states[0],
+            vec![Some(a[0].unwrap()), None, Some(a[2].unwrap()), None]
+        );
+        assert_eq!(
+            walk.series.states[1],
+            vec![None, Some(b[1].unwrap()), None, Some(b[3].unwrap())]
+        );
     }
 
     #[test]

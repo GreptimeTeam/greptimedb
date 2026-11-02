@@ -2051,7 +2051,7 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
             .to_string();
         if split {
             assert!(
-                display.contains("AggregateFinalizeExec"),
+                display.contains("Aggregate sum by [] final"),
                 "{query}: {display}"
             );
             let producer = observer.fused().expect("native partial producer");
@@ -2447,15 +2447,10 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
     observer.clear();
     let without_native = run(without_expr, "(0, 0, '1s')").await.unwrap();
     let native_plan = observer.root_plan();
-    let mut plan_nodes = vec![native_plan];
-    let mut has_aggregate_finalize = false;
-    while let Some(node) = plan_nodes.pop() {
-        has_aggregate_finalize |= node.name() == "AggregateFinalizeExec";
-        plan_nodes.extend(node.children().into_iter().cloned());
-    }
     assert!(
-        has_aggregate_finalize,
-        "native plan must execute AggregateFinalizeExec"
+        holds_split_merge(&native_plan),
+        "the native plan must fold partial state in a Final node: {}",
+        datafusion::physical_plan::displayable(native_plan.as_ref()).indent(true)
     );
     let (_, native_rows) = native_labelled_rows(without_native).await;
     let legacy = instance
@@ -3059,23 +3054,19 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
             let legacy_rows = legacy.iter().map(|batch| batch.num_rows()).sum::<usize>();
             assert_eq!(native_rows, legacy_rows);
             assert!(native_rows >= 1, "histogram_quantile must produce data");
-            assert_eq!(native_columns.len(), legacy_columns.len());
-            assert_eq!(native_value_index, legacy_value_index);
-            for (index, (native_column, legacy_column)) in
-                native_columns.iter().zip(legacy_columns).enumerate()
-            {
-                if index == native_value_index {
-                    assert_ne!(native_column.name, legacy_column.name);
-                    assert_eq!(native_column.name, "val");
-                    assert_eq!(
-                        legacy_column.name,
-                        "prom_rate(ts_range,val,ts,Int64(20000))"
-                    );
-                } else {
-                    assert_eq!(native_column.name, legacy_column.name);
-                    assert_eq!(native_column.data_type, legacy_column.data_type);
-                }
-            }
+            assert_eq!(
+                vec!["ts", "val", "host"],
+                native_columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>(),
+                "{shape}: native boundary columns"
+            );
+            assert_eq!(native_value_index, 1, "{shape}: native value position");
+            assert_eq!(
+                legacy_columns[legacy_value_index].name,
+                "prom_rate(ts_range,val,ts,Int64(20000))"
+            );
             assert_eq!(
                 native_columns[native_value_index].data_type,
                 legacy_columns[legacy_value_index].data_type
@@ -3084,11 +3075,16 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
                 .iter()
                 .flat_map(|batch| {
                     let timestamps = batch
-                        .column(0)
+                        .column_by_name("ts")
+                        .unwrap()
                         .as_any()
                         .downcast_ref::<TimestampMillisecondArray>()
                         .unwrap();
-                    let labels = cast(batch.column(1).as_ref(), &DataType::Utf8).unwrap();
+                    let labels = cast(
+                        batch.column_by_name("host").unwrap().as_ref(),
+                        &DataType::Utf8,
+                    )
+                    .unwrap();
                     let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
                     let values = cast(
                         batch.column(native_value_index).as_ref(),
@@ -3111,11 +3107,16 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
                 .iter()
                 .flat_map(|batch| {
                     let timestamps = batch
-                        .column(0)
+                        .column_by_name("ts")
+                        .unwrap()
                         .as_any()
                         .downcast_ref::<TimestampMillisecondArray>()
                         .unwrap();
-                    let labels = cast(batch.column(1).as_ref(), &DataType::Utf8).unwrap();
+                    let labels = cast(
+                        batch.column_by_name("host").unwrap().as_ref(),
+                        &DataType::Utf8,
+                    )
+                    .unwrap();
                     let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
                     let values = cast(
                         batch.column(legacy_value_index).as_ref(),
@@ -5790,15 +5791,21 @@ async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
     assert_eq!(native_rows, legacy_rows);
 }
 
-/// What every name of the frontend-side merge a split aggregate runs in front of contains.
-const FINALIZE_EXEC_NAME: &str = "AggregateFinalize";
-
-/// Whether any node of `plan` is the merge a split aggregate runs in front of.
+/// Whether a Final fused node routes its aggregate state through the series repartitioner.
 fn holds_split_merge(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> bool {
     let mut stack = vec![plan.clone()];
     while let Some(node) = stack.pop() {
-        if node.name().contains(FINALIZE_EXEC_NAME) {
-            return true;
+        let display = datafusion::physical_plan::displayable(node.as_ref())
+            .indent(false)
+            .to_string();
+        if node.name() == "FusedSeriesExec" && display.contains(" final") {
+            let mut descendants = node.children().into_iter().cloned().collect::<Vec<_>>();
+            while let Some(child) = descendants.pop() {
+                if child.name() == "SeriesRepartitionExec" {
+                    return true;
+                }
+                descendants.extend(child.children().into_iter().cloned());
+            }
         }
         stack.extend(node.children().into_iter().cloned());
     }
@@ -5855,14 +5862,16 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
             value,
         )
     };
-    for (query, expected) in [
+    for (query, expected, expected_columns) in [
         (
             "sum(native_pair_demo) / sum(native_pair_other)",
             vec![(0, std::collections::BTreeMap::new(), 0.375)],
+            vec!["ts", "val"],
         ),
         (
             "sum by (host) (native_pair_demo) / sum by (host) (native_pair_other)",
             vec![grouped("a", 0.25), grouped("b", 0.5)],
+            vec!["ts", "val", "host"],
         ),
     ] {
         let sql = format!("TQL EVAL (0, 0, '1s') {query}");
@@ -5886,22 +5895,56 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // per region. Each segment binds its own source's metric, which is what makes the division
         // read two different metrics rather than one read twice.
         observer.clear();
-        let (native_columns, native_rows) =
-            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
-        let root = observer.root_plan();
+        let native_output = native_tql_output(&instance, &sql, true).await;
+        // Check the actual output schema before the row reader sorts the columns.
+        let schema = match &native_output.data {
+            OutputData::Stream(stream) => stream.schema(),
+            OutputData::RecordBatches(batches) => batches.schema(),
+            _ => unreachable!("TQL EVAL returns record batches"),
+        };
+        let boundary_columns = schema
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(
-            root.name(),
-            "FusedSeriesExec",
-            "{query}: the parent is the frontend's own: {}",
-            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+            expected_columns, boundary_columns,
+            "{query}: native boundary columns"
         );
+        let (native_columns, native_rows) = native_labelled_rows(native_output).await;
+        let root = observer.root_plan();
+        let fused_parent = if root.name() == "ProjectionExec" {
+            let children = root.children();
+            assert_eq!(
+                1,
+                children.len(),
+                "{query}: the naming projection renames one input: {}",
+                datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+            );
+            assert_eq!(
+                "FusedSeriesExec",
+                children[0].name(),
+                "{query}: the parent under the naming projection is the frontend's own: {}",
+                datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+            );
+            Arc::clone(children[0])
+        } else {
+            assert_eq!(
+                root.name(),
+                "FusedSeriesExec",
+                "{query}: the parent is the frontend's own: {}",
+                datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+            );
+            Arc::clone(&root)
+        };
         assert_eq!(root.output_partitioning().partition_count(), 1, "{query}");
         assert_eq!(
-            root.children().len(),
+            fused_parent.children().len(),
             2,
             "{query}: one input per segmented prefix: {}",
             datafusion::physical_plan::displayable(root.as_ref()).indent(true)
         );
+        let root = fused_parent;
         // Each region answers one prefix: a repartition over the segment that evaluates the
         // selector, over the scan bound to that selector's metric.
         fn scan_metric(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> Option<String> {
@@ -5953,14 +5996,6 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         assert!(
             legacy_columns.iter().any(|column| column == "ts"),
             "{query}"
-        );
-        assert!(
-            native_columns.iter().any(|column| column == "ts"),
-            "{query}"
-        );
-        assert!(
-            native_columns.iter().any(|column| column == "val"),
-            "{query}: {native_columns:?}"
         );
         let labels = native_rows
             .first()
@@ -8146,11 +8181,7 @@ async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bound
     let mut stack = vec![legacy_root.clone()];
     while let Some(node) = stack.pop() {
         assert_ne!(node.name(), "FusedSeriesExec", "legacy plan must not fuse");
-        assert_ne!(
-            node.name(),
-            "AggregateFinalizeExec",
-            "legacy plan must not finalize"
-        );
+
         stack.extend(node.children().into_iter().cloned());
     }
     assert_eq!(legacy_rows, vec![(60_000, 20.0), (120_000, 15.0)]);
@@ -8294,11 +8325,7 @@ async fn native_promql_cross_table_range_aggregate_segments_keep_windows() {
     let mut stack = vec![legacy_root];
     while let Some(node) = stack.pop() {
         assert_ne!(node.name(), "FusedSeriesExec", "legacy plan must not fuse");
-        assert_ne!(
-            node.name(),
-            "AggregateFinalizeExec",
-            "legacy plan must not finalize"
-        );
+
         stack.extend(node.children().into_iter().cloned());
     }
     assert_eq!(legacy_rows, vec![(60_000, 2.0), (120_000, 4.0 / 3.0)]);
@@ -8932,12 +8959,12 @@ async fn native_promql_corpus_route_matrix() {
             })
             .collect::<Vec<_>>();
         let fused = !fused_nodes_in_root(&root).is_empty();
-        let split = root_display.contains("AggregateFinalizeExec")
+        let split = holds_split_merge(&root)
             && regions.iter().any(|p| {
                 let d = datafusion::physical_plan::displayable(p.as_ref())
                     .indent(true)
                     .to_string();
-                d.contains("FusedSeriesExec") && d.contains("partial state:")
+                d.contains("FusedSeriesExec") && d.contains(" partial")
             });
         // `segmented` means the frontend's native node consumes what a region's native node
         // produced. A `MergeScan` alone does not show that: its region side can be a plain scan
@@ -9513,7 +9540,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         "the fold is a complete aggregate over the assembled series: {pair_sum_display}"
     );
     assert!(
-        !pair_sum_display.contains("AggregateFinalizeExec"),
+        !holds_split_merge(&pair_sum_plan),
         "the fold is not planned as partition-local partial state: {pair_sum_display}"
     );
     let (_, pair_sum_rows) = native_labelled_rows(pair_sum).await;
@@ -9588,7 +9615,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
                 "{shape}: the fold is a complete aggregate over the assembled frames: {display}"
             );
             assert!(
-                !display.contains("AggregateFinalizeExec"),
+                !holds_split_merge(&plan),
                 "{shape}: the aggregate runs over the boundary itself, not as partial state: {display}"
             );
         }
@@ -9683,7 +9710,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         "the fold runs natively as a complete aggregate over the boundary: {sum_display}"
     );
     assert!(
-        !sum_display.contains("AggregateFinalizeExec"),
+        !holds_split_merge(&sum_plan),
         "the fold's state is not the substitute for the canonical merge: {sum_display}"
     );
     assert!(

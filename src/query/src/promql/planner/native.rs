@@ -17,9 +17,10 @@
 //! [`PromPlanner::try_plan_native_fused`] offers a whole statement expression to the native
 //! compiler and, when the compiler accepts it, replaces everything the existing path would plan
 //! below the root with one [`FusedSeries`] node over the selector's own table scan. A tree that
-//! folds across series - an aggregate - is split instead: its per-series prefix runs in a
-//! `FusedSeries` producer and an [`AggregateFinalize`] merges the state every partition exports,
-//! because a region holds only part of a group. Declining is the normal answer: every shape the
+//! folds across series - an aggregate - is split instead: its per-series prefix and a `Partial`
+//! aggregate run in a `FusedSeries` producer, a `SeriesRepartitionExec` routes that state, and a
+//! second `FusedSeries` runs the `Final` aggregate over it, because a region holds only part of a
+//! group. Declining is the normal answer: every shape the
 //! compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps the
 //! plan the existing planner builds.
 //!
@@ -52,8 +53,8 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
-    AggregateFinalize, FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality,
-    RawSeriesSource, input_locality, matching_operands_drop_key, tree_source_fields,
+    FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
+    input_locality, matching_operands_drop_key, tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -76,7 +77,6 @@ use crate::promql::native_compile::{
     InfoInput, compile_selectors, compile_statement, info_input, statement_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
-use crate::query_engine::QueryEngineState;
 
 /// The query-context key that turns the native fused-series route on for one query.
 ///
@@ -172,7 +172,6 @@ impl PromPlanner {
     pub(super) async fn try_plan_native_operand(
         &mut self,
         expr: &PromExpr,
-        _query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
         let saved = self.ctx.clone();
         let (plan, operand_ctx) = match self.try_plan_native_fused_with_context(expr).await? {
@@ -411,7 +410,6 @@ impl PromPlanner {
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
-        _query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
         Ok(self
             .try_plan_native_fused_with_context(prom_expr)
@@ -739,15 +737,10 @@ impl PromPlanner {
         let cross_table =
             !same_table_scans(prepared.iter().map(|(scan, ..)| scan)) || logical_ids_differ;
         // The first input names the output's time index and, on one table, binds every scan.
-        let Some((_, series_schema, metric, time, tags, _)) = prepared.first() else {
+        let Some((_, _, metric, time, tags, _)) = prepared.first() else {
             return Ok(None);
         };
-        let (series_schema, metric, time, tags) = (
-            Arc::clone(series_schema),
-            metric.clone(),
-            time.clone(),
-            tags.clone(),
-        );
+        let (metric, time, tags) = (metric.clone(), time.clone(), tags.clone());
         // The compiler binds one input per selector in the same pre-order `collect_selectors`
         // walks, so position i of both lists is the same occurrence. This is the guard that the
         // two walks agree: a mismatch is a compiler defect, not a query this route can plan.
@@ -1019,9 +1012,12 @@ impl PromPlanner {
         if multi_input && depends_on_input_order(root) {
             return Ok(None);
         }
-        // The native output schema can name only compiled value fields, the time index and tag
-        // columns. A grouping by metric name has no tag column to represent the distinct groups, so
-        // this route declines it rather than claiming those groups are interchangeable.
+        // The native output schema can name only compiled value fields, the time index and the tag
+        // columns a source declares. A discovered source declares `__name__` because the name is
+        // what tells two metrics with equal labels apart, so a nameless selector's names survive a
+        // grouping by `__name__` (#10106). A named selector's source does not declare it - the table
+        // name is the metric name - so a tree reading more than one such source cannot report the
+        // distinct groups and declines instead of claiming they are interchangeable.
         if multi_input && groups_by_metric_name(root) {
             return Ok(None);
         }
@@ -1068,48 +1064,39 @@ impl PromPlanner {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather
             // than whole samples, so it moves less between the two halves than a sample boundary
             // would. The general segmentation below is the fallback for the trees it declines,
-            // which are the ones its per-series prefix cannot express.
-            if !multi_input
-                && selectors.len() == 1
-                && AggregateFinalize::can_split(&tree, &series_schema.fields, &time)
-            {
-                // With experimental_native_promql enabled, an aggregate value column is named after
-                // the compiled tree's root field (for example, `field_0`), not legacy planner text.
-                // Legacy headers in tests/cases remain unchanged because native PromQL is opt-in/off
-                // by default.
-                let Some(output_fields) = native_root_fields(compiled.tree.root()) else {
-                    return Ok(None);
-                };
-                let Some(output_tags) = native_output_tags(compiled.tree.root(), &source_tags)
+            // which are the ones its per-series prefix cannot express. The split is decided before
+            // anything consumes a child, so a tree it declines keeps the plan it would have built
+            // without this route.
+            let split = if !multi_input && selectors.len() == 1 {
+                FusedSeries::split_aggregate(&tree, &time).context(DataFusionPlanningSnafu)?
+            } else {
+                None
+            };
+            if let Some((partial, final_tree)) = split {
+                let Some(output_schema) = Self::fused_root_schema(&final_tree, &source_tags, &time)
                 else {
                     return Ok(None);
                 };
-                let output_schema = fused_output_schema(&output_fields, &output_tags, &time)?;
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
-                let node = match AggregateFinalize::try_new(
+                let node = plan_split_aggregate(
                     Arc::from(prom_expr.to_string()),
-                    tree.clone(),
+                    partial,
+                    final_tree,
                     FusedSeriesBinding {
                         grid,
-                        time_index: time,
+                        time_index: time.clone(),
                         tags,
                         metric_name: metric,
                     },
                     rawinput,
                     output_schema,
-                ) {
-                    Ok(node) => node,
-                    Err(DataFusionError::NotImplemented(_)) => return Ok(None),
-                    Err(error) => return Err(error).context(DataFusionPlanningSnafu),
-                };
-                return Ok(Some((
-                    LogicalPlan::Extension(Extension {
-                        node: Arc::new(node),
-                    }),
-                    single_input_context,
-                )));
+                )?;
+                let plan = LogicalPlan::Extension(Extension {
+                    node: Arc::new(node),
+                });
+                return Ok(Some((plan, single_input_context)));
             }
             // Preserve the established refusal for repeated same-table operands unless
             // segmentation is needed to preserve a computed matching key.
@@ -2242,6 +2229,65 @@ fn fused_output_schema(
     ))
 }
 
+/// Builds the two nodes a split native aggregate runs in.
+///
+/// The first is a [`FusedSeries`] over `rawinput` running the per-series prefix and a `Partial`
+/// aggregate at its root, so each partition exports the state it folded. The second is a
+/// [`FusedSeries`] over the first running the `Final` aggregate and everything the split moved
+/// above it: it reads state where the first reads series, and answers the statement's rows. Between
+/// them the physical planner puts a `SeriesRepartitionExec`, which is what makes every row of a
+/// group reach one final partition.
+///
+/// The statement's output value columns must match the partial state's accumulator count; a
+/// mismatch means the declared output shape does not match the state schema of the split tree.
+fn plan_split_aggregate(
+    promql: Arc<str>,
+    partial: NativeTree,
+    final_tree: NativeTree,
+    binding: FusedSeriesBinding,
+    rawinput: LogicalPlan,
+    output_schema: DFSchemaRef,
+) -> Result<FusedSeries> {
+    let state_accumulators = match &partial.root().output {
+        NativeType::AggregateState(state) => state.accumulators.len(),
+        _ => {
+            return Err(DataFusionError::Plan(format!(
+                "the partial tree for `{promql}` does not produce aggregate state"
+            )))
+            .context(DataFusionPlanningSnafu);
+        }
+    };
+    let values = output_schema
+        .fields()
+        .iter()
+        .filter(|field| field.data_type() == &ArrowDataType::Float64)
+        .count();
+    if values != state_accumulators {
+        return Err(DataFusionError::Plan(format!(
+            "the partial state for `{promql}` has {state_accumulators} accumulator(s), but the output schema declares \
+             {values} value column(s)"
+        )))
+        .context(DataFusionPlanningSnafu);
+    }
+    let partial = FusedSeries::try_new_state_export(
+        Arc::clone(&promql),
+        partial,
+        binding.clone(),
+        vec![rawinput],
+    )
+    .context(DataFusionPlanningSnafu)?;
+    FusedSeries::try_new(
+        promql,
+        final_tree,
+        binding,
+        vec![LogicalPlan::Extension(Extension {
+            node: Arc::new(partial),
+        })],
+        output_schema,
+    )
+    .context(DataFusionPlanningSnafu)
+}
+
 /// The time-range filter a selector's scan reads, from the bounds its compiled requirement names.
 ///
 /// The selector bounds are already checked against the millisecond timestamp schema during
@@ -2667,9 +2713,9 @@ fn depends_on_input_order(node: &NativeNode) -> bool {
 /// than an answer given.
 ///
 /// `without(...)` needs no such check: both routes drop `__name__` there. Nor does a tree with one
-/// selector: it reads one metric, so every group it folds carries the same name and naming that name
-/// or dropping it cannot merge two groups. What the check is for is the tree that reads more than one
-/// metric, which is the one a multi-input node is bound for.
+/// source: a discovered selector's source declares `__name__` per metric, and a named one folds one
+/// metric whose name cannot merge two groups. What the check is for is the tree reading more than one
+/// source, where only a discovered source can report a name at all.
 fn groups_by_metric_name(node: &NativeNode) -> bool {
     let grouping_names_metric = |op: &BoundAggregate| matches!(&op.group, Grouping::By(names) if names.iter().any(|name| name.as_ref() == METRIC_NAME));
     match &node.expr {
@@ -2907,12 +2953,16 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, cut_segments,
-        hybrid_binary_admitted, independent_scan_pair, native_output_tags, native_promql_requested,
-        scan_time_filter,
+        ArrowDataType, ArrowTimeUnit, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY, NativeType,
+        collect_selectors, cut_segments, fused_output_schema, hybrid_binary_admitted,
+        independent_scan_pair, native_output_tags, native_promql_requested, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
+        compiled_test_tree_with_fields(query, &["v0"])
+    }
+
+    fn compiled_test_tree_with_fields(query: &str, fields: &[&str]) -> NativeTree {
         let statement = promql_parser::parser::EvalStmt {
             expr: promql_parser::parser::parse(query).unwrap(),
             start: UNIX_EPOCH,
@@ -2921,7 +2971,13 @@ mod tests {
             lookback_delta: Duration::from_secs(5),
         };
         let schema = Arc::new(SeriesSchema {
-            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            fields: fields
+                .iter()
+                .map(|name| FieldSpec {
+                    name: (*name).into(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
             eval_grid: None,
         });
         crate::promql::native_compile::compile_selectors(
@@ -3334,6 +3390,68 @@ mod tests {
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
             native_output_tags(tree.root(), &sources)
         );
+    }
+
+    #[test]
+    fn numeric_aggregate_projection_keeps_grouping_tags_and_value_schema() {
+        let sources = [vec![
+            "host".to_string(),
+            "kind".to_string(),
+            "zone".to_string(),
+        ]];
+        for query in [
+            "sum by (host, zone) ((x))",
+            "min by (host, zone) ((x))",
+            "max without (kind) ((x))",
+        ] {
+            let tree = compiled_test_tree(query);
+            let NativeType::Samples(schema) = &tree.root().output else {
+                panic!("{query} must produce evaluated samples");
+            };
+            assert_eq!(1, schema.fields.len(), "{query}");
+            assert_eq!("v0", schema.fields[0].name.as_ref(), "{query}");
+            let tags = native_output_tags(tree.root(), &sources).unwrap();
+            assert_eq!(
+                vec!["host", "zone"],
+                tags.iter().map(String::as_str).collect::<Vec<_>>(),
+                "{query}"
+            );
+        }
+
+        let tree = compiled_test_tree_with_fields("sum by (zone, host) ((x))", &["v0", "v1"]);
+        let NativeType::Samples(schema) = &tree.root().output else {
+            panic!("multi-field aggregate must produce evaluated samples");
+        };
+        assert_eq!(
+            vec!["v0", "v1"],
+            schema
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        let output = fused_output_schema(
+            &["v0".to_string(), "v1".to_string()],
+            &["zone".to_string(), "host".to_string()],
+            "ts",
+        )
+        .unwrap();
+        assert_eq!(
+            vec!["ts", "v0", "v1", "zone", "host"],
+            output
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            *output.field(0).data_type()
+        );
+        assert_eq!(ArrowDataType::Float64, *output.field(1).data_type());
+        assert_eq!(ArrowDataType::Float64, *output.field(2).data_type());
+        assert_eq!(ArrowDataType::Utf8, *output.field(3).data_type());
+        assert_eq!(ArrowDataType::Utf8, *output.field(4).data_type());
     }
 
     #[test]
