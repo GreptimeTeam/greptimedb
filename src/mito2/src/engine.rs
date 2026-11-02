@@ -55,6 +55,8 @@ pub mod listener;
 #[cfg(test)]
 mod merge_mode_test;
 #[cfg(test)]
+mod metadata_count_test;
+#[cfg(test)]
 mod object_store_wal_recovery_test;
 #[cfg(test)]
 mod object_store_wal_test;
@@ -1231,6 +1233,7 @@ impl EngineInner {
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_scan_memory_tracker(self.scan_memory_tracker.clone())
         .with_experimental_series_scan_v2(self.config.experimental_series_scan_v2)
+        .with_experimental_metadata_count(self.config.experimental_metadata_count)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
