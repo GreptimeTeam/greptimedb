@@ -1888,34 +1888,111 @@ async fn merge_inputs_waits_for_gated_input_before_publishing_identity() {
     assert_eq!(metric, first.0.metric);
 }
 
-/// A duplicate complete identity fails instead of publishing a second final chain.
+/// CompleteDisjoint publishes and releases each identity without retaining history.
 #[tokio::test]
-async fn complete_disjoint_rejects_repeated_identity() {
-    let metric = labels("duplicate-disjoint");
-    let child = Scripted::plan(vec![
-        vec![Step::chunk(chunk(metric.clone(), 0, 1, true))],
-        vec![Step::chunk(chunk(metric, 1, 1, true))],
-    ]);
+async fn complete_disjoint_memory_does_not_grow_with_published_identity_history() {
+    const IDENTITIES: usize = 2_000;
+    const LABEL_VALUE_LEN: usize = 1_024;
+    const MEMORY_BUDGET: usize = 4 * 1024 * 1024;
+    let fixture = labels(&"x".repeat(LABEL_VALUE_LEN));
+    let steps = (0..IDENTITIES)
+        .map(|index| {
+            let identity = SeriesLabels::try_new(
+                fixture.name().map(Arc::<str>::from),
+                vec![Label {
+                    name: Arc::from("host"),
+                    value: Arc::from(format!("{index:04}-{}", "x".repeat(LABEL_VALUE_LEN - 5))),
+                }],
+            )
+            .expect("test identity is legal");
+            Step::chunk(chunk(identity, 1, 1, true))
+        })
+        .collect();
+    let finish_first = Arc::new(Switch::default());
+    let gate_other = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![
+            GatedPartition {
+                before: steps,
+                after: Vec::new(),
+                switch: Some(Arc::clone(&finish_first)),
+            },
+            GatedPartition {
+                before: Vec::new(),
+                after: Vec::new(),
+                switch: Some(Arc::clone(&gate_other)),
+            },
+        ],
+        Arc::clone(&finish_first),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(MEMORY_BUDGET));
+    let context = task_context(&pool);
     let plan = Arc::new(SeriesRepartitionExec::try_new_complete_disjoint(child, 1).unwrap());
-    let context = SessionContext::default().task_ctx();
     let mut stream = output_of(&plan, 0, &context);
-    let mut got_error = false;
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(_) => assert!(!got_error, "no chain is published after duplicate failure"),
-            Err(error) => {
-                got_error = true;
-                assert!(
-                    error
-                        .to_string()
-                        .contains("CompleteDisjoint series identity appeared more than once"),
-                    "distinct failure: {error}"
-                );
-                break;
-            }
+    finish_first.open();
+    let drain = async {
+        for index in 0..IDENTITIES {
+            let (series, finality) = stream
+                .next()
+                .await
+                .expect("a ready complete chain is not blocked by the live input")
+                .expect("complete producer chains route successfully");
+            assert!(finality, "each complete chain is final when published");
+            assert_eq!(
+                labels(&format!("{index:04}-{}", "x".repeat(LABEL_VALUE_LEN - 5))),
+                series.metric,
+                "each full identity appears exactly once in producer order"
+            );
+            assert_eq!(Some(1), series.time.first_position());
+            assert_eq!(1, series.time.len());
+            let (position, row) = series.time.positions().next().expect("one time point");
+            assert_eq!(1, position);
+            assert_eq!(0, row);
+            assert_eq!(1_000, series.time.timestamp(0).expect("timestamp at point"));
+            let value = series.fields.as_slice()[0]
+                .iter()
+                .next()
+                .expect("one sample");
+            let datatypes::series::samples::SampleRef::Float(value) = value else {
+                panic!("expected float sample");
+            };
+            assert_eq!(1.0, value);
         }
-    }
-    assert!(got_error, "duplicate chain fails the execution");
+    };
+    tokio::time::timeout(Duration::from_secs(30), drain)
+        .await
+        .expect("all identities make progress while the producer remains live");
+    assert!(
+        !gate_other.is_open(),
+        "the input remains live after its identities drain"
+    );
+
+    // The previous implementation retained each published identity key and its history reservation
+    // until stream teardown. This lower bound excludes the group/map overhead, making it conservative:
+    // 2,000 host values of 1,019 bytes alone exceed 1.9 MiB. The 4 MiB pool allows transient queued chains, but the
+    // fully drained state must be far below the retained-history charge.
+    let old_history_lower_bound = IDENTITIES * (LABEL_VALUE_LEN - 5);
+    assert!(old_history_lower_bound > MEMORY_BUDGET / 4);
+    assert!(
+        old_history_lower_bound < MEMORY_BUDGET,
+        "budget also admits the historical charge"
+    );
+    assert!(
+        pool.reserved() < MEMORY_BUDGET / 4,
+        "drained identities must not retain their historical keys"
+    );
+
+    gate_other.open();
+    let eof = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("input EOF is observable");
+    assert!(eof.is_none(), "the stream closes after EOF");
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "all transient reservations are released"
+    );
 }
 
 /// A one-fragment large identity needs no merge workspace and fits its own finite payload budget.

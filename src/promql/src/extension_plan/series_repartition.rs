@@ -180,8 +180,9 @@ pub enum IdentityCompletion {
     /// An identity may be split across inputs: every input has to contribute it or end first.
     #[default]
     MergeInputs,
-    /// Every identity lives in exactly one input partition, so one closed chain is the whole
-    /// identity. A second chain for an identity that already published is an error.
+    /// The producer guarantees each identity appears as one complete chain on one input partition.
+    /// The router may publish a closed chain immediately and does not retain history to validate
+    /// that guarantee after publication.
     CompleteDisjoint,
 }
 
@@ -232,7 +233,9 @@ impl SeriesRepartitionExec {
         Self::try_new_with_routing(input, outputs, policy)
     }
 
-    /// Creates a node whose identities are complete on one disjoint chain.
+    /// Creates a node for an input whose producer guarantees each identity is one complete chain
+    /// on one input partition. Closed identities are published immediately; later duplicate chains
+    /// are not detected, so callers must uphold the producer guarantee.
     pub fn try_new_complete_disjoint(
         input: Arc<dyn ExecutionPlan>,
         outputs: usize,
@@ -1758,7 +1761,6 @@ struct RepartitionStream {
     /// What the frame this stream emits declares about the order of its keys.
     ordering: SeriesOrdering,
     identity_completion: IdentityCompletion,
-    identities: BTreeMap<OwnerKey, MemoryReservation>,
     groups: BTreeMap<OwnerKey, PendingGroup>,
     eof: Vec<bool>,
     last_key_from: Vec<Option<Vec<u8>>>,
@@ -1841,7 +1843,6 @@ impl RepartitionStream {
             schema,
             ordering,
             identity_completion,
-            identities: BTreeMap::new(),
             pool: Arc::clone(pool),
             groups: BTreeMap::new(),
             eof: Vec::new(),
@@ -2128,14 +2129,6 @@ impl Stream for RepartitionStream {
                             (key, RoutedChain::Raw(chain))
                         }
                     };
-                    if this.identity_completion == IdentityCompletion::CompleteDisjoint
-                        && (this.identities.contains_key(&key) || this.groups.contains_key(&key))
-                    {
-                        this.lease.fail(Arc::new(DataFusionError::Execution(
-                            "CompleteDisjoint series identity appeared more than once".into(),
-                        )));
-                        continue;
-                    }
                     if !this.groups.contains_key(&key) {
                         let metadata =
                             MemoryConsumer::new("SeriesRepartitionIdentity").register(&this.pool);
@@ -2162,17 +2155,6 @@ impl Stream for RepartitionStream {
                         if let Err(error) = metadata.try_grow(bytes) {
                             this.lease.fail(Arc::new(error));
                             continue;
-                        }
-                        if this.identity_completion == IdentityCompletion::CompleteDisjoint {
-                            let history = MemoryConsumer::new("SeriesRepartitionIdentityHistory")
-                                .register(&this.pool);
-                            let history_bytes =
-                                std::mem::size_of::<OwnerKey>().saturating_add(key_bytes);
-                            if let Err(error) = history.try_grow(history_bytes) {
-                                this.lease.fail(Arc::new(error));
-                                continue;
-                            }
-                            this.identities.insert(key.clone(), history);
                         }
                         this.groups.insert(
                             key.clone(),
