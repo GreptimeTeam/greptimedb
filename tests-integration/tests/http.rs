@@ -5181,6 +5181,20 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+/// The Prometheus release these native-histogram expectations follow: **v3.5.0**.
+///
+/// Prometheus 3.x is the line that carries native histograms together with the float/histogram
+/// mixed-sample PromQL semantics this route answers, and it is a tagged release rather than a
+/// moving branch, so the expectations below name behaviours a reader can look up. The repository
+/// has no global pin (the RFC cites commit `9f159f6` only for its OTLP translator), so each
+/// expectation states the value it wants rather than comparing against a running Prometheus.
+const PROMETHEUS_REFERENCE: &str = "v3.5.0";
+
+/// Writes one native histogram through Remote Write 2.0.
+///
+/// `positive_deltas` holds *increments*, not bucket counts, so the two entries are derived from
+/// `count`: decoding accumulates them and the server rejects a payload whose bucket total disagrees
+/// with its count.
 async fn write_native_histogram(
     client: &TestClient,
     labels: &[(&str, &str)],
@@ -5449,8 +5463,14 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
     let body: Value = response.json().await;
     assert_eq!(body["data"]["resultType"], "vector");
     assert_eq!(body["data"]["result"][0]["histogram"][0], 3.0);
-    assert_eq!(body["data"]["result"][0]["histogram"][1]["count"], "13");
-    assert_eq!(body["data"]["result"][0]["histogram"][1]["sum"], "30");
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["count"], "13",
+        "`sum_over_time` adds the counts as {PROMETHEUS_REFERENCE} does"
+    );
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["sum"], "30",
+        "`sum_over_time` adds the sums as {PROMETHEUS_REFERENCE} does"
+    );
     assert_eq!(
         observer.take("histogram sum_over_time").name(),
         "FusedSeriesExec"
@@ -5537,8 +5557,14 @@ pub async fn test_remote_write_v2_histogram_prometheus_native_route(store_type: 
     assert_eq!(body["data"]["resultType"], "vector");
     assert_eq!(body["data"]["result"][0]["metric"]["job"], "api");
     assert_eq!(body["data"]["result"][0]["histogram"][0], 3.0);
-    assert_eq!(body["data"]["result"][0]["histogram"][1]["count"], "5");
-    assert_eq!(body["data"]["result"][0]["histogram"][1]["sum"], "10");
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["count"], "5",
+        "count as {PROMETHEUS_REFERENCE} renders it"
+    );
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["sum"], "10",
+        "sum as {PROMETHEUS_REFERENCE} renders it"
+    );
     let bucket_counts = body["data"]["result"][0]["histogram"][1]["buckets"]
         .as_array()
         .unwrap()
