@@ -637,9 +637,6 @@ impl PromPlanner {
         if multi_input && groups_by_metric_name(root) {
             return Ok(None);
         }
-        // A two-vector expression around a fold cannot attach one shared set of output labels to
-        // both operands: at least one side no longer carries the selector tags needed by the match.
-        // The current native node is one output schema, not a per-operand schema rewrite.
         // Catch construction-time refusals before choosing native execution: errors raised during
         // physical planning cannot fall back. This includes unsupported aggregates and `topk`,
         // `limitk` or CountValues groupings; it does not cover data-dependent errors raised while
@@ -1689,6 +1686,10 @@ mod tests {
             "A + on(job) group_left B",
             "100 / B",
             "A / (B + C)",
+            // A fold on either side: one shared output label set cannot describe both operands, and
+            // the shapes that produced a `tag_0` planning error before the aggregate gate existed.
+            "sum(A) / B",
+            "A / sum(B)",
         ] {
             assert!(!hybrid_admission(query), "{query}");
         }
