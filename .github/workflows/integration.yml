@@ -259,7 +259,16 @@ jobs:
       - name: Check compat version window and anchors
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python3 .github/scripts/update-compat-versions.py --check --published-only --check-anchors
+          FROZEN_RELEASE_BACKPORT: ${{ github.event_name == 'pull_request' && github.event.pull_request.number == 10073 && github.base_ref == 'release/5e02efa9' }}
+        run: |
+          # This frozen-release backport does not track the moving published-release window.
+          # Keep anchor validation; every other PR and merge-group retains the full check.
+          if [[ "$FROZEN_RELEASE_BACKPORT" == "true" ]]; then
+            echo "Skipping published-version window freshness for release backport #10073; validating anchors."
+            python3 .github/scripts/update-compat-versions.py --check-anchors
+          else
+            python3 .github/scripts/update-compat-versions.py --check --published-only --check-anchors
+          fi
 
   compat:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || (github.event.action == 'opened' && github.event.pull_request.draft == false)))) }}
