@@ -49,10 +49,11 @@ use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
+use promql::native::canonicalize::insert_native_merge_inside_current_fused;
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    BoundAggregate, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeType,
-    reads_across_series,
+    BoundAggregate, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeProperties,
+    NativeType, merges_are_placeable_in, reads_across_series,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, Matchers};
@@ -705,7 +706,27 @@ impl PromPlanner {
                 single_input_context,
             )));
         }
-        let tree = compiled.tree;
+        // RawSeriesSource inputs can read a whole region, but this planner has no proof that
+        // their canonical keys are globally unique; keep the boundary conservative (`Unknown`).
+        let boundary = vec![NativeProperties::not_known(); selectors.len()];
+        // Every single-input non-per-partition route returned above through AggregateFinalize.
+        // Therefore this rewrite branch is multi-input only. FusedSeries::execute reads 0..count
+        // for every input when inputs.len() > 1 (fused_series.rs:1407-1411), proving all pieces
+        // arrive in this execution. Keep the route fact explicit rather than passing a bare claim.
+        let co_located = multi_input;
+        let tree = if per_partition && !multi_input {
+            compiled.tree
+        } else {
+            if !co_located {
+                return Ok(None);
+            }
+            let rewritten = insert_native_merge_inside_current_fused(&compiled.tree, &boundary)
+                .context(DataFusionPlanningSnafu)?;
+            if !merges_are_placeable_in(rewritten.root(), &boundary, co_located) {
+                return Ok(None);
+            }
+            rewritten
+        };
         // The tags are asked for before the fields, because the walk answers for a tree the
         // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
         // the walk derives or - where it derives none - the ones the existing planner names.
@@ -1399,7 +1420,8 @@ mod tests {
 
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::native::plan::{NativeExpr, NativeNode, NativeTree};
+    use promql::native::canonicalize::insert_native_merge_inside_current_fused;
+    use promql::native::plan::{NativeExpr, NativeNode, NativeProperties, NativeTree};
     use session::context::QueryContextBuilder;
 
     use super::{
@@ -1427,6 +1449,27 @@ mod tests {
         )
         .unwrap()
         .tree
+    }
+
+    fn contains_merge(node: &NativeNode) -> bool {
+        match &node.expr {
+            NativeExpr::Merge { .. } => true,
+            NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Instant { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. } => contains_merge(input),
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                contains_merge(left) || contains_merge(right)
+            }
+            NativeExpr::Info { base, info, .. } => contains_merge(base) || contains_merge(info),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => contains_merge(input) || parameters.iter().any(contains_merge),
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
+        }
     }
 
     fn input_sources(root: &NativeNode) -> Vec<usize> {
@@ -1478,6 +1521,20 @@ mod tests {
             .iter()
             .map(|selector| selector.name.clone().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn planner_boundary_keeps_window_over_raw_input_unmerged() {
+        // This is the multi-input planner route's conservative boundary: one unknown property
+        // per selector occurrence. A range selector compiles directly to Window(Input), but the
+        // pass cannot wrap raw samples in Merge: merges only bind evaluated vectors.
+        let tree = compiled_test_tree("rate(some_metric[5m]) + other_metric");
+        let boundary = vec![NativeProperties::not_known(); 2];
+        let rewritten = insert_native_merge_inside_current_fused(&tree, &boundary).unwrap();
+        assert!(
+            !contains_merge(rewritten.root()),
+            "the raw Input boundary unexpectedly received a merge:\n{rewritten}"
+        );
     }
 
     #[test]

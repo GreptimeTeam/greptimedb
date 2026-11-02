@@ -1998,7 +1998,8 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     );
     // The scan below is chosen during physical planning, so the route cannot know whether it is
     // the legacy scan (`KeyThenTime`) or the two-phase one (`Contiguous`) and must bind the weaker
-    // guarantee both provide. `rate` compiles to one window over that raw input.
+    // guarantee both provide. `rate` compiles to one window over that raw input. The canonical
+    // merge planner test uses an evaluated subquery window.
     let NativeExpr::Window { input, .. } = &fused.tree().root().expr else {
         panic!("the root is not a window: {:?}", fused.tree().root().expr);
     };
