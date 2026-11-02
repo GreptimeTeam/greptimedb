@@ -1,8 +1,8 @@
 name: Cargo.lock Diff Check
 
 # Non-blocking check that warns when Cargo.lock has a large diff, to help
-# catch accidental dependency updates. This job always succeeds; it only
-# posts/updates a PR comment when the threshold is exceeded.
+# catch accidental dependency updates. Always report the diff in the job summary;
+# comments are optional and only attempted for same-repository PRs.
 on:
     pull_request:
         paths:
@@ -36,7 +36,7 @@ jobs:
                   # `base...head` diffs from the merge-base of the PR, i.e. exactly
                   # what this PR changes in Cargo.lock. --numstat prints
                   # "<added> <deleted> <path>".
-                  NUMSTAT="$(git diff --numstat "${BASE_SHA}...${HEAD_SHA}" -- Cargo.lock || true)"
+                  NUMSTAT="$(git diff --numstat "${BASE_SHA}...${HEAD_SHA}" -- Cargo.lock)"
                   echo "::group::Cargo.lock numstat"
                   echo "${NUMSTAT}" >&2
                   echo "::endgroup::"
@@ -55,8 +55,18 @@ jobs:
                   } >> "${GITHUB_OUTPUT}"
                   echo "Computed Cargo.lock diff: +${ADDED} -${DELETED} (${TOTAL} lines)"
 
+                  {
+                    printf '## Cargo.lock diff\n\n'
+                    printf -- '- Added lines: %s\n- Deleted lines: %s\n- Total changed lines: %s\n\n' "${ADDED}" "${DELETED}" "${TOTAL}"
+                    if (( TOTAL > 500 )); then
+                      printf 'Large Cargo.lock diff: please confirm this dependency update is intentional.\n\n'
+                    fi
+                    printf 'Diff size is informational and does not fail CI. PR comments are optional and only attempted for same-repository PRs.\n'
+                  } >> "${GITHUB_STEP_SUMMARY}"
+
             - name: Warn when Cargo.lock diff exceeds 500 lines
-              if: ${{ fromJSON(steps.diff.outputs.total || '0') > 500 }}
+              if: ${{ github.event.pull_request.head.repo.full_name == github.repository && fromJSON(steps.diff.outputs.total || '0') > 500 }}
+              continue-on-error: true
               uses: marocchino/sticky-pull-request-comment@v2
               with:
                   header: cargo-lock-diff-warning
@@ -72,7 +82,8 @@ jobs:
                       - If intended (e.g. a deliberate dependency bump), you can ignore this warning.
 
             - name: Hide resolved warning
-              if: ${{ fromJSON(steps.diff.outputs.total || '0') <= 500 }}
+              if: ${{ github.event.pull_request.head.repo.full_name == github.repository && fromJSON(steps.diff.outputs.total || '0') <= 500 }}
+              continue-on-error: true
               uses: marocchino/sticky-pull-request-comment@v2
               with:
                   header: cargo-lock-diff-warning
