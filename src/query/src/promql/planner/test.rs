@@ -1968,6 +1968,22 @@ async fn native_fused_plans_dynamic_scalars() {
         let fused = find_fused_series(&plan).expect("a data-free statement uses the native route");
         assert!(fused.children().is_empty(), "{query}");
     }
+    let query = "count_values(\"l\", vector(1))";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("data-free count_values takes native route");
+    assert!(fused.children().is_empty(), "{query}");
+    let schema = fused.schema().as_ref();
+    assert_eq!(
+        vec![DEFAULT_TIME_INDEX_COLUMN, "value", "l"],
+        schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        "{query} output schema"
+    );
+    // The in-memory planner fixture has no executable region; data-free execution is covered by
+    // native runtime tests, while this assertion pins native admission and exact output schema.
     for query in [
         "scalar(some_metric)",
         "some_metric > bool scalar(some_metric)",

@@ -235,25 +235,24 @@ impl PromPlanner {
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
-            // A statement that reads no data has no scan: no metric, no tags, and the value under
-            // the name the existing path gives a bare literal, or the one `vector()` binds. A tree
-            // whose labels the walk cannot derive, such as `count_values("l", vector(1))`, would
-            // lose the labels it generates, so it is left to the existing plan.
-            if native_output_tags(tree.root(), &[]).is_none_or(|tags| !tags.is_empty()) {
+            // A data-free tree has no input scan. Its output tags still come from the compiled
+            // expression: decline only when the tag walk cannot derive them, otherwise use those
+            // names consistently in the output schema and binding.
+            let Some(output_tags) = native_output_tags(tree.root(), &[]) else {
                 return Ok(None);
-            }
+            };
             let time_index = DEFAULT_TIME_INDEX_COLUMN.to_string();
             let Some(values) = native_root_fields(tree.root()) else {
                 return Ok(None);
             };
-            let output_schema = fused_output_schema(&values, &[], &time_index)?;
+            let output_schema = fused_output_schema(&values, &output_tags, &time_index)?;
             let node = FusedSeries::try_new(
                 Arc::from(prom_expr.to_string()),
                 tree,
                 FusedSeriesBinding {
                     grid,
                     time_index,
-                    tags: Vec::new(),
+                    tags: output_tags,
                     metric_name: None,
                 },
                 Vec::new(),
