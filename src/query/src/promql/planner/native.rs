@@ -1365,11 +1365,13 @@ async fn segment_tree(
     if children.len() > 1 && groups_by_metric_name(tree.root()) {
         return Ok(None);
     }
-    // A statement the existing planner refuses is not one this route may answer. Its refusal is the
-    // product's answer for that statement - an operation with no kernel, or one whose arguments it
-    // rejects - and answering it here would turn an error into a value. Reading the existing plan's
-    // columns is how the rest of this route inherits that refusal; this call is that same check for
-    // a shape whose columns the derivation can name on its own.
+    // A statement the existing planner refuses is not one this route may answer: that refusal is
+    // the product's answer for the statement today, and answering it here would turn an error into
+    // a value. What is inherited is the *existing planner's* coverage, which is not the same thing
+    // as what this route can execute - `clamp` has a kernel here and none there, and the existing
+    // tests pin its refusal on both routes. Reading the existing plan's columns is how the rest of
+    // this route inherits that refusal; this call is the same check for a shape whose columns the
+    // derivation can name on its own.
     if planner
         .legacy_output_columns(prom_expr, query_engine_state)
         .await
@@ -1611,10 +1613,29 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
             | BoundVectorOp::Sort(_) => fused_output_tags(input, source_tags),
-            // `absent` reports the labels its own matchers name, not its input's.
-            BoundVectorOp::CountValues { .. }
-            | BoundVectorOp::Histogram(_)
-            | BoundVectorOp::Absent { .. } => None,
+            BoundVectorOp::Absent { labels } => {
+                let input_tags = fused_output_tags(input, source_tags)?;
+                let named = labels
+                    .tags()
+                    .iter()
+                    .map(|label| label.name.as_ref())
+                    .collect::<Vec<_>>();
+                // `absent` reports matcher-named labels, not all input labels or the table's columns;
+                // only named labels present as input columns can be represented as frame columns.
+                if named
+                    .iter()
+                    .any(|name| !input_tags.iter().any(|tag| tag == name))
+                {
+                    return None;
+                }
+                Some(
+                    input_tags
+                        .into_iter()
+                        .filter(|tag| named.contains(&tag.as_str()))
+                        .collect(),
+                )
+            }
+            BoundVectorOp::CountValues { .. } | BoundVectorOp::Histogram(_) => None,
         },
         NativeExpr::Merge { .. } => None,
         NativeExpr::Binary {
