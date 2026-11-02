@@ -1976,6 +1976,13 @@ async fn native_fused_plans_dynamic_scalars() {
             "value",
             "1",
         ),
+        ("count_values(\"time\", vector(1))", "value", "time", "1"),
+        (
+            "count_values(\"value\", vector(1)) by (native_value_0)",
+            "native_value_1",
+            "value",
+            "1",
+        ),
         (
             "count_values(\"vector(s)\", vector(1))",
             "value",
@@ -2017,7 +2024,12 @@ async fn native_fused_plans_dynamic_scalars() {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).expect("data-free count_values takes native route");
         assert!(fused.children().is_empty(), "{query}");
-        let expected_schema = vec![DEFAULT_TIME_INDEX_COLUMN, expected_value, expected_label];
+        let expected_time = if expected_label == "time" {
+            "native_time_0"
+        } else {
+            DEFAULT_TIME_INDEX_COLUMN
+        };
+        let expected_schema = vec![expected_time, expected_value, expected_label];
         let root_fields = fused.tree().root().output.samples().unwrap();
         assert_eq!(
             vec![expected_value],
@@ -2038,6 +2050,12 @@ async fn native_fused_plans_dynamic_scalars() {
                 .collect::<Vec<_>>(),
             "{query} output schema"
         );
+        let encoded = fused.serialize().unwrap();
+        let decoded = FusedSeries::deserialize(&encoded).unwrap();
+        assert_eq!(fused.schema(), decoded.schema(), "{query} roundtrip schema");
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(decoded),
+        });
         let (_, batches) = execute(plan, &build_query_engine_state()).await;
         assert!(!batches.is_empty(), "{query}");
         for batch in &batches {

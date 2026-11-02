@@ -319,10 +319,29 @@ fn data_free_value_field(stmt: &EvalStmt) -> Arc<str> {
                         }
                     }
                 }
+                if let Some(modifier) = &aggregate.modifier {
+                    match modifier {
+                        LabelModifier::Include(labels) | LabelModifier::Exclude(labels) => {
+                            targets.extend(labels.labels.iter().cloned());
+                        }
+                    }
+                }
                 visit(&aggregate.expr, targets);
             }
             PromExpr::Unary(unary) => visit(&unary.expr, targets),
             PromExpr::Binary(binary) => {
+                if let Some(modifier) = &binary.modifier {
+                    if let Some(matching) = &modifier.matching {
+                        targets.extend(matching.labels().labels.iter().cloned());
+                    }
+                    match &modifier.card {
+                        VectorMatchCardinality::OneToMany(labels)
+                        | VectorMatchCardinality::ManyToOne(labels) => {
+                            targets.extend(labels.labels.iter().cloned());
+                        }
+                        _ => {}
+                    }
+                }
                 visit(&binary.lhs, targets);
                 visit(&binary.rhs, targets);
             }

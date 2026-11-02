@@ -240,9 +240,25 @@ impl PromPlanner {
             let Some(output_tags) = native_output_tags(tree.root(), &[]) else {
                 return Ok(None);
             };
-            let time_index = DEFAULT_TIME_INDEX_COLUMN.to_string();
             let Some(values) = native_root_fields(tree.root()) else {
                 return Ok(None);
+            };
+            let time_index = if values
+                .iter()
+                .chain(&output_tags)
+                .any(|name| name == DEFAULT_TIME_INDEX_COLUMN)
+            {
+                (0usize..)
+                    .map(|index| format!("native_time_{index}"))
+                    .find(|candidate| {
+                        !values
+                            .iter()
+                            .chain(&output_tags)
+                            .any(|name| name == candidate)
+                    })
+                    .expect("the time column candidate sequence is unbounded")
+            } else {
+                DEFAULT_TIME_INDEX_COLUMN.to_string()
             };
             let output_schema = fused_output_schema(&values, &output_tags, &time_index)?;
             let node = FusedSeries::try_new(
