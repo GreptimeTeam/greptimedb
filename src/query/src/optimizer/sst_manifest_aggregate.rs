@@ -37,6 +37,7 @@ use datafusion_expr::{
     UserDefinedLogicalNodeCore,
 };
 use datafusion_optimizer::AnalyzerRule;
+use datatypes::schema::Schema;
 use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::ScanRequest;
 use table::table::adapter::DfTableProviderAdapter;
@@ -67,6 +68,10 @@ impl AnalyzerRule for SstManifestAggregateRule {
                     return Ok(Transformed::no(plan));
                 }
                 let split = StateMergeHelper::split_aggr_node(aggregate.clone())?;
+                // The frontend may compute types that cannot cross the inspection boundary.
+                if Schema::try_from(split.lower_state.schema().clone()).is_err() {
+                    return Ok(Transformed::no(plan));
+                }
                 let remote = split
                     .lower_state
                     .transform_up(|node| {

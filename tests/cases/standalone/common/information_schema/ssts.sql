@@ -149,4 +149,12 @@ FROM information_schema.ssts_manifest WHERE region_id > 0;
 SELECT COUNT(index_file_size), SUM(num_rows), SUM(level), SUM(index_file_size)
 FROM information_schema.ssts_manifest WHERE region_id = 0;
 
+-- Decimal256 can remain internal when only the final DOUBLE result crosses the boundary.
+SELECT CAST(SUM(CAST(num_rows AS DECIMAL(39, 0))) AS DOUBLE) > 0 AS has_rows
+FROM information_schema.ssts_manifest;
+
+SELECT COUNT(*) AS files,
+  CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE) AS bytes
+FROM information_schema.ssts_manifest WHERE region_id = 0;
+
 DROP TABLE sst_case;

@@ -294,6 +294,8 @@ async fn test_manifest_aggregate_states_match_baseline() {
 async fn test_manifest_aggregate_fallbacks() {
     for sql in [
         "SELECT COUNT(DISTINCT file_size) FROM ssts_manifest",
+        "SELECT CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE) FROM ssts_manifest",
+        "SELECT COUNT(*), CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE) FROM ssts_manifest",
         "SELECT file_size, COUNT(*) FROM ssts_manifest GROUP BY file_size",
         "SELECT SUM(file_size + 1) FROM ssts_manifest",
         "SELECT SUM(CAST(min_ts AS BIGINT)) FROM ssts_manifest",

@@ -333,6 +333,47 @@ FROM pushed CROSS JOIN fallback;
 | true       | true                | true      | true              | true               | true        | true        | true             | true               | true             |
 +------------+---------------------+-----------+-------------------+--------------------+-------------+-------------+------------------+--------------------+------------------+
 
+-- Unsupported aggregate state types stay on the frontend, including mixed aggregates.
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+EXPLAIN SELECT COUNT(*), CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE)
+FROM information_schema.ssts_manifest;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                       |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                            |
+|               | Projection: count(Int64(1)) AS count(*), CAST(sum(information_schema.ssts_manifest.file_size) AS Float64)                                                                                                  |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1)), sum(CAST(information_schema.ssts_manifest.file_size AS Decimal256(39, 0)))]]                                                                            |
+|               |     TableScan: information_schema.ssts_manifest                                                                                                                                                            |
+|               | ]]                                                                                                                                                                                                         |
+| physical_plan | ProjectionExec: expr=[count(Int64(1))@0 as count(*), CAST(sum(information_schema.ssts_manifest.file_size)@1 AS Float64) as sum(information_schema.ssts_manifest.file_size)]                                |
+|               |   AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1)), sum(information_schema.ssts_manifest.file_size)]                                                                                               |
+|               |     CoalescePartitionsExec                                                                                                                                                                                 |
+|               |       AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1)), sum(information_schema.ssts_manifest.file_size)]                                                                                         |
+|               |         RepartitionExec: REDACTED
+|               |           DistributedInspectExec: kind=SstManifest, scan=ScanRequest { projection: [10] }, schema=Schema { fields: [Field { name: "file_size", data_type: UInt64 }], metadata: {"greptime:version": "0"} } |
+|               |                                                                                                                                                                                                            |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+WITH candidate AS (
+  SELECT COUNT(*) AS files,
+    CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE) AS bytes
+  FROM information_schema.ssts_manifest
+), baseline AS (
+  SELECT COUNT(*) AS files,
+    CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE) AS bytes
+  FROM (SELECT file_size FROM information_schema.ssts_manifest LIMIT 1000)
+)
+SELECT candidate.files = baseline.files AS same_count,
+  candidate.bytes = baseline.bytes AS same_bytes
+FROM candidate CROSS JOIN baseline;
+
++------------+------------+
+| same_count | same_bytes |
++------------+------------+
+| true       | true       |
++------------+------------+
+
 DROP TABLE ssts_limit_case;
 
 Affected Rows: 0

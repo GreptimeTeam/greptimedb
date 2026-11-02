@@ -165,4 +165,22 @@ SELECT pushed.files = fallback.files AS same_count,
   pushed.recent_rows IS NOT DISTINCT FROM fallback.recent_rows AS same_recent_rows
 FROM pushed CROSS JOIN fallback;
 
+-- Unsupported aggregate state types stay on the frontend, including mixed aggregates.
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+EXPLAIN SELECT COUNT(*), CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE)
+FROM information_schema.ssts_manifest;
+
+WITH candidate AS (
+  SELECT COUNT(*) AS files,
+    CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE) AS bytes
+  FROM information_schema.ssts_manifest
+), baseline AS (
+  SELECT COUNT(*) AS files,
+    CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE) AS bytes
+  FROM (SELECT file_size FROM information_schema.ssts_manifest LIMIT 1000)
+)
+SELECT candidate.files = baseline.files AS same_count,
+  candidate.bytes = baseline.bytes AS same_bytes
+FROM candidate CROSS JOIN baseline;
+
 DROP TABLE ssts_limit_case;
