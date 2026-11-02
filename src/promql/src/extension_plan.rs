@@ -24,7 +24,6 @@ mod raw_series_source;
 mod scalar_calculate;
 mod series_divide;
 mod series_repartition;
-mod state_repartition;
 #[cfg(test)]
 mod test_util;
 mod union_distinct_on;
@@ -58,7 +57,6 @@ pub use raw_series_source::{RawSeriesSource, RawSeriesSourceExec};
 pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use series_repartition::{IdentityCompletion, SeriesRepartitionExec, SeriesRouting};
-pub use state_repartition::StateRepartitionExec;
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
