@@ -31,9 +31,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
 use std::sync::Arc;
 
+use datafusion::arrow::array::Array;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesLabels;
+use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent, StateFieldsBatch};
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
+use datatypes::series::time::TimeAxis;
 
 use crate::aggregate::{
     AggregateOp, BLOCK_POINTS, Counts, FloatAggregator, FloatState, Group, LabelKey,
@@ -97,6 +100,14 @@ pub struct PartialGroup {
 pub struct PartialAggregate {
     pub op: AggregateOp,
     pub groups: Vec<PartialGroup>,
+}
+
+/// One Arrow-backed aggregate state row, independent of executor plumbing.
+pub(crate) struct StateRow {
+    pub metric: SeriesLabels,
+    pub time: TimeAxis,
+    pub fields: StateFieldsBatch,
+    pub kind: AggregateStateKind,
 }
 
 impl FloatAggregator {
@@ -313,6 +324,96 @@ impl FloatMerger {
         Ok(())
     }
 
+    /// Merges one Arrow-backed state row directly, without materializing a partial aggregate.
+    // Used by the native aggregate frame consumer when it wires direct state-row merging.
+    #[allow(dead_code)]
+    pub(crate) fn merge_row(
+        &mut self,
+        row: &StateRow,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
+        let op = crate::native::state::op_of_state(row.kind);
+        if op != self.op {
+            return Err(DataFusionError::Execution(format!(
+                "cannot merge {:?} state into {:?}",
+                op, self.op
+            )));
+        }
+        let width = self.schema.fields.len();
+        if row.fields.len() != width {
+            return Err(DataFusionError::Execution(
+                "aggregate state does not match the grid or fields of the merge".into(),
+            ));
+        }
+        let grid_len = self
+            .schema
+            .eval_grid
+            .as_ref()
+            .expect("checked at construction")
+            .spec()
+            .len as usize;
+        let mut opened = None;
+        let key_workspace = key_workspace_bytes(&row.metric);
+        let mut live = None;
+        for (point, position) in row.time.positions() {
+            if point >= grid_len {
+                return Err(DataFusionError::Execution(
+                    "aggregate state does not match the grid or fields of the merge".into(),
+                ));
+            }
+            let mut present = false;
+            for field in 0..width {
+                present |= row
+                    .fields
+                    .is_present(field, position)
+                    .map_err(crate::grid_series::external)?;
+            }
+            if !present {
+                return Err(DataFusionError::Execution(
+                    "aggregate state names a position with no contribution".into(),
+                ));
+            }
+            let index = match opened {
+                Some(index) => index,
+                None => {
+                    budget(self.retained.saturating_add(key_workspace))?;
+                    let key = label_key(&row.metric);
+                    let live_bytes = key_bytes(&key);
+                    let index = match self.group_index.get(&key).copied() {
+                        Some(index) => index,
+                        None => {
+                            self.open_group(row.metric.clone(), key, live_bytes, &mut budget)?
+                        }
+                    };
+                    live = Some(live_bytes);
+                    opened = Some(index);
+                    index
+                }
+            };
+            let mut field = 0;
+            let mut state_error = None;
+            let states = std::iter::from_fn(|| {
+                if field == width || state_error.is_some() {
+                    return None;
+                }
+                let current = field;
+                field += 1;
+                match state_at(&row.fields, current, position) {
+                    Ok(state) => Some(state),
+                    Err(error) => {
+                        state_error = Some(error);
+                        None
+                    }
+                }
+            });
+            self.write_point(index, point, states, live.unwrap_or(0), &mut budget)?;
+            if let Some(error) = state_error {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     /// Adds a group and its key, admitting the group vector and index growth first.
     fn open_group(
         &mut self,
@@ -388,38 +489,49 @@ impl FloatMerger {
         live: usize,
         budget: &mut impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
+        for (point, states) in points {
+            self.write_point(index, point, states.into_iter(), live, budget)?
+        }
+        Ok(())
+    }
+
+    /// Writes one point's states, admitting a missing block before allocating it.
+    fn write_point(
+        &mut self,
+        index: usize,
+        point: usize,
+        states: impl Iterator<Item = Option<AccumulatorState>>,
+        live: usize,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
         let width = self.schema.fields.len();
         let block_bytes = BLOCK_POINTS
             .saturating_mul(width)
             .saturating_mul(size_of::<FloatState>());
         let blocks = &mut self.groups[index].blocks;
-        for (point, states) in points {
-            let block_index = point / BLOCK_POINTS;
-            let entries = blocks.len();
-            let block = match blocks.entry(block_index) {
-                BTreeEntry::Occupied(entry) => entry.into_mut(),
-                BTreeEntry::Vacant(entry) => {
-                    budget(
-                        self.retained
-                            .saturating_add(live)
-                            .saturating_add(block_bytes)
-                            .saturating_add(btree_backing_bytes(entries.saturating_add(1))),
-                    )?;
-                    self.retained = self
-                        .retained
+        let block_index = point / BLOCK_POINTS;
+        let entries = blocks.len();
+        let block = match blocks.entry(block_index) {
+            BTreeEntry::Occupied(entry) => entry.into_mut(),
+            BTreeEntry::Vacant(entry) => {
+                budget(
+                    self.retained
+                        .saturating_add(live)
                         .saturating_add(block_bytes)
-                        .saturating_add(btree_backing_bytes(entries.saturating_add(1)))
-                        .saturating_sub(btree_backing_bytes(entries));
-                    entry.insert(
-                        vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice(),
-                    )
-                }
-            };
-            let offset = (point % BLOCK_POINTS) * width;
-            for (slot, state) in block[offset..offset + width].iter_mut().zip(states) {
-                if let Some(state) = state {
-                    slot.merge(self.op, FloatState::from_partial(state));
-                }
+                        .saturating_add(btree_backing_bytes(entries.saturating_add(1))),
+                )?;
+                self.retained = self
+                    .retained
+                    .saturating_add(block_bytes)
+                    .saturating_add(btree_backing_bytes(entries.saturating_add(1)))
+                    .saturating_sub(btree_backing_bytes(entries));
+                entry.insert(vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice())
+            }
+        };
+        let offset = (point % BLOCK_POINTS) * width;
+        for (slot, state) in block[offset..offset + width].iter_mut().zip(states) {
+            if let Some(state) = state {
+                slot.merge(self.op, FloatState::from_partial(state));
             }
         }
         Ok(())
@@ -438,6 +550,58 @@ impl FloatMerger {
     ) -> Result<Vec<Series>> {
         finish_groups_budgeted(self.schema, self.op, self.groups, self.retained, budget)
     }
+}
+
+/// One present field's state at one position, read from the row's component arrays.
+///
+/// The components come from the row's own declaration, which `merge_row` has already checked
+/// against the merge's kind, so a component list that disagrees is caught before this runs.
+fn state_at(
+    fields: &StateFieldsBatch,
+    field: usize,
+    position: usize,
+) -> Result<Option<AccumulatorState>> {
+    if !fields
+        .is_present(field, position)
+        .map_err(crate::grid_series::external)?
+    {
+        return Ok(None);
+    }
+    let mut state = AccumulatorState::default();
+    for &component in fields.components() {
+        match component {
+            StateComponent::IncrementalMean => {
+                state.incremental_mean = fields
+                    .field_bool_values(field, component)
+                    .map_err(crate::grid_series::external)?
+                    .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "present aggregate state has a missing component".into(),
+                        )
+                    })?;
+            }
+            _ => {
+                let value = fields
+                    .field_values(field, component)
+                    .map_err(crate::grid_series::external)?
+                    .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "present aggregate state has a missing component".into(),
+                        )
+                    })?;
+                match component {
+                    StateComponent::Value => state.value = value,
+                    StateComponent::Mean => state.mean = value,
+                    StateComponent::Compensation => state.compensation = value,
+                    StateComponent::Count => state.count = value,
+                    StateComponent::IncrementalMean => unreachable!(),
+                }
+            }
+        }
+    }
+    Ok(Some(state))
 }
 
 impl FloatState {
@@ -574,4 +738,146 @@ pub fn merge_count_values(
         }
     }
     count_series(schema, groups)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::{Float64Array, ListArray, StructArray};
+    use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+    use datafusion::arrow::datatypes::{DataType, Field};
+    use datatypes::series::aggregate_state::{AggregateStateSchema, StateComponent};
+    use datatypes::series::samples::FieldSpec;
+    use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+
+    fn fields_batch() -> StateFieldsBatch {
+        let item_fields: datafusion::arrow::datatypes::Fields = vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new("compensation", DataType::Float64, true),
+        ]
+        .into();
+        let make_field =
+            |values: Vec<Option<f64>>, compensation: Vec<Option<f64>>, validity: Vec<bool>| {
+                let item = StructArray::new(
+                    item_fields.clone(),
+                    vec![
+                        Arc::new(Float64Array::from(values)),
+                        Arc::new(Float64Array::from(compensation)),
+                    ],
+                    Some(NullBuffer::from(validity)),
+                );
+                Arc::new(ListArray::new(
+                    Arc::new(Field::new(
+                        "item",
+                        DataType::Struct(item_fields.clone()),
+                        true,
+                    )),
+                    OffsetBuffer::new(ScalarBuffer::from(vec![0i32, 3])),
+                    Arc::new(item),
+                    None,
+                ))
+            };
+        let field_a = make_field(
+            vec![Some(2.), Some(3.), Some(4.)],
+            vec![Some(0.), Some(0.), Some(0.)],
+            vec![true, true, true],
+        );
+        let field_b = make_field(
+            vec![Some(5.), None, Some(7.)],
+            vec![Some(0.), None, Some(0.)],
+            vec![true, false, true],
+        );
+        let outer_fields = vec![
+            Field::new("a", field_a.data_type().clone(), false),
+            Field::new("b", field_b.data_type().clone(), false),
+        ]
+        .into();
+        let outer = StructArray::new(outer_fields, vec![field_a, field_b], None);
+        let schema = AggregateStateSchema::try_new(
+            AggregateStateKind::Sum,
+            vec![StateComponent::Value, StateComponent::Compensation],
+        )
+        .unwrap();
+        StateFieldsBatch::try_from_arrow(outer, &schema).unwrap()
+    }
+
+    fn schema() -> Arc<SeriesSchema> {
+        Arc::new(SeriesSchema {
+            fields: vec![
+                FieldSpec { name: "a".into() },
+                FieldSpec { name: "b".into() },
+            ]
+            .into(),
+            eval_grid: Some(Arc::new(
+                EvalGrid::try_new(GridSpec::try_new(0, 1, 3).unwrap()).unwrap(),
+            )),
+        })
+    }
+
+    #[test]
+    fn merge_row_matches_partial_merge_with_field_hole() {
+        let schema = schema();
+        let metric = SeriesLabels::try_new(Some("m".into()), Vec::new()).unwrap();
+        let row = StateRow {
+            metric: metric.clone(),
+            time: TimeAxis::Grid(
+                GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 3).unwrap(),
+            ),
+            fields: fields_batch(),
+            kind: AggregateStateKind::Sum,
+        };
+        let mut from_row = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+        from_row.merge_row(&row, |_| Ok(())).unwrap();
+        let mut from_partial = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+        from_partial
+            .merge(PartialAggregate {
+                op: AggregateOp::Sum,
+                groups: vec![PartialGroup {
+                    metric,
+                    points: vec![
+                        (
+                            0,
+                            vec![
+                                Some(AccumulatorState {
+                                    value: 2.0,
+                                    ..Default::default()
+                                }),
+                                Some(AccumulatorState {
+                                    value: 5.0,
+                                    ..Default::default()
+                                }),
+                            ],
+                        ),
+                        (
+                            1,
+                            vec![
+                                Some(AccumulatorState {
+                                    value: 3.0,
+                                    ..Default::default()
+                                }),
+                                None,
+                            ],
+                        ),
+                        (
+                            2,
+                            vec![
+                                Some(AccumulatorState {
+                                    value: 4.0,
+                                    ..Default::default()
+                                }),
+                                Some(AccumulatorState {
+                                    value: 7.0,
+                                    ..Default::default()
+                                }),
+                            ],
+                        ),
+                    ],
+                }],
+            })
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", from_row.finish().unwrap()),
+            format!("{:?}", from_partial.finish().unwrap()),
+        );
+    }
 }

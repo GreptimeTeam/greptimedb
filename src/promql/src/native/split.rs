@@ -418,11 +418,12 @@ impl Split {
     }
 }
 
-/// Puts `merged` where the suffix reads its values, returning the suffix above it.
+/// Puts `merged` at the cut and returns the suffix above it.
 ///
-/// The suffix is the spine the split built while unwinding, so its leaf is the one input node and
-/// every node between that leaf and the root is one of the operations the walk admits. A node of
-/// another shape would be a split this code did not build.
+/// A suffix is the spine of point-wise maps and constant-sided binaries between the cut and the
+/// root, with scalar constants preserved. Aggregates above the cut and vector operations are
+/// refused by `split`, while binary operands admitted there must be scalar constants, so none of
+/// those other shapes can occur here.
 fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     let NativeNode { expr, output } = node;
     let rejected = || {
@@ -431,18 +432,10 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     let expr = match expr {
         NativeExpr::Input(_) => return Ok(merged.clone()),
         // A constant carries no state: the suffix keeps it as it is, beside the merged values.
-        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
+        NativeExpr::Scalar(_) => {
             return Ok(NativeNode { expr, output });
         }
         NativeExpr::Map { input, op } => NativeExpr::Map {
-            input: Box::new(enter_suffix(*input, merged)?),
-            op,
-        },
-        NativeExpr::Aggregate { input, op } => NativeExpr::Aggregate {
-            input: Box::new(enter_suffix(*input, merged)?),
-            op,
-        },
-        NativeExpr::Vector { input, op } => NativeExpr::Vector {
             input: Box::new(enter_suffix(*input, merged)?),
             op,
         },

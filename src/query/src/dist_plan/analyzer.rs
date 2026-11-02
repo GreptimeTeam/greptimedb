@@ -38,6 +38,7 @@ use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
 use promql::extension_plan::{FusedOutputFormat, FusedSeries, SeriesDivide};
+use promql::native::plan::{AggregateStage, NativeExpr, NativeType};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -581,12 +582,10 @@ fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
 /// frontend over the state every partition exported, and the `Partial` half below it still reads its
 /// own scan. Every other plan keeps the ordinary encoding checks.
 ///
-/// The inner half is checked by what it exports, not only by its node kind: a `FusedSeries` that
-/// answers with computed values is not a state producer, and folding those values as if they were
-/// partitions' contributions would report one partition's answer as the whole group's. The check is
-/// not implied by the constructor either — `with_exprs_and_inputs` hands a node whatever input an
-/// optimizer rebuilt, so the outer half can hold a replacement producer its own constructor never
-/// saw.
+/// The exception applies only when the outer node reads aggregate state, and its inner producer is
+/// a `SeriesFrame` over one table scan whose root is a `Partial` aggregate producing
+/// `AggregateState`. A `SeriesFrame` can also contain evaluated values, so its format and input
+/// shape alone do not establish that it exports state.
 fn is_in_process_plan(plan: &LogicalPlan) -> bool {
     let LogicalPlan::Extension(extension) = plan else {
         return false;
@@ -607,6 +606,11 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
     };
     partial.format() == FusedOutputFormat::SeriesFrame
         && matches!(partial.children(), [LogicalPlan::TableScan(_)])
+        && matches!(
+            &partial.tree().root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+        )
+        && matches!(&partial.tree().root().output, NativeType::AggregateState(_))
 }
 
 impl PlanRewriter {

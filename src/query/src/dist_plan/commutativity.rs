@@ -262,13 +262,14 @@ impl Categorizer {
                     return Commutativity::NonCommutative;
                 }
                 let root = fused.tree().root();
-                // A `Partial` aggregate folds only what this partition reads and exports the state
-                // it folded, so a region can run it over its own scan: the `Final` half above the
-                // exchange is what needs every contribution in one place, and that half's input is
-                // the exchange rather than a scan, so it is never classified here.
+                // A `Partial` root is safe below the region boundary only when its prefix itself
+                // reads per-series work. Do not rely on split admission here: hand-built trees can
+                // put a whole-vector operation below the aggregate. The `Final` half above the
+                // exchange is not classified here because its input is the exchange, not a scan.
                 let partial = matches!(
                     &root.expr,
-                    NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+                    NativeExpr::Aggregate { input, op }
+                        if op.stage == AggregateStage::Partial && !reads_across_series(input)
                 );
                 let per_series = pointwise_operand(root) || independent_scan_pair(root);
                 if reads_across_series(root) && !per_series && !partial {

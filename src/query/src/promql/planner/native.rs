@@ -512,15 +512,10 @@ impl PromPlanner {
         let cross_table =
             !same_table_scans(prepared.iter().map(|(scan, ..)| scan)) || logical_ids_differ;
         // The first input names the output's time index and, on one table, binds every scan.
-        let Some((_, series_schema, metric, time, tags)) = prepared.first() else {
+        let Some((_, _, metric, time, tags)) = prepared.first() else {
             return Ok(None);
         };
-        let (series_schema, metric, time, tags) = (
-            Arc::clone(series_schema),
-            metric.clone(),
-            time.clone(),
-            tags.clone(),
-        );
+        let (metric, time, tags) = (metric.clone(), time.clone(), tags.clone());
         // The compiler binds one input per selector in the same pre-order `collect_selectors`
         // walks, so position i of both lists is the same occurrence. This is the guard that the
         // two walks agree: a mismatch is a compiler defect, not a query this route can plan.
@@ -732,7 +727,6 @@ impl PromPlanner {
                     Arc::from(prom_expr.to_string()),
                     partial,
                     final_tree,
-                    series_schema.fields.len(),
                     FusedSeriesBinding {
                         grid,
                         time_index: time,
@@ -1539,25 +1533,33 @@ fn fused_output_schema(
 /// them the physical planner puts a [`StateRepartitionExec`], which is what makes every row of a
 /// group reach one final partition.
 ///
-/// The value count of the statement's rows must equal the number of fields the cut aggregate folds:
-/// a mismatch would pair a value column with another field's state.
+/// The statement's output value columns must match the partial state's accumulator count; a
+/// mismatch means the declared output shape does not match the state schema of the split tree.
 fn plan_split_aggregate(
     promql: Arc<str>,
     partial: NativeTree,
     final_tree: NativeTree,
-    folded: usize,
     binding: FusedSeriesBinding,
     rawinput: LogicalPlan,
     output_schema: DFSchemaRef,
 ) -> Result<FusedSeries> {
+    let state_accumulators = match &partial.root().output {
+        NativeType::AggregateState(state) => state.accumulators.len(),
+        _ => {
+            return Err(DataFusionError::Plan(format!(
+                "the partial tree for `{promql}` does not produce aggregate state"
+            )))
+            .context(DataFusionPlanningSnafu);
+        }
+    };
     let values = output_schema
         .fields()
         .iter()
         .filter(|field| field.data_type() == &ArrowDataType::Float64)
         .count();
-    if values != folded {
+    if values != state_accumulators {
         return Err(DataFusionError::Plan(format!(
-            "the aggregate of `{promql}` folds {folded} field(s), and the output schema declares \
+            "the partial state for `{promql}` has {state_accumulators} accumulator(s), but the output schema declares \
              {values} value column(s)"
         )))
         .context(DataFusionPlanningSnafu);

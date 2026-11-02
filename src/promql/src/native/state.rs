@@ -301,7 +301,7 @@ pub(crate) fn partial_from_state_chunk(
 }
 
 /// The kernel aggregate a state kind merges into.
-fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
+pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
     match kind {
         AggregateStateKind::Sum => AggregateOp::Sum,
         AggregateStateKind::Count => AggregateOp::Count,
