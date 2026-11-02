@@ -2006,13 +2006,15 @@ fn collect_selectors<'a>(
         PromExpr::NumberLiteral(_) => return true,
         PromExpr::Unary(unary) => return collect_selectors(stmt, &unary.expr, out),
         PromExpr::Call(call) => {
-            // A label rewrite is a point-wise map, so its selectors would be its argument's - but
-            // the runtime refuses two series that a rewrite gives one label set
-            // (`a_label_rewrite_relabels_series_and_refuses_a_shared_point`), where the existing
-            // plan answers them. Admitting the shape would turn an answer into an error, so the
-            // statement keeps the existing plan until that refusal has a fallback.
             if matches!(call.func.name, "label_replace" | "label_join") {
-                return false;
+                let arity_valid = if call.func.name == "label_replace" {
+                    call.args.args.len() == 5
+                } else {
+                    call.args.args.len() >= 4
+                };
+                return arity_valid
+                    && matches!(call.args.args.first(), Some(arg) if matches!(arg.value_type(), ValueType::Vector | ValueType::Matrix))
+                    && collect_selectors(stmt, &call.args.args[0], out);
             }
             for arg in &call.args.args {
                 if !collect_selectors(stmt, arg, out) {

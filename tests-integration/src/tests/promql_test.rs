@@ -1930,6 +1930,20 @@ async fn native_output_text(output: Output) -> String {
     batches.pretty_print().unwrap()
 }
 
+/// The error a query reports, whether it was raised while planning or while its stream was read.
+async fn collect_error(output: Output) -> String {
+    match output.data {
+        OutputData::Stream(stream) => match collect_batches(stream).await {
+            Ok(_) => "the query answered rows where Prometheus reports an error".to_string(),
+            Err(error) => error.to_string(),
+        },
+        OutputData::RecordBatches(_) => {
+            "the query answered rows where Prometheus reports an error".to_string()
+        }
+        other => format!("the query answered {other:?}"),
+    }
+}
+
 async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
     let batches = match output.data {
         OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
@@ -2300,6 +2314,176 @@ async fn native_test_instance_with_options(
         .build()
         .await;
     (standalone, observer)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus_answers() {
+    common_telemetry::init_default_ut_logging();
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_label_rewrite_reachable")
+            .with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    // Sixteen host series spread the scan over four partitions, and `probe_time` holds the
+    // complementary pair: two stored series ten minutes apart - twice the five-minute lookback - so
+    // that at each evaluation point exactly one of them holds a value.
+    execute_all(
+        &instance,
+        "CREATE TABLE probe_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true'); \
+         CREATE TABLE probe (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='probe_phy'); \
+         CREATE TABLE probe_time (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='probe_phy'); \
+         CREATE TABLE probe_two (host STRING, dc STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, dc)) ENGINE=metric WITH ('on_physical_table'='probe_phy'); \
+         INSERT INTO probe_two (host,dc,ts,val) VALUES ('a','z1',0,1),('b','z2',0,2); \
+         INSERT INTO probe_time (host,ts,val) VALUES ('first',0,10),('second',600000,20); \
+         INSERT INTO probe (host,ts,val) VALUES ('a',0,1),('b',0,2),('c',0,3),('d',0,4),('e',0,5),('f',0,6),('g',0,7),('h',0,8),('i',0,9),('j',0,10),('k',0,11),('l',0,12),('m',0,13),('n',0,14),('o',0,15),('p',0,16)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let run = |expr: &str, range: &str| {
+        let sql = format!("TQL EVAL {range} {expr}");
+        let instance = instance.clone();
+        async move {
+            instance
+                .do_query(&sql, native_query_context(true, 4))
+                .await
+                .remove(0)
+        }
+    };
+
+    // A fresh destination cannot make two series equal, so the rewrite is safe to spread and the
+    // scan keeps all four partitions.
+    observer.clear();
+    let fresh = run(
+        r#"label_replace(probe, "dst", "$1", "host", "(.*)")"#,
+        "(0, 0, '1s')",
+    )
+    .await
+    .unwrap();
+    let fresh_rows = native_result_rows(fresh).await;
+    let fused = observer.take();
+    assert_four_native_partitions(&fused);
+    assert_eq!(
+        fresh_rows,
+        (0..16)
+            .map(|index| (0, ((b'a' + index) as char).to_string(), (index + 1) as f64))
+            .collect::<Vec<_>>(),
+        "a fresh-destination rewrite answers every series it read"
+    );
+
+    // Rewriting the only tag of every series folds all sixteen into one label set at one point.
+    // Prometheus refuses that, and so must this route: the rewrite is no longer safe to spread, and
+    // the refusal has to survive whether or not a consumer would have folded the series anyway.
+    for (shape, expr) in [
+        (
+            "at the root",
+            r#"label_replace(probe, "host", "same", "host", ".*")"#,
+        ),
+        (
+            "under sum",
+            r#"sum(label_replace(probe, "host", "same", "host", ".*"))"#,
+        ),
+        (
+            "under topk",
+            r#"topk(1, label_replace(probe, "host", "same", "host", ".*"))"#,
+        ),
+    ] {
+        observer.clear();
+        let error = match run(expr, "(0, 0, '1s')").await {
+            Ok(output) => collect_error(output).await,
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("the node produces two series under the label set")
+                || error.contains("vector cannot contain metrics with the same labelset"),
+            "{shape}: the collapse must be refused, got: {error}"
+        );
+    }
+
+    // The remaining rewrite shapes a caller writes: a join of two tags, a deletion, and a rewrite of
+    // the metric name. Each is asserted on the columns the answer actually carries, because a rewrite
+    // that names a label the schema does not describe would publish a tag the reader cannot see.
+    let run_two = |expr: &str| {
+        let sql = format!("TQL EVAL (0, 0, '1s') {expr}");
+        let instance = instance.clone();
+        async move {
+            instance
+                .do_query(&sql, native_query_context(true, 4))
+                .await
+                .remove(0)
+                .unwrap()
+        }
+    };
+    for (shape, expr, column, expected) in [
+        (
+            "join two tags into one",
+            r#"label_join(probe_two, "joined", "-", "host", "dc")"#,
+            "joined",
+            vec!["a-z1".to_string(), "b-z2".to_string()],
+        ),
+        (
+            "delete a tag",
+            r#"label_replace(probe_two, "dc", "", "dc", ".*")"#,
+            "host",
+            vec!["a".to_string(), "b".to_string()],
+        ),
+    ] {
+        observer.clear();
+        let output = run_two(expr).await;
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("TQL EVAL returns record batches"),
+        };
+        let schema_names = batches
+            .schema()
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let mut values = Vec::new();
+        for batch in batches.iter() {
+            let column = batch.column_by_name(column).unwrap_or_else(|| {
+                panic!("{shape}: the schema must carry `{column}`: {schema_names:?}")
+            });
+            let column = cast(column.as_ref(), &DataType::Utf8).unwrap();
+            let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+            values.extend((0..column.len()).map(|row| column.value(row).to_string()));
+        }
+        values.sort();
+        assert_eq!(values, expected, "{shape}");
+        // A deletion and a metric-name rewrite leave the two series distinct, so the answer keeps
+        // both of them; the join adds a label without changing that.
+        assert_eq!(
+            observer.take().output_partitioning().partition_count(),
+            4,
+            "{shape}: a rewrite that cannot make two series equal stays spread"
+        );
+    }
+
+    // A `__name__` destination is not covered here on purpose: the existing planner refuses that
+    // destination outright ("Invalid destination label name in label_replace()"), so no route can
+    // answer it and admitting the shape natively would only turn a refusal into a different one.
+
+    // Two stored series rewritten to one label set, holding values at different evaluation points,
+    // are one series carrying both points rather than two rows.
+    observer.clear();
+    let complementary = run(
+        r#"label_replace(probe_time, "host", "same", "host", ".*")"#,
+        "(0, 600, '10m')",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        native_result_rows(complementary).await,
+        vec![(0, "same".into(), 10.0), (600_000, "same".into(), 20.0)],
+        "complementary points of one rewritten label set are one series"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
