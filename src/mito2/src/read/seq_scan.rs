@@ -217,13 +217,34 @@ impl SeqScan {
             }
         }
 
-        let mapper = &stream_ctx.input.mapper;
+        Self::merge_flat_sources(
+            stream_ctx,
+            sources,
+            part_metrics,
+            skip_dedup,
+            stream_ctx
+                .input
+                .mapper
+                .input_arrow_schema(stream_ctx.input.compaction),
+            stream_ctx.input.mapper.field_column_start(),
+        )
+        .await
+    }
+
+    /// Merges flat batches with an explicit schema, including identity-only samples.
+    pub(crate) async fn merge_flat_sources(
+        stream_ctx: &StreamContext,
+        mut sources: Vec<BoxedRecordBatchStream>,
+        part_metrics: Option<&PartitionMetrics>,
+        skip_dedup: bool,
+        schema: datatypes::arrow::datatypes::SchemaRef,
+        field_column_start: usize,
+    ) -> Result<BoxedRecordBatchStream> {
         let reader: BoxedRecordBatchStream = if sources.len() == 1 {
             // Currently, we can't skip dedup when there is only one source because
             // that source may have duplicate rows.
             sources.pop().unwrap()
         } else {
-            let schema = mapper.input_arrow_schema(stream_ctx.input.compaction);
             let metrics_reporter = part_metrics.map(|m| m.merge_metrics_reporter());
             let reader = FlatMergeReader::new(
                 schema,
@@ -250,10 +271,7 @@ impl SeqScan {
                 MergeMode::LastNonNull => Box::pin(
                     FlatDedupReader::new(
                         reader,
-                        FlatLastNonNull::new(
-                            mapper.field_column_start(),
-                            stream_ctx.input.filter_deleted,
-                        ),
+                        FlatLastNonNull::new(field_column_start, stream_ctx.input.filter_deleted),
                         dedup_metrics_reporter,
                     )
                     .into_stream(),
