@@ -64,7 +64,7 @@ pub(crate) fn shared_weight(key: &DecodedKey, value: &DecodedValue) -> u32 {
 }
 
 /// Contains no artifact handle or live object-store reader. Fixed lock striping bounds
-/// coordination memory; cancellation drops the guard and permits a later retry.
+/// admission coordination memory. Loads run independently; no guard crosses an await.
 #[derive(Clone)]
 pub(crate) struct MetadataCache {
     cache: SstDecodedMetaCache,
@@ -78,7 +78,7 @@ impl CacheStrategy {
         };
         Some(MetadataCache {
             cache: manager.sst_decoded_meta_cache.clone()?,
-            locks: manager.columnar_load_locks.clone(),
+            locks: manager.columnar_admission_locks.clone(),
             namespace,
         })
     }
@@ -110,16 +110,20 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
         return Ok(value);
     }
     CACHE_MISS.with_label_values(&[COLUMNAR_META]).inc();
+    CACHE_LOAD.with_label_values(&[COLUMNAR_META]).inc();
+    let value = Arc::new(loader.await?);
+    // A caller may flush buffered output while its loader is Pending, then stop
+    // polling it under downstream backpressure. Never hold a shared lock across
+    // that await: another stream may need the lock to finish the current series.
+    // Serialize only admission, without awaiting even this short critical section.
     let mut hash = DefaultHasher::new();
     key.hash(&mut hash);
-    let _guard = context.locks[hash.finish() as usize % context.locks.len()]
-        .lock()
-        .await;
+    let Ok(_guard) = context.locks[hash.finish() as usize % context.locks.len()].try_lock() else {
+        return Ok(value);
+    };
     if let Some(value) = get() {
         return Ok(value);
     }
-    CACHE_LOAD.with_label_values(&[COLUMNAR_META]).inc();
-    let value = Arc::new(loader.await?);
     let identity_size = match &key {
         DecodedKey::Columnar { identity, .. } => identity.capacity(),
         _ => 0,
@@ -148,27 +152,67 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
     use crate::cache::CacheManager;
 
+    #[rstest::rstest]
+    #[case::same_key(false)]
+    #[case::stripe_collision(true)]
     #[tokio::test]
-    async fn concurrent_loads_coalesce_and_cancellation_allows_retry() {
+    async fn backpressured_load_does_not_block_other_readers(#[case] different_key: bool) {
         let manager = CacheManager::builder().sst_meta_cache_size(8192).build();
         let strategy = CacheStrategy::EnableAll(Arc::new(manager));
         let cache = strategy.columnar_metadata(FileId::random()).unwrap();
-        let calls = AtomicUsize::new(0);
-        let request = || {
-            load(Some(&cache), "generation/part/page".into(), |_| 64, async {
-                calls.fetch_add(1, Ordering::Relaxed);
-                tokio::task::yield_now().await;
-                Ok(vec![1u8, 2, 3])
-            })
+        let identity = "generation/part/page";
+        let stripe = |identity: &str| {
+            let key = DecodedKey::Columnar {
+                namespace: cache.namespace,
+                identity: identity.to_string(),
+                representation: TypeId::of::<Vec<u8>>(),
+            };
+            let mut hash = DefaultHasher::new();
+            key.hash(&mut hash);
+            hash.finish() as usize % cache.locks.len()
         };
-        let (left, right) = tokio::join!(request(), request());
-        assert!(Arc::ptr_eq(&left.unwrap(), &right.unwrap()));
-        assert_eq!(1, calls.load(Ordering::Relaxed));
+        let other_identity = if different_key {
+            (0..)
+                .map(|i| format!("other/{i}"))
+                .find(|other| stripe(other) == stripe(identity))
+                .unwrap()
+        } else {
+            identity.to_string()
+        };
+        let (complete, pending) = tokio::sync::oneshot::channel();
+        let mut owner = Box::pin(load(
+            Some(&cache),
+            "generation/part/page".into(),
+            |_| 64,
+            async {
+                pending.await.unwrap();
+                Ok(vec![1u8, 2, 3])
+            },
+        ));
+        assert!(futures::poll!(&mut owner).is_pending());
+        // Deliver the I/O wake, but deliberately never poll its owner again until
+        // the second reader completes. This models a stream paused after a flush.
+        complete.send(()).unwrap();
+        let other = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            load(Some(&cache), other_identity, |_| 64, async {
+                Ok(vec![1u8, 2, 3])
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(other.as_slice(), &[1, 2, 3]);
+        let first = owner.await.unwrap();
+        let cached = load(Some(&cache), "generation/part/page".into(), |_| 64, async {
+            panic!("must reuse the admitted entry")
+        })
+        .await
+        .unwrap();
+        assert!(Arc::ptr_eq(&first, &cached));
 
         let mut canceled = Box::pin(load(
             Some(&cache),
