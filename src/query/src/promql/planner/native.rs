@@ -17,9 +17,10 @@
 //! [`PromPlanner::try_plan_native_fused`] offers a whole statement expression to the native
 //! compiler and, when the compiler accepts it, replaces everything the existing path would plan
 //! below the root with one [`FusedSeries`] node over the selector's own table scan. A tree that
-//! folds across series - an aggregate - is split instead: its per-series prefix runs in a
-//! `FusedSeries` producer and an [`AggregateFinalize`] merges the state every partition exports,
-//! because a region holds only part of a group. Declining is the normal answer: every shape the
+//! folds across series - an aggregate - is split instead: its per-series prefix and a `Partial`
+//! aggregate run in a `FusedSeries` producer, a [`StateRepartitionExec`] routes that state, and a
+//! second `FusedSeries` runs the `Final` aggregate over it, because a region holds only part of a
+//! group. Declining is the normal answer: every shape the
 //! compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps the
 //! plan the existing planner builds.
 //!
@@ -49,8 +50,10 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
-    AggregateFinalize, FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality,
-    RawSeriesSource, input_locality, matching_operands_drop_key, tree_source_fields,
+use promql::extension_plan::{
+    FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
+    input_locality, matching_operands_drop_key, tree_source_fields,
+};
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -709,30 +712,27 @@ impl PromPlanner {
             // than whole samples, so it moves less between the two halves than a sample boundary
             // would. The general segmentation below is the fallback for the trees it declines,
             // which are the ones its per-series prefix cannot express.
-            if !multi_input
-                && selectors.len() == 1
-                && AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
-            {
-                let output_fields = match &compiled.tree.root().output {
-                    NativeType::Samples(schema) => schema
-                        .fields
-                        .iter()
-                        .map(|field| field.name.to_string())
-                        .collect(),
-                    NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-                    NativeType::AggregateState(_) => return Ok(None),
-                };
-                let Some(output_tags) = fused_output_tags(compiled.tree.root(), &source_tags)
-                else {
-                    return Ok(None);
-                };
-                let output_schema = fused_output_schema(&output_fields, &output_tags, &time)?;
+            // The split is decided before anything consumes a child, so a tree it declines keeps
+            // the plan it would have built without this route.
+            let split = if !multi_input && selectors.len() == 1 {
+                FusedSeries::split_aggregate(&compiled.tree, &time)
+                    .context(DataFusionPlanningSnafu)?
+            } else {
+                None
+            };
+            if let Some((partial, final_tree)) = split {
+                let (legacy_fields, legacy_tags) = self
+                    .legacy_output_columns(prom_expr, query_engine_state)
+                    .await?;
+                let output_schema = fused_output_schema(&legacy_fields, &legacy_tags, &time)?;
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
-                let node = match AggregateFinalize::try_new(
+                let node = plan_split_aggregate(
                     Arc::from(prom_expr.to_string()),
-                    compiled.tree,
+                    partial,
+                    final_tree,
+                    series_schema.fields.len(),
                     FusedSeriesBinding {
                         grid,
                         time_index: time,
@@ -741,11 +741,7 @@ impl PromPlanner {
                     },
                     rawinput,
                     output_schema,
-                ) {
-                    Ok(node) => node,
-                    Err(DataFusionError::NotImplemented(_)) => return Ok(None),
-                    Err(error) => return Err(error).context(DataFusionPlanningSnafu),
-                };
+                )?;
                 return Ok(Some((
                     LogicalPlan::Extension(Extension {
                         node: Arc::new(node),
@@ -1532,6 +1528,57 @@ fn fused_output_schema(
         DFSchema::new_with_metadata(columns, Default::default())
             .context(DataFusionPlanningSnafu)?,
     ))
+}
+
+/// Builds the two nodes a split native aggregate runs in.
+///
+/// The first is a [`FusedSeries`] over `rawinput` running the per-series prefix and a `Partial`
+/// aggregate at its root, so each partition exports the state it folded. The second is a
+/// [`FusedSeries`] over the first running the `Final` aggregate and everything the split moved
+/// above it: it reads state where the first reads series, and answers the statement's rows. Between
+/// them the physical planner puts a [`StateRepartitionExec`], which is what makes every row of a
+/// group reach one final partition.
+///
+/// The value count of the statement's rows must equal the number of fields the cut aggregate folds:
+/// a mismatch would pair a value column with another field's state.
+fn plan_split_aggregate(
+    promql: Arc<str>,
+    partial: NativeTree,
+    final_tree: NativeTree,
+    folded: usize,
+    binding: FusedSeriesBinding,
+    rawinput: LogicalPlan,
+    output_schema: DFSchemaRef,
+) -> Result<FusedSeries> {
+    let values = output_schema
+        .fields()
+        .iter()
+        .filter(|field| field.data_type() == &ArrowDataType::Float64)
+        .count();
+    if values != folded {
+        return Err(DataFusionError::Plan(format!(
+            "the aggregate of `{promql}` folds {folded} field(s), and the output schema declares \
+             {values} value column(s)"
+        )))
+        .context(DataFusionPlanningSnafu);
+    }
+    let partial = FusedSeries::try_new_state_export(
+        Arc::clone(&promql),
+        partial,
+        binding.clone(),
+        vec![rawinput],
+    )
+    .context(DataFusionPlanningSnafu)?;
+    Ok(FusedSeries::try_new(
+        promql,
+        final_tree,
+        binding,
+        vec![LogicalPlan::Extension(Extension {
+            node: Arc::new(partial),
+        })],
+        output_schema,
+    )
+    .context(DataFusionPlanningSnafu)?)
 }
 
 /// The time-range filter a selector's scan reads, from the bounds its compiled requirement names.

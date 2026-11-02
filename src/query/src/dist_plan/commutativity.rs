@@ -21,10 +21,10 @@ use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
-    AggregateFinalize, EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate,
-    RawSeriesSource, SeriesDivide, SeriesNormalize,
+    EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, RawSeriesSource, SeriesDivide,
+    SeriesNormalize,
 };
-use promql::native::plan::reads_across_series;
+use promql::native::plan::{AggregateStage, NativeExpr, reads_across_series};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -262,8 +262,16 @@ impl Categorizer {
                     return Commutativity::NonCommutative;
                 }
                 let root = fused.tree().root();
+                // A `Partial` aggregate folds only what this partition reads and exports the state
+                // it folded, so a region can run it over its own scan: the `Final` half above the
+                // exchange is what needs every contribution in one place, and that half's input is
+                // the exchange rather than a scan, so it is never classified here.
+                let partial = matches!(
+                    &root.expr,
+                    NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+                );
                 let per_series = pointwise_operand(root) || independent_scan_pair(root);
-                if reads_across_series(root) && !per_series {
+                if reads_across_series(root) && !per_series && !partial {
                     return Commutativity::NonCommutative;
                 }
 
@@ -280,9 +288,6 @@ impl Categorizer {
                     Commutativity::NonCommutative
                 }
             }
-            // The merge reads every partition's state, so it cannot run in one of them: a region
-            // would merge the state its own scan produced and report that as the whole group.
-            name if name == AggregateFinalize::name() => Commutativity::NonCommutative,
             name if name == SeriesNormalize::name()
                 || name == InstantManipulate::name()
                 || name == RangeManipulate::name() =>

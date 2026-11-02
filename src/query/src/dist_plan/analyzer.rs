@@ -37,7 +37,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::{AggregateFinalize, FusedSeries, SeriesDivide};
+use promql::extension_plan::{FusedOutputFormat, FusedSeries, SeriesDivide};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -575,40 +575,37 @@ fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
 }
 
 /// Whether `plan` is the native route's whole plan: a `FusedSeries` node over its scan, or the
-/// `AggregateFinalize` merge of exactly such a node's partition-local state.
+/// `Final` half of a split aggregate over the `Partial` half that reads such a scan.
 ///
-/// The merge is the one shape that puts a node above the fused producer: it runs on the frontend over
-/// the state every partition exports, and the producer below it still reads its own scan. Every other
-/// plan keeps the ordinary encoding checks.
+/// The split is the one shape that puts a node above the fused producer: the `Final` half runs on the
+/// frontend over the state every partition exported, and the `Partial` half below it still reads its
+/// own scan. Every other plan keeps the ordinary encoding checks.
 ///
-/// The producer is checked by what it exports, not only by its node kind: a `FusedSeries` that
-/// answers with computed values is not a merge input, and merging those values as if they were
+/// The inner half is checked by what it exports, not only by its node kind: a `FusedSeries` that
+/// answers with computed values is not a state producer, and folding those values as if they were
 /// partitions' contributions would report one partition's answer as the whole group's. The check is
 /// not implied by the constructor either — `with_exprs_and_inputs` hands a node whatever input an
-/// optimizer rebuilt, so a merge can hold a replacement producer its own constructor never saw.
+/// optimizer rebuilt, so the outer half can hold a replacement producer its own constructor never
+/// saw.
 fn is_in_process_plan(plan: &LogicalPlan) -> bool {
-    if is_fused_series_plan(plan) {
-        return true;
-    }
     let LogicalPlan::Extension(extension) = plan else {
         return false;
     };
-    if !extension.node.as_any().is::<AggregateFinalize>() {
+    let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>() else {
         return false;
+    };
+    if !fused.reads_aggregate_state() {
+        // A node reading its own scan is the route's whole plan by itself.
+        return fused.children().len() == 1;
     }
-    // The merge's own child, as this rewrite walks it: the producer over its scan.
-    let inputs = extension.node.inputs();
-    let [LogicalPlan::Extension(partial)] = inputs.as_slice() else {
+    let [LogicalPlan::Extension(partial)] = fused.children() else {
         return false;
     };
-    let Some(fused) = partial.node.as_any().downcast_ref::<FusedSeries>() else {
+    let Some(partial) = partial.node.as_any().downcast_ref::<FusedSeries>() else {
         return false;
     };
-    fused.partial_fold().is_some()
-        && matches!(
-            partial.node.inputs().as_slice(),
-            [LogicalPlan::TableScan(_)]
-        )
+    partial.format() == FusedOutputFormat::SeriesFrame
+        && matches!(partial.children(), [LogicalPlan::TableScan(_)])
 }
 
 impl PlanRewriter {
