@@ -93,7 +93,7 @@ use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, Grouping, InstantValue, NativeExpr, NativeNode,
     NativeTree, NativeType, reads_across_series,
 };
-use crate::native::state::{StateChunk, state_chunk_from_frame_row};
+use crate::native::state::{StateChunk, state_row_from_frame_row};
 use crate::source::materialize_raw_labels;
 use crate::vector_match::{DuplicateEvidence, MatchingLabels};
 
@@ -2491,10 +2491,10 @@ impl ExecutionPlan for FusedSeriesExec {
                     streams.push(
                         decoded
                             .map(move |item| match item {
-                                Ok(row) => state_chunk_from_frame_row(row, &binding)
-                                    .map(|chunk| FusedFeed {
+                                Ok(row) => state_row_from_frame_row(row, &binding)
+                                    .map(|row| FusedFeed {
                                         source,
-                                        chunk: FusedChunk::State(chunk),
+                                        chunk: FusedChunk::State(StateChunk::Row(row)),
                                     })
                                     .map_err(|error| {
                                         BoxedError::new(common_query::error::Error::from(error))
@@ -2711,6 +2711,7 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
 }
 
 /// One chunk a child handed over, in the form the child's frame declared it in.
+#[derive(Clone, Debug)]
 enum FusedChunk {
     /// Raw samples: one scan series, with its own timestamps.
     Raw(RawSeriesChunk),
@@ -2804,7 +2805,7 @@ impl FusedSeriesStream {
                 FusedChunk::Evaluated(chunk) => {
                     executor.push_evaluated(*input_id, chunk.clone())?
                 }
-                FusedChunk::State(chunk) => executor.push_state(*input_id, chunk.clone())?,
+                FusedChunk::State(chunk) => executor.push_state(*input_id, (*chunk).clone())?,
             }
         }
         if self.frame_mode || self.state_mode {
@@ -3076,7 +3077,15 @@ impl Stream for FusedStateStream {
             }
             match Pin::new(&mut self.source).poll_output(cx) {
                 Poll::Ready(Some(Ok(FusedOutput::State(chunk)))) => {
-                    self.pending.extend(chunk.series);
+                    let StateChunk::Series { series, .. } = chunk else {
+                        Pin::new(&mut self.source).fail();
+                        return Poll::Ready(Some(Err(BoxedError::new(
+                            common_query::error::Error::from(DataFusionError::Internal(
+                                "row state reached state export stream".into(),
+                            )),
+                        ))));
+                    };
+                    self.pending.extend(series);
                 }
                 Poll::Ready(Some(Ok(_))) => {
                     Pin::new(&mut self.source).fail();

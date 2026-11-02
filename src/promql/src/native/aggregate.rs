@@ -43,9 +43,7 @@ use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, Grouping as BoundGrouping,
     aggregate_state_binding,
 };
-use crate::native::state::{
-    StateChunk, partial_from_state_chunk, state_bytes, state_chunk_from_partial,
-};
+use crate::native::state::{StateChunk, state_chunk_from_partial};
 
 /// The output shape produced by an aggregate stage.
 pub(crate) enum AggregateOutput {
@@ -211,36 +209,43 @@ impl AggregateRuntime {
         let expected = self.state_schema.as_ref().ok_or_else(|| {
             DataFusionError::NotImplemented("this runtime does not merge aggregate state".into())
         })?;
-        if chunk.state_schema.kind != expected.kind
-            || chunk.state_schema.components != expected.components
+        let StateChunk::Row(row) = chunk else {
+            return Err(DataFusionError::Internal(
+                "Final aggregate received producer state series".into(),
+            ));
+        };
+        if row.fields.kind() != expected.kind
+            || row.fields.components() != expected.components.as_ref()
         {
             return Err(DataFusionError::NotImplemented(
                 "this runtime does not merge that kind of state".into(),
             ));
         }
-        if chunk.state_schema.grid.spec() != expected.grid.spec() {
+        if row
+            .time
+            .grid()
+            .is_none_or(|grid| grid.spec() != expected.grid.spec())
+        {
             return Err(DataFusionError::Execution(
                 "aggregate state grid mismatch".into(),
             ));
         }
-        if chunk.state_schema.accumulators.len() != self.schema.fields.len() {
+        if row.fields.len() != self.schema.fields.len() {
             return Err(DataFusionError::Execution(
                 "aggregate state field count mismatch".into(),
             ));
         }
-        let partial =
-            partial_from_state_chunk(chunk, |bytes| buffer.resize(pending.saturating_add(bytes)))?;
         let description = self.describe();
         let merger = self.merger.as_mut().ok_or_else(|| no_fold(&description))?;
-        merger.merge_budgeted(partial, |retained| {
-            buffer.resize(pending.saturating_add(retained))
-        })?;
+        merger.merge_row(&row, |bytes| buffer.resize(pending.saturating_add(bytes)))?;
         buffer.resize(merger.state_bytes())
     }
 
     /// Transient bytes required to consume a state chunk.
-    pub(crate) fn pending_state(&self, chunk: &StateChunk) -> usize {
-        state_bytes(chunk)
+    pub(crate) fn pending_state(&self, _chunk: &StateChunk) -> usize {
+        // StateRow only clones handles into the caller-owned frame batch; merge allocations are
+        // admitted directly by FloatMerger::merge_row.
+        0
     }
 
     /// The number of retained groups, for budgeting the output queue backing storage.

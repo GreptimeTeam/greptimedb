@@ -11350,22 +11350,49 @@ fn partial_final_matches_complete_over_concatenated_input() {
             exec.push_evaluated(InputId::new(0), evaluated_chunk(&schema, 0, vals, true))
                 .unwrap();
             exec.end_of_input().unwrap();
+            let mut series = Vec::new();
             while let Some(chunk) = exec.next_state().unwrap() {
-                partial_states.extend(chunk.series);
+                let crate::native::state::StateChunk::Series {
+                    series: chunk_series,
+                    ..
+                } = chunk
+                else {
+                    panic!("Partial executor returned row state");
+                };
+                series.extend(chunk_series.into_iter().map(|series| (series, true)));
+            }
+            let source = Box::pin(futures::stream::iter(series.into_iter().map(Ok)));
+            let frame_state_schema = Arc::new(
+                datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                    state_kind,
+                    state_schema.components.to_vec(),
+                )
+                .unwrap(),
+            );
+            let frames = common_query::series_frame::pack_aggregate_state(
+                source,
+                frame_state_schema.clone(),
+                Arc::clone(&schema),
+            )
+            .unwrap();
+            let decoded = common_query::series_frame::unpack_aggregate_state(
+                frames,
+                Some(frame_state_schema),
+                Some(Arc::clone(&schema)),
+            )
+            .unwrap();
+            use futures::StreamExt;
+            for row in futures::executor::block_on(decoded.collect::<Vec<_>>()) {
+                let row = row.unwrap();
+                let row =
+                    crate::native::state::state_row_from_frame_row(row, &state_schema).unwrap();
+                partial_states.push(crate::native::state::StateChunk::Row(row));
             }
         }
         let tree_final = aggregate_tree(AggregateStage::Final);
         let mut final_exec = executor(&tree_final, pool());
-        for series in partial_states {
-            final_exec
-                .push_state(
-                    InputId::new(0),
-                    crate::native::state::StateChunk {
-                        series: vec![series],
-                        state_schema: Arc::clone(&state_schema),
-                    },
-                )
-                .unwrap();
+        for state in partial_states {
+            final_exec.push_state(InputId::new(0), state).unwrap();
         }
         final_exec.end_of_input().unwrap();
         let mut merged = Vec::new();

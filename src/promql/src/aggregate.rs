@@ -16,7 +16,7 @@
 //! is keyed by absolute grid index, never by local row number; sparse state and trimmed output
 //! do not expand the full grid.
 
-mod state;
+pub(crate) mod state;
 #[cfg(test)]
 mod tests;
 

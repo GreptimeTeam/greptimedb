@@ -194,6 +194,7 @@ fn invalid<T>(reason: &str) -> Result<T> {
 
 /// Columnar state fields retained in Arrow form so consumers can read component values in place.
 /// Null items are field-local holes, not zero-valued states.
+#[derive(Clone, Debug)]
 pub struct StateFieldsBatch {
     kind: AggregateStateKind,
     components: Arc<[StateComponent]>,

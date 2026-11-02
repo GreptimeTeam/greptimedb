@@ -79,7 +79,6 @@ mod tests;
 /// Only a source hands over raw samples; everything above a window hands over evaluated chunks.
 /// The two cannot be confused once the tree is built, because a window's bound input grid says
 /// which one its input produces.
-#[derive(Clone, Debug)]
 enum NativeChunk {
     /// Raw source samples, with their own timestamps.
     Raw(RawSeriesChunk),
@@ -95,7 +94,10 @@ impl NativeChunk {
         match self {
             Self::Raw(chunk) => chunk.time.len(),
             Self::Evaluated(chunk) => chunk.series.time.len(),
-            Self::AggregateState(chunk) => chunk.series.iter().map(|s| s.time.len()).sum(),
+            Self::AggregateState(StateChunk::Series { series, .. }) => {
+                series.iter().map(|s| s.time.len()).sum()
+            }
+            Self::AggregateState(StateChunk::Row(row)) => row.time.len(),
         }
     }
 
@@ -4978,7 +4980,12 @@ impl NodeState {
         // tree the compiler should have refused.
         if let NativeChunk::AggregateState(chunk) = chunk {
             let pending = aggregate.pending_state(&chunk);
-            let positions = chunk.series.iter().map(|series| series.time.len()).sum();
+            let positions = match &chunk {
+                StateChunk::Series { series, .. } => {
+                    series.iter().map(|series| series.time.len()).sum()
+                }
+                StateChunk::Row(row) => row.time.len(),
+            };
             self.buffer.grow(pending)?;
             let metrics = Arc::clone(&self.buffer.metrics);
             {
@@ -5054,7 +5061,12 @@ impl NodeState {
             // it are the groups this execution folded, and the consumer closes each when its own
             // input ends rather than when a chunk arrives.
             AggregateOutput::State(chunk) => {
-                closed = chunk.series.len();
+                let StateChunk::Series { series, .. } = &chunk else {
+                    return Err(DataFusionError::Internal(
+                        "Partial aggregate produced row state".into(),
+                    ));
+                };
+                closed = series.len();
                 let bytes = state_bytes(&chunk);
                 self.queued
                     .push_back((NativeChunk::AggregateState(chunk), bytes));
@@ -5848,9 +5860,10 @@ fn evaluated_values(chunk: &NativeChunk) -> usize {
     match chunk {
         NativeChunk::Evaluated(chunk) => valid_values(chunk),
         NativeChunk::Raw(chunk) => chunk.time.len(),
-        NativeChunk::AggregateState(chunk) => {
-            chunk.series.iter().map(|series| series.time.len()).sum()
+        NativeChunk::AggregateState(StateChunk::Series { series, .. }) => {
+            series.iter().map(|series| series.time.len()).sum()
         }
+        NativeChunk::AggregateState(StateChunk::Row(row)) => row.time.len(),
     }
 }
 

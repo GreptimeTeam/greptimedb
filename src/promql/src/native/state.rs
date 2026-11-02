@@ -21,7 +21,7 @@
 //! other: a field with no contribution at a carried position stays absent through both directions
 //! rather than being filled in with a zero that a later merge would count.
 
-use std::mem::size_of;
+use std::mem::{size_of, size_of_val};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
@@ -32,14 +32,17 @@ use datatypes::series::frame::StateFrameRow;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{GridSpan, TimeAxis};
 
-use crate::aggregate::{AccumulatorState, AggregateOp, PartialAggregate, PartialGroup};
+use crate::aggregate::{AggregateOp, PartialAggregate, PartialGroup};
 use crate::native::plan::AggregateStateSchema;
 
-/// One partition's aggregate state, sharing the binding the producer and consumer type-check by.
+/// One partition's aggregate state, either in producer series form or as a decoded consumer row.
 #[derive(Clone, Debug)]
-pub(crate) struct StateChunk {
-    pub series: Vec<StateSeries>,
-    pub state_schema: Arc<AggregateStateSchema>,
+pub(crate) enum StateChunk {
+    Series {
+        series: Vec<StateSeries>,
+        state_schema: Arc<AggregateStateSchema>,
+    },
+    Row(crate::aggregate::state::StateRow),
 }
 
 /// The state kind an aggregate's states are states of.
@@ -163,7 +166,7 @@ pub(crate) fn state_chunk_from_partial(
         });
     }
 
-    let chunk = StateChunk {
+    let chunk = StateChunk::Series {
         series,
         state_schema,
     };
@@ -204,16 +207,11 @@ fn state_spans(
     Ok(spans)
 }
 
-/// Builds the executor's state unit from one decoded frame row.
-///
-/// The row is columnar: its per-field component arrays are read where they lie, one row's worth at
-/// a time. This is the one place a frame row becomes the kernel's partial form, and it is a
-/// per-group conversion — not a (group, point, field) table, and not a rebuild of a partition's
-/// state tree.
-pub(crate) fn state_chunk_from_frame_row(
+/// Builds the executor's Arrow-backed state row from one decoded frame row.
+pub(crate) fn state_row_from_frame_row(
     row: StateFrameRow,
     binding: &AggregateStateSchema,
-) -> Result<StateChunk> {
+) -> Result<crate::aggregate::state::StateRow> {
     let fields = row
         .fields()
         .map_err(|error| DataFusionError::Execution(error.to_string()))?;
@@ -231,73 +229,12 @@ pub(crate) fn state_chunk_from_frame_row(
             binding.components
         )));
     }
-    let series = row
-        .to_state_series()
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
-    Ok(StateChunk {
-        series: vec![series],
-        state_schema: Arc::new(binding.clone()),
+    Ok(crate::aggregate::state::StateRow {
+        metric: row.metric().clone(),
+        time: row.time().clone(),
+        fields,
+        kind: binding.kind,
     })
-}
-
-/// Converts a state chunk back into the kernel's partial state, keeping every hole.
-pub(crate) fn partial_from_state_chunk(
-    chunk: StateChunk,
-    mut budget: impl FnMut(usize) -> Result<()>,
-) -> Result<PartialAggregate> {
-    let op = op_of_state(chunk.state_schema.kind);
-    ensure_bound_state(op, chunk.state_schema.as_ref())?;
-
-    budget(chunk.series.len().saturating_mul(size_of::<PartialGroup>()))?;
-    let mut groups = Vec::with_capacity(chunk.series.len());
-    for series in chunk.series {
-        let positions = series.time.positions().collect::<Vec<_>>();
-        if series
-            .states
-            .iter()
-            .any(|field| field.len() != positions.len())
-        {
-            return Err(DataFusionError::Execution(
-                "aggregate state rows do not match their axis".into(),
-            ));
-        }
-        budget(
-            positions
-                .len()
-                .saturating_mul(series.states.len())
-                .saturating_mul(size_of::<Option<AccumulatorState>>()),
-        )?;
-        let mut points = Vec::with_capacity(positions.len());
-        for (point, row) in positions {
-            let states = series
-                .states
-                .iter()
-                .map(|field| {
-                    field[row].map(|value| AccumulatorState {
-                        value: value.value,
-                        mean: value.mean,
-                        compensation: value.compensation,
-                        count: value.count,
-                        incremental_mean: value.incremental_mean,
-                    })
-                })
-                .collect::<Vec<_>>();
-            // A group state has no component to look at, so the position itself is the evidence
-            // that this group was folded there; an all-hole row would be a contribution that never
-            // happened.
-            if states.iter().all(Option::is_none) {
-                return Err(DataFusionError::Execution(
-                    "aggregate state names a position with no contribution".into(),
-                ));
-            }
-            points.push((point, states));
-        }
-        groups.push(PartialGroup {
-            metric: series.metric,
-            points,
-        });
-    }
-    Ok(PartialAggregate { op, groups })
 }
 
 /// The kernel aggregate a state kind merges into.
@@ -320,7 +257,15 @@ pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
 /// measurement -- it counts vector capacities, not allocator overhead -- which is what the
 /// reservation it feeds needs: a figure that never under-counts what the executor holds.
 pub(crate) fn state_bytes(chunk: &StateChunk) -> usize {
-    let series_bytes = chunk.series.iter().fold(0usize, |total, series| {
+    let StateChunk::Series {
+        series,
+        state_schema,
+    } = chunk
+    else {
+        // The frame batch owns the Arrow buffers; the row only carries cloned handles into them.
+        return 0;
+    };
+    let series_bytes = series.iter().fold(0usize, |total, series| {
         let runs = series.time.runs().count();
         let labels = series
             .metric
@@ -353,16 +298,10 @@ pub(crate) fn state_bytes(chunk: &StateChunk) -> usize {
             .saturating_add(states)
     });
     size_of::<StateChunk>()
-        .saturating_add(
-            chunk
-                .series
-                .capacity()
-                .saturating_mul(size_of::<StateSeries>()),
-        )
+        .saturating_add(series.capacity().saturating_mul(size_of::<StateSeries>()))
         .saturating_add(series_bytes)
         .saturating_add(
-            chunk
-                .state_schema
+            state_schema
                 .components
                 .len()
                 .saturating_mul(size_of::<StateComponent>()),
