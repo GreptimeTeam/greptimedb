@@ -96,10 +96,10 @@ pub struct PersistentContext {
 }
 
 /// A dispatched migration sub-procedure that is not settled yet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SubprocedureMeta {
-    /// The region migrated by the sub-procedure.
-    pub region_id: RegionId,
+    /// The regions migrated by the sub-procedure.
+    pub region_ids: Vec<RegionId>,
     /// The procedure id of the sub-procedure.
     pub procedure_id: ProcedureId,
 }
@@ -118,8 +118,6 @@ pub struct VolatileContext {
     /// its migration succeeded, when it was given up by [`DrainDatanodeStrategy::TryAll`],
     /// when the drained datanode stopped leading it, or when another migration owns it.
     pub plan: Option<DrainDatanodePlan>,
-    /// The migration sub-procedures of the current batch that are not settled yet.
-    pub inflight_subprocedures: Vec<SubprocedureMeta>,
     /// The number of regions confirmed to have left the source while collecting batch results.
     pub migrated: usize,
     /// The regions given up by [`DrainDatanodeStrategy::TryAll`] in this run.
