@@ -417,6 +417,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
         }
 
+        // The flush has committed its manifest, including in staging mode. Count only
+        // its Parquet output, before WAL cleanup (which can fail after the commit).
+        let flushed_parquet_bytes = request
+            .edit
+            .files_to_add
+            .iter()
+            .map(|file| file.file_size)
+            .sum();
+        region
+            .region_stats
+            .flushed_parquet_bytes
+            .fetch_add(flushed_parquet_bytes, Ordering::Relaxed);
+
         region.update_flush_millis();
         // Update topic latest entry id as soon as possible after flush to make sure the prunable entry id is updated timely,
         // which is important for remote WAL pruning.
