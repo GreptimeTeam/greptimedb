@@ -263,18 +263,11 @@ impl FusedSeries {
             output_tags: if self.partial_fold.is_some() {
                 self.binding.tags.clone()
             } else if self.format == FusedOutputFormat::SeriesFrame {
+                // A frame node's label columns come from the tree, so carrying them would let a
+                // payload contradict the tree. Decode derives them instead.
                 Vec::new()
             } else {
-                output_tags_from_schema(
-                    self.output_schema.as_arrow(),
-                    self.tree
-                        .root()
-                        .output
-                        .samples()
-                        .map_or(&[], |schema| &schema.fields),
-                    &self.binding.time_index,
-                    matches!(self.tree.root().output, NativeType::Scalar(_)),
-                )
+                self.output_tags()
             },
         };
         let encoded = postcard::to_stdvec(&payload).map_err(|e| {

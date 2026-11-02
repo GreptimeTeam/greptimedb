@@ -1493,6 +1493,43 @@ fn a_vector_operation_cannot_consume_raw_samples() {
     assert!(error.to_string().contains("an evaluated vector"), "{error}");
 }
 
+/// A root that reports samples while its expression is a constant breaks its own contract.
+///
+/// The tree is constructed directly here — a child module of `native::plan` may — because the node
+/// is one the public constructors decline: a constant does not produce samples, and a zero-input
+/// tree has no scan that would refuse it later. Every public constructor therefore stays a checked
+/// one.
+#[test]
+fn a_scalar_root_claiming_samples_is_refused() {
+    let statement_grid = grid(0, 60_000, 4);
+    let tree = NativeTree {
+        root: NativeNode {
+            expr: NativeExpr::Scalar(BoundScalar { value: 1.0 }),
+            output: evaluated(Arc::new([]), Arc::clone(&statement_grid)),
+        },
+    };
+    let binding = FusedSeriesBinding {
+        grid: statement_grid,
+        time_index: "time".to_string(),
+        tags: vec![],
+        metric_name: None,
+    };
+
+    let error = FusedSeries::try_new(
+        Arc::from("1"),
+        tree,
+        binding,
+        Vec::new(),
+        Arc::new(DFSchema::empty()),
+    )
+    .expect_err("a samples root reads no source while reporting samples");
+
+    assert!(
+        error.to_string().contains("does not produce a scalar"),
+        "the refusal must name the contract the root breaks: {error}"
+    );
+}
+
 /// A samples root without an input is refused by FusedSeries.
 #[test]
 fn a_samples_root_without_an_input_is_refused() {
