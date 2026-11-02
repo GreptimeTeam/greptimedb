@@ -3921,27 +3921,26 @@ async fn native_fused_label_rewrites_keep_legacy_output_labels() {
         // ... and below another call, which is the same shape one level deeper.
         r#"abs(label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)"))"#,
         r#"abs(label_join(some_metric, "newlabel", "-", "tag_0", "tag_0"))"#,
-        // A second occurrence does not admit it either: the collision is the runtime's, not the
-        // placement's, so the pair keeps the existing plan as well.
+        // A rewrite that meets the same metric again is admitted too: what the runtime refuses is
+        // two series under one label set, not the shape, and the refusal is the Prometheus answer.
         r#"label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)") + on(newlabel) some_metric"#,
         r#"label_join(some_metric, "newlabel", "-", "tag_0", "tag_0") + some_metric"#,
     ] {
         let native = build_native_fused_plan(query, true).await;
         let display = native.display_indent().to_string();
         assert!(
-            find_fused_series(&native).is_none(),
-            "`{query}` writes a label the runtime would refuse twice, so it keeps the existing \
-             plan: {display}"
+            find_fused_series(&native).is_some(),
+            "`{query}` is a point-wise rewrite the native route admits: {display}"
         );
         assert!(
             display.contains("newlabel"),
-            "`{query}` must keep the projection that emits its new label: {display}"
+            "`{query}` must declare the rewritten label: {display}"
         );
         let without_flag = build_native_fused_plan(query, false).await;
-        assert_eq!(
+        assert_ne!(
             display,
             without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan, not an approximation of it"
+            "`{query}` must use the native plan only when it is enabled"
         );
     }
 }
