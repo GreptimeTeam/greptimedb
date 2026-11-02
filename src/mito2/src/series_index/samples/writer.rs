@@ -42,6 +42,39 @@ use crate::series_index::samples::{
 };
 use crate::series_index::writer::{decode_series_identity, validate_metadata};
 
+use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
+
+/// Coalesces encoded columns across blocks before handing them to OpenDAL.
+#[derive(Default)]
+struct SampleBuffer {
+    bytes: Vec<u8>,
+}
+
+impl SampleBuffer {
+    async fn write(&mut self, outputs: &mut Outputs, mut bytes: &[u8]) -> Result<()> {
+        let capacity = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
+        while !bytes.is_empty() {
+            if self.bytes.capacity() == 0 {
+                self.bytes.reserve_exact(capacity);
+            }
+            let count = bytes.len().min(capacity - self.bytes.len());
+            self.bytes.extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+            if self.bytes.len() == capacity {
+                self.flush(outputs).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn flush(&mut self, outputs: &mut Outputs) -> Result<()> {
+        if !self.bytes.is_empty() {
+            outputs.write(std::mem::take(&mut self.bytes)).await?;
+        }
+        Ok(())
+    }
+}
+
 struct Row {
     id: MetricSeriesId,
     time: i64,
@@ -53,6 +86,7 @@ pub(super) struct SamplesWriter {
     options: ColumnarSamplesFormat,
     manifest: Manifest,
     outputs: Outputs,
+    output_buffer: SampleBuffer,
     offsets: SparseOffsetsCache,
     key_buffer: Vec<u8>,
     rows: Vec<Row>,
@@ -138,6 +172,7 @@ impl SamplesWriter {
                 paths: Vec::new(),
                 committed: false,
             },
+            output_buffer: SampleBuffer::default(),
             offsets: SparseOffsetsCache::new(),
             key_buffer: Vec::new(),
             rows: Vec::new(),
@@ -284,13 +319,15 @@ impl SamplesWriter {
             let id = u32::try_from(self.manifest.files.len())
                 .map_err(|_| invalid("too many sample parts"))?;
             self.outputs.open(self.manifest.part_path(id)).await?;
-            self.outputs.write(metadata::header()).await?;
+            self.output_buffer
+                .write(&mut self.outputs, &metadata::header())
+                .await?;
             self.position = metadata::HEADER_SIZE;
         }
         for (column, chunk) in block.columns.iter_mut().zip(chunks) {
             column.payload.offset = self.position;
             self.position = column.payload.end()?;
-            self.outputs.write(chunk).await?;
+            self.output_buffer.write(&mut self.outputs, &chunk).await?;
         }
         if self.leaves.is_empty() || self.leaf_bytes + size > self.options.page_bytes {
             self.leaves.push(Vec::new());
@@ -318,7 +355,7 @@ impl SamplesWriter {
         let bounds = page.bounds()?;
         let (payload, bytes) = pack(&page.encode(), self.position, 1, true)?;
         self.position = payload.end()?;
-        self.outputs.write(bytes).await?;
+        self.output_buffer.write(&mut self.outputs, &bytes).await?;
         Ok(PageReference { bounds, payload })
     }
     async fn finish_part(&mut self) -> Result<()> {
@@ -341,9 +378,10 @@ impl SamplesWriter {
             .position
             .checked_add(metadata::TRAILER_SIZE)
             .ok_or_else(|| invalid("sample file length overflow"))?;
-        self.outputs
+        self.output_buffer
             .write(
-                Trailer {
+                &mut self.outputs,
+                &Trailer {
                     root,
                     depth,
                     file_length,
@@ -352,6 +390,7 @@ impl SamplesWriter {
                 .encode(),
             )
             .await?;
+        self.output_buffer.flush(&mut self.outputs).await?;
         self.outputs.close().await?;
         let part = Part {
             part_id: u32::try_from(self.manifest.files.len())
@@ -482,4 +521,87 @@ fn encode_block(rows: &[Row], manifest: &Manifest, ordinal: u64) -> Result<(Bloc
         }
     }
     Ok((block, chunks))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outputs() -> Outputs {
+        Outputs {
+            store: ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+            active: None,
+            paths: Vec::new(),
+            committed: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_output_boundaries_and_parts() {
+        let capacity = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
+        let mut outputs = outputs();
+        let mut buffer = SampleBuffer::default();
+        for size in [0, capacity - 1, capacity, capacity + 1, capacity * 2 + 13] {
+            let path = format!("part-{size}");
+            outputs.open(path.clone()).await.unwrap();
+            let bytes: Vec<_> = (0..size).map(|i| (i % 251) as u8).collect();
+            // Exercise both tiny fragments and an input larger than the staging buffer.
+            let split = size.min(1000);
+            for chunk in bytes[..split].chunks(7) {
+                buffer.write(&mut outputs, chunk).await.unwrap();
+            }
+            buffer.write(&mut outputs, &bytes[split..]).await.unwrap();
+            assert_eq!(buffer.bytes.len(), size % capacity);
+            buffer.flush(&mut outputs).await.unwrap();
+            outputs.close().await.unwrap();
+            assert!(buffer.bytes.is_empty());
+            assert_eq!(outputs.store.read(&path).await.unwrap().to_vec(), bytes);
+        }
+        outputs.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abort_discards_pending_bytes() {
+        let mut outputs = outputs();
+        let mut buffer = SampleBuffer::default();
+        outputs.open("part".into()).await.unwrap();
+        buffer.write(&mut outputs, b"pending").await.unwrap();
+        outputs.cleanup().await.unwrap();
+        drop(buffer);
+        assert!(!outputs.store.exists("part").await.unwrap());
+    }
+
+    /// Synthetic small-write benchmark; run explicitly with --ignored --nocapture.
+    #[tokio::test]
+    #[ignore]
+    async fn benchmark_small_sample_writes() {
+        let capacity = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
+        let fragment = vec![42; 100];
+        let count = capacity / fragment.len() + 1;
+        for buffered in [false, true] {
+            let mut outputs = outputs();
+            outputs.open("bench".into()).await.unwrap();
+            let mut buffer = SampleBuffer::default();
+            let started = std::time::Instant::now();
+            for _ in 0..count {
+                if buffered {
+                    buffer.write(&mut outputs, &fragment).await.unwrap();
+                } else {
+                    outputs.write(fragment.clone()).await.unwrap();
+                }
+            }
+            buffer.flush(&mut outputs).await.unwrap();
+            outputs.close().await.unwrap();
+            eprintln!(
+                "buffered={buffered}, elapsed={:?}, submitted_fragments={}",
+                started.elapsed(),
+                if buffered { 2 } else { count }
+            );
+            assert_eq!(
+                outputs.store.read("bench").await.unwrap().len(),
+                count * fragment.len()
+            );
+            outputs.cleanup().await.unwrap();
+        }
+    }
 }
