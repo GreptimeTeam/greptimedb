@@ -6385,44 +6385,16 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
     let instance = standalone.fe_instance().clone();
     execute_all(
         &instance,
-        "CREATE TABLE topk_metric (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+        "CREATE TABLE topk_metric_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table' = 'true'); \
+         CREATE TABLE topk_metric (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table' = 'topk_metric_phy'); \
          INSERT INTO topk_metric (host, ts, val) VALUES \
+         ('a', 0, 2), ('b', 0, 7), ('c', 0, 11), ('a', 1000, 3), ('b', 1000, 13), ('c', 1000, 5); \
+         CREATE TABLE topk_ordinary (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO topk_ordinary (host, ts, val) VALUES \
          ('a', 0, 2), ('b', 0, 7), ('c', 0, 11), ('a', 1000, 3), ('b', 1000, 13), ('c', 1000, 5)",
         QueryContext::arc(),
     )
     .await;
-    let sql = "TQL EVAL (0, 1, '1s') sum(topk(1, topk_metric))";
-    observer.clear();
-    let native_output = native_tql_output(&instance, sql, true).await;
-    let batches = match native_output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
-    let rows = batches
-        .iter()
-        .flat_map(|batch| {
-            let timestamps = batch
-                .column_by_name("ts")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap();
-            let values = batch
-                .columns()
-                .iter()
-                .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
-                .unwrap();
-            (0..batch.num_rows())
-                .map(move |row| (timestamps.value(row), values.value(row)))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        rows,
-        vec![(0, 11.0), (1_000, 13.0)],
-        "sum(topk(1, ...)) must return the global maximum"
-    );
     fn walk(
         plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
         found: &mut Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
@@ -6435,136 +6407,179 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
         }
     }
 
-    // The statement splits in two: the per-series prefix stays in the region, and the global
-    // `topk` and `sum` run above it. So the frontend tree holds one segment, and the other is the
-    // root of the region's own execution - which is where the exchange that gathers it lives.
-    let root = observer.root_plan();
-    let mut frontend = Vec::new();
-    walk(&root, &mut frontend);
-    assert_eq!(
-        frontend.len(),
-        1,
-        "the global sum and its topk are one frontend segment: {}",
-        datafusion::physical_plan::displayable(root.as_ref()).indent(true)
-    );
-    let parent = &frontend[0];
-    assert_eq!(
-        parent.output_partitioning().partition_count(),
-        1,
-        "a global topk answers one partition"
-    );
-    let parent_display = datafusion::physical_plan::displayable(parent.as_ref())
-        .indent(true)
-        .to_string();
-    let parent_tree = parent_display
-        .split_once("NativeTree")
-        .map_or(parent_display.as_str(), |(_, tree)| tree);
-    assert!(
-        parent_tree.contains("Aggregate sum by [] complete"),
-        "the parent owns the complete sum: {parent_tree}"
-    );
-    assert!(
-        parent_tree.contains("Vector topk 1 by []"),
-        "the parent owns the global topk: {parent_tree}"
-    );
-    assert!(
-        parent_tree.contains("Input evaluated samples source=0"),
-        "the parent reads its child's evaluated frame, not a scan: {parent_tree}"
-    );
-    assert!(
-        !parent_tree.contains("Instant"),
-        "the prefix was cut out, so no instant evaluation is left in the parent: {parent_tree}"
-    );
+    for table in ["topk_metric", "topk_ordinary"] {
+        let sql = format!("TQL EVAL (0, 1, '1s') sum(topk(1, {table}))");
+        observer.clear();
+        let native_output = native_tql_output(&instance, &sql, true).await;
+        let batches = match native_output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("TQL EVAL returns record batches"),
+        };
+        let rows = batches
+            .iter()
+            .flat_map(|batch| {
+                let timestamps = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                let values = batch
+                    .columns()
+                    .iter()
+                    .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+                    .unwrap();
+                (0..batch.num_rows())
+                    .map(move |row| (timestamps.value(row), values.value(row)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![(0, 11.0), (1_000, 13.0)],
+            "sum(topk(1, ...)) must return the global maximum for {table}"
+        );
 
-    let mut region_fused = Vec::new();
-    for plan in observer.region_plans() {
-        walk(&plan, &mut region_fused);
-    }
-    assert_eq!(
-        region_fused.len(),
-        1,
-        "the prefix is the region's own segment"
-    );
-    let child = &region_fused[0];
-    assert!(
-        child.output_partitioning().partition_count() > 1,
-        "the prefix keeps the scan's partitions, which is the point of cutting below the topk"
-    );
-    let child_display = datafusion::physical_plan::displayable(child.as_ref())
-        .indent(true)
-        .to_string();
-    // The first line names the statement the node was built for, which is the same for both
-    // segments; what a segment computes is the tree below it.
-    let child_tree = child_display
-        .split_once("NativeTree")
-        .map_or(child_display.as_str(), |(_, tree)| tree);
-    assert!(
-        child_tree.contains("Instant"),
-        "the child owns the per-series prefix: {child_tree}"
-    );
-    assert!(
-        !child_tree.contains("topk") && !child_tree.contains("Aggregate"),
-        "the global operations stayed in the parent: {child_tree}"
-    );
-    let declaration =
-        datatypes::series::frame::SeriesFrameDeclaration::parse(child.schema().as_ref())
-            .expect("the child publishes a series frame");
-    assert_eq!(
-        declaration.content(),
-        datatypes::series::frame::FrameContent::Evaluated,
-        "the segment hands its parent computed values"
-    );
-    assert_eq!(
-        declaration.labels(),
-        datatypes::series::frame::FrameLabelMode::Explicit,
-        "the segment names each series"
-    );
-    // The region root is normalized before it leaves: ordinary coalescing would interleave the
-    // segments of one evaluated chain, which the decoder refuses.
-    let region_root = observer
-        .region_plans()
-        .into_iter()
-        .find(|plan| {
-            let mut found = Vec::new();
-            walk(plan, &mut found);
-            !found.is_empty()
-        })
-        .expect("the region plan holding the segment was captured");
-    assert_eq!(
-        region_root.output_partitioning().partition_count(),
-        1,
-        "the region answers one stream: {}",
-        datafusion::physical_plan::displayable(region_root.as_ref()).indent(true)
-    );
-    // The plan the wrapper sees is the optimized one, so the router may be the root itself or sit
-    // directly above the segment.
-    let exchange = if region_root.name() == "SeriesRepartitionExec" {
-        region_root.clone()
-    } else {
-        let region_children = region_root.children();
-        match region_children.first() {
-            Some(only) if only.name() == "SeriesRepartitionExec" => Arc::clone(only),
-            _ => panic!(
-                "the region exit is the series-aware router: {}",
-                datafusion::physical_plan::displayable(region_root.as_ref()).indent(true)
-            ),
+        // The statement splits in two: the per-series prefix stays in the region, and the global
+        // `topk` and `sum` run above it. So the frontend tree holds one segment, and the other is the
+        // root of the region's own execution - which is where the exchange that gathers it lives.
+        let root = observer.root_plan();
+        let mut frontend = Vec::new();
+        walk(&root, &mut frontend);
+        assert_eq!(
+            frontend.len(),
+            1,
+            "the global sum and its topk are one frontend segment: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        let parent = &frontend[0];
+        assert_eq!(
+            parent.output_partitioning().partition_count(),
+            1,
+            "a global topk answers one partition"
+        );
+        let parent_display = datafusion::physical_plan::displayable(parent.as_ref())
+            .indent(true)
+            .to_string();
+        let parent_tree = parent_display
+            .split_once("NativeTree")
+            .map_or(parent_display.as_str(), |(_, tree)| tree);
+        assert!(
+            parent_tree.contains("Aggregate sum by [] complete"),
+            "the parent owns the complete sum: {parent_tree}"
+        );
+        assert!(
+            parent_tree.contains("Vector topk 1 by []"),
+            "the parent owns the global topk: {parent_tree}"
+        );
+        assert!(
+            parent_tree.contains("Input evaluated samples source=0"),
+            "the parent reads its child's evaluated frame, not a scan: {parent_tree}"
+        );
+        assert!(
+            !parent_tree.contains("Instant"),
+            "the prefix was cut out, so no instant evaluation is left in the parent: {parent_tree}"
+        );
+
+        let mut region_fused = Vec::new();
+        for plan in observer.region_plans() {
+            walk(&plan, &mut region_fused);
         }
-    };
-    let gathered = exchange.children();
-    assert_eq!(gathered.len(), 1, "the router reads one input");
-    assert!(
-        Arc::ptr_eq(gathered[0], child),
-        "the router gathers the segment itself, not something else: {}",
-        datafusion::physical_plan::displayable(exchange.as_ref()).indent(true)
-    );
-    assert_eq!(
-        exchange.output_partitioning().partition_count(),
-        1,
-        "the region answers one stream"
-    );
+        assert_eq!(
+            region_fused.len(),
+            1,
+            "the prefix is the region's own segment"
+        );
+        let child = &region_fused[0];
+        assert!(
+            child.output_partitioning().partition_count() > 1,
+            "the prefix keeps the scan's partitions, which is the point of cutting below the topk"
+        );
+        let child_display = datafusion::physical_plan::displayable(child.as_ref())
+            .indent(true)
+            .to_string();
+        // The first line names the statement the node was built for, which is the same for both
+        // segments; what a segment computes is the tree below it.
+        let child_tree = child_display
+            .split_once("NativeTree")
+            .map_or(child_display.as_str(), |(_, tree)| tree);
+        assert!(
+            child_tree.contains("Instant"),
+            "the child owns the per-series prefix: {child_tree}"
+        );
+        assert!(
+            !child_tree.contains("topk") && !child_tree.contains("Aggregate"),
+            "the global operations stayed in the parent: {child_tree}"
+        );
+        let declaration =
+            datatypes::series::frame::SeriesFrameDeclaration::parse(child.schema().as_ref())
+                .expect("the child publishes a series frame");
+        assert_eq!(
+            declaration.content(),
+            datatypes::series::frame::FrameContent::Evaluated,
+            "the segment hands its parent computed values"
+        );
+        assert_eq!(
+            declaration.labels(),
+            datatypes::series::frame::FrameLabelMode::Explicit,
+            "the segment names each series"
+        );
+        // The region root is normalized before it leaves: ordinary coalescing would interleave the
+        // segments of one evaluated chain, which the decoder refuses.
+        let region_root = observer
+            .region_plans()
+            .into_iter()
+            .find(|plan| {
+                let mut found = Vec::new();
+                walk(plan, &mut found);
+                !found.is_empty()
+            })
+            .expect("the region plan holding the segment was captured");
+        assert_eq!(
+            region_root.output_partitioning().partition_count(),
+            1,
+            "the region answers one stream: {}",
+            datafusion::physical_plan::displayable(region_root.as_ref()).indent(true)
+        );
+        // The plan the wrapper sees is the optimized one, so the router may be the root itself or sit
+        // directly above the segment.
+        let exchange = if region_root.name() == "SeriesRepartitionExec" {
+            region_root.clone()
+        } else {
+            let region_children = region_root.children();
+            match region_children.first() {
+                Some(only) if only.name() == "SeriesRepartitionExec" => Arc::clone(only),
+                _ => panic!(
+                    "the region exit is the series-aware router: {}",
+                    datafusion::physical_plan::displayable(region_root.as_ref()).indent(true)
+                ),
+            }
+        };
+        let gathered = exchange.children();
+        assert_eq!(gathered.len(), 1, "the router reads one input");
+        assert!(
+            Arc::ptr_eq(gathered[0], child),
+            "the router gathers the segment itself, not something else: {}",
+            datafusion::physical_plan::displayable(exchange.as_ref()).indent(true)
+        );
+        assert_eq!(
+            exchange.output_partitioning().partition_count(),
+            1,
+            "the region answers one stream"
+        );
+        assert_eq!(
+            exchange
+                .downcast_ref::<promql::extension_plan::SeriesRepartitionExec>()
+                .expect("region exit is a series router")
+                .identity_completion(),
+            promql::extension_plan::IdentityCompletion::CompleteDisjoint,
+            "the root optimizer recognizes complete per-series identities on {table}"
+        );
 
-    let legacy = eval_values(native_tql_output(&instance, sql, false).await);
-    assert_eq!(rows, legacy, "native and legacy answers differ");
+        let legacy = eval_values(native_tql_output(&instance, &sql, false).await);
+        assert_eq!(rows, legacy, "native and legacy answers differ for {table}");
+    }
 }
 
 /// Checks a computed matching-key expression routes evaluated operands into multiple partitions.

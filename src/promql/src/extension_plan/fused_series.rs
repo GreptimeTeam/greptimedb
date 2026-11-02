@@ -63,6 +63,7 @@ use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{MemoryReservation, UnboundedMemoryPool};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -1681,10 +1682,12 @@ fn preserves_partition_identity(node: &NativeNode) -> bool {
     }
 }
 
-/// Returns whether the scan's bound logical tags cover every primary-key column.
+/// Returns whether the scan's bound logical tags cover every user-visible primary-key column.
 ///
-/// A label source that decodes only part of the primary key can map two stored series onto one
-/// output identity, so the early-publication guarantee cannot be taken from the scan's type.
+/// Internal metric-engine keys are not output labels. The per-series scan guarantees `__tsid` is
+/// derived from user tags; within one logical table, distinct series are distinguished by their
+/// user-visible primary-key columns. Requiring all of those columns prevents distinct stored series
+/// from collapsing onto one output identity.
 fn bound_tags_cover_primary_key(label_source: &RawLabelSource) -> bool {
     let RawLabelSource::PrimaryKey {
         physical_metadata,
@@ -1698,9 +1701,13 @@ fn bound_tags_cover_primary_key(label_source: &RawLabelSource) -> bool {
         .iter()
         .map(|tag| tag.column_id)
         .collect::<std::collections::HashSet<_>>();
-    physical_metadata
-        .primary_key_columns()
-        .all(|column| bound_ids.contains(&column.column_id))
+    physical_metadata.primary_key_columns().all(|column| {
+        let name = column.column_schema.name.as_str();
+        let metric_engine_internal = name
+            == store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            || name == store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
+        metric_engine_internal || bound_ids.contains(&column.column_id)
+    })
 }
 
 impl FusedSeriesExec {
@@ -1714,13 +1721,21 @@ impl FusedSeriesExec {
             return false;
         }
 
-        let input = &self.inputs[0].0;
-        input
-            .downcast_ref::<SeriesScanExec>()
-            .is_some_and(|scan| bound_tags_cover_primary_key(scan.label_source()))
-            || input
-                .downcast_ref::<FusedSeriesExec>()
+        fn is_complete_series_input(plan: &dyn ExecutionPlan) -> bool {
+            if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
+                return bound_tags_cover_primary_key(scan.label_source());
+            }
+            if let Some(cooperative) = plan.downcast_ref::<CooperativeExec>() {
+                return cooperative
+                    .children()
+                    .first()
+                    .is_some_and(|child| is_complete_series_input(child.as_ref()));
+            }
+            plan.downcast_ref::<FusedSeriesExec>()
                 .is_some_and(FusedSeriesExec::has_partition_disjoint_identities)
+        }
+
+        is_complete_series_input(self.inputs[0].0.as_ref())
     }
 
     /// Creates the node, rejecting whatever this node cannot execute or convert.

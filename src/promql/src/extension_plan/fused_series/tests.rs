@@ -1419,6 +1419,106 @@ fn bound_tags_cover_primary_key_checks_all_primary_key_columns() {
     assert!(!super::bound_tags_cover_primary_key(
         &RawLabelSource::Explicit
     ));
+
+    let mut metric_builder = RegionMetadataBuilder::new(RegionId::new(9, 10));
+    metric_builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Tag,
+            column_id: 10,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Tag,
+            column_id: 11,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "host",
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Tag,
+            column_id: 12,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Timestamp,
+            column_id: 14,
+        });
+    metric_builder.primary_key(vec![10, 11, 12]);
+    let metric_metadata = Arc::new(metric_builder.build().unwrap());
+    let metric_source = |ids: &[u32]| RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("m"),
+        physical_metadata: Arc::clone(&metric_metadata),
+        logical_tags: ids
+            .iter()
+            .map(|id| BoundTag {
+                column_id: *id,
+                name: Arc::from(if *id == 12 { "host" } else { "internal" }),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    };
+    assert!(super::bound_tags_cover_primary_key(&metric_source(&[12])));
+    assert!(!super::bound_tags_cover_primary_key(&metric_source(&[])));
+
+    let mut reserved_builder = RegionMetadataBuilder::new(RegionId::new(9, 11));
+    reserved_builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "user_reserved",
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Tag,
+            column_id: store_api::storage::consts::ReservedColumnId::version(),
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "host",
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Tag,
+            column_id: 13,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Timestamp,
+            column_id: 15,
+        });
+    reserved_builder.primary_key(vec![
+        store_api::storage::consts::ReservedColumnId::version(),
+        13,
+    ]);
+    let reserved_metadata = Arc::new(reserved_builder.build().unwrap());
+    let reserved_source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("ordinary"),
+        physical_metadata: reserved_metadata,
+        logical_tags: vec![BoundTag {
+            column_id: 13,
+            name: Arc::from("host"),
+        }]
+        .into(),
+    };
+    assert!(!super::bound_tags_cover_primary_key(&reserved_source));
 }
 
 fn fused(tree: NativeTree) -> FusedSeries {
