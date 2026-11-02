@@ -19,7 +19,7 @@ use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
 use query::query_engine::DescribeResult;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 use sql::statements::statement::Statement;
 
 use crate::error::Result;
@@ -30,6 +30,34 @@ pub type ServerSqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
 pub const MAX_LOGICAL_TABLE_DDL_BYTES: usize = 1024 * 1024;
 /// Maximum number of CREATE statements in one logical-table batch.
 pub const MAX_LOGICAL_TABLE_DDL_STATEMENTS: usize = 128;
+
+/// The namespace bound at PREPARE must also be used for authorization at EXECUTE.
+/// It must not replace the execution context: session functions still observe the
+/// current schema and settings.
+#[derive(Clone, Debug)]
+pub struct PreparedStatement {
+    pub statement: Statement,
+    catalog: String,
+    schema: String,
+}
+
+impl PreparedStatement {
+    pub fn new(statement: Statement, query_ctx: &QueryContext) -> Self {
+        Self {
+            statement,
+            catalog: query_ctx.current_catalog().to_string(),
+            schema: query_ctx.current_schema(),
+        }
+    }
+
+    /// Uses the newly admitted user snapshot, but the originally bound namespace.
+    pub fn authorization_context(&self, query_ctx: &QueryContext) -> QueryContextRef {
+        let mut authorization_ctx = query_ctx.fork();
+        authorization_ctx.set_current_catalog(&self.catalog);
+        authorization_ctx.set_current_schema(&self.schema);
+        Arc::new(authorization_ctx)
+    }
+}
 
 #[async_trait]
 pub trait SqlQueryHandler {
@@ -73,6 +101,30 @@ pub trait SqlQueryHandler {
         stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> Result<Output>;
+
+    /// Rechecks a cached statement without restarting its plan or result stream.
+    /// Handlers with mutable authorization must check the current user against
+    /// the original bindings, including when a suspended portal is resumed.
+    async fn check_prepared_permission(
+        &self,
+        _prepared: &PreparedStatement,
+        _query_ctx: QueryContextRef,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Executes a cached plan with its original statement namespace.
+    async fn do_exec_prepared_plan(
+        &self,
+        plan: LogicalPlan,
+        prepared: PreparedStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.check_prepared_permission(&prepared, query_ctx.clone())
+            .await?;
+        self.do_exec_plan(plan, Some(prepared.statement), query_ctx)
+            .await
+    }
 
     async fn do_promql_query(
         &self,

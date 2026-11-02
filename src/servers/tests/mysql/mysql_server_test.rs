@@ -225,6 +225,63 @@ async fn test_start_mysql_server() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_existing_mysql_connection_rejects_revoked_authorization() -> Result<()> {
+    use auth::tests::{AuthorizationState, RefreshingUserProvider};
+
+    let provider = Arc::new(RefreshingUserProvider::default());
+    let handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
+    let mut server = create_mysql_server_with_query_handler(
+        handler,
+        Default::default(),
+        Some(provider.clone()),
+    )?;
+    server.start("127.0.0.1:0".parse().unwrap()).await?;
+    let mut client = create_connection_default_db_name(server.bind_addr().unwrap().port(), false)
+        .await
+        .unwrap();
+    let sql = "SELECT uint32s FROM numbers LIMIT 1";
+    let prepared = client.prep(sql).await.unwrap();
+    client.query_drop(sql).await.unwrap();
+    client.exec_drop(&prepared, ()).await.unwrap();
+
+    for state in [
+        AuthorizationState::Deleted,
+        AuthorizationState::Active(1),
+        AuthorizationState::Unavailable,
+    ] {
+        provider.set_state(state);
+        // A protocol error, not a disconnected socket, must prevent each execution path.
+        assert!(matches!(
+            client.query_drop(sql).await.unwrap_err(),
+            mysql_async::Error::Server(_)
+        ));
+        assert!(matches!(
+            client.exec_drop(&prepared, ()).await.unwrap_err(),
+            mysql_async::Error::Server(_)
+        ));
+        assert!(matches!(
+            client
+                .query_drop("SELECT @@version_comment")
+                .await
+                .unwrap_err(),
+            mysql_async::Error::Server(_)
+        ));
+        assert!(matches!(
+            client
+                .prep("SELECT uint32s FROM numbers LIMIT 2")
+                .await
+                .unwrap_err(),
+            mysql_async::Error::Server(_)
+        ));
+    }
+    provider.set_state(AuthorizationState::Active(0));
+    client.exec_drop(&prepared, ()).await.unwrap();
+    client.disconnect().await.unwrap();
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_reject_no_database() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();

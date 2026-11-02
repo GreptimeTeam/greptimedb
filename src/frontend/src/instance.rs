@@ -88,7 +88,7 @@ use servers::interceptor::{
 use servers::prometheus_handler::{
     ParsedPromQuery, PrometheusHandler, resolve_schema_from_matchers,
 };
-use servers::query_handler::sql::SqlQueryHandler;
+use servers::query_handler::sql::{PreparedStatement, SqlQueryHandler};
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
@@ -1140,7 +1140,39 @@ impl SqlQueryHandler for Instance {
         stmt: Option<Statement>,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        self.do_exec_plan_inner(plan, stmt, query_ctx)
+        async {
+            if let Some(stmt) = &stmt {
+                self.check_sql_permission(stmt, &query_ctx).await?;
+            }
+            self.do_exec_plan_inner(plan, stmt, query_ctx).await
+        }
+        .await
+        .map_err(BoxedError::new)
+        .context(server_error::ExecutePlanSnafu)
+    }
+
+    async fn check_prepared_permission(
+        &self,
+        prepared: &PreparedStatement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<()> {
+        // PREPARE permission checks cannot authorize a later EXECUTE after revocation.
+        let authorization_ctx = prepared.authorization_context(&query_ctx);
+        self.check_sql_permission(&prepared.statement, &authorization_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecutePlanSnafu)
+    }
+
+    async fn do_exec_prepared_plan(
+        &self,
+        plan: LogicalPlan,
+        prepared: PreparedStatement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.check_prepared_permission(&prepared, query_ctx.clone())
+            .await?;
+        self.do_exec_plan_inner(plan, Some(prepared.statement), query_ctx)
             .await
             .map_err(BoxedError::new)
             .context(server_error::ExecutePlanSnafu)
@@ -3474,6 +3506,144 @@ mod tests {
             .unwrap();
         assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cached_plan_and_cursor_fetch_recheck_permissions() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+        let ctx = test_query_ctx(42);
+        instance
+            .plugins
+            .insert::<PermissionCheckerRef>(Arc::new(auth::DefaultPermissionChecker));
+        let reader = auth::user_provider_from_option("static_user_provider:cmd:alice:rw=password")
+            .unwrap()
+            .authenticate(
+                auth::Identity::UserId("alice", None),
+                auth::Password::PlainText("password".to_string().into()),
+            )
+            .await
+            .unwrap();
+        ctx.set_current_user(reader);
+        let statement = parse_one_sql("SELECT * FROM source");
+        let plan = SqlQueryHandler::do_describe(&instance, statement.clone(), ctx.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .logical_plan;
+        let prepared = PreparedStatement::new(statement, &ctx);
+        SqlQueryHandler::do_exec_prepared_plan(
+            &instance,
+            plan.clone(),
+            prepared.clone(),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        execute_one_sql(
+            &instance,
+            "DECLARE auth_cursor CURSOR FOR SELECT * FROM source",
+            ctx.clone(),
+        )
+        .await?;
+
+        execute_one_sql(&instance, "FETCH 1 FROM auth_cursor", ctx.clone()).await?;
+
+        let writer = auth::user_provider_from_option("static_user_provider:cmd:alice:wo=password")
+            .unwrap()
+            .authenticate(
+                auth::Identity::UserId("alice", None),
+                auth::Password::PlainText("password".to_string().into()),
+            )
+            .await
+            .unwrap();
+        ctx.set_current_user(writer);
+        assert_permission_denied(
+            SqlQueryHandler::do_exec_prepared_plan(&instance, plan, prepared, ctx.clone()).await,
+        );
+        let mut fetch =
+            SqlQueryHandler::do_query(&instance, "FETCH 1 FROM auth_cursor", ctx.clone()).await;
+        assert_eq!(fetch.len(), 1);
+        assert_permission_denied(fetch.remove(0));
+        let mut query = SqlQueryHandler::do_query(&instance, "SELECT * FROM source", ctx).await;
+        assert_permission_denied(query.remove(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prepared_plan_authorization_uses_original_namespace() -> TestResult<()> {
+        struct SchemaPermissionChecker(&'static str);
+
+        impl PermissionChecker for SchemaPermissionChecker {
+            fn check_permission(
+                &self,
+                _user: UserInfoRef,
+                _req: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                user: UserInfoRef,
+                req: PermissionReq,
+                _targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                self.check_permission(user, req)
+            }
+
+            fn check_permission_with_context(
+                &self,
+                _user: UserInfoRef,
+                _req: PermissionReq,
+                schema: Option<&str>,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(if schema == Some(self.0) {
+                    PermissionResp::Allow
+                } else {
+                    PermissionResp::Reject
+                })
+            }
+        }
+
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+        let ctx = test_query_ctx(43);
+        let stmt = parse_one_sql("SELECT * FROM source");
+        let plan = SqlQueryHandler::do_describe(&instance, stmt.clone(), ctx.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .logical_plan;
+        let prepared = PreparedStatement::new(stmt, &ctx);
+        ctx.set_current_schema("other");
+
+        // USE must neither retarget the permission check nor change the bound plan.
+        instance
+            .plugins
+            .insert::<PermissionCheckerRef>(Arc::new(SchemaPermissionChecker("public")));
+        SqlQueryHandler::do_exec_prepared_plan(
+            &instance,
+            plan.clone(),
+            prepared.clone(),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ctx.current_schema(), "other");
+
+        // Access to the current schema cannot authorize the plan bound to public.
+        instance
+            .plugins
+            .map_mut::<PermissionCheckerRef, _, _>(|checker| {
+                *checker.unwrap() = Arc::new(SchemaPermissionChecker("other"));
+            });
+        assert_permission_denied(
+            SqlQueryHandler::do_exec_prepared_plan(&instance, plan, prepared, ctx).await,
+        );
         Ok(())
     }
 

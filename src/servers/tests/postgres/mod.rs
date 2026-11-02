@@ -347,6 +347,81 @@ async fn test_schema_validating() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_existing_postgres_connection_rejects_revoked_authorization() -> Result<()> {
+    use auth::tests::{AuthorizationState, RefreshingUserProvider};
+
+    let provider = Arc::new(RefreshingUserProvider::default());
+    let (server, port) =
+        start_test_server_with_user_provider(provider.clone(), Default::default()).await?;
+    let sql = "SELECT uint32s FROM numbers LIMIT 1";
+    let shortcut = "SHOW default_transaction_isolation";
+    let connect = || create_plain_connection_with_credentials(port, "greptime", "greptime");
+    for state in [
+        AuthorizationState::Deleted,
+        AuthorizationState::Active(1),
+        AuthorizationState::Unavailable,
+    ] {
+        provider.set_state(AuthorizationState::Active(0));
+        // Account errors are FATAL in PostgreSQL. Admit independent connections
+        // before revocation so every path reaches its own authorization gate.
+        let simple = connect().await.unwrap();
+        let extended = connect().await.unwrap();
+        let fixture = connect().await.unwrap();
+        let parser = connect().await.unwrap();
+        let prepared = extended.prepare(sql).await.unwrap();
+        assert_eq!(extended.query(&prepared, &[]).await.unwrap().len(), 1);
+        assert!(!simple.simple_query(sql).await.unwrap().is_empty());
+        assert!(!fixture.simple_query(shortcut).await.unwrap().is_empty());
+
+        provider.set_state(state);
+        let errors = [
+            simple.simple_query(sql).await.unwrap_err(),
+            extended.query(&prepared, &[]).await.unwrap_err(),
+            fixture.simple_query(shortcut).await.unwrap_err(),
+            parser.prepare(sql).await.unwrap_err(),
+        ];
+        for error in errors {
+            assert!(error.as_db_error().is_some(), "{error:?}");
+        }
+    }
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_suspended_postgres_portal_rechecks_authorization() -> Result<()> {
+    use auth::tests::{AuthorizationState, RefreshingUserProvider};
+
+    let provider = Arc::new(RefreshingUserProvider::default());
+    let (server, port) =
+        start_test_server_with_user_provider(provider.clone(), Default::default()).await?;
+    for state in [
+        AuthorizationState::Deleted,
+        AuthorizationState::Active(1),
+        AuthorizationState::Unavailable,
+    ] {
+        provider.set_state(AuthorizationState::Active(0));
+        let mut client = create_plain_connection_with_credentials(port, "greptime", "greptime")
+            .await
+            .unwrap();
+        let transaction = client.transaction().await.unwrap();
+        let statement = transaction
+            .prepare("SELECT uint32s FROM numbers LIMIT 3")
+            .await
+            .unwrap();
+        let portal = transaction.bind(&statement, &[]).await.unwrap();
+        assert_eq!(transaction.query_portal(&portal, 1).await.unwrap().len(), 1);
+        assert_eq!(transaction.query_portal(&portal, 1).await.unwrap().len(), 1);
+
+        provider.set_state(state);
+        let error = transaction.query_portal(&portal, 1).await.unwrap_err();
+        assert!(error.as_db_error().is_some(), "{error:?}");
+    }
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_scram_sha256_auth() -> Result<()> {
     let verifier =
         format_pg_scram_sha256_password_verifier(b"greptime", b"pg-scram-salt", 4096).unwrap();

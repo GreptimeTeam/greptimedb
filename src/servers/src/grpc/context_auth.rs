@@ -163,15 +163,21 @@ pub async fn auth(
         .context(NotFoundAuthHeaderSnafu)?;
 
     match auth_scheme {
-        AuthScheme::Basic(api::v1::Basic { username, password }) => user_provider
-            .auth(
-                Identity::UserId(&username, None),
-                Password::PlainText(password.into()),
-                query_ctx.current_catalog(),
-                &query_ctx.current_schema(),
-            )
-            .await
-            .context(AuthSnafu),
+        AuthScheme::Basic(api::v1::Basic { username, password }) => async {
+            let user = user_provider
+                .auth(
+                    Identity::UserId(&username, None),
+                    Password::PlainText(password.into()),
+                    query_ctx.current_catalog(),
+                    &query_ctx.current_schema(),
+                )
+                .await?;
+            user_provider
+                .refresh_authorization(query_ctx.current_catalog(), &user)
+                .await
+        }
+        .await
+        .context(AuthSnafu),
         AuthScheme::Token(_) => Err(UnsupportedAuthScheme {
             name: "Token AuthScheme".to_string(),
         }),
@@ -188,6 +194,43 @@ mod tests {
     use session::hints::{HINTS_KEY, REMOTE_QUERY_ID_EXTENSION_KEY, RESERVED_EXTENSION_KEYS};
 
     use super::*;
+
+    #[tokio::test]
+    async fn test_cached_grpc_credentials_do_not_bypass_authorization_refresh() {
+        use auth::tests::{AuthorizationState, RefreshingUserProvider};
+        use common_error::status_code::StatusCode;
+
+        let provider = Arc::new(RefreshingUserProvider::default());
+        let header = RequestHeader {
+            authorization: Some(AuthHeader {
+                auth_scheme: Some(AuthScheme::Basic(api::v1::Basic {
+                    username: "greptime".into(),
+                    password: "greptime".into(),
+                })),
+            }),
+            ..Default::default()
+        };
+        let ctx = Arc::new(QueryContextBuilder::default().build());
+        let user = auth(Some(provider.clone()), Some(&header), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(user.username(), "greptime");
+        assert!(user.is_admin());
+        for (state, status) in [
+            (AuthorizationState::Deleted, StatusCode::UserNotFound),
+            (AuthorizationState::Active(1), StatusCode::UserNotFound),
+            (AuthorizationState::Unavailable, StatusCode::Unexpected),
+        ] {
+            provider.set_state(state);
+            let error = auth(Some(provider.clone()), Some(&header), &ctx)
+                .await
+                .unwrap_err();
+            assert_eq!(error.status_code(), status);
+        }
+
+        // A provider-less internal listener has no external identity to refresh.
+        assert!(auth(None, None, &ctx).await.is_ok());
+    }
 
     #[test]
     fn test_channel_comes_from_server_extensions() {

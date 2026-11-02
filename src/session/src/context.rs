@@ -22,7 +22,7 @@ use std::time::Duration;
 use api::v1::ExplainOptions;
 use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
-use auth::UserInfoRef;
+use auth::{UserInfoRef, UserProviderRef};
 pub use common_base::protocol::Channel;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
@@ -75,6 +75,9 @@ pub struct QueryContext {
     mutable_session_data: Arc<RwLock<MutableInner>>,
     #[builder(default)]
     mutable_query_context_data: Arc<RwLock<QueryContextMutableFields>>,
+    /// Local-only snapshot: later session refreshes must not change an admitted request.
+    #[builder(setter(skip))]
+    authorization_snapshot: Arc<RwLock<Option<UserInfoRef>>>,
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extensions: HashMap<String, String>,
@@ -289,7 +292,7 @@ impl From<&QueryContext> for api::v1::QueryContext {
 }
 
 impl QueryContext {
-    /// Forks this context with an independent snapshot of mutable session data.
+    /// Forks this context with independent session data and authorization snapshot.
     ///
     /// Unlike [`Clone`], changes to the schema, user, timezone, and other fields
     /// held in mutable session data do not affect this context.
@@ -297,6 +300,9 @@ impl QueryContext {
         let mut fork = self.clone();
         fork.mutable_session_data = Arc::new(RwLock::new(
             self.mutable_session_data.read().unwrap().clone(),
+        ));
+        fork.authorization_snapshot = Arc::new(RwLock::new(
+            self.authorization_snapshot.read().unwrap().clone(),
         ));
         fork
     }
@@ -456,11 +462,31 @@ impl QueryContext {
     }
 
     pub fn current_user(&self) -> UserInfoRef {
-        self.mutable_session_data.read().unwrap().user_info.clone()
+        let snapshot = self.authorization_snapshot.read().unwrap().clone();
+        snapshot.unwrap_or_else(|| self.mutable_session_data.read().unwrap().user_info.clone())
     }
 
+    /// Updates this request's user and the identity used by subsequent session requests.
     pub fn set_current_user(&self, user: UserInfoRef) {
+        *self.authorization_snapshot.write().unwrap() = Some(user.clone());
         self.mutable_session_data.write().unwrap().user_info = user;
+    }
+
+    /// Refreshes authorization before request parsing, rewriting, or execution.
+    ///
+    /// A failure must abort admission; the previous identity is not a fallback.
+    /// No credential validation or operation permission check is performed here.
+    pub async fn refresh_authorization(
+        &self,
+        user_provider: Option<&UserProviderRef>,
+    ) -> auth::error::Result<()> {
+        if let Some(provider) = user_provider {
+            let user = provider
+                .refresh_authorization(self.current_catalog(), &self.current_user())
+                .await?;
+            self.set_current_user(user);
+        }
+        Ok(())
     }
 
     pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
@@ -757,6 +783,7 @@ impl QueryContextBuilder {
             sst_min_sequences: self.sst_min_sequences.unwrap_or_default(),
             mutable_session_data: self.mutable_session_data.unwrap_or_default(),
             mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
+            authorization_snapshot: Default::default(),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
@@ -992,6 +1019,25 @@ mod test {
 
         assert_eq!(context.current_schema(), "public");
         assert_eq!(fork.current_schema(), "private");
+    }
+
+    #[test]
+    fn test_authorization_snapshot_survives_subsequent_session_requests() {
+        let session = Session::new(None, Channel::Mysql, Default::default(), 1);
+        let first = session.new_query_context();
+        first.set_current_user(auth::userinfo_by_name(Some("alice".into())));
+
+        let second = session.new_query_context();
+        assert_eq!(second.current_user().username(), "alice");
+        second.set_current_user(auth::userinfo_by_name(Some("bob".into())));
+
+        assert_eq!(first.current_user().username(), "alice");
+        assert_eq!(second.current_user().username(), "bob");
+        assert_eq!(session.user_info().username(), "bob");
+        let fork = second.fork();
+        fork.set_current_user(auth::userinfo_by_name(Some("charlie".into())));
+        assert_eq!(fork.current_user().username(), "charlie");
+        assert_eq!(second.current_user().username(), "bob");
     }
 
     #[test]

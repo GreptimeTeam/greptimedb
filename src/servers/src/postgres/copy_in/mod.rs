@@ -410,7 +410,7 @@ impl PostgresServerHandlerInner {
         // The batching-aware context routes copy-in flushes through the
         // pending-rows batcher like SQL INSERT when it is enabled for
         // this connection.
-        let query_ctx = self.new_query_context();
+        let query_ctx = self.new_query_context().await?;
         let (catalog, schema, table) = resolve_table_name(&query_ctx, &stmt.table)?;
 
         let Some(table_info) = self

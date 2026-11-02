@@ -24,7 +24,10 @@ provided through handler traits, mostly implemented by `frontend`.
 - gRPC wire changes start in `greptime-proto`; update builders and handlers here
   after bumping it.
 - Auth or `QueryContext` changes must cover HTTP, gRPC, MySQL, and PostgreSQL
-  entry points.
+  entry points. Refresh mutable authorization before request dispatch (including
+  SQL shortcuts); cached plans retain their original statement namespace for
+  execution-time authorization via `SqlQueryHandler::do_exec_prepared_plan`.
+  PostgreSQL `on_execute` also checks before pgwire resumes a suspended portal.
 - Internal frontend gRPC listeners set `Channel::Internal` in server-owned request
   extensions. Handlers preserve it through query execution and metering; client
   flow metadata does not grant an internal channel.

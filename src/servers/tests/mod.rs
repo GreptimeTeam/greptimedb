@@ -49,6 +49,37 @@ mod mysql;
 mod postgres;
 mod prom_remote_write_v2_test;
 
+#[tokio::test]
+async fn test_authorization_refresh_installs_a_request_snapshot() {
+    let provider: auth::UserProviderRef = Arc::new(auth::tests::RefreshingUserProvider::default());
+    let session = session::Session::new(
+        None,
+        session::context::Channel::Mysql,
+        Default::default(),
+        1,
+    );
+    let first = session.new_query_context();
+    let cached = provider
+        .authenticate(
+            auth::Identity::UserId("greptime", None),
+            auth::Password::PlainText("greptime".to_string().into()),
+        )
+        .await
+        .unwrap();
+    first.set_current_user(cached);
+    assert!(!first.current_user().is_admin());
+
+    let second = session.new_query_context();
+    second.refresh_authorization(Some(&provider)).await.unwrap();
+    assert_eq!(
+        second.current_user().username(),
+        first.current_user().username()
+    );
+    assert!(second.current_user().is_admin());
+    assert!(session.user_info().is_admin());
+    assert!(!first.current_user().is_admin());
+}
+
 pub struct DummyInstance {
     query_engine: QueryEngineRef,
 }

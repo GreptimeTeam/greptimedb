@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+use std::sync::{Arc, RwLock};
+
 use common_base::secrets::ExposeSecret;
 use common_error::ext::BoxedError;
 use snafu::{OptionExt, ResultExt};
@@ -21,7 +24,7 @@ use crate::error::{
     UserPasswordMismatchSnafu,
 };
 use crate::user_info::DefaultUserInfo;
-use crate::{Identity, Password, UserInfoRef, UserProvider, auth_mysql};
+use crate::{Identity, Password, UserInfo, UserInfoRef, UserProvider, auth_mysql};
 
 pub struct DatabaseAuthInfo<'a> {
     pub catalog: &'a str,
@@ -115,6 +118,119 @@ impl UserProvider for MockUserProvider {
                 username: user_info.username().to_string(),
             }
             .fail()
+        }
+    }
+}
+
+/// Authoritative account state behind a cached authentication result.
+#[derive(Clone, Copy)]
+pub enum AuthorizationState {
+    Active(u64),
+    Deleted,
+    Unavailable,
+}
+
+/// Simulates a provider whose credential cache still holds generation zero
+/// without its newly granted admin privilege. Tests can also revoke that account
+/// independently of the authenticated session.
+pub struct RefreshingUserProvider {
+    state: RwLock<AuthorizationState>,
+}
+
+impl Default for RefreshingUserProvider {
+    fn default() -> Self {
+        Self {
+            state: RwLock::new(AuthorizationState::Active(0)),
+        }
+    }
+}
+
+impl RefreshingUserProvider {
+    pub fn set_state(&self, state: AuthorizationState) {
+        *self.state.write().unwrap() = state;
+    }
+}
+
+#[derive(Debug)]
+struct VersionedUserInfo {
+    generation: u64,
+    admin: bool,
+}
+
+impl UserInfo for VersionedUserInfo {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn username(&self) -> &str {
+        "greptime"
+    }
+
+    fn is_admin(&self) -> bool {
+        self.admin
+    }
+}
+
+#[async_trait::async_trait]
+impl UserProvider for RefreshingUserProvider {
+    fn name(&self) -> &str {
+        "refreshing-test-provider"
+    }
+
+    async fn authenticate(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfoRef> {
+        MockUserProvider::default()
+            .authenticate(id, password)
+            .await?;
+        Ok(Arc::new(VersionedUserInfo {
+            generation: 0,
+            admin: false,
+        }))
+    }
+
+    async fn authenticate_bearer_token(&self, token: &str, _catalog: &str) -> Result<UserInfoRef> {
+        if token != "signed-token" {
+            return UserPasswordMismatchSnafu {
+                username: "greptime",
+            }
+            .fail();
+        }
+        Ok(Arc::new(VersionedUserInfo {
+            generation: 0,
+            admin: false,
+        }))
+    }
+
+    async fn authorize(&self, catalog: &str, schema: &str, user: &UserInfoRef) -> Result<()> {
+        MockUserProvider::default()
+            .authorize(catalog, schema, user)
+            .await
+    }
+
+    async fn refresh_authorization(
+        &self,
+        _catalog: &str,
+        user: &UserInfoRef,
+    ) -> Result<UserInfoRef> {
+        match *self.state.read().unwrap() {
+            AuthorizationState::Active(generation)
+                if user
+                    .as_any()
+                    .downcast_ref::<VersionedUserInfo>()
+                    .is_some_and(|user| user.generation == generation) =>
+            {
+                Ok(Arc::new(VersionedUserInfo {
+                    generation,
+                    admin: true,
+                }))
+            }
+            AuthorizationState::Unavailable => crate::error::InternalStateSnafu {
+                msg: "authorization backend unavailable",
+            }
+            .fail(),
+            _ => UserNotFoundSnafu {
+                username: user.username(),
+            }
+            .fail(),
         }
     }
 }

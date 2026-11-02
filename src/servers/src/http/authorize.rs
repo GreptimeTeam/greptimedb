@@ -107,9 +107,13 @@ pub async fn inner_auth<B>(
     //    [`UserProvider::auth_bearer_token`]; otherwise fall through to the
     //    username/password path (Basic / influxdb / splunk) below.
     if let Some(token) = extract_bearer_token(&req) {
-        match user_provider
-            .auth_bearer_token(token, &catalog, &schema)
-            .await
+        match async {
+            let user = user_provider
+                .auth_bearer_token(token, &catalog, &schema)
+                .await?;
+            user_provider.refresh_authorization(&catalog, &user).await
+        }
+        .await
         {
             Ok(userinfo) => {
                 query_ctx.set_current_user(userinfo);
@@ -152,14 +156,18 @@ pub async fn inner_auth<B>(
     };
 
     // 5. auth
-    match user_provider
-        .auth(
-            auth::Identity::UserId(&username, None),
-            auth::Password::PlainText(password),
-            &catalog,
-            &schema,
-        )
-        .await
+    match async {
+        let user = user_provider
+            .auth(
+                auth::Identity::UserId(&username, None),
+                auth::Password::PlainText(password),
+                &catalog,
+                &schema,
+            )
+            .await?;
+        user_provider.refresh_authorization(&catalog, &user).await
+    }
+    .await
     {
         Ok(userinfo) => {
             query_ctx.set_current_user(userinfo);
@@ -722,6 +730,36 @@ mod tests {
             None
         );
         assert_eq!(extract_bearer_token(&bearer("Bearer", "")), None);
+    }
+
+    #[tokio::test]
+    async fn test_cached_http_credentials_do_not_bypass_authorization_refresh() {
+        use auth::tests::{AuthorizationState, RefreshingUserProvider};
+
+        for header in ["Basic Z3JlcHRpbWU6Z3JlcHRpbWU=", "Bearer signed-token"] {
+            let provider = std::sync::Arc::new(RefreshingUserProvider::default());
+            let request = || mock_http_request(Some(header), None).unwrap();
+            let admitted = inner_auth(Some(provider.clone()), request()).await.unwrap();
+            let user = admitted
+                .extensions()
+                .get::<session::context::QueryContext>()
+                .unwrap()
+                .current_user();
+            assert_eq!(user.username(), "greptime");
+            assert!(user.is_admin());
+
+            for state in [
+                AuthorizationState::Deleted,
+                AuthorizationState::Active(1),
+                AuthorizationState::Unavailable,
+            ] {
+                provider.set_state(state);
+                let response = inner_auth(Some(provider.clone()), request())
+                    .await
+                    .unwrap_err();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+        }
     }
 
     /// A `UserProvider` that resolves exactly one bearer token to a known user

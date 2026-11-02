@@ -156,7 +156,10 @@ impl MakePostgresServerHandler {
 
             batching_enabled,
             session: session.clone(),
-            query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
+            query_parser: Arc::new(
+                DefaultQueryParser::new(self.query_handler.clone(), session)
+                    .with_user_provider(self.user_provider.clone()),
+            ),
             copy_in_state: tokio::sync::Mutex::new(None),
         };
         PostgresServerHandler(Arc::new(handler))

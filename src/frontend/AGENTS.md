@@ -41,7 +41,10 @@ including caches owned by pipeline and protocol handlers.
 
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
   permission checks, timeout/cancellation, and delegates planning/execution to
-  `StatementExecutor`. Distributed scans enter through `region_query.rs`.
+  `StatementExecutor`. Cached SQL plans recheck the current user against their
+  PREPARE-time namespace in `check_prepared_permission`, used by plan execution
+  and suspended-portal resumption without replacing the live execution context.
+  Distributed scans enter through `region_query.rs`.
 - **Logical-table batch DDL** (`instance.rs`): dedicated SQL handler → bounded
   parse/interception → all-member permissions → operator CREATE preparation →
   one logical-table batch procedure. Keep pre-submission validation side-effect free.

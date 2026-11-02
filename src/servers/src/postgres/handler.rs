@@ -36,11 +36,13 @@ use pgwire::api::results::{
     DescribePortalResponse, DescribeStatementResponse, FieldInfo, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
-use pgwire::api::{ClientInfo, ErrorHandler, Type};
+use pgwire::api::store::{Entry, PortalStore};
+use pgwire::api::{ClientInfo, ClientPortalStore, DEFAULT_NAME, ErrorHandler, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::messages::copy::CopyData;
 use pgwire::messages::data::DataRow;
+use pgwire::messages::extendedquery::Execute;
 use query::dist_analyze_output_schema;
 use query::planner::DfLogicalPlanner;
 use query::query_engine::DescribeResult;
@@ -57,16 +59,19 @@ use crate::error::{DataFusionSnafu, InferParameterTypesSnafu, Result};
 use crate::postgres::types::*;
 use crate::postgres::utils::convert_err;
 use crate::postgres::{PostgresServerHandlerInner, copy_in, fixtures};
-use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::query_handler::sql::{PreparedStatement, ServerSqlQueryHandlerRef};
 
 impl PostgresServerHandlerInner {
     /// Creates a query context carrying this connection's batching
     /// selection, so write paths can route through the pending-rows
     /// batcher when it is enabled.
-    pub(super) fn new_query_context(&self) -> QueryContextRef {
+    pub(super) async fn new_query_context(&self) -> PgWireResult<QueryContextRef> {
         let mut ctx = self.session.new_query_context();
         Arc::make_mut(&mut ctx).set_batching_enabled(self.batching_enabled);
-        ctx
+        ctx.refresh_authorization(self.query_parser.user_provider.as_ref())
+            .await
+            .map_err(convert_err)?;
+        Ok(ctx)
     }
 }
 
@@ -79,7 +84,7 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let query_ctx = self.new_query_context();
+        let query_ctx = self.new_query_context().await?;
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY, db.as_str()])
@@ -370,6 +375,7 @@ pub struct DefaultQueryParser {
     query_handler: ServerSqlQueryHandlerRef,
     session: Arc<Session>,
     compatibility_parser: PostgresCompatibilityParser,
+    user_provider: Option<auth::UserProviderRef>,
 }
 
 impl DefaultQueryParser {
@@ -378,7 +384,16 @@ impl DefaultQueryParser {
             query_handler,
             session,
             compatibility_parser: PostgresCompatibilityParser::new(),
+            user_provider: None,
         }
+    }
+
+    pub(crate) fn with_user_provider(
+        mut self,
+        user_provider: Option<auth::UserProviderRef>,
+    ) -> Self {
+        self.user_provider = user_provider;
+        self
     }
 }
 
@@ -402,6 +417,10 @@ impl QueryParser for DefaultQueryParser {
     ) -> PgWireResult<Option<Self::Statement>> {
         crate::metrics::METRIC_POSTGRES_PREPARED_COUNT.inc();
         let query_ctx = self.session.new_query_context();
+        query_ctx
+            .refresh_authorization(self.user_provider.as_ref())
+            .await
+            .map_err(convert_err)?;
 
         // do not parse if query is empty or matches rules
         if sql.is_empty() {
@@ -457,13 +476,13 @@ impl QueryParser for DefaultQueryParser {
 
             if let Some(logical_plan) = self
                 .query_handler
-                .do_describe(stmt.clone(), query_ctx)
+                .do_describe(stmt.clone(), query_ctx.clone())
                 .await
                 .map_err(convert_err)?
                 .map(|DescribeResult { logical_plan }| logical_plan)
             {
                 Ok(Some(PgSqlPlan {
-                    plan: SqlPlan::Plan(logical_plan, stmt),
+                    plan: SqlPlan::Plan(logical_plan, PreparedStatement::new(stmt, &query_ctx)),
                     copy_to_stdout_format,
                     copy_from_stdin: None,
                 }))
@@ -500,6 +519,28 @@ impl QueryParser for DefaultQueryParser {
 
 #[async_trait]
 impl ExtendedQueryHandler for PostgresServerHandlerInner {
+    async fn on_execute<C>(&self, client: &mut C, message: Execute) -> PgWireResult<()>
+    where
+        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::PortalStore: PortalStore<Statement = Self::Statement>,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        // pgwire resumes suspended portals (and answers empty portals) without
+        // calling do_query, so admission must guard the Execute message itself.
+        let query_ctx = self.new_query_context().await?;
+        let portal_name = message.name.as_deref().unwrap_or(DEFAULT_NAME);
+        if let Some(Entry::Value(portal)) = client.portal_store().get_portal(portal_name)
+            && let SqlPlan::Plan(_, prepared) = &portal.statement.statement.plan
+        {
+            self.query_handler
+                .check_prepared_permission(prepared, query_ctx)
+                .await
+                .map_err(convert_err)?;
+        }
+        self._on_execute(client, message).await
+    }
+
     type Statement = PgSqlPlan;
     type QueryParser = DefaultQueryParser;
 
@@ -518,7 +559,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let query_ctx = self.new_query_context();
+        let query_ctx = self.new_query_context().await?;
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY, db.as_str()])
@@ -560,7 +601,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                     .context(DataFusionSnafu)
                     .map_err(convert_err)?;
                 self.query_handler
-                    .do_exec_plan(plan, Some(stmt.clone()), query_ctx.clone())
+                    .do_exec_prepared_plan(plan, stmt.clone(), query_ctx.clone())
                     .await
             }
             SqlPlan::Statement(_stmt, query) => {
@@ -593,6 +634,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        self.new_query_context().await?;
         let sql_plan = &stmt.statement.plan;
         // client provided parameter types, can be empty if client doesn't try to parse statement
         let provided_param_types = &stmt.parameter_types;
@@ -647,6 +689,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        self.new_query_context().await?;
         let sql_plan = &portal.statement.statement.plan;
         let format = &portal.result_column_format;
 

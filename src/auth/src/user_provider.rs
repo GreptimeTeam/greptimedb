@@ -83,6 +83,27 @@ pub trait UserProvider: Send + Sync {
     /// This method should be called after [authenticate()](UserProvider::authenticate()).
     async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfoRef) -> Result<()>;
 
+    /// Refreshes the authorization of an already authenticated identity before a new request.
+    ///
+    /// Providers with mutable permissions should return an immutable, current user snapshot,
+    /// or reject the request if the account was deleted, recreated, or cannot be checked
+    /// within their freshness policy. They must preserve the authenticated identity and
+    /// credential-bound restrictions, and validate any account-generation information
+    /// carried by `user_info`; a username lookup alone must not attach an old session
+    /// to a newly created account.
+    ///
+    /// This does not reauthenticate credentials, extend their validity, or authorize a
+    /// particular operation or schema. Callers must still perform those permission checks.
+    /// The default preserves existing providers' session semantics. This hook is called
+    /// at request/stream admission; it does not interrupt work already admitted.
+    async fn refresh_authorization(
+        &self,
+        _catalog: &str,
+        user_info: &UserInfoRef,
+    ) -> Result<UserInfoRef> {
+        Ok(user_info.clone())
+    }
+
     /// Combination of [authenticate()](UserProvider::authenticate()) and [authorize()](UserProvider::authorize()).
     /// In most cases it's preferred for both convenience and performance.
     async fn auth(

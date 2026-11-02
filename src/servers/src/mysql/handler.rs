@@ -51,13 +51,13 @@ use tokio::io::AsyncWrite;
 
 use crate::SqlPlan;
 use crate::error::{
-    self, DataFrameSnafu, InferParameterTypesSnafu, InvalidPrepareStatementSnafu, Result,
+    self, AuthSnafu, DataFrameSnafu, InferParameterTypesSnafu, InvalidPrepareStatementSnafu, Result,
 };
 use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::mysql::helper::{self, format_placeholder, transform_placeholders_with_count};
 use crate::mysql::writer;
 use crate::mysql::writer::{create_mysql_column, handle_err};
-use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::query_handler::sql::{PreparedStatement, ServerSqlQueryHandlerRef};
 
 /// Parameters for the prepared statement
 enum Params<'a> {
@@ -142,6 +142,13 @@ impl MysqlInstanceShim {
 
     #[tracing::instrument(skip_all, name = "mysql::do_query")]
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        if let Err(error) = query_ctx
+            .refresh_authorization(self.user_provider.as_ref())
+            .await
+            .context(AuthSnafu)
+        {
+            return vec![Err(error)];
+        }
         if let Some(output) =
             crate::mysql::federated::check(query, query_ctx.clone(), self.session.clone())
         {
@@ -195,6 +202,10 @@ impl MysqlInstanceShim {
         query_ctx: QueryContextRef,
         stmt_key: String,
     ) -> Result<(Vec<Column>, Vec<Column>)> {
+        query_ctx
+            .refresh_authorization(self.user_provider.as_ref())
+            .await
+            .context(AuthSnafu)?;
         if crate::mysql::federated::check(raw_query, query_ctx.clone(), self.session.clone())
             .is_some()
         {
@@ -256,7 +267,8 @@ impl MysqlInstanceShim {
 
         match plan {
             Some(plan) if can_cache_as_plan => {
-                self.save_plan(SqlPlan::Plan(plan, statement), stmt_key)
+                let prepared = PreparedStatement::new(statement, &query_ctx);
+                self.save_plan(SqlPlan::Plan(plan, prepared), stmt_key)
                     .inspect_err(|e| {
                         error!(e; "Failed to save prepared statement");
                     })?;
@@ -281,6 +293,10 @@ impl MysqlInstanceShim {
         stmt_key: String,
         params: Params<'_>,
     ) -> Result<Vec<std::result::Result<Output, error::Error>>> {
+        query_ctx
+            .refresh_authorization(self.user_provider.as_ref())
+            .await
+            .context(AuthSnafu)?;
         let sql_plan = match self.plan(&stmt_key) {
             None => {
                 return error::PrepareStatementNotFoundSnafu { name: stmt_key }.fail();
@@ -319,7 +335,7 @@ impl MysqlInstanceShim {
                 );
                 vec![
                     self.query_handler
-                        .do_exec_plan(replaced_plan, Some(stmt), query_ctx.clone())
+                        .do_exec_prepared_plan(replaced_plan, stmt, query_ctx.clone())
                         .await,
                 ]
             }
@@ -677,6 +693,19 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
+        if let Err(error) = self
+            .new_query_context()
+            .refresh_authorization(self.user_provider.as_ref())
+            .await
+        {
+            return w
+                .error(
+                    ErrorKind::ER_DBACCESS_DENIED_ERROR,
+                    error.output_msg().as_bytes(),
+                )
+                .await
+                .map_err(Into::into);
+        }
         let (catalog_from_db, schema) = parse_optional_catalog_and_schema_from_db_string(database);
         let catalog = if let Some(catalog) = &catalog_from_db {
             catalog.clone()

@@ -58,8 +58,8 @@ pub enum SqlPlan {
     Empty,
     /// Hardcoded SQL shortcuts
     Shortcut(String),
-    /// Datafusion parsed execution plan with the original statement
-    Plan(LogicalPlan, Statement),
+    /// Datafusion parsed execution plan with the original statement bindings
+    Plan(LogicalPlan, query_handler::sql::PreparedStatement),
     /// Parsed statement when execution is not managed by datafusion
     /// eg. CREATE TABLE
     /// The String is the original query string to avoid AST round-trip issues
