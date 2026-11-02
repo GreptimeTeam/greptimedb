@@ -199,6 +199,21 @@ impl RawSeriesStream for EmptyRawStream {
 /// other, and a seeded router can be reasoned about - and tested - without one.
 const ROUTING_SEED: u64 = 0x517c_c1b7_2722_0a95;
 
+/// Whether a series identity is complete on a single chain, or has to be merged across inputs.
+///
+/// A router can publish an identity as soon as its chain closes only when that chain is the whole
+/// identity for the execution. Whether that holds is a property of the producer, not of the router,
+/// so it is declared explicitly and defaults to the conservative merge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IdentityCompletion {
+    /// An identity may be split across inputs: every input has to contribute it or end first.
+    #[default]
+    MergeInputs,
+    /// Every identity lives in exactly one input partition, so one closed chain is the whole
+    /// identity. A second chain for an identity that already published is an error.
+    CompleteDisjoint,
+}
+
 /// The Repartition stage: one child's partitions, redistributed by canonical label set.
 ///
 /// The node holds one execution's shared state: its output partitions are separate `execute` calls
@@ -211,6 +226,7 @@ pub struct SeriesRepartitionExec {
     /// The one hash configuration of this node's execution.
     routing: Routing,
     routing_policy: SeriesRouting,
+    identity_completion: IdentityCompletion,
     content: FrameContent,
     ordering: SeriesOrdering,
     /// Started by the first `execute` call, since the output partitions share one read of the child.
@@ -245,11 +261,43 @@ impl SeriesRepartitionExec {
         Self::try_new_with_routing(input, outputs, policy)
     }
 
+    /// Creates a node whose identities are complete on one disjoint chain.
+    pub fn try_new_complete_disjoint(
+        input: Arc<dyn ExecutionPlan>,
+        outputs: usize,
+    ) -> DataFusionResult<Self> {
+        let declaration =
+            SeriesFrameDeclaration::parse(input.schema().as_ref()).map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "SeriesRepartition input is not a series frame: {error}"
+                ))
+            })?;
+        let policy = match declaration.content() {
+            FrameContent::Evaluated => SeriesRouting::CanonicalLabels,
+            FrameContent::Raw => SeriesRouting::RawPrimaryKey,
+        };
+        Self::try_new_with_completion(input, outputs, policy, IdentityCompletion::CompleteDisjoint)
+    }
+
     /// Creates the node with an explicit content-compatible routing policy.
     pub fn try_new_with_routing(
         input: Arc<dyn ExecutionPlan>,
         outputs: usize,
         routing_policy: SeriesRouting,
+    ) -> DataFusionResult<Self> {
+        Self::try_new_with_completion(
+            input,
+            outputs,
+            routing_policy,
+            IdentityCompletion::MergeInputs,
+        )
+    }
+
+    fn try_new_with_completion(
+        input: Arc<dyn ExecutionPlan>,
+        outputs: usize,
+        routing_policy: SeriesRouting,
+        identity_completion: IdentityCompletion,
     ) -> DataFusionResult<Self> {
         if outputs == 0 {
             return Err(DataFusionError::Plan(
@@ -332,6 +380,7 @@ impl SeriesRepartitionExec {
             series_schema,
             routing: Routing::with_policy(outputs, routing_policy.clone()),
             routing_policy,
+            identity_completion,
             content,
             ordering,
             shared: Mutex::new(None),
@@ -342,6 +391,10 @@ impl SeriesRepartitionExec {
     /// The routing policy used by this node.
     pub fn routing_policy(&self) -> &SeriesRouting {
         &self.routing_policy
+    }
+
+    pub fn identity_completion(&self) -> IdentityCompletion {
+        self.identity_completion
     }
 
     /// How many output partitions this node has.
@@ -420,10 +473,11 @@ impl ExecutionPlan for SeriesRepartitionExec {
         }
         // Rebuilt rather than patched, so a child whose schema changed is refused here instead of
         // routed under a frame declaration the new child does not make.
-        Ok(Arc::new(Self::try_new_with_routing(
+        Ok(Arc::new(Self::try_new_with_completion(
             children.swap_remove(0),
             self.outputs(),
             self.routing_policy.clone(),
+            self.identity_completion,
         )?))
     }
 
@@ -468,6 +522,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
             &context.runtime_env().memory_pool,
             self.input.properties().partitioning.partition_count(),
             self.ordering,
+            self.identity_completion,
         );
         let handoff = Arc::clone(&inner.handoff);
         let output: SendableRecordBatchStream = match self.content {
@@ -1685,6 +1740,7 @@ fn group_ready(
     eof: &[bool],
     last_key_from: &[Option<Vec<u8>>],
     ordering: SeriesOrdering,
+    completion: IdentityCompletion,
     key: &OwnerKey,
 ) -> bool {
     if ordering == SeriesOrdering::KeyThenTime {
@@ -1696,6 +1752,9 @@ fn group_ready(
                 *received || *eof || last_key.as_ref().is_some_and(|last| last > key)
             },
         );
+    }
+    if completion == IdentityCompletion::CompleteDisjoint {
+        return true;
     }
     group
         .received
@@ -1728,6 +1787,8 @@ struct RepartitionStream {
     pool: Arc<dyn MemoryPool>,
     /// What the frame this stream emits declares about the order of its keys.
     ordering: SeriesOrdering,
+    identity_completion: IdentityCompletion,
+    identities: BTreeMap<OwnerKey, MemoryReservation>,
     groups: BTreeMap<OwnerKey, PendingGroup>,
     eof: Vec<bool>,
     last_key_from: Vec<Option<Vec<u8>>>,
@@ -1802,12 +1863,15 @@ impl RepartitionStream {
         pool: &Arc<dyn MemoryPool>,
         inputs: usize,
         ordering: SeriesOrdering,
+        identity_completion: IdentityCompletion,
     ) -> Self {
         Self {
             receiver,
             lease,
             schema,
             ordering,
+            identity_completion,
+            identities: BTreeMap::new(),
             pool: Arc::clone(pool),
             groups: BTreeMap::new(),
             eof: Vec::new(),
@@ -1989,8 +2053,15 @@ impl Stream for RepartitionStream {
             if this.rescan {
                 let next = if this.ordering == SeriesOrdering::KeyThenTime {
                     this.groups.first_key_value().and_then(|(key, group)| {
-                        group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
-                            .then(|| key.clone())
+                        group_ready(
+                            group,
+                            &this.eof,
+                            &this.last_key_from,
+                            this.ordering,
+                            this.identity_completion,
+                            key,
+                        )
+                        .then(|| key.clone())
                     })
                 } else {
                     match &this.resume_after {
@@ -2006,13 +2077,21 @@ impl Stream for RepartitionStream {
                                     &this.eof,
                                     &this.last_key_from,
                                     this.ordering,
+                                    this.identity_completion,
                                     key,
                                 )
                                 .then(|| key.clone())
                             }),
                         None => this.groups.iter().find_map(|(key, group)| {
-                            group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
-                                .then(|| key.clone())
+                            group_ready(
+                                group,
+                                &this.eof,
+                                &this.last_key_from,
+                                this.ordering,
+                                this.identity_completion,
+                                key,
+                            )
+                            .then(|| key.clone())
                         }),
                     }
                 };
@@ -2094,6 +2173,14 @@ impl Stream for RepartitionStream {
                             (key, RoutedChain::Raw(chain))
                         }
                     };
+                    if this.identity_completion == IdentityCompletion::CompleteDisjoint
+                        && (this.identities.contains_key(&key) || this.groups.contains_key(&key))
+                    {
+                        this.lease.fail(Arc::new(DataFusionError::Execution(
+                            "CompleteDisjoint series identity appeared more than once".into(),
+                        )));
+                        continue;
+                    }
                     if !this.groups.contains_key(&key) {
                         let metadata =
                             MemoryConsumer::new("SeriesRepartitionIdentity").register(&this.pool);
@@ -2120,6 +2207,17 @@ impl Stream for RepartitionStream {
                         if let Err(error) = metadata.try_grow(bytes) {
                             this.lease.fail(Arc::new(error));
                             continue;
+                        }
+                        if this.identity_completion == IdentityCompletion::CompleteDisjoint {
+                            let history = MemoryConsumer::new("SeriesRepartitionIdentityHistory")
+                                .register(&this.pool);
+                            let history_bytes =
+                                std::mem::size_of::<OwnerKey>().saturating_add(key_bytes);
+                            if let Err(error) = history.try_grow(history_bytes) {
+                                this.lease.fail(Arc::new(error));
+                                continue;
+                            }
+                            this.identities.insert(key.clone(), history);
                         }
                         this.groups.insert(
                             key.clone(),
@@ -2167,6 +2265,7 @@ impl Stream for RepartitionStream {
                         &this.eof,
                         &this.last_key_from,
                         this.ordering,
+                        this.identity_completion,
                         &key,
                     ) && let Err(error) = this.finish_group(&key)
                     {

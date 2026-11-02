@@ -1703,6 +1703,113 @@ async fn completed_identity_is_published_before_inputs_finish() {
     assert_chains_are_whole(&received);
 }
 
+/// CompleteDisjoint releases an identity while another input is deterministically gated.
+#[tokio::test]
+async fn complete_disjoint_publishes_before_gated_input_contributes_or_eof() {
+    let metric = labels("disjoint-early");
+    let gate = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![
+            GatedPartition::open(vec![Step::chunk(chunk(metric.clone(), 0, 1, true))]),
+            GatedPartition {
+                before: Vec::new(),
+                after: Vec::new(),
+                switch: Some(Arc::clone(&gate)),
+            },
+        ],
+        Arc::new(Switch::default()),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let plan = Arc::new(SeriesRepartitionExec::try_new_complete_disjoint(child, 1).unwrap());
+    let context = SessionContext::default().task_ctx();
+    let mut stream = output_of(&plan, 0, &context);
+    let first = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::poll_fn(|cx| stream.as_mut().poll_next(cx)),
+    )
+    .await
+    .expect("identity appears while the other partition is gated")
+    .expect("one identity is emitted")
+    .expect("identity succeeds");
+    assert!(first.1, "the chain is final on its first publication");
+    assert_eq!(metric, first.0.metric);
+    assert!(
+        !gate.is_open(),
+        "the other input has neither contributed nor reached EOF"
+    );
+    gate.open();
+}
+
+/// MergeInputs keeps the same identity behind the missing-input barrier.
+#[tokio::test]
+async fn merge_inputs_waits_for_gated_input_before_publishing_identity() {
+    let metric = labels("disjoint-early");
+    let gate = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![
+            GatedPartition::open(vec![Step::chunk(chunk(metric.clone(), 0, 1, true))]),
+            GatedPartition {
+                before: Vec::new(),
+                after: Vec::new(),
+                switch: Some(Arc::clone(&gate)),
+            },
+        ],
+        Arc::new(Switch::default()),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let plan = Arc::new(SeriesRepartitionExec::try_new(child, 1).unwrap());
+    let context = SessionContext::default().task_ctx();
+    let mut stream = output_of(&plan, 0, &context);
+    assert!(
+        futures::future::poll_fn(|cx| match stream.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await,
+        "default mode is pending while the second input is gated"
+    );
+    gate.open();
+    let first = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::poll_fn(|cx| stream.as_mut().poll_next(cx)),
+    )
+    .await
+    .expect("input release finishes")
+    .expect("series appears")
+    .expect("identity succeeds");
+    assert_eq!(metric, first.0.metric);
+}
+
+/// A duplicate complete identity fails instead of publishing a second final chain.
+#[tokio::test]
+async fn complete_disjoint_rejects_repeated_identity() {
+    let metric = labels("duplicate-disjoint");
+    let child = Scripted::plan(vec![
+        vec![Step::chunk(chunk(metric.clone(), 0, 1, true))],
+        vec![Step::chunk(chunk(metric, 1, 1, true))],
+    ]);
+    let plan = Arc::new(SeriesRepartitionExec::try_new_complete_disjoint(child, 1).unwrap());
+    let context = SessionContext::default().task_ctx();
+    let mut stream = output_of(&plan, 0, &context);
+    let mut got_error = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(_) => assert!(!got_error, "no chain is published after duplicate failure"),
+            Err(error) => {
+                got_error = true;
+                assert!(
+                    error
+                        .to_string()
+                        .contains("CompleteDisjoint series identity appeared more than once"),
+                    "distinct failure: {error}"
+                );
+                break;
+            }
+        }
+    }
+    assert!(got_error, "duplicate chain fails the execution");
+}
+
 /// A one-fragment large identity needs no merge workspace and fits its own finite payload budget.
 #[tokio::test]
 async fn single_fragment_large_identity_fits_finite_payload_budget() {
@@ -2459,6 +2566,7 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
         SeriesOrdering::Contiguous,
+        super::IdentityCompletion::MergeInputs,
     );
     wait_until("both identities and EOF are queued", || {
         producer_stopped(&shared)
@@ -4488,6 +4596,7 @@ async fn a_recorded_failure_reaches_every_output_once() {
                 &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
                 2,
                 SeriesOrdering::Contiguous,
+                super::IdentityCompletion::MergeInputs,
             ))),
         }) as SendableEvaluatedSeriesStream);
     }
@@ -4823,6 +4932,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
                         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
                         2,
                         SeriesOrdering::Contiguous,
+                        super::IdentityCompletion::MergeInputs,
                     ))),
                 }),
                 Arc::clone(&series_schema),
@@ -4933,6 +5043,7 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
                     &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
                     2,
                     SeriesOrdering::Contiguous,
+                    super::IdentityCompletion::MergeInputs,
                 ))),
             }),
             Arc::clone(&schema()),
@@ -5093,6 +5204,7 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
             &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
             1,
             SeriesOrdering::Contiguous,
+            super::IdentityCompletion::MergeInputs,
         ))),
     });
     let future = route_partition(
@@ -5685,6 +5797,7 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
         SeriesOrdering::Contiguous,
+        super::IdentityCompletion::MergeInputs,
     );
     wait_until("internal producer finishes", || producer_stopped(&shared)).await;
     // Queue, EOF, and identity-group metadata are charged alongside the retained chunks; the
@@ -5982,6 +6095,7 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
         SeriesOrdering::Contiguous,
+        super::IdentityCompletion::MergeInputs,
     );
     wait_until("histogram producer queues the whole chain", || {
         producer_stopped(&shared)
