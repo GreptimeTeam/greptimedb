@@ -1358,7 +1358,7 @@ fn evaluated_incremental_measure_matches_full_measure_at_exact_byte_budget() {
             metric: Some(metric.clone()),
             is_last: true,
             time: RowTime::Spans(vec![GridSpan::new(0, 8), GridSpan::new(10, 1)]),
-            samples: vec![samples.clone()],
+            payload: RowPayload::Samples(vec![samples.clone()]),
             bytes: 0,
         };
         let exact_budget = measure_row(&whole).unwrap();
@@ -4672,4 +4672,388 @@ fn the_frozen_text_covers_every_datatype_variant() {
         VARIANT_NAMES.len(),
         "one fixture entry per datatype variant, no duplicates"
     );
+}
+
+#[cfg(test)]
+mod aggregate_state_acceptance {
+    use super::*;
+    use crate::series::aggregate_state::{
+        AggregateStateKind as Kind, AggregateStateSchema, AggregateStateValues as Values,
+        StateComponent as Component, StateSeries,
+    };
+
+    fn state_schema(fields: &[&str], len: usize) -> SeriesSchema {
+        let base = test_schema(fields);
+        SeriesSchema {
+            fields: base.fields,
+            eval_grid: Some(Arc::new(
+                crate::series::time::EvalGrid::try_new(
+                    crate::series::time::GridSpec::try_new(0, 1, len as u64).unwrap(),
+                )
+                .unwrap(),
+            )),
+        }
+    }
+
+    fn state_frame(
+        kind: Kind,
+        schema: &SeriesSchema,
+        spans: Vec<GridSpan>,
+        states: Vec<Vec<Option<Values>>>,
+        last: bool,
+    ) -> (RecordBatch, SeriesFrameDecoder) {
+        let components = match kind {
+            Kind::Sum => vec![Component::Value, Component::Compensation],
+            Kind::Count => vec![Component::Count],
+            Kind::Avg => vec![
+                Component::Value,
+                Component::Mean,
+                Component::Compensation,
+                Component::Count,
+                Component::IncrementalMean,
+            ],
+            Kind::Min | Kind::Max => vec![Component::Value],
+            Kind::Group => vec![],
+            Kind::Stddev | Kind::Stdvar => {
+                vec![Component::Value, Component::Mean, Component::Count]
+            }
+        };
+        let state = AggregateStateSchema::try_new(kind, components).unwrap();
+        let time = TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap();
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            schema,
+            StateSeries {
+                metric: metric(Some("m"), &[("job", "x")]),
+                time,
+                states,
+            },
+            last,
+        )
+        .unwrap();
+        let mut builder = SeriesFrameBuilder::try_new_aggregate_state(
+            &state,
+            schema,
+            FrameLabelMode::Explicit,
+            8,
+            1 << 20,
+        )
+        .unwrap();
+        let mut cursor = cursor;
+        assert!(cursor.append_to(&mut builder).unwrap().is_none());
+        let batch = builder.flush().unwrap().unwrap();
+        let decoder =
+            SeriesFrameDecoder::try_new_aggregate_state(&state, schema, FrameLabelMode::Explicit)
+                .unwrap();
+        (batch, decoder)
+    }
+
+    fn values(n: usize, seed: f64) -> Vec<Option<Values>> {
+        (0..n)
+            .map(|i| {
+                Some(Values {
+                    value: seed + i as f64,
+                    mean: seed + 10.0 + i as f64,
+                    compensation: seed + 20.0 + i as f64,
+                    count: seed + 30.0 + i as f64,
+                    incremental_mean: i % 2 == 0,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn group_state_keeps_field_local_presence_through_ipc_and_slices() {
+        let schema = state_schema(&["a", "b"], 6);
+        let (batch, decoder) = state_frame(
+            Kind::Group,
+            &schema,
+            vec![GridSpan::new(0, 4)],
+            vec![
+                vec![Some(Values::default()), None, Some(Values::default()), None],
+                vec![None; 4],
+            ],
+            true,
+        );
+        let expected = decoder.decode_aggregate_state(&batch).unwrap();
+        let baseline_metric = expected[0].metric().clone();
+        let baseline_positions = expected[0].time().positions().collect::<Vec<_>>();
+        let baseline_last = expected[0].is_last();
+        let check = |rows: Vec<StateFrameRow>| {
+            let row = &rows[0];
+            let fields = row.fields().unwrap();
+            let presence = |field| {
+                (0..4)
+                    .map(|i| fields.is_present(field, i).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(presence(0), vec![true, false, true, false]);
+            assert_eq!(presence(1), vec![false; 4]);
+            assert_eq!(row.metric(), &baseline_metric);
+            assert_eq!(
+                row.time().positions().collect::<Vec<_>>(),
+                baseline_positions
+            );
+            assert_eq!(row.is_last(), baseline_last);
+        };
+        check(expected);
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, &batch.schema()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let batches = StreamReader::try_new(std::io::Cursor::new(ipc), None)
+            .unwrap()
+            .map(|batch| batch.unwrap())
+            .collect::<Vec<_>>();
+        let joined = concat_batches(&batch.schema(), &batches).unwrap();
+        check(decoder.decode_aggregate_state(&joined).unwrap());
+        check(decoder.decode_aggregate_state(&joined.slice(0, 1)).unwrap());
+    }
+
+    #[test]
+    fn aggregate_state_kinds_round_trip_values_presence_labels_axis_and_finality() {
+        let kinds = [
+            Kind::Sum,
+            Kind::Count,
+            Kind::Avg,
+            Kind::Min,
+            Kind::Max,
+            Kind::Group,
+            Kind::Stddev,
+            Kind::Stdvar,
+        ];
+        for kind in kinds {
+            let schema = state_schema(&["x", "y"], 5);
+            let (batch, decoder) = state_frame(
+                kind,
+                &schema,
+                vec![GridSpan::new(1, 2), GridSpan::new(4, 1)],
+                vec![
+                    values(3, 1.0),
+                    vec![
+                        None,
+                        Some(values(3, 1.0)[1].unwrap()),
+                        Some(values(3, 1.0)[2].unwrap()),
+                    ],
+                ],
+                true,
+            );
+            let rows = decoder.decode_aggregate_state(&batch).unwrap();
+            assert_eq!(rows.len(), 1);
+            let row = &rows[0];
+            assert_eq!(row.metric(), &metric(Some("m"), &[("job", "x")]));
+            assert_eq!(
+                row.time().positions().map(|(p, _)| p).collect::<Vec<_>>(),
+                vec![1, 2, 4]
+            );
+            assert!(row.is_last());
+            let fields = row.fields().unwrap();
+            assert_eq!(fields.kind(), kind);
+            assert_eq!(
+                (0..3)
+                    .map(|i| fields.is_present(0, i).unwrap())
+                    .collect::<Vec<_>>(),
+                vec![true; 3]
+            );
+            assert_eq!(
+                (0..3)
+                    .map(|i| fields.is_present(1, i).unwrap())
+                    .collect::<Vec<_>>(),
+                vec![false, true, true]
+            );
+            for field in 0..2 {
+                for (component, expected) in [
+                    (Component::Value, [1.0, 2.0, 3.0]),
+                    (Component::Mean, [11.0, 12.0, 13.0]),
+                    (Component::Compensation, [21.0, 22.0, 23.0]),
+                    (Component::Count, [31.0, 32.0, 33.0]),
+                ] {
+                    if let Some(array) = fields.field_values(field, component).unwrap() {
+                        for (i, value) in expected.iter().enumerate() {
+                            if fields.is_present(field, i).unwrap() {
+                                assert_eq!(array.value(i), *value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_state_runs_and_empty_batch_decode() {
+        let schema = state_schema(&["x"], 10);
+        let (batch, decoder) = state_frame(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 3), GridSpan::new(5, 3)],
+            vec![values(6, 0.0)],
+            true,
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_eq!(
+            rows[0]
+                .time()
+                .runs()
+                .map(|r| (r.position, r.len))
+                .collect::<Vec<_>>(),
+            vec![(0, 3), (5, 3)]
+        );
+        assert!(
+            decoder
+                .decode_aggregate_state(&batch.slice(0, 0))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod aggregate_state_decoder_rejections {
+    use super::*;
+    use crate::series::aggregate_state::{
+        AggregateStateKind as Kind, AggregateStateSchema, AggregateStateValues as Values,
+        StateComponent as Component, StateSeries,
+    };
+
+    fn fixture() -> (RecordBatch, SeriesFrameDecoder) {
+        let base = test_schema(&["x"]);
+        let schema = SeriesSchema {
+            fields: base.fields,
+            eval_grid: Some(Arc::new(
+                crate::series::time::EvalGrid::try_new(
+                    crate::series::time::GridSpec::try_new(0, 1, 3).unwrap(),
+                )
+                .unwrap(),
+            )),
+        };
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 3)])
+                .unwrap();
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            &schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states: vec![vec![
+                    Some(Values {
+                        value: 1.0,
+                        compensation: 2.0,
+                        ..Values::default()
+                    });
+                    3
+                ]],
+            },
+            true,
+        )
+        .unwrap();
+        let mut cursor = cursor;
+        let mut builder = SeriesFrameBuilder::try_new_aggregate_state(
+            &state,
+            &schema,
+            FrameLabelMode::Explicit,
+            4,
+            4096,
+        )
+        .unwrap();
+        assert!(cursor.append_to(&mut builder).unwrap().is_none());
+        let batch = builder.flush().unwrap().unwrap();
+        let decoder =
+            SeriesFrameDecoder::try_new_aggregate_state(&state, &schema, FrameLabelMode::Explicit)
+                .unwrap();
+        (batch, decoder)
+    }
+
+    fn replace_field(batch: &RecordBatch, replacement: ArrayRef) -> RecordBatch {
+        let old = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let mut columns = old.columns().to_vec();
+        columns[0] = replacement;
+        let fields = Arc::new(
+            StructArray::try_new(old.fields().clone(), columns, old.nulls().cloned()).unwrap(),
+        );
+        let mut batch_columns = batch.columns().to_vec();
+        batch_columns[3] = fields;
+        RecordBatch::try_new(batch.schema(), batch_columns).unwrap()
+    }
+
+    #[test]
+    fn present_state_item_with_missing_component_is_rejected() {
+        let (batch, decoder) = fixture();
+        let list = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let item = list
+            .values()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let mut columns = item.columns().to_vec();
+        columns[0] = Arc::new(Float64Array::from(vec![None, Some(1.0), Some(1.0)]));
+        let broken_item = Arc::new(
+            StructArray::try_new(item.fields().clone(), columns, item.nulls().cloned()).unwrap(),
+        );
+        let broken_list = Arc::new(
+            ListArray::try_new(
+                match list.data_type() {
+                    DataType::List(f) => f.clone(),
+                    _ => unreachable!(),
+                },
+                list.offsets().clone(),
+                broken_item,
+                list.nulls().cloned(),
+            )
+            .unwrap(),
+        );
+        let broken = replace_field(&batch, broken_list);
+        assert!(decoder.decode_aggregate_state(&broken).is_err());
+    }
+
+    #[test]
+    fn state_list_length_must_match_carried_positions() {
+        let (batch, decoder) = fixture();
+        let list = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let broken = Arc::new(
+            ListArray::try_new(
+                match list.data_type() {
+                    DataType::List(f) => f.clone(),
+                    _ => unreachable!(),
+                },
+                OffsetBuffer::new(ScalarBuffer::from(vec![0i32, 2])),
+                list.values().slice(0, 2),
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(
+            decoder
+                .decode_aggregate_state(&replace_field(&batch, broken))
+                .is_err()
+        );
+    }
 }
