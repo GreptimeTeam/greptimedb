@@ -1576,39 +1576,38 @@ fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
 /// ([`insert_native_merge_inside_current_fused`]) read one rule: a second copy of it would be a
 /// rule that can silently disagree with this one about the same tree.
 ///
-/// Three answers, because the flag the runtime computes carries two facts and a boundary answers
-/// neither:
+/// Three answers, because what a consumer may do about a contribution carries two facts and a
+/// boundary answers neither:
 ///
-/// - `Some(true)`: the output is one series per canonical label set, established here. The runtime
-///   marks such a node `shared = false` and nothing above it collects.
-/// - `Some(false)`: the output may hold several series of one label set, and this node *says so*.
-///   The runtime marks it `shared = true`, so a consumer that needs one unified series collects it
-///   through `MergeInput`. A [`NativeExpr::Merge`] inserted above such a node would turn that
-///   collection off - a merge answers `Some(true)`, so the consumer would stream an already-merged
-///   series - and the pass inserts none there.
+/// - `Some(true)`: the output is one series per canonical label set, established here, so a
+///   consumer that needs one unified series already has it and collects nothing.
+/// - `Some(false)`: the output may hold several series of one label set, and this node *says so*,
+///   so a consumer that needs one unified series collects them through `MergeInput`. A
+///   [`NativeExpr::Merge`] above such a node would make it stream an already-merged series and
+///   turn that collection off, so the pass inserts none there.
 /// - `None`: the output may hold several, and this node says nothing: it has neither a proof to
 ///   offer nor a report to make. Only a boundary ([`NativeExpr::Input`]) answers this, and a node
-///   that hands its input's series back unchanged passes the answer on. The runtime's flag is
-///   `false` here too, so the flag alone cannot tell this case from a proof - and `None` is exactly
-///   the case the pass exists for: the one state in which neither the runtime nor the tree collects
-///   anything.
+///   that hands its input's series back unchanged passes the answer on. `None` is exactly the case
+///   the pass exists for: the one state in which neither the runtime's own collection nor the tree
+///   collects anything.
 ///
-/// `matches!(answer, Some(false))` is the runtime's `shared` flag bit for bit, which is what makes
-/// the two readers' agreement checkable: `the_predicate_and_the_runtime_agree` in
-/// [`execute`](crate::native::execute)'s tests asserts it node for node on
-/// `RuntimeNode::build`'s own return value.
+/// The collection condition is `matches!(answer, Some(false))`. Both readers derive it from this
+/// one function: the runtime asks it for a child at the two places that collect (`Window`'s
+/// `MergeInput` and `limitk`'s pre-selection merge), and the insertion pass asks it to decide what
+/// a consumer still needs.
 ///
 /// [`insert_native_merge_inside_current_fused`]:
 ///     crate::native::canonicalize::insert_native_merge_inside_current_fused
-#[allow(clippy::match_same_arms)] // Each arm is one line of `RuntimeNode::build`, and the reason each answers as it does is written there rather than merged into a bucket.
+#[allow(clippy::match_same_arms)] // Keep each expression's contribution guarantee explicit.
 pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
     match &node.expr {
         // A boundary hands over the pieces some upstream execution produced: what it holds is one
         // storage series at a time for a scan and one partition's fragments of a label set for an
-        // exchange, and nothing in the tree can tell which series those fragments belong to. The
-        // runtime reports `shared = false` for it because a merge binds samples evaluated on a
-        // grid, not because the pieces are one series per label set, so a proof is not this
-        // function's to give; it answers `None`, and the flag follows with `false`.
+        // exchange, and nothing in the tree can tell which series those fragments belong to. A
+        // merge binds samples evaluated on a grid rather than proving the pieces are one series
+        // per label set, so a proof is not this function's to give: it answers `None`, and the
+        // collection condition `matches!(None, Some(false))` is `false`, which is why a consumer
+        // here collects nothing and the insertion pass is what supplies a merge.
         NativeExpr::Input(_) => None,
         // A constant holds no label set at all, so it has nothing that could arrive twice.
         NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } | NativeExpr::VectorOf { .. } => {
@@ -1665,13 +1664,24 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
                 // vector side one label set.
                 Some(false)
             } else {
-                // A filtering comparison keeps the label set it read, so the vector side's answer
-                // is this node's.
-                let vector = if left.output.samples().is_some() {
-                    left
-                } else {
-                    right
+                // A filtering comparison keeps the label set it read, so the side that carries
+                // series answers for this node. Which side that is follows the rule the runtime's
+                // broadcast matches on: an evaluated vector carries them, and with two scalars the
+                // carrier is the side that is not a bound constant (`broadcast_runtime`'s
+                // `literal(left).is_none()`), which is what the second test below reads.
+                //
+                // The two selection rules agree wherever it is observable: every scalar node kind
+                // answers `Some(true)` (`Scalar`, `EvalTime`, `VectorOf`), so a scalar-scalar pair
+                // answers `Some(true)` whichever side is named and a consumer collects nothing
+                // either way. The constant check is still what keeps the two readers describing
+                // the same node rather than coinciding by accident.
+                let carries_series = |node: &NativeNode| {
+                    if node.output.samples().is_some() {
+                        return true;
+                    }
+                    !matches!(node.expr, NativeExpr::Scalar(BoundScalar { .. }))
                 };
+                let vector = if carries_series(left) { left } else { right };
                 unifies_its_own_contributions(vector)
             }
         }

@@ -977,10 +977,12 @@ fn a_window_refuses_two_contributions_holding_one_position() {
 }
 
 /// A window over a node that *can* alias gets its collection from the runtime, and that collection is
-/// a `MergeInput`: `RuntimeNode::build`'s `Window` arm asks its child for `shared`, and the nodes that
-/// rewrite labels report `true` - a `Map` always, a `Timestamp` always, a `Window` always, a
-/// label-dropping broadcast always. The window then collects the fragments, checks the stream contract
-/// (`MergeInput::check`) and merges them with `merge_same_labelset` before the evaluator sees them.
+/// a `MergeInput`: `RuntimeNode::build`'s `Window` arm asks
+/// [`unifies_its_own_contributions`](crate::native::plan::unifies_its_own_contributions) about its
+/// child and collects exactly when the child answers `Some(false)` - a `Map` always, a `Timestamp`
+/// always, a label-dropping broadcast always, and a `Window` when its own answer is `Some(false)`.
+/// The window then collects the fragments, checks the stream contract (`MergeInput::check`) and
+/// merges them with `merge_same_labelset` before the evaluator sees them.
 ///
 /// That merge *is* the joint processing: cross-contribution ordering (it sorts by position), one state
 /// per label set (each merged set is handed to the evaluator as one closing series) and the
@@ -998,7 +1000,7 @@ fn a_window_refuses_two_contributions_holding_one_position() {
 /// tree-level merge would turn off - and it collects that one because its window's child is the
 /// boundary itself, which proves nothing at all. The pass decides between the two with
 /// [`unifies_its_own_contributions`](crate::native::plan::unifies_its_own_contributions), the same
-/// function `RuntimeNode::build` computes its `shared` flag from; the module documentation of the
+/// function `RuntimeNode::build`'s window arm asks about its child; the module documentation of the
 /// window arm is the full statement.
 #[test]
 fn a_window_over_aliasing_child_collects_its_fragments_at_runtime() {

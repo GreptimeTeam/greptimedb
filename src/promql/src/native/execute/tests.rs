@@ -276,6 +276,124 @@ fn instant(
 }
 
 #[test]
+fn window_and_limitk_collect_only_unified_contributions() {
+    let grid = grid(0, 1_000, 2);
+
+    let build = |node: NativeNode| {
+        let tree = NativeTree::try_new(node).unwrap();
+        let mut inputs = Vec::new();
+        RuntimeNode::build(tree.root(), &pool(), &mut inputs, "root".to_string()).unwrap()
+    };
+
+    let raw_window = build(window_with(
+        evaluated_input(Arc::clone(&grid)),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: raw_merge, ..
+    } = raw_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        raw_merge.is_none(),
+        "unknown input keeps the old no-merge behavior"
+    );
+
+    let fragmented_window = build(window_with(
+        map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: fragmented_merge,
+        ..
+    } = fragmented_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        fragmented_merge.is_some(),
+        "reported fragments must be collected"
+    );
+
+    let merged_window = build(window_with(
+        merge(evaluated_input(Arc::clone(&grid))),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: merged_input,
+        ..
+    } = merged_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        merged_input.is_none(),
+        "already-unified contributions need no collection"
+    );
+
+    let raw_limitk = build(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ));
+    let RuntimeOp::Vector {
+        vector: Some(vector),
+        ..
+    } = raw_limitk.op
+    else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "input with unknown grouping is not merged here"
+    );
+
+    let limitk = || BoundVectorOp::LimitK {
+        k: 1.0,
+        group: Grouping::By(Arc::from([])),
+    };
+    let fragmented = map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]);
+    let fragmented_limitk = build(vector_op(fragmented, limitk()));
+    let RuntimeOp::Vector {
+        vector: Some(vector),
+        ..
+    } = fragmented_limitk.op
+    else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        vector.merge_input,
+        "limitk must merge fragmented input series"
+    );
+
+    let unified = merge(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]));
+    let unified_limitk = build(vector_op(unified, limitk()));
+    let RuntimeOp::Vector {
+        vector: Some(vector),
+        ..
+    } = unified_limitk.op
+    else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "limitk must not re-merge unified input"
+    );
+}
+
+#[test]
 fn timestamp_instant_rejects_negative_lookback() {
     let output_grid = grid(500, 1_000, 1);
     let mut root = instant(input(), -1, 0, Arc::clone(&output_grid));

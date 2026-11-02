@@ -72,7 +72,7 @@
 //! `MergeInput` is what performs the window's joint processing - it orders the contributions, keeps
 //! one state per label set, and decides end-of-series from the `is_last` of the collected fragments
 //! (`MergeInput::check`, then `merge_same_labelset`, then the evaluator). Whether a window gets one
-//! is decided by [`unifies_its_own_contributions`], which `RuntimeNode::build` and this pass both
+//! is decided by [`unifies_its_own_contributions`], which runtime construction and this pass both
 //! call, so the two cannot disagree about a child. It answers in three values, and this pass acts on
 //! exactly one of them:
 //!
