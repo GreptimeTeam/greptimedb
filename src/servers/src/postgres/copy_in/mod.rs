@@ -37,6 +37,7 @@ mod influxdb;
 mod options;
 mod otlp;
 mod parse;
+mod prom_write;
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -68,6 +69,7 @@ use pgwire::api::{ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
+use prom_write::{PromWriteOptions, PromWriteVersion};
 use prost::Message;
 use session::context::QueryContextRef;
 use table::metadata::TableInfo;
@@ -109,6 +111,8 @@ const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("influxdb_line", influxdb::build_influxdb_codec),
     ("otlp", otlp::build_otlp_codec),
     ("otlp_metrics", otlp::build_otlp_codec),
+    ("promwrite", prom_write::build_prom_write_codec),
+    ("prom_remote_write", prom_write::build_prom_write_codec),
     ("text", build_unimplemented_text_codec),
     ("txt", build_unimplemented_text_codec),
     ("binary", build_unimplemented_binary_codec),
@@ -279,6 +283,13 @@ enum Payload {
     /// decoded and completed as one request at `CopyDone` through the
     /// matching OTLP pipeline.
     Otlp { data: Vec<u8>, options: OtlpOptions },
+    /// The whole buffered Prometheus Remote Write body with its
+    /// validated options, completed as one request at `CopyDone`
+    /// through the shared remote-write ingestion core.
+    PromWrite {
+        data: Vec<u8>,
+        options: PromWriteOptions,
+    },
 }
 
 impl CopyInState {
@@ -354,6 +365,23 @@ impl CopyInState {
         }
     }
 
+    /// State for the promwrite format: the whole request body is
+    /// buffered and completed once at `CopyDone` through the shared
+    /// remote-write ingestion core. Binary: the advertised wire format
+    /// code is 1.
+    fn new_prom_write(options: &PromWriteOptions, query_ctx: QueryContextRef) -> Self {
+        Self {
+            query_ctx,
+            payload: Payload::PromWrite {
+                data: Vec::new(),
+                options: options.clone(),
+            },
+            codec_name: "promwrite",
+            codec_format_code: 1,
+            rows_written: 0,
+        }
+    }
+
     /// The wire format code advertised to the client.
     pub(crate) fn format_code(&self) -> i8 {
         self.codec_format_code
@@ -364,7 +392,9 @@ impl CopyInState {
     fn feed(&mut self, data: &[u8]) -> PgWireResult<()> {
         match &mut self.payload {
             Payload::Table { parser, rows, .. } => rows.extend(parser.feed(data)?),
-            Payload::Influxdb { data: buffered, .. } | Payload::Otlp { data: buffered, .. } => {
+            Payload::Influxdb { data: buffered, .. }
+            | Payload::Otlp { data: buffered, .. }
+            | Payload::PromWrite { data: buffered, .. } => {
                 if buffered.len() + data.len() > COPY_IN_MAX_PAYLOAD_BYTES {
                     return Err(bad_copy_data(format!(
                         "COPY FROM STDIN payload exceeds the {} limit; split the import into multiple COPY statements",
@@ -383,7 +413,7 @@ impl CopyInState {
         match &mut self.payload {
             Payload::Table { parser, rows, .. } => rows.extend(parser.finish()?),
             // The whole payload is one request body; nothing to finalize.
-            Payload::Influxdb { .. } | Payload::Otlp { .. } => {}
+            Payload::Influxdb { .. } | Payload::Otlp { .. } | Payload::PromWrite { .. } => {}
         }
         Ok(())
     }
@@ -392,7 +422,7 @@ impl CopyInState {
         match &self.payload {
             Payload::Table { rows, .. } => rows.len() >= COPY_IN_FLUSH_ROWS,
             // Completed once at CopyDone, not mid-stream.
-            Payload::Influxdb { .. } | Payload::Otlp { .. } => false,
+            Payload::Influxdb { .. } | Payload::Otlp { .. } | Payload::PromWrite { .. } => false,
         }
     }
 
@@ -425,6 +455,17 @@ impl CopyInState {
     /// Takes the buffered OTLP payload and its options, if any.
     fn take_otlp(&mut self) -> Option<(OtlpOptions, Vec<u8>)> {
         let Payload::Otlp { options, data } = &mut self.payload else {
+            return None;
+        };
+        if data.is_empty() {
+            return None;
+        }
+        Some((options.clone(), std::mem::take(data)))
+    }
+
+    /// Takes the buffered remote-write body and its options, if any.
+    fn take_prom_write(&mut self) -> Option<(PromWriteOptions, Vec<u8>)> {
+        let Payload::PromWrite { options, data } = &mut self.payload else {
             return None;
         };
         if data.is_empty() {
@@ -611,11 +652,29 @@ impl PostgresServerHandlerInner {
                 }
                 CopyInState::new_otlp(options, query_ctx)
             }
+            // promwrite forbids a target table too — the body's series
+            // carry their own metric names — and completes through the
+            // shared remote-write ingestion core; the server must be
+            // wired.
+            CopyFormat::PromWrite(options) => {
+                if !stmt.table.is_empty() {
+                    return Err(unsupported(format!(
+                        "format promwrite routes each series to its own metric table; \"COPY {} FROM STDIN\" must not name one",
+                        stmt.table.join(".")
+                    )));
+                }
+                if self.prom_write_state.is_none() {
+                    return Err(unsupported(
+                        "this server is not wired for the promwrite format",
+                    ));
+                }
+                CopyInState::new_prom_write(options, query_ctx)
+            }
         };
         let num_columns = match &state.payload {
             Payload::Table { grpc_schema, .. } => grpc_schema.len(),
             // No fixed column set: the format routes per record.
-            Payload::Influxdb { .. } | Payload::Otlp { .. } => 0,
+            Payload::Influxdb { .. } | Payload::Otlp { .. } | Payload::PromWrite { .. } => 0,
         };
         let format_code = state.format_code();
 
@@ -644,6 +703,16 @@ impl PostgresServerHandlerInner {
             };
             return self
                 .flush_otlp(otlp_handler, options, bytes, query_ctx)
+                .await;
+        }
+        if let Some((options, bytes)) = state.take_prom_write() {
+            let Some(prom_write_state) = &self.prom_write_state else {
+                return Err(unsupported(
+                    "this server is not wired for the promwrite format",
+                ));
+            };
+            return self
+                .flush_prom_write(prom_write_state, options, bytes, query_ctx)
                 .await;
         }
         if let Some(request) = state.take_lines()? {
@@ -817,6 +886,66 @@ impl PostgresServerHandlerInner {
                         _ => 0,
                     })
                     .sum())
+            }
+        }
+    }
+
+    /// Completes a promwrite copy through the shared remote-write
+    /// ingestion core: the same decode, validation, conversion and
+    /// write paths the `/v1/prometheus/write` endpoint runs, with the
+    /// same context extensions, under the connection's regular postgres
+    /// query context. No parsing or conversion lives at the copy layer.
+    async fn flush_prom_write(
+        &self,
+        prom_write_state: &crate::http::prom_store::PromStoreState,
+        options: PromWriteOptions,
+        bytes: Vec<u8>,
+        query_ctx: QueryContextRef,
+    ) -> PgWireResult<u64> {
+        use crate::http::prom_store::{
+            ingest_remote_write_v1, ingest_remote_write_v2, stamp_remote_write_extensions,
+        };
+        use crate::prom_remote_write::{REMOTE_WRITE_V1_VERSION, REMOTE_WRITE_V2_VERSION};
+
+        let version_str = match options.version {
+            PromWriteVersion::V1 => REMOTE_WRITE_V1_VERSION,
+            PromWriteVersion::V2 => REMOTE_WRITE_V2_VERSION,
+        };
+        // Same context extensions the HTTP endpoint stamps (physical
+        // table, semantic identity); the channel stays this
+        // connection's postgres channel.
+        let mut ctx = (*query_ctx).clone();
+        stamp_remote_write_extensions(&mut ctx, options.physical_table.as_deref(), version_str);
+        let pipeline_info = crate::http::extractor::PipelineInfo {
+            pipeline_name: options.pipeline_name,
+            pipeline_version: options.pipeline_version,
+            pipeline_params: Default::default(),
+        };
+        let body = axum::body::Bytes::from(bytes);
+        match options.version {
+            PromWriteVersion::V1 => {
+                let outcome = ingest_remote_write_v1(
+                    prom_write_state,
+                    pipeline_info,
+                    options.zstd,
+                    Arc::new(ctx),
+                    body,
+                )
+                .await
+                .map_err(|error| convert_err(error.error))?;
+                Ok(outcome.rows_written)
+            }
+            PromWriteVersion::V2 => {
+                // The db labels the per-batch write-progress counters,
+                // and CopyData carries no pre-charged body reservation
+                // (the decompressed size is charged inside decode, like
+                // an HTTP request without the accounting extension).
+                let db = query_ctx.get_db_string();
+                let (outcome, _, _) =
+                    ingest_remote_write_v2(prom_write_state, &db, options.zstd, ctx, body, 0)
+                        .await
+                        .map_err(|error| convert_err(error.error))?;
+                Ok(outcome.samples_written + outcome.histograms_written)
             }
         }
     }
