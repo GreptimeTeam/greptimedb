@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter;
 use std::ops::Range;
@@ -21,6 +22,7 @@ use std::time::Instant;
 use common_base::range_read::RangeReader;
 use common_base::term_token::{extract_like_probes, extract_term_probes};
 use common_telemetry::{tracing, warn};
+use datatypes::schema::{FulltextBackend, FulltextOptions};
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReaderImpl};
 use index::fulltext_index::Config;
@@ -30,6 +32,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
 use snafu::ResultExt;
+use store_api::metadata::RegionMetadata;
 use store_api::region_request::PathType;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
@@ -143,12 +146,13 @@ impl FulltextIndexApplyMetrics {
 }
 
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
+#[derive(Clone)]
 pub struct FulltextIndexApplier {
     /// Requests to be applied.
     requests: Arc<BTreeMap<IndexTarget, FulltextRequest>>,
 
     /// Expected JSON path fulltext settings from the current schema.
-    expected_json_options: BTreeMap<IndexTarget, datatypes::schema::FulltextOptions>,
+    expected_json_options: BTreeMap<IndexTarget, FulltextOptions>,
 
     /// The source of the index.
     index_source: IndexSource,
@@ -170,23 +174,9 @@ impl FulltextIndexApplier {
         store: ObjectStore,
         requests: BTreeMap<IndexTarget, FulltextRequest>,
         puffin_manager_factory: PuffinManagerFactory,
+        metadata: &RegionMetadata,
     ) -> Self {
-        let requests = Arc::new(requests);
-        let index_source = IndexSource::new(table_dir, path_type, puffin_manager_factory, store);
-
-        Self {
-            predicate_key: PredicateKey::new_fulltext(requests.clone()),
-            requests,
-            expected_json_options: BTreeMap::new(),
-            index_source,
-            bloom_filter_index_cache: None,
-        }
-    }
-
-    /// Captures current JSON path settings for per-SST compatibility checks.
-    pub fn with_metadata(mut self, metadata: &store_api::metadata::RegionMetadata) -> Self {
-        self.expected_json_options = self
-            .requests
+        let expected_json_options = requests
             .keys()
             .filter(|target| matches!(target, IndexTarget::JsonPath(_)))
             .filter_map(|target| {
@@ -194,16 +184,45 @@ impl FulltextIndexApplier {
                     .map(|options| (target.clone(), options))
             })
             .collect();
-        self
+        let requests = Arc::new(requests);
+        let index_source = IndexSource::new(table_dir, path_type, puffin_manager_factory, store);
+
+        Self {
+            predicate_key: PredicateKey::new_fulltext(requests.clone()),
+            requests,
+            expected_json_options,
+            index_source,
+            bloom_filter_index_cache: None,
+        }
     }
 
-    /// Returns whether every requested JSON path has compatible SST settings.
-    /// Conservatively skip this applier if any path changed; original predicates still run.
-    pub fn compatible_with_sst(&self, metadata: &store_api::metadata::RegionMetadata) -> bool {
-        self.expected_json_options.iter().all(|(target, expected)| {
-            crate::sst::index::column::fulltext_target_options(metadata, target).as_ref()
-                == Some(expected)
-        })
+    /// Keeps only targets compatible with the SST's saved JSON path settings.
+    /// Ordinary columns use the blob's own configuration without this check.
+    /// A filtered applier has its own predicate key so cached results never mix
+    /// different subsets of the requested predicates.
+    pub fn for_sst(&self, metadata: &RegionMetadata) -> Option<Cow<'_, Self>> {
+        if self
+            .requests
+            .keys()
+            .all(|target| self.is_target_compatible(metadata, target))
+        {
+            return Some(Cow::Borrowed(self));
+        }
+        let requests: BTreeMap<_, _> = self
+            .requests
+            .iter()
+            .filter(|(target, _)| self.is_target_compatible(metadata, target))
+            .map(|(target, request)| (target.clone(), request.clone()))
+            .collect();
+        if requests.is_empty() {
+            return None;
+        }
+        let requests = Arc::new(requests);
+        Some(Cow::Owned(Self {
+            predicate_key: PredicateKey::new_fulltext(requests.clone()),
+            requests,
+            ..self.clone()
+        }))
     }
 
     /// Sets the file cache.
@@ -234,6 +253,24 @@ impl FulltextIndexApplier {
     /// Returns the predicate key.
     pub fn predicate_key(&self) -> &PredicateKey {
         &self.predicate_key
+    }
+
+    fn is_target_compatible(&self, metadata: &RegionMetadata, target: &IndexTarget) -> bool {
+        if matches!(target, IndexTarget::ColumnId(_)) {
+            return true;
+        }
+        let Some(expected) = self.expected_json_options.get(target) else {
+            return false;
+        };
+        let Some(actual) = crate::sst::index::column::fulltext_target_options(metadata, target)
+        else {
+            return false;
+        };
+        // Segment layout and FPR are self-described by the blob. Both Bloom
+        // analyzers use ScriptTokenizer; Tantivy's analyzers differ.
+        expected.backend == actual.backend
+            && expected.case_sensitive == actual.case_sensitive
+            && (expected.backend == FulltextBackend::Bloom || expected.analyzer == actual.analyzer)
     }
 }
 
@@ -568,6 +605,7 @@ impl FulltextIndexApplier {
 }
 
 /// The source of the index.
+#[derive(Clone)]
 struct IndexSource {
     table_dir: String,
 

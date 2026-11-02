@@ -145,8 +145,8 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
                 self.store,
                 requests,
                 self.puffin_manager_factory,
+                self.metadata,
             )
-            .with_metadata(self.metadata)
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
             .with_bloom_filter_cache(self.bloom_filter_cache)
@@ -339,11 +339,211 @@ mod tests {
     use datafusion_common::Column;
     use datafusion_expr::expr::{Like, ScalarFunction};
     use datafusion_expr::{Literal, ScalarUDF};
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
+
+    #[test]
+    fn test_json_fulltext_predicate_extraction() {
+        let options = FulltextOptions {
+            enable: true,
+            ..Default::default()
+        };
+        let metadata = json_metadata(Some(options));
+        let target = IndexTarget::new_json_path(3, vec!["message".into()]).unwrap();
+        for literal in [
+            ScalarValue::Utf8(Some("error timeout".into())),
+            ScalarValue::LargeUtf8(Some("error timeout".into())),
+            ScalarValue::Utf8View(Some("error timeout".into())),
+        ] {
+            let expr = json_expr("$.message", Some(ScalarValue::Utf8View(None)));
+            let query = ScalarFunction::new_udf(
+                matches_func(),
+                vec![expr.clone(), Expr::Literal(literal.clone(), None)],
+            );
+            assert_eq!(
+                FulltextIndexApplierBuilder::expr_to_query(&metadata, &query)
+                    .unwrap()
+                    .0,
+                target
+            );
+            for lowered in [false, true] {
+                let expr = if lowered {
+                    lower().call(vec![expr.clone()])
+                } else {
+                    expr.clone()
+                };
+                let term = ScalarFunction::new_udf(
+                    matches_term_func(),
+                    vec![expr.clone(), Expr::Literal(literal.clone(), None)],
+                );
+                let (actual, term) =
+                    FulltextIndexApplierBuilder::expr_to_term(&metadata, &term).unwrap();
+                assert_eq!(actual, target);
+                assert_eq!(term.col_lowered, lowered);
+                let like = Like::new(
+                    false,
+                    Box::new(expr),
+                    Box::new(Expr::Literal(literal.clone(), None)),
+                    None,
+                    false,
+                );
+                let (actual, like) =
+                    FulltextIndexApplierBuilder::expr_to_like(&metadata, &like).unwrap();
+                assert_eq!(actual, target);
+                assert_eq!(like.col_lowered, lowered);
+            }
+        }
+        for expr in [
+            json_expr("$.missing", None),
+            json_expr("$.message", Some(ScalarValue::Int64(None))),
+        ] {
+            assert!(FulltextIndexApplierBuilder::expr_target(&metadata, &expr).is_none());
+        }
+        assert!(
+            FulltextIndexApplierBuilder::expr_target(
+                &json_metadata(None),
+                &json_expr("$.message", None)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_json_fulltext_sst_compatibility() {
+        let (_dir, factory) = PuffinManagerFactory::new_for_test_block("json_fulltext_plan");
+        let ordinary = IndexTarget::ColumnId(1);
+        let path = IndexTarget::new_json_path(3, vec!["message".into()]).unwrap();
+        let other = IndexTarget::new_json_path(3, vec!["other".into()]).unwrap();
+        let missing = IndexTarget::new_json_path(3, vec!["missing".into()]).unwrap();
+        for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
+            let options = FulltextOptions {
+                enable: true,
+                backend: backend.clone(),
+                ..Default::default()
+            };
+            let metadata = json_metadata(Some(options.clone()));
+            let requests = BTreeMap::from([
+                (ordinary.clone(), FulltextRequest::default()),
+                (path.clone(), FulltextRequest::default()),
+                (other.clone(), FulltextRequest::default()),
+            ]);
+            let applier = FulltextIndexApplier::new(
+                "test".into(),
+                PathType::Bare,
+                object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+                requests,
+                factory.clone(),
+                &metadata,
+            );
+            let unchanged = applier.for_sst(&metadata).unwrap();
+            assert_eq!(unchanged.predicate_key(), applier.predicate_key());
+            for change in 0..7 {
+                let mut changed = options.clone();
+                match change {
+                    0 => changed.granularity += 1,
+                    1 => changed.false_positive_rate_in_10000 += 1,
+                    2 => changed.analyzer = FulltextAnalyzer::Chinese,
+                    3 => changed.case_sensitive = true,
+                    4 => {
+                        changed.backend = if backend == FulltextBackend::Bloom {
+                            FulltextBackend::Tantivy
+                        } else {
+                            FulltextBackend::Bloom
+                        }
+                    }
+                    5 => changed.enable = false,
+                    _ => {}
+                }
+                let sst = json_metadata((change != 6).then_some(changed));
+                let plan = applier.for_sst(&sst).unwrap();
+                assert!(plan.requests.contains_key(&ordinary));
+                assert!(plan.requests.contains_key(&other));
+                let compatible = change < 2 || (change == 2 && backend == FulltextBackend::Bloom);
+                assert_eq!(
+                    plan.requests.contains_key(&path),
+                    compatible,
+                    "{backend:?}, change={change}"
+                );
+                assert_eq!(plan.predicate_key() == applier.predicate_key(), compatible);
+            }
+            // An unresolved query-side target must not become compatible merely
+            // because the expected options map has no entry for it.
+            let applier = FulltextIndexApplier::new(
+                "test".into(),
+                PathType::Bare,
+                object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+                BTreeMap::from([(missing.clone(), FulltextRequest::default())]),
+                factory.clone(),
+                &metadata,
+            );
+            assert!(applier.for_sst(&metadata).is_none());
+            // Missing current options are also fail-closed even if the SST has them.
+            let applier = FulltextIndexApplier::new(
+                "test".into(),
+                PathType::Bare,
+                object_store::ObjectStore::new(object_store::services::Memory::default()).unwrap(),
+                BTreeMap::from([(path.clone(), FulltextRequest::default())]),
+                factory.clone(),
+                &json_metadata(None),
+            );
+            assert!(applier.for_sst(&metadata).is_none());
+        }
+    }
+
+    fn json_metadata(options: Option<FulltextOptions>) -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::from_existing(mock_metadata());
+        let mut column =
+            ColumnSchema::new("attrs", ConcreteDataType::json2(Default::default()), true);
+        column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::try_new(
+                vec![
+                    JsonTypeHint {
+                        path: vec!["message".into()],
+                        data_type: ConcreteDataType::string_datatype(),
+                        inverted_index: false,
+                        skipping_index: None,
+                        fulltext_index: options,
+                    },
+                    JsonTypeHint {
+                        path: vec!["other".into()],
+                        data_type: ConcreteDataType::string_datatype(),
+                        inverted_index: false,
+                        skipping_index: None,
+                        fulltext_index: Some(FulltextOptions {
+                            enable: true,
+                            ..Default::default()
+                        }),
+                    },
+                ],
+                Some(0),
+            )
+            .unwrap(),
+        ))));
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: column,
+            semantic_type: SemanticType::Field,
+            column_id: 3,
+        });
+        builder.build().unwrap()
+    }
+
+    fn json_expr(path: &str, ty: Option<ScalarValue>) -> Expr {
+        use common_function::scalars::json::json_get::JsonGetWithType;
+        use common_function::scalars::udf::create_udf;
+        let mut args = vec![datafusion_expr::col("attrs"), datafusion_expr::lit(path)];
+        if let Some(ty) = ty {
+            args.push(Expr::Literal(ty, None));
+        }
+        Expr::ScalarFunction(ScalarFunction::new_udf(
+            Arc::new(create_udf(Arc::new(JsonGetWithType::default()))),
+            args,
+        ))
+    }
 
     fn mock_metadata() -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));

@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use crate::sst::index::column::extract_json_type_hint_values;
 use api::v1::SemanticType;
 use arrow_schema::extension::ExtensionType;
 use common_telemetry::warn;
@@ -44,6 +43,7 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::sst::index::TYPE_FULLTEXT_INDEX;
+use crate::sst::index::column::extract_json_type_hint_values;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
@@ -73,6 +73,7 @@ impl FulltextIndexer {
         include_json_paths: bool,
     ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
+        let global_memory_usage = Arc::new(AtomicUsize::new(0));
 
         for column in &metadata.column_metadatas {
             // Tag columns don't support fulltext index now.
@@ -110,11 +111,17 @@ impl FulltextIndexer {
                     let Some(options) = hint.fulltext_index.as_ref().filter(|o| o.enable) else {
                         continue;
                     };
-                    if let Ok(target) =
-                        IndexTarget::new_json_path(column.column_id, hint.path.clone())
-                    {
-                        targets.push((target, options.clone()));
-                    }
+                    let target = IndexTarget::new_json_path(column.column_id, hint.path.clone())
+                        .map_err(|err| {
+                            crate::error::InvalidRecordBatchSnafu {
+                                reason: format!(
+                                    "Invalid JSON fulltext path {:?}: {err}",
+                                    hint.path
+                                ),
+                            }
+                            .build()
+                        })?;
+                    targets.push((target, options.clone()));
                 }
             }
             for (target, options) in targets {
@@ -144,13 +151,12 @@ impl FulltextIndexer {
                             IntermediateLocation::new(&metadata.region_id, sst_file_id),
                             intermediate_manager.clone(),
                         ));
-                        let global_memory_usage = Arc::new(AtomicUsize::new(0));
                         let creator = BloomFilterFulltextIndexCreator::new(
                             config,
                             options.granularity as _,
                             options.false_positive_rate(),
                             temp_file_provider,
-                            global_memory_usage,
+                            global_memory_usage.clone(),
                             Some(mem_limit),
                         );
                         AltFulltextCreator::Bloom(creator)
@@ -731,12 +737,20 @@ mod tests {
                         "json_test".into(),
                         PathType::Bare,
                         store.clone(),
-                        BTreeMap::from([(target, request)]),
+                        BTreeMap::from([
+                            (target, request.clone()),
+                            (
+                                IndexTarget::new_json_path(1, vec!["missing".into()]).unwrap(),
+                                request,
+                            ),
+                        ]),
                         factory.clone(),
+                        &metadata,
                     )
-                    .with_metadata(&metadata)
                     .with_bloom_filter_cache(Some(cache.clone()));
-                    assert!(applier.compatible_with_sst(&metadata));
+                    let plan = applier.for_sst(&metadata).unwrap();
+                    assert_ne!(plan.predicate_key(), applier.predicate_key());
+                    let applier = plan.as_ref();
                     for change in 0..3 {
                         let mut changed_hints = hints.to_vec();
                         for hint in &mut changed_hints {
@@ -760,9 +774,16 @@ mod tests {
                                     JsonSettings::try_new(changed_hints, Some(0)).unwrap(),
                                 ),
                             )));
-                        assert!(!applier.compatible_with_sst(&changed));
+                        assert_eq!(
+                            applier.for_sst(&changed).is_some(),
+                            change == 0 && backend == FulltextBackend::Bloom,
+                        );
                     }
-                    assert!(!applier.compatible_with_sst(&mock_region_metadata(backend.clone())));
+                    assert!(
+                        applier
+                            .for_sst(&mock_region_metadata(backend.clone()))
+                            .is_none()
+                    );
                     for _ in 0..2 {
                         match backend {
                             FulltextBackend::Tantivy => {
@@ -1031,6 +1052,7 @@ mod tests {
                 object_store,
                 requests,
                 factory,
+                &region_metadata,
             );
 
             let backend = backend.clone();
@@ -1062,6 +1084,46 @@ mod tests {
 
     fn rows(row_ids: impl IntoIterator<Item = RowId>) -> BTreeSet<RowId> {
         row_ids.into_iter().collect()
+    }
+
+    #[tokio::test]
+    async fn test_fulltext_bloom_shared_memory_spills() {
+        let dir = common_test_util::temp_dir::create_temp_dir("shared_fulltext_memory");
+        let metadata = mock_region_metadata(FulltextBackend::Bloom);
+        let manager = new_intm_mgr(dir.path().to_string_lossy()).await;
+        let mut indexer = FulltextIndexer::new(
+            &metadata.region_id,
+            &FileId::random(),
+            &manager,
+            &metadata,
+            false,
+            2 * 1024 * 1024,
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // Each target stays below 2 MB on its own; together they exceed the
+        // shared threshold and must spill finalized Bloom filters to disk.
+        for creator in indexer.creators.values_mut() {
+            for row in 0..20_000 {
+                creator.inner.push_text(&format!("row{row}")).await.unwrap();
+            }
+        }
+        let mut directories = vec![dir.path().join("__intm")];
+        let mut spilled = false;
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    directories.push(entry.path());
+                } else {
+                    spilled = true;
+                }
+            }
+        }
+        assert!(spilled, "combined memory usage must trigger spilling");
+        indexer.abort().await.unwrap();
     }
 
     #[tokio::test]

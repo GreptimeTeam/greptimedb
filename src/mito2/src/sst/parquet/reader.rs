@@ -1051,9 +1051,9 @@ impl ParquetReaderBuilder {
             &self.fulltext_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            if !index_applier.compatible_with_sst(sst_metadata) {
+            let Some(index_applier) = index_applier.for_sst(sst_metadata) else {
                 continue;
-            }
+            };
             let predicate_key = index_applier.predicate_key();
             // Fast path: return early if the result is in the cache.
             let cached = self
@@ -1316,9 +1316,9 @@ impl ParquetReaderBuilder {
             &self.fulltext_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            if !index_applier.compatible_with_sst(sst_metadata) {
+            let Some(index_applier) = index_applier.for_sst(sst_metadata) else {
                 continue;
-            }
+            };
             let predicate_key = index_applier.predicate_key();
             // Fast path: return early if the result is in the cache.
             let cached = self

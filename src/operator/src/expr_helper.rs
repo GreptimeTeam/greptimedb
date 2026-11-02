@@ -1865,6 +1865,65 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     }
 
     #[test]
+    fn test_json_fulltext_settings_roundtrip() {
+        use datatypes::json::{JsonSettings, JsonTypeHint};
+        use datatypes::schema::FulltextOptions;
+        use store_api::region_request::{AlterKind as RegionAlterKind, RegionAlterRequest};
+
+        for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
+            let options =
+                FulltextOptions::new(true, FulltextAnalyzer::Chinese, true, backend, 8, 0.05)
+                    .unwrap();
+            let settings = JsonSettings::try_new(
+                vec![JsonTypeHint {
+                    path: vec!["nested".into(), "message".into()],
+                    data_type: ConcreteDataType::string_datatype(),
+                    inverted_index: true,
+                    skipping_index: None,
+                    fulltext_index: Some(options.clone()),
+                }],
+                Some(0),
+            )
+            .unwrap();
+            let wire = json_settings_to_proto(settings.clone()).unwrap();
+            assert_eq!(
+                api::v1::column_def::json_fulltext_options_from_proto(
+                    wire.type_hints[0].fulltext_index.clone().unwrap()
+                )
+                .unwrap(),
+                options,
+            );
+            let set_settings = api::v1::SetJsonSettings {
+                column_name: "payload".into(),
+                settings: Some(wire),
+            };
+            let expr = api::v1::AlterTableExpr {
+                kind: Some(AlterTableKind::SetJsonSettings(set_settings.clone())),
+                ..Default::default()
+            };
+            let request = common_grpc_expr::alter_expr_to_request(1, expr, None).unwrap();
+            let table::requests::AlterKind::SetJsonSettings { request } = request.alter_kind else {
+                panic!("expected JSON settings request");
+            };
+            assert_eq!(settings, request.settings);
+            let request = RegionAlterRequest::try_from(api::v1::region::AlterRequest {
+                kind: Some(api::v1::region::alter_request::Kind::SetJsonSettings(
+                    set_settings,
+                )),
+                ..Default::default()
+            })
+            .unwrap();
+            let RegionAlterKind::SetJsonSettings {
+                settings: decoded, ..
+            } = request.kind
+            else {
+                panic!("expected JSON settings region request");
+            };
+            assert_eq!(settings, decoded);
+        }
+    }
+
+    #[test]
     fn test_to_alter_set_json_settings_expr() {
         let sql = "ALTER TABLE monitor MODIFY COLUMN payload JSON2 (service STRING INVERTED INDEX SKIPPING INDEX WITH (granularity='8'), message STRING);";
         let stmt =
