@@ -121,8 +121,8 @@ use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
-    SendableEvaluatedSeriesStream, pack_evaluated_series, pack_raw_series, unpack_evaluated_series,
-    unpack_raw_series,
+    SendableEvaluatedSeriesStream, pack_evaluated_series, pack_raw_series,
+    raw_series_frame_schema_with_ordering, unpack_evaluated_series, unpack_raw_series,
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -136,12 +136,14 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
-use datatypes::series::frame::{FrameContent, LabelDecodeSpec, SeriesFrameDeclaration};
+use datatypes::series::frame::{
+    FrameContent, FrameLabelMode, LabelDecodeSpec, SeriesFrameDeclaration,
+};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{Series, SeriesSchema};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt};
-use store_api::region_engine::{NO_BOUND_LABEL_SOURCE, RawSeriesStream, SendableRawSeriesStream};
+use store_api::region_engine::{RawSeriesStream, SendableRawSeriesStream};
 use tokio::sync::mpsc;
 use twox_hash::XxHash64;
 
@@ -159,37 +161,6 @@ pub enum SeriesRouting {
     Matching(crate::vector_match::MatchingLabels),
     /// Route raw frames by their complete stored primary key.
     RawPrimaryKey,
-}
-
-struct EmptyRawStream {
-    schema: Arc<SeriesSchema>,
-    ordering: SeriesOrdering,
-}
-
-impl Stream for EmptyRawStream {
-    type Item = Result<RawSeriesChunk, BoxedError>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(None)
-    }
-}
-
-impl RawSeriesStream for EmptyRawStream {
-    fn schema(&self) -> &Arc<SeriesSchema> {
-        &self.schema
-    }
-
-    fn label_source(&self) -> &store_api::region_engine::RawLabelSource {
-        &NO_BOUND_LABEL_SOURCE
-    }
-
-    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
-        None
-    }
-
-    fn ordering(&self) -> SeriesOrdering {
-        self.ordering
-    }
 }
 
 /// The seed behind every routing decision.
@@ -336,18 +307,17 @@ impl SeriesRepartitionExec {
             SeriesOrdering::Contiguous
         };
         let declared = match content {
-            FrameContent::Evaluated => pack_evaluated_series(
-                Box::pin(futures::stream::empty()),
-                Arc::clone(&series_schema),
-            )?
-            .schema(),
-            FrameContent::Raw => {
-                let source = EmptyRawStream {
-                    schema: Arc::clone(&series_schema),
-                    ordering,
-                };
-                pack_raw_series(Box::pin(source))?.schema()
-            }
+            FrameContent::Evaluated => common_query::series_frame::frame_schema_with(
+                &series_schema,
+                FrameLabelMode::Explicit,
+                None,
+                SeriesOrdering::Contiguous,
+            )?,
+            FrameContent::Raw => raw_series_frame_schema_with_ordering(
+                &series_schema,
+                &store_api::region_engine::NO_BOUND_LABEL_SOURCE,
+                ordering,
+            )?,
         };
         // The input is re-declared from what it says about itself, not from what this node
         // publishes: the two differ whenever the child carries its labels in its keys.
@@ -1415,18 +1385,6 @@ async fn read_raw_chains(
     }
 }
 
-fn exact_identity(series: &Series) -> ExactIdentity {
-    (
-        series.metric.name().map(Arc::<str>::from),
-        series
-            .metric
-            .tags()
-            .iter()
-            .map(|tag| (Arc::clone(&tag.name), Arc::clone(&tag.value)))
-            .collect(),
-    )
-}
-
 /// Merges exact metric-name and complete-tag identities, preserving first-seen group order.
 ///
 /// The Fused series stack calls this helper for evaluated frame finalization; this branch does not
@@ -1559,6 +1517,18 @@ enum Queued {
 
 type ExactIdentity = (Option<Arc<str>>, Vec<(Arc<str>, Arc<str>)>);
 
+fn exact_identity(series: &Series) -> ExactIdentity {
+    (
+        series.metric.name().map(Arc::<str>::from),
+        series
+            .metric
+            .tags()
+            .iter()
+            .map(|tag| (Arc::clone(&tag.name), Arc::clone(&tag.value)))
+            .collect(),
+    )
+}
+
 /// Turns an owner's evaluated publications into the evaluated stream the packer consumes.
 struct EvaluatedOutputStream {
     inner: Option<Pin<Box<RepartitionStream>>>,
@@ -1660,6 +1630,10 @@ enum OwnerKey {
     Raw(Vec<u8>),
 }
 
+fn raw_identity(chunk: &RawSeriesChunk) -> OwnerKey {
+    OwnerKey::Raw(chunk.primary_key.as_slice().to_vec())
+}
+
 /// The raw identity of one chunk: its complete stored primary key and nothing else.
 ///
 /// Labels are deliberately not part of the key. Two pieces of one physical key must always meet in
@@ -1715,10 +1689,6 @@ fn raw_chunk_slice_bytes(chunk: &RawSeriesChunk) -> DataFusionResult<usize> {
                 .saturating_mul(std::mem::size_of::<i64>()),
         )
         .saturating_add(fields_bytes))
-}
-
-fn raw_identity(chunk: &RawSeriesChunk) -> OwnerKey {
-    OwnerKey::Raw(chunk.primary_key.as_slice().to_vec())
 }
 
 struct PendingGroup {
@@ -2140,15 +2110,6 @@ impl Stream for RepartitionStream {
                                 continue;
                             };
                             let key = exact_identity(&first.0);
-                            if chain
-                                .iter()
-                                .any(|(series, _, _)| exact_identity(series) != key)
-                            {
-                                this.lease.fail(Arc::new(DataFusionError::Execution(
-                                    "one series chain contains multiple exact identities".into(),
-                                )));
-                                continue;
-                            }
                             (OwnerKey::Evaluated(key), RoutedChain::Evaluated(chain))
                         }
                         RoutedChain::Raw(chain) => {
@@ -2156,12 +2117,6 @@ impl Stream for RepartitionStream {
                                 continue;
                             };
                             let key = raw_identity(&first.0);
-                            if chain.iter().any(|(chunk, _)| raw_identity(chunk) != key) {
-                                this.lease.fail(Arc::new(DataFusionError::Execution(
-                                    "one raw chain contains multiple primary keys".into(),
-                                )));
-                                continue;
-                            }
                             if let OwnerKey::Raw(raw_key) = &key
                                 && this.ordering == SeriesOrdering::KeyThenTime
                             {
