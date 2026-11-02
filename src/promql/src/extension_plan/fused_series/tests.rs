@@ -1044,8 +1044,7 @@ fn plain_envelope(
     output_tags: Vec<String>,
 ) -> Vec<u8> {
     let binding = binding_of(&tree, raw_schema(), binding_tags);
-    let schema_tags = super::output_tags_for_tree(&tree);
-    let schema = super::plain_rows_schema(&tree, &schema_tags, TIME).unwrap();
+    let schema = super::plain_rows_schema(&tree, &output_tags, TIME).unwrap();
     let node = FusedSeries::try_new(
         Arc::from(PROMQL),
         tree,

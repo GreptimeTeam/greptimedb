@@ -273,6 +273,7 @@ impl FusedSeries {
                         .samples()
                         .map_or(&[], |schema| &schema.fields),
                     &self.binding.time_index,
+                    matches!(self.tree.root().output, NativeType::Scalar(_)),
                 )
             },
         };
@@ -547,7 +548,16 @@ impl FusedSeries {
 
     /// The label columns of the output, independent of the raw-input binding.
     fn output_tags(&self) -> Vec<String> {
-        output_tags_for_tree(&self.tree)
+        output_tags_from_schema(
+            self.output_schema.as_arrow(),
+            self.tree
+                .root()
+                .output
+                .samples()
+                .map_or(&[], |schema| &schema.fields),
+            &self.binding.time_index,
+            matches!(self.tree.root().output, NativeType::Scalar(_)),
+        )
     }
 }
 
@@ -823,6 +833,7 @@ fn output_tags_from_schema(
     schema: &datafusion::arrow::datatypes::Schema,
     series_fields: &[FieldSpec],
     time: &str,
+    scalar_root: bool,
 ) -> Vec<String> {
     let field_names = series_fields
         .iter()
@@ -831,34 +842,10 @@ fn output_tags_from_schema(
     schema
         .fields()
         .iter()
-        .filter(|field| field.name() != time && !field_names.contains(field.name().as_str()))
-        .map(|field| field.name().clone())
-        .collect()
-}
-
-fn output_tags_for_tree(tree: &NativeTree) -> Vec<String> {
-    let Some(schema) = tree.root().output.samples() else {
-        return Vec::new();
-    };
-    let field_names = schema
-        .fields
-        .iter()
-        .map(|field| field.name.as_ref())
-        .collect::<std::collections::HashSet<_>>();
-    collect_source_schemas(tree)
-        .unwrap_or_default()
-        .into_iter()
-        .flat_map(|source| {
-            source
-                .fields
-                .iter()
-                .map(|field| field.name.clone())
-                .collect::<Vec<_>>()
+        .filter(|field| {
+            field.name() != time && !field_names.contains(field.name().as_str()) && !scalar_root
         })
-        .filter(|name| !field_names.contains(name.as_ref()))
-        .map(|name| name.to_string())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
+        .map(|field| field.name().clone())
         .collect()
 }
 

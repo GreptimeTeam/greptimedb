@@ -1012,7 +1012,7 @@ mod tests {
             .as_any()
             .downcast_ref::<AggregateFinalize>()
             .unwrap();
-        let inputs = finalize.inputs();
+        let inputs = datafusion_expr::UserDefinedLogicalNodeCore::inputs(finalize);
         let [producer] = inputs.as_slice() else {
             unreachable!()
         };

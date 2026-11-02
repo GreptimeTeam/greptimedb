@@ -538,9 +538,8 @@ pub struct NativeTree {
 impl NativeTree {
     /// Creates a tree over `root`, checking that every node's contract holds.
     ///
-    /// A rejected tree is a compiler defect rather than a query error: the compiler only builds a
-    /// node after deciding that this combination is supported, so the error is
-    /// [`DataFusionError::Internal`] and not a statement the client wrote wrong.
+    /// A structurally inconsistent tree is a compiler defect; a tree beyond the native depth
+    /// limit is unsupported by this route and can fall back to the existing planner.
     pub fn try_new(root: NativeNode) -> Result<Self> {
         ensure_native_node_depth(&root)?;
         root.validate()?;
@@ -584,14 +583,16 @@ impl<'de> serde::Deserialize<'de> for NativeTree {
             root: NativeNode,
         }
         let wire = Wire::deserialize(deserializer)?;
-        Self::try_new(wire.root).map_err(serde::de::Error::custom)
+        ensure_native_node_depth(&wire.root).map_err(serde::de::Error::custom)?;
+        wire.root.validate().map_err(serde::de::Error::custom)?;
+        Ok(Self { root: wire.root })
     }
 }
 
 fn ensure_native_node_depth(root: &NativeNode) -> Result<()> {
     fn visit(node: &NativeNode, depth: usize) -> Result<()> {
         if depth > MAX_NATIVE_NODE_DEPTH {
-            return Err(invalid(&format!(
+            return Err(DataFusionError::NotImplemented(format!(
                 "native tree nesting exceeds {MAX_NATIVE_NODE_DEPTH}"
             )));
         }

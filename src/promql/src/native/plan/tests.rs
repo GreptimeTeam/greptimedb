@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use datafusion::common::DFSchema;
+use datafusion::common::{DFSchema, DataFusionError};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
@@ -1493,6 +1493,27 @@ fn a_vector_operation_cannot_consume_raw_samples() {
     assert!(error.to_string().contains("an evaluated vector"), "{error}");
 }
 
+/// A samples root without an input is refused by FusedSeries.
+#[test]
+fn a_samples_root_without_an_input_is_refused() {
+    let tree = NativeTree::try_new(input()).unwrap();
+    let binding = FusedSeriesBinding {
+        grid: grid(0, 60_000, 4),
+        time_index: "time".to_string(),
+        tags: vec![],
+        metric_name: None,
+    };
+    let error = FusedSeries::try_new(
+        Arc::from("some_metric"),
+        tree,
+        binding,
+        Vec::new(),
+        Arc::new(DFSchema::empty()),
+    )
+    .expect_err("a samples root without an input is refused");
+    assert!(error.to_string().contains("source indexes"), "{error}");
+}
+
 /// FusedSeries must reject a tree constructed outside the checked NativeTree constructor.
 #[test]
 fn fused_series_rejects_a_tree_over_the_depth_limit() {
@@ -1611,7 +1632,10 @@ fn native_tree_depth_limit_holds_across_lifecycle_on_named_worker_stack() {
                 postcard::from_bytes::<NativeTree>(&bytes).unwrap_err(),
                 postcard::Error::SerdeDeCustom
             );
-            assert!(NativeTree::try_new(over_limit.root.clone()).is_err());
+            assert!(matches!(
+                NativeTree::try_new(over_limit.root.clone()),
+                Err(DataFusionError::NotImplemented(_))
+            ));
             drop(over_limit);
         })
         .unwrap()
