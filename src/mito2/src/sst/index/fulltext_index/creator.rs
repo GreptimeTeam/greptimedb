@@ -42,7 +42,6 @@ use crate::error::{
     Result,
 };
 use crate::read::Batch;
-use crate::sst::index::TYPE_FULLTEXT_INDEX;
 use crate::sst::index::column::extract_json_type_hint_values;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::intermediate::{
@@ -50,6 +49,7 @@ use crate::sst::index::intermediate::{
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::{IndexBuildType, TYPE_FULLTEXT_INDEX};
 
 /// `FulltextIndexer` is responsible for creating fulltext indexes for SST files.
 pub struct FulltextIndexer {
@@ -70,7 +70,7 @@ impl FulltextIndexer {
         metadata: &RegionMetadataRef,
         compress: bool,
         mem_limit: usize,
-        include_json_paths: bool,
+        build_type: IndexBuildType,
     ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
         let global_memory_usage = Arc::new(AtomicUsize::new(0));
@@ -98,7 +98,10 @@ impl FulltextIndexer {
             if let Some(options) = options.filter(|options| options.enable) {
                 targets.push((IndexTarget::ColumnId(column.column_id), options));
             }
-            if include_json_paths
+            // Only flush and compaction builds collect JSON targets; manual and schema-change
+            // rebuilds skip them because existing SSTs may not materialize the current hints.
+            // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
+            if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
                 && column.column_schema.data_type.is_json2()
                 && let Some(extension) = column
                     .column_schema
@@ -572,7 +575,12 @@ mod tests {
         use datatypes::vectors::{Helper, UInt8Vector, UInt64Vector};
 
         for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
-            for flat in [false, true] {
+            for (flat, build_type) in [
+                (false, IndexBuildType::Flush),
+                (false, IndexBuildType::Compact),
+                (true, IndexBuildType::Flush),
+                (true, IndexBuildType::Compact),
+            ] {
                 let (dir, factory) =
                     PuffinManagerFactory::new_for_test_async("json_fulltext").await;
                 let options = FulltextOptions::new(
@@ -617,20 +625,22 @@ mod tests {
                 let metadata = Arc::new(builder.build().unwrap());
                 let file_id = FileId::random();
                 let manager = new_intm_mgr(dir.path().to_string_lossy()).await;
-                assert!(
-                    FulltextIndexer::new(
-                        &metadata.region_id,
-                        &file_id,
-                        &manager,
-                        &metadata,
-                        false,
-                        1024,
-                        false
-                    )
-                    .await
-                    .unwrap()
-                    .is_none()
-                );
+                for rebuild_type in [IndexBuildType::Manual, IndexBuildType::SchemaChange] {
+                    assert!(
+                        FulltextIndexer::new(
+                            &metadata.region_id,
+                            &file_id,
+                            &manager,
+                            &metadata,
+                            false,
+                            1024,
+                            rebuild_type,
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                    );
+                }
                 let mut creator = FulltextIndexer::new(
                     &metadata.region_id,
                     &file_id,
@@ -638,7 +648,7 @@ mod tests {
                     &metadata,
                     false,
                     1024,
-                    true,
+                    build_type,
                 )
                 .await
                 .unwrap()
@@ -748,9 +758,8 @@ mod tests {
                         &metadata,
                     )
                     .with_bloom_filter_cache(Some(cache.clone()));
-                    let plan = applier.for_sst(&metadata).unwrap();
-                    assert_ne!(plan.predicate_key(), applier.predicate_key());
-                    let applier = plan.as_ref();
+                    let requests = applier.compatible_requests_for_sst(&metadata).unwrap();
+                    assert_eq!(requests.len(), 1);
                     for change in 0..3 {
                         let mut changed_hints = hints.to_vec();
                         for hint in &mut changed_hints {
@@ -775,20 +784,20 @@ mod tests {
                                 ),
                             )));
                         assert_eq!(
-                            applier.for_sst(&changed).is_some(),
+                            applier.compatible_requests_for_sst(&changed).is_some(),
                             change == 0 && backend == FulltextBackend::Bloom,
                         );
                     }
                     assert!(
                         applier
-                            .for_sst(&mock_region_metadata(backend.clone()))
+                            .compatible_requests_for_sst(&mock_region_metadata(backend.clone()))
                             .is_none()
                     );
                     for _ in 0..2 {
                         match backend {
                             FulltextBackend::Tantivy => {
                                 let rows = applier
-                                    .apply_fine(index_id, None, None)
+                                    .apply_fine(index_id, None, &requests, None)
                                     .await
                                     .unwrap()
                                     .unwrap();
@@ -799,7 +808,13 @@ mod tests {
                             }
                             FulltextBackend::Bloom => {
                                 let ranges = applier
-                                    .apply_coarse(index_id, None, [(4, true)].into_iter(), None)
+                                    .apply_coarse(
+                                        index_id,
+                                        None,
+                                        [(4, true)].into_iter(),
+                                        &requests,
+                                        None,
+                                    )
                                     .await
                                     .unwrap()
                                     .unwrap();
@@ -991,7 +1006,7 @@ mod tests {
             &region_metadata,
             true,
             1024,
-            true,
+            IndexBuildType::Flush,
         )
         .await
         .unwrap()
@@ -1055,18 +1070,22 @@ mod tests {
                 &region_metadata,
             );
 
+            let requests = applier
+                .compatible_requests_for_sst(&region_metadata)
+                .unwrap();
             let backend = backend.clone();
             async move {
                 match backend {
-                    FulltextBackend::Tantivy => {
-                        applier.apply_fine(index_id, None, None).await.unwrap()
-                    }
+                    FulltextBackend::Tantivy => applier
+                        .apply_fine(index_id, None, &requests, None)
+                        .await
+                        .unwrap(),
                     FulltextBackend::Bloom => {
                         let coarse_mask = coarse_mask.unwrap_or_default();
                         let row_groups = (0..coarse_mask.len()).map(|i| (1, coarse_mask[i]));
                         // row group id == row id
                         let resp = applier
-                            .apply_coarse(index_id, None, row_groups, None)
+                            .apply_coarse(index_id, None, row_groups, &requests, None)
                             .await
                             .unwrap();
                         resp.map(|r| {
@@ -1098,7 +1117,7 @@ mod tests {
             &metadata,
             false,
             2 * 1024 * 1024,
-            true,
+            IndexBuildType::Flush,
         )
         .await
         .unwrap()

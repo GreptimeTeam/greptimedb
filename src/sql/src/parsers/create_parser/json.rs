@@ -14,6 +14,7 @@
 
 use datatypes::extension::json::JSON2_REMAINDER_FIELD_NAME;
 use datatypes::json::JSON2_MAX_STRUCTURED_DEPTH;
+use datatypes::schema::FulltextOptions;
 use snafu::{ResultExt, ensure};
 use sqlparser::ast::{DataType, ExactNumberInfo, ObjectName};
 use sqlparser::dialect::keywords::Keyword;
@@ -24,6 +25,7 @@ use crate::ast::Ident;
 use crate::dialect::GreptimeDbDialect;
 use crate::error::{InvalidSqlSnafu, Result, SyntaxSnafu};
 use crate::parsers::create_parser::{INVERTED, SKIPPING};
+use crate::statements::OptionMap;
 use crate::statements::create::{Json2Options, JsonTypeHint};
 
 const JSON2_TYPE_NAME: &str = "JSON2";
@@ -239,7 +241,7 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
             }
             skipping_index = Some(
                 datatypes::schema::SkippingIndexOptions::try_from(
-                    crate::statements::OptionMap::new(options).into_map(),
+                    OptionMap::new(options).into_map(),
                 )
                 .context(crate::error::SetSkippingIndexOptionSnafu)?,
             );
@@ -277,10 +279,8 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
                 );
             }
             fulltext_index = Some(
-                datatypes::schema::FulltextOptions::try_from(
-                    crate::statements::OptionMap::new(options).into_map(),
-                )
-                .context(crate::error::SetFulltextOptionSnafu)?,
+                FulltextOptions::try_from(OptionMap::new(options).into_map())
+                    .context(crate::error::SetFulltextOptionSnafu)?,
             );
         } else if matches!(parser.peek_token().token, Token::Comma | Token::RParen) {
             break;

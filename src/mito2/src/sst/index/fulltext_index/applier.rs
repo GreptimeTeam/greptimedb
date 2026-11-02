@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter;
 use std::ops::Range;
@@ -40,13 +39,13 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
 };
-use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ApplyBloomFilterIndexSnafu, ApplyFulltextIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu,
     PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionIndexId;
+use crate::sst::index::column::fulltext_target_options;
 use crate::sst::index::fulltext_index::applier::builder::FulltextRequest;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::puffin_manager::{
@@ -146,7 +145,6 @@ impl FulltextIndexApplyMetrics {
 }
 
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
-#[derive(Clone)]
 pub struct FulltextIndexApplier {
     /// Requests to be applied.
     requests: Arc<BTreeMap<IndexTarget, FulltextRequest>>,
@@ -159,18 +157,12 @@ pub struct FulltextIndexApplier {
 
     /// Cache for bloom filter index.
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
-
-    /// Predicate key. Used to identify the predicate and fetch result from cache.
-    predicate_key: PredicateKey,
 }
 
 pub type FulltextIndexApplierRef = Arc<FulltextIndexApplier>;
 
 impl FulltextIndexApplier {
     /// Creates a new `FulltextIndexApplier`.
-    ///
-    /// `metadata` resolves the expected fulltext options for JSON path targets.
-    /// Targets whose options cannot be resolved are treated as incompatible with SSTs.
     pub fn new(
         table_dir: String,
         path_type: PathType,
@@ -183,15 +175,13 @@ impl FulltextIndexApplier {
             .keys()
             .filter(|target| matches!(target, IndexTarget::JsonPath(_)))
             .filter_map(|target| {
-                crate::sst::index::column::fulltext_target_options(metadata, target)
-                    .map(|options| (target.clone(), options))
+                fulltext_target_options(metadata, target).map(|options| (target.clone(), options))
             })
             .collect();
         let requests = Arc::new(requests);
         let index_source = IndexSource::new(table_dir, path_type, puffin_manager_factory, store);
 
         Self {
-            predicate_key: PredicateKey::new_fulltext(requests.clone()),
             requests,
             expected_json_options,
             index_source,
@@ -201,15 +191,17 @@ impl FulltextIndexApplier {
 
     /// Keeps only targets compatible with the SST's saved JSON path settings.
     /// Ordinary columns use the blob's own configuration without this check.
-    /// A filtered applier has its own predicate key so cached results never mix
-    /// different subsets of the requested predicates.
-    pub fn for_sst(&self, metadata: &RegionMetadata) -> Option<Cow<'_, Self>> {
+    /// Returns `None` when no compatible request remains for this SST.
+    pub fn compatible_requests_for_sst(
+        &self,
+        metadata: &RegionMetadata,
+    ) -> Option<Arc<BTreeMap<IndexTarget, FulltextRequest>>> {
         if self
             .requests
             .keys()
             .all(|target| self.is_target_compatible(metadata, target))
         {
-            return Some(Cow::Borrowed(self));
+            return Some(self.requests.clone());
         }
         let requests: BTreeMap<_, _> = self
             .requests
@@ -220,12 +212,7 @@ impl FulltextIndexApplier {
         if requests.is_empty() {
             return None;
         }
-        let requests = Arc::new(requests);
-        Some(Cow::Owned(Self {
-            predicate_key: PredicateKey::new_fulltext(requests.clone()),
-            requests,
-            ..self.clone()
-        }))
+        Some(Arc::new(requests))
     }
 
     /// Sets the file cache.
@@ -253,11 +240,6 @@ impl FulltextIndexApplier {
         self
     }
 
-    /// Returns the predicate key.
-    pub fn predicate_key(&self) -> &PredicateKey {
-        &self.predicate_key
-    }
-
     fn is_target_compatible(&self, metadata: &RegionMetadata, target: &IndexTarget) -> bool {
         if matches!(target, IndexTarget::ColumnId(_)) {
             return true;
@@ -265,8 +247,7 @@ impl FulltextIndexApplier {
         let Some(expected) = self.expected_json_options.get(target) else {
             return false;
         };
-        let Some(actual) = crate::sst::index::column::fulltext_target_options(metadata, target)
-        else {
+        let Some(actual) = fulltext_target_options(metadata, target) else {
             return false;
         };
         // Segment layout and FPR are self-described by the blob. Both Bloom
@@ -284,6 +265,7 @@ impl FulltextIndexApplier {
     /// # Arguments
     /// * `file_id` - The region file ID to apply predicates to
     /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
+    /// * `requests` - Compatible requests for this SST
     /// * `metrics` - Optional mutable reference to collect metrics on demand
     #[tracing::instrument(
         skip_all,
@@ -293,12 +275,13 @@ impl FulltextIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
+        requests: &BTreeMap<IndexTarget, FulltextRequest>,
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
         let apply_start = Instant::now();
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
-        for (target, request) in self.requests.iter() {
+        for (target, request) in requests.iter() {
             // Tantivy tokens don't follow `matches_term` boundaries, e.g. `SimpleTokenizer`
             // keeps "错误error日志" as one token, so terms and patterns are left to the
             // bloom backend.
@@ -408,6 +391,7 @@ impl FulltextIndexApplier {
     /// * `file_id` - The region file ID to apply predicates to
     /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
     /// * `row_groups` - Iterator of row group lengths and whether to search in the row group
+    /// * `requests` - Compatible requests for this SST
     /// * `metrics` - Optional mutable reference to collect metrics on demand
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -419,6 +403,7 @@ impl FulltextIndexApplier {
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         row_groups: impl Iterator<Item = (usize, bool)>,
+        requests: &BTreeMap<IndexTarget, FulltextRequest>,
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<Vec<(usize, Vec<Range<usize>>)>>> {
         let apply_start = Instant::now();
@@ -426,7 +411,7 @@ impl FulltextIndexApplier {
         let (input, mut output) = Self::init_coarse_output(row_groups);
         let mut applied = false;
 
-        for (target, request) in self.requests.iter() {
+        for (target, request) in requests.iter() {
             if request.terms.is_empty() && request.likes.is_empty() {
                 continue;
             }

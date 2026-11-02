@@ -347,6 +347,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::cache::index::result_cache::PredicateKey;
 
     #[test]
     fn test_json_fulltext_predicate_extraction() {
@@ -441,8 +442,8 @@ mod tests {
                 factory.clone(),
                 &metadata,
             );
-            let unchanged = applier.for_sst(&metadata).unwrap();
-            assert_eq!(unchanged.predicate_key(), applier.predicate_key());
+            let unchanged = applier.compatible_requests_for_sst(&metadata).unwrap();
+            assert!(Arc::ptr_eq(&unchanged, &applier.requests));
             for change in 0..7 {
                 let mut changed = options.clone();
                 match change {
@@ -461,16 +462,21 @@ mod tests {
                     _ => {}
                 }
                 let sst = json_metadata((change != 6).then_some(changed));
-                let plan = applier.for_sst(&sst).unwrap();
-                assert!(plan.requests.contains_key(&ordinary));
-                assert!(plan.requests.contains_key(&other));
+                let requests = applier.compatible_requests_for_sst(&sst).unwrap();
+                assert!(requests.contains_key(&ordinary));
+                assert!(requests.contains_key(&other));
                 let compatible = change < 2 || (change == 2 && backend == FulltextBackend::Bloom);
                 assert_eq!(
-                    plan.requests.contains_key(&path),
+                    requests.contains_key(&path),
                     compatible,
                     "{backend:?}, change={change}"
                 );
-                assert_eq!(plan.predicate_key() == applier.predicate_key(), compatible);
+                assert_eq!(Arc::ptr_eq(&requests, &applier.requests), compatible);
+                assert_eq!(
+                    PredicateKey::new_fulltext(requests)
+                        == PredicateKey::new_fulltext(applier.requests.clone()),
+                    compatible,
+                );
             }
             // An unresolved query-side target must not become compatible merely
             // because the expected options map has no entry for it.
@@ -482,7 +488,7 @@ mod tests {
                 factory.clone(),
                 &metadata,
             );
-            assert!(applier.for_sst(&metadata).is_none());
+            assert!(applier.compatible_requests_for_sst(&metadata).is_none());
             // Missing current options are also fail-closed even if the SST has them.
             let applier = FulltextIndexApplier::new(
                 "test".into(),
@@ -492,7 +498,7 @@ mod tests {
                 factory.clone(),
                 &json_metadata(None),
             );
-            assert!(applier.for_sst(&metadata).is_none());
+            assert!(applier.compatible_requests_for_sst(&metadata).is_none());
         }
     }
 

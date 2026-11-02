@@ -655,14 +655,7 @@ impl IndexerBuilderImpl {
             &self.metadata,
             self.fulltext_index_config.compress,
             mem_limit,
-            // Existing SSTs may not materialize the current JSON hints.
-            // FIXME: Manual/schema-change rebuilds replace the Puffin file and
-            // can drop existing JSON path indexes. Rebuild support needs to
-            // preserve or rematerialize these targets before enabling them here.
-            matches!(
-                self.build_type,
-                IndexBuildType::Flush | IndexBuildType::Compact
-            ),
+            self.build_type.clone(),
         )
         .await;
 

@@ -266,7 +266,7 @@ pub struct JsonTypeHint {
     /// Skipping index options for this hinted path.
     pub skipping_index: Option<SkippingIndexOptions>,
     /// Fulltext index options for a string hinted path.
-    pub fulltext_index: Option<datatypes::schema::FulltextOptions>,
+    pub fulltext_index: Option<FulltextOptions>,
 }
 
 impl Column {

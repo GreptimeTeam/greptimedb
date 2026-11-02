@@ -1051,15 +1051,18 @@ impl ParquetReaderBuilder {
             &self.fulltext_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            let Some(index_applier) = index_applier.for_sst(sst_metadata) else {
+            // Filter out index requests incompatible with this SST.
+            // Its JSON path hints or fulltext settings may differ from the current schema;
+            // ordinary column requests and compatible JSON paths are retained.
+            let Some(requests) = index_applier.compatible_requests_for_sst(sst_metadata) else {
                 continue;
             };
-            let predicate_key = index_applier.predicate_key();
+            let predicate_key = PredicateKey::new_fulltext(requests.clone());
             // Fast path: return early if the result is in the cache.
             let cached = self
                 .cache_strategy
                 .index_result_cache()
-                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+                .and_then(|cache| cache.get(&predicate_key, self.file_handle.file_id().file_id()));
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
@@ -1076,6 +1079,7 @@ impl ParquetReaderBuilder {
                 .apply_fine(
                     self.file_handle.index_id(),
                     Some(file_size_hint),
+                    &requests,
                     metrics.fulltext_index_apply_metrics.as_mut(),
                 )
                 .await;
@@ -1091,7 +1095,7 @@ impl ParquetReaderBuilder {
             };
 
             self.apply_index_result_and_update_cache(
-                predicate_key,
+                &predicate_key,
                 self.file_handle.file_id().file_id(),
                 selection,
                 output,
@@ -1316,15 +1320,18 @@ impl ParquetReaderBuilder {
             &self.fulltext_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
-            let Some(index_applier) = index_applier.for_sst(sst_metadata) else {
+            // Filter out index requests incompatible with this SST.
+            // Its JSON path hints or fulltext settings may differ from the current schema;
+            // ordinary column requests and compatible JSON paths are retained.
+            let Some(requests) = index_applier.compatible_requests_for_sst(sst_metadata) else {
                 continue;
             };
-            let predicate_key = index_applier.predicate_key();
+            let predicate_key = PredicateKey::new_fulltext(requests.clone());
             // Fast path: return early if the result is in the cache.
             let cached = self
                 .cache_strategy
                 .index_result_cache()
-                .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
+                .and_then(|cache| cache.get(&predicate_key, self.file_handle.file_id().file_id()));
             if let Some(result) = cached.as_ref()
                 && all_required_row_groups_searched(output, result)
             {
@@ -1353,6 +1360,7 @@ impl ParquetReaderBuilder {
                     self.file_handle.index_id(),
                     Some(file_size_hint),
                     rgs,
+                    &requests,
                     metrics.fulltext_index_apply_metrics.as_mut(),
                 )
                 .await;
@@ -1373,7 +1381,7 @@ impl ParquetReaderBuilder {
             }
 
             self.apply_index_result_and_update_cache(
-                predicate_key,
+                &predicate_key,
                 self.file_handle.file_id().file_id(),
                 selection,
                 output,

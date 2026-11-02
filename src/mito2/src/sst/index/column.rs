@@ -20,6 +20,7 @@ use datatypes::arrow::array::{Array, ArrayRef, StructArray};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::extension::json::Json2ExtensionType;
+use datatypes::schema::FulltextOptions;
 use datatypes::vectors::{Helper, VectorRef};
 use index::target::IndexTarget;
 use snafu::{OptionExt, ResultExt};
@@ -197,7 +198,7 @@ pub(crate) fn skipping_target_data_type(
 pub(crate) fn fulltext_target_options(
     metadata: &RegionMetadata,
     target: &IndexTarget,
-) -> Option<datatypes::schema::FulltextOptions> {
+) -> Option<FulltextOptions> {
     let path = match target {
         IndexTarget::ColumnId(id) => {
             let column = metadata.column_by_id(*id)?;
