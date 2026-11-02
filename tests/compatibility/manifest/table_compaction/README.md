@@ -7,6 +7,18 @@ released binary. They preserve L0/L1 metadata, sequences and flush boundaries.
 V1 publishes compaction results using ordinary file edits. It adds no task IDs,
 phases, receipts, request epochs or extension-state fields to the manifest.
 Task retries may be submitted more than once; publication checks current inputs.
+The Enterprise `publish_table_compaction` API consumes a query-visible input
+snapshot and returns `Applied` or `StaleInputs`. A stale attempt must re-snapshot
+and replan, never re-import its old inputs. Even stale/error outcomes must not
+trigger blind output deletion: an earlier attempt may already have published
+those objects. Callers retain output protection until recovery or GC resolves
+liveness.
+
+Publication tests (including partial success, lost ACKs and reopened regions):
+
+```sh
+cargo nextest run -p mito2 --features enterprise -E 'test(engine::table_compaction)'
+```
 
 ```sh
 cargo nextest run -p mito2 -E 'test(manifest::tests::compatibility)'

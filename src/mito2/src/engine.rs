@@ -85,6 +85,8 @@ mod skip_wal_test;
 mod staging_test;
 #[cfg(test)]
 mod sync_test;
+#[cfg(feature = "enterprise")]
+pub mod table_compaction;
 #[cfg(test)]
 mod truncate_test;
 

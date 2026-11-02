@@ -29,6 +29,8 @@ mod handle_manifest;
 mod handle_open;
 mod handle_rebuild_index;
 mod handle_remap;
+#[cfg(feature = "enterprise")]
+mod handle_table_compaction;
 mod handle_truncate;
 mod handle_write;
 
