@@ -244,6 +244,7 @@ struct FusedSeriesPayload {
     promql: Arc<str>,
     partial_fold: Option<BoundAggregate>,
     output_tags: Vec<String>,
+    output_columns: Vec<String>,
 }
 
 impl FusedSeries {
@@ -263,11 +264,20 @@ impl FusedSeries {
             output_tags: if self.partial_fold.is_some() {
                 self.binding.tags.clone()
             } else if self.format == FusedOutputFormat::SeriesFrame {
-                // A frame node's label columns come from the tree, so carrying them would let a
-                // payload contradict the tree. Decode derives them instead.
                 Vec::new()
             } else {
                 self.output_tags()
+            },
+            output_columns: if self.partial_fold.is_none()
+                && self.format == FusedOutputFormat::PlainRows
+            {
+                self.output_schema
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect()
+            } else {
+                Vec::new()
             },
         };
         let encoded = postcard::to_stdvec(&payload).map_err(|e| {
@@ -326,6 +336,7 @@ impl FusedSeries {
             promql,
             partial_fold,
             output_tags,
+            output_columns,
         } = payload;
         let grid = Arc::new(
             EvalGrid::try_deferred(grid)
@@ -364,15 +375,17 @@ impl FusedSeries {
         }
         let output_schema = match format {
             FusedOutputFormat::SeriesFrame => {
-                if !output_tags.is_empty() {
+                if !output_tags.is_empty() || !output_columns.is_empty() {
                     return Err(DataFusionError::Plan(
-                        "SeriesFrame FusedSeries payload must not carry output tags".into(),
+                        "SeriesFrame FusedSeries payload must not carry output tags or columns"
+                            .into(),
                     ));
                 }
                 series_frame_output_schema(evaluated_output(&tree)?.as_ref())?
             }
             FusedOutputFormat::PlainRows => {
-                let schema = plain_rows_schema(&tree, &output_tags, &binding.time_index)?;
+                let schema =
+                    plain_rows_schema(&tree, &output_tags, &output_columns, &binding.time_index)?;
                 validate_plain_output_schema(&schema, &tree, &output_tags, &binding.time_index)?;
                 schema
             }
@@ -845,13 +858,28 @@ fn output_tags_from_schema(
 fn plain_rows_schema(
     tree: &NativeTree,
     tags: &[String],
+    output_columns: &[String],
     time: &str,
 ) -> DataFusionResult<SchemaRef> {
-    let fields = match &tree.root().output {
-        NativeType::Samples(schema) => schema.fields.to_vec(),
-        NativeType::Scalar(_) if tags.is_empty() => vec![FieldSpec {
-            name: Arc::from("value"),
-        }],
+    let value_fields = match &tree.root().output {
+        NativeType::Samples(schema) => schema
+            .fields
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect::<Vec<_>>(),
+        NativeType::Scalar(_) if tags.is_empty() => {
+            let values = output_columns
+                .iter()
+                .filter(|name| name.as_str() != time)
+                .filter(|name| !tags.contains(name))
+                .collect::<Vec<_>>();
+            if values.len() != 1 {
+                return Err(DataFusionError::Plan(
+                    "scalar root output must contain exactly one value column".into(),
+                ));
+            }
+            vec![values[0].clone()]
+        }
         NativeType::Scalar(_) => {
             return Err(DataFusionError::Plan(format!(
                 "FusedSeriesExec scalar root cannot produce {} tag columns",
@@ -864,26 +892,32 @@ fn plain_rows_schema(
             ));
         }
     };
-    let mut columns = Vec::with_capacity(fields.len() + tags.len() + 1);
-    columns.push(Arc::new(datafusion::arrow::datatypes::Field::new(
-        time,
-        DataType::Timestamp(TimeUnit::Millisecond, None),
-        false,
-    )));
-    columns.extend(fields.iter().map(|field| {
-        Arc::new(datafusion::arrow::datatypes::Field::new(
-            field.name.as_ref(),
-            DataType::Float64,
-            true,
-        ))
-    }));
-    columns.extend(tags.iter().map(|tag| {
-        Arc::new(datafusion::arrow::datatypes::Field::new(
-            tag,
-            DataType::Utf8,
-            true,
-        ))
-    }));
+    let mut expected = vec![time.to_string()];
+    expected.extend(value_fields.iter().cloned());
+    expected.extend(tags.iter().cloned());
+    if output_columns.len() != expected.len()
+        || output_columns.iter().any(|name| !expected.contains(name))
+        || expected.iter().any(|name| !output_columns.contains(name))
+    {
+        return Err(DataFusionError::Plan(
+            "PlainRows output columns do not match tree fields, tags, and time".into(),
+        ));
+    }
+    let columns = output_columns
+        .iter()
+        .map(|name| {
+            let (data_type, nullable) = if name == time {
+                (DataType::Timestamp(TimeUnit::Millisecond, None), false)
+            } else if tags.contains(name) {
+                (DataType::Utf8, true)
+            } else {
+                (DataType::Float64, true)
+            };
+            Arc::new(datafusion::arrow::datatypes::Field::new(
+                name, data_type, nullable,
+            ))
+        })
+        .collect::<Vec<_>>();
     Ok(Arc::new(datafusion::arrow::datatypes::Schema::new(columns)))
 }
 

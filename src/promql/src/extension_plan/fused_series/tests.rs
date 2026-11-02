@@ -947,11 +947,29 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     assert_eq!(decoded.schema(), node.schema());
     let rows = fused(rate_tree());
     let row_decoded = FusedSeries::deserialize(&rows.serialize().unwrap()).unwrap();
-    assert_eq!(row_decoded.schema().field(0).name(), TIME);
-    assert_eq!(row_decoded.schema().field(1).name(), VALUE);
-    assert_eq!(row_decoded.schema().field(2).name(), HOST);
-    assert_eq!(row_decoded.schema().field(3).name(), NAME);
+    assert_eq!(row_decoded.schema(), rows.schema());
     assert_eq!(row_decoded.tree(), rows.tree());
+
+    // A legal noncanonical order must survive the wire unchanged.
+    let canonical = rows.schema().as_arrow();
+    let reordered_schema = Arc::new(Schema::new(vec![
+        canonical.field_with_name(VALUE).unwrap().clone(),
+        canonical.field_with_name(HOST).unwrap().clone(),
+        canonical.field_with_name(NAME).unwrap().clone(),
+        canonical.field_with_name(TIME).unwrap().clone(),
+    ]));
+    let reordered = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        rows.tree().clone(),
+        rows.binding().clone(),
+        rows.children().to_vec(),
+        Arc::new(
+            datafusion::common::DFSchema::try_from(reordered_schema.as_ref().clone()).unwrap(),
+        ),
+    )
+    .unwrap();
+    let reordered_decoded = FusedSeries::deserialize(&reordered.serialize().unwrap()).unwrap();
+    assert_eq!(reordered_decoded.schema(), reordered.schema());
 
     // The output schema owns the label layout; the source binding may have no tags or different
     // labels after a tree operation such as label rewriting.
@@ -966,17 +984,12 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     .unwrap();
     let decoded = FusedSeries::deserialize(&empty_tags.serialize().unwrap()).unwrap();
     assert_eq!(decoded.binding().tags, empty_tags.binding().tags);
-    assert_eq!(decoded.schema().field(0).name(), TIME);
-    assert_eq!(decoded.schema().field(1).name(), VALUE);
-    assert_eq!(decoded.schema().field(2).name(), HOST);
-    assert_eq!(decoded.schema().field(3).name(), NAME);
+    assert_eq!(decoded.schema(), empty_tags.schema());
 
     let projected = fused(binary_tree(raw_schema(), raw_schema()));
     let projected_bytes = projected.serialize().unwrap();
     let projected_decoded = FusedSeries::deserialize(&projected_bytes).unwrap();
-    assert_eq!(projected_decoded.schema().field(0).name(), TIME);
-    assert_eq!(projected_decoded.schema().field(1).name(), VALUE);
-    assert_eq!(projected_decoded.schema().field(2).name(), HOST);
+    assert_eq!(projected_decoded.schema(), projected.schema());
 
     let partial = partial_node(AggregateKind::Sum);
     let partial_decoded = FusedSeries::deserialize(&partial.serialize().unwrap()).unwrap();
@@ -1043,8 +1056,26 @@ fn plain_envelope(
     binding_tags: Vec<String>,
     output_tags: Vec<String>,
 ) -> Vec<u8> {
+    let output_columns = [TIME.to_string(), VALUE.to_string()]
+        .into_iter()
+        .chain(output_tags.iter().cloned())
+        .collect::<Vec<_>>();
+    plain_envelope_in_order(tree, binding_tags, output_tags, output_columns)
+}
+
+/// The same envelope with the output columns in a caller-chosen order.
+///
+/// The planner happens to emit time-then-values-then-tags, so an assertion made only
+/// against that order cannot notice if decoding reorders. This lets a test pin a legal
+/// schema the planner would not produce.
+fn plain_envelope_in_order(
+    tree: NativeTree,
+    binding_tags: Vec<String>,
+    output_tags: Vec<String>,
+    output_columns: Vec<String>,
+) -> Vec<u8> {
     let binding = binding_of(&tree, raw_schema(), binding_tags);
-    let schema = super::plain_rows_schema(&tree, &output_tags, TIME).unwrap();
+    let schema = super::plain_rows_schema(&tree, &output_tags, &output_columns, TIME).unwrap();
     let node = FusedSeries::try_new(
         Arc::from(PROMQL),
         tree,
@@ -1076,6 +1107,7 @@ fn scalar_envelope(tree: NativeTree) -> Vec<u8> {
         promql: Arc::from(PROMQL),
         partial_fold: None,
         output_tags: Vec::new(),
+        output_columns: vec![TIME.into(), "value".into()],
     };
     let encoded = postcard::to_stdvec(&payload).unwrap();
     let mut bytes = 3u32.to_le_bytes().to_vec();
@@ -1121,6 +1153,52 @@ fn plain_rows_decode_rejects_invalid_schemas() {
     assert_decode_error(&scalar_with_tag, "scalar root cannot produce 1 tag columns");
 }
 
+/// A legal column order the planner does not emit must survive the round trip.
+///
+/// The planner happens to write time, then values, then tags, so a test that only ever
+/// uses that order cannot notice decoding reordering the columns — and `MergeScan`
+/// compares schemas by position, so a reordered schema is a different schema.
+#[test]
+fn a_non_default_column_order_survives_the_round_trip() {
+    let tree = rate_tree();
+    // value first, then the time index, then the label: the reverse of the emitted order.
+    let output_columns = vec![VALUE.to_string(), TIME.to_string(), HOST.to_string()];
+    let bytes = plain_envelope_in_order(
+        tree.clone(),
+        vec![HOST.into()],
+        vec![HOST.into()],
+        output_columns.clone(),
+    );
+
+    let decoded = FusedSeries::deserialize(&bytes).unwrap();
+    let names: Vec<&str> = decoded
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect();
+    assert_eq!(
+        names, output_columns,
+        "the carried order must be the decoded order, not the reconstruction default"
+    );
+    // The types are derived, so they must still follow the role each name plays.
+    assert_eq!(
+        decoded.schema().field(0).data_type(),
+        &DataType::Float64,
+        "{VALUE} is a value field"
+    );
+    assert_eq!(
+        decoded.schema().field(1).data_type(),
+        &DataType::Timestamp(TimeUnit::Millisecond, None),
+        "{TIME} is the time index"
+    );
+    assert_eq!(
+        decoded.schema().field(2).data_type(),
+        &DataType::Utf8,
+        "{HOST} is a label"
+    );
+}
+
 #[test]
 fn series_frame_decode_rejects_carried_output_tags() {
     let node = envelope_node_with_tags(vec![HOST.into(), NAME.into()]);
@@ -1128,7 +1206,7 @@ fn series_frame_decode_rejects_carried_output_tags() {
     let wrong = mutate_envelope_payload(&bytes, |payload| {
         payload.output_tags.push(HOST.into());
     });
-    assert_decode_error(&wrong, "must not carry output tags");
+    assert_decode_error(&wrong, "must not carry output tags or columns");
 }
 
 #[test]
