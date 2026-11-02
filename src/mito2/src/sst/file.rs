@@ -242,6 +242,13 @@ pub struct FileMeta {
     /// the default value `0` doesn't means the file doesn't contains any rows,
     /// but instead means the number of rows is unknown.
     pub num_rows: u64,
+    /// Physical rows are unique by primary key and timestamp and contain no
+    /// deletion markers. This is a file-local guarantee, not a query row count:
+    /// predicates, sequence fences and other sources still require validation.
+    /// Only a writer whose input has this guarantee may set it. Legacy files
+    /// and outputs of older writers conservatively default to false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub num_rows_is_logical: bool,
     /// Number of row groups in the file.
     ///
     /// For historical reasons, this field might be missing in old files. Thus
@@ -1150,6 +1157,32 @@ mod tests {
             num_series: 0,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_metadata_count_legacy_file_meta() {
+        let fixture = include_str!(
+            "../../../../tests/compatibility/mito/metadata_count/legacy_file_meta.json"
+        );
+        let legacy: FileMeta = serde_json::from_str(fixture).unwrap();
+        assert_eq!(legacy.num_rows, 0);
+        assert!(!legacy.num_rows_is_logical);
+        let serialized = serde_json::to_value(&legacy).unwrap();
+        assert!(serialized.get("num_rows_is_logical").is_none());
+        let mut physical = serde_json::from_str::<serde_json::Value>(fixture).unwrap();
+        physical["num_rows"] = 7.into();
+        let physical: FileMeta = serde_json::from_value(physical).unwrap();
+        assert_eq!(physical.num_rows, 7);
+        assert!(!physical.num_rows_is_logical);
+        let certified = FileMeta {
+            num_rows_is_logical: true,
+            ..physical
+        };
+        let serialized = serde_json::to_string(&certified).unwrap();
+        assert_eq!(
+            serde_json::from_str::<FileMeta>(&serialized).unwrap(),
+            certified
+        );
     }
 
     #[test]

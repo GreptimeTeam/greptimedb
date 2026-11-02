@@ -694,6 +694,9 @@ impl SstMerger for DefaultSstMerger {
                     index_file_size: sst_info.index_metadata.file_size,
                     index_version: 0,
                     num_rows: sst_info.num_rows as u64,
+                    // Both dedup merge modes emit one row per primary key and
+                    // timestamp; LastNonNull only changes which field values survive.
+                    num_rows_is_logical: !append_mode && output.filter_deleted,
                     num_row_groups: sst_info.num_row_groups,
                     sequence: sequence_metadata.file_sequence,
                     partition_expr: partition_expr.clone(),
@@ -1261,6 +1264,14 @@ mod tests {
                 .iter()
                 .all(|file| !file.meta_ref().preserve_row_sequence)
         );
+        // Both outputs are level 1, but the delete output's only row is a
+        // deletion marker: `num_rows` is not its visible row count, and nothing
+        // else in the file metadata says so.
+        assert!(
+            outputs
+                .iter()
+                .all(|file| !file.meta_ref().num_rows_is_logical)
+        );
 
         // Cover the original snapshot, each partial success/cancellation state,
         // and both completed outputs using real persisted SSTs and merge readers.
@@ -1307,6 +1318,89 @@ mod tests {
                 timestamps,
                 "put_done={put_done}, delete_done={delete_done}"
             );
+        }
+    }
+
+    /// Only outputs that drop deletion markers certify logical row counts.
+    #[tokio::test]
+    async fn test_compaction_output_certifies_logical_rows_only_when_filtering_deletes() {
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::compaction::CompactionOutput;
+        use crate::compaction::compactor::{CompactionRegion, Compactor, DefaultCompactor};
+        use crate::compaction::picker::PickerOutput;
+        use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
+        use crate::test_util::{CreateRequestBuilder, TestEnv, rows_schema};
+
+        let mut env = TestEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let engine = env
+            .create_engine(MitoConfig {
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            })
+            .await;
+        let request = CreateRequestBuilder::new().build();
+        let columns = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        put_and_flush(&engine, region_id, &columns, 0..3).await;
+        delete_and_flush(&engine, region_id, &columns, 0..1).await;
+        put_and_flush(&engine, region_id, &columns, 2..5).await;
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version();
+        let files: Vec<_> = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .cloned()
+            .collect();
+        assert!(
+            files
+                .iter()
+                .all(|file| !file.meta_ref().num_rows_is_logical)
+        );
+        let compaction_region = CompactionRegion {
+            region_id,
+            region_options: version.options.clone(),
+            engine_config: Arc::new(MitoConfig::default()),
+            region_metadata: version.metadata.clone(),
+            cache_manager: engine.cache_manager(),
+            access_layer: region.access_layer.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
+            current_version: version.into(),
+            file_purger: None,
+            ttl: None,
+            max_parallelism: 1,
+            plugins: common_base::Plugins::new(),
+        };
+        // Rows 0..5 with row 0 deleted: four visible rows.
+        for (filter_deleted, num_rows) in [(false, 5), (true, 4)] {
+            let picker_output = PickerOutput {
+                outputs: vec![CompactionOutput {
+                    output_level: 1,
+                    inputs: files.clone(),
+                    filter_deleted,
+                    output_time_range: None,
+                }],
+                expired_ssts: vec![],
+                time_window_size: 3600,
+                max_file_size: None,
+            };
+            let merged = DefaultCompactor::with_merger(DefaultSstMerger)
+                .merge_ssts(&compaction_region, picker_output)
+                .await
+                .unwrap();
+            let [output] = merged.files_to_add.as_slice() else {
+                panic!("expected one output: {:?}", merged.files_to_add);
+            };
+            assert_eq!(output.level, 1);
+            assert_eq!(output.num_rows, num_rows, "filter_deleted={filter_deleted}");
+            assert_eq!(output.num_rows_is_logical, filter_deleted);
         }
     }
 

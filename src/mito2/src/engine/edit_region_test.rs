@@ -632,7 +632,7 @@ async fn test_failed_region_edit_preserves_sequence() {
 }
 
 #[tokio::test]
-async fn test_region_edit_clears_preserve_row_sequence() {
+async fn test_region_edit_clears_file_certifications() {
     let mut env = TestEnv::new().await;
     let (engine, _) = create_engine_with_request_listener(&mut env).await;
 
@@ -650,6 +650,8 @@ async fn test_region_edit_clears_preserve_row_sequence() {
     let mut edit = test_region_edit(region.region_id, file_id);
     // The caller claims the file preserves per-row sequences...
     edit.files_to_add[0].preserve_row_sequence = true;
+    // ...and that its row count is logical.
+    edit.files_to_add[0].num_rows_is_logical = true;
 
     engine.edit_region(region.region_id, edit).await.unwrap();
 
@@ -664,6 +666,8 @@ async fn test_region_edit_clears_preserve_row_sequence() {
         .unwrap()
         .1;
     assert!(!file.meta_ref().preserve_row_sequence);
+    // The edit cannot verify how the file was deduplicated either.
+    assert!(!file.meta_ref().num_rows_is_logical);
     assert_eq!(Some(1), file.meta_ref().sequence.map(|s| s.get()));
 }
 

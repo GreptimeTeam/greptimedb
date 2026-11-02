@@ -307,6 +307,7 @@ fn file_meta_from_sst_info(
         index_file_size: 0,
         index_version: 0,
         num_rows: info.num_rows as u64,
+        num_rows_is_logical: false,
         num_row_groups: info.num_row_groups,
         sequence: NonZeroU64::new(sequence),
         partition_expr: None,

@@ -322,10 +322,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // sequence domain but cannot prove or rewrite the physical per-row sequence
         // column. The added files are therefore atomic/untrusted: clear the
         // `preserve_row_sequence` marker so exact sequence-range scans fail closed
-        // until the scan reaches the assigned max sequence.
+        // until the scan reaches the assigned max sequence. Likewise, the edit
+        // cannot verify deduplication, so metadata counts do not trust the files.
         for file in &mut edit.files_to_add {
             file.sequence = NonZeroU64::new(file_sequence);
             file.preserve_row_sequence = false;
+            file.num_rows_is_logical = false;
         }
 
         // Allow retrieving `is_staging` before spawn the edit region task.

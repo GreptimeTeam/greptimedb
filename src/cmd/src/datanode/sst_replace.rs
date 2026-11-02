@@ -164,6 +164,9 @@ impl SstReplaceCommand {
         let mut new_file = old_file.clone();
         new_file.file_size = new_file_size;
         new_file.num_rows = new_num_rows;
+        // Matching physical counts do not certify the replacement's dedup or
+        // deletion semantics. Only a trusted output pipeline can restore this.
+        new_file.num_rows_is_logical = false;
         new_file.num_row_groups = new_num_row_groups;
         new_file.max_row_group_uncompressed_size = max_row_group_uncompressed_size(&parquet_meta);
 
