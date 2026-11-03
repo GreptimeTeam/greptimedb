@@ -3690,8 +3690,8 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let mut physical_target = PermissionTableTarget::new("greptime", "public", physical_table);
-        physical_target.is_physical_metric_table = true;
+        let physical_target = PermissionTableTarget::new("greptime", "public", physical_table)
+            .with_physical_metric_table(true);
         assert_eq!(
             PermissionTableTargets::Resolved(vec![logical_target.clone(), physical_target.clone()]),
             instance

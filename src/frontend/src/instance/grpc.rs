@@ -454,12 +454,12 @@ impl Instance {
                             table_name: table_name.to_string(),
                         })?;
 
-                    let mut target = PermissionTableTarget::new(
+                    let target = PermissionTableTarget::new(
                         &table_name.catalog_name,
                         &table_name.schema_name,
                         &table_name.table_name,
-                    );
-                    target.is_physical_metric_table = table.table_info().is_physical_table();
+                    )
+                    .with_physical_metric_table(table.table_info().is_physical_table());
                     plugins.get::<PermissionCheckerRef>().as_ref()
                         .check_permission_with_table_targets(
                             ctx.current_user(),

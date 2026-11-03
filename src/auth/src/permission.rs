@@ -53,6 +53,12 @@ impl PermissionTableTarget {
             is_physical_metric_table: false,
         }
     }
+
+    /// Sets whether catalog metadata identifies this target as a physical metric table.
+    pub fn with_physical_metric_table(mut self, is_physical_metric_table: bool) -> Self {
+        self.is_physical_metric_table = is_physical_metric_table;
+        self
+    }
 }
 
 /// The result of resolving every table target in a permission request.
