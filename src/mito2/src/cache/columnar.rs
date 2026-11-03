@@ -124,8 +124,6 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     let Ok(_guard) = context.locks[stripe].try_lock() else {
         return Ok(value);
     };
-    // Someone may have admitted the same identity while this load ran; theirs is as good as this
-    // one and is already accounted for, so it wins and this value is dropped.
     if let Some(existing) = get() {
         return Ok(existing);
     }
@@ -234,7 +232,46 @@ mod tests {
         assert_eq!(&[7], value.unwrap().as_slice());
     }
 
-    /// The same, for two identities that share a stripe.
+    /// When two loads of one identity both miss, the later finisher adopts the value admitted first.
+    #[tokio::test]
+    async fn a_load_that_finishes_later_adopts_the_value_admitted_first() {
+        let cache = cache();
+        let identity = "generation/part/racing-page".to_string();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut load_a = Box::pin(load(Some(&cache), identity.clone(), |_| 64, async move {
+            Ok(receiver.await.expect("load A payload sender remains alive"))
+        }));
+        assert!(futures::poll!(&mut load_a).is_pending());
+
+        let value_b = complete_promptly(load(Some(&cache), identity.clone(), |_| 64, async {
+            Ok(vec![1u8])
+        }))
+        .await
+        .expect("load B must finish while load A is parked")
+        .unwrap();
+        assert_eq!(&[1], value_b.as_slice());
+
+        sender.send(vec![2u8]).expect("load A is still waiting");
+        let value_a = complete_promptly(&mut load_a)
+            .await
+            .expect("load A must finish promptly")
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&value_b, &value_a),
+            "later-finishing load must adopt the value admitted by load B"
+        );
+        assert_eq!(&[1], value_a.as_slice());
+
+        let cached = load(Some(&cache), identity, |_| 64, async {
+            panic!("cached value should avoid invoking the loader")
+        })
+        .await
+        .unwrap();
+        assert!(Arc::ptr_eq(&value_b, &cached));
+        assert_eq!(&[1], cached.as_slice());
+    }
+
+    /// The same, for two identities that share one stripe.
     #[tokio::test]
     async fn a_paused_load_does_not_block_a_colliding_identity() {
         let cache = cache();
