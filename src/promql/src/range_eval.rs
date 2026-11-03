@@ -16,6 +16,8 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use common_query::prometheus::is_prometheus_stale_nan;
 use datafusion::arrow::array::{Array, Float64Array};
@@ -220,13 +222,11 @@ struct PendingBatch {
     spans: Vec<Vec<Range<usize>>>,
     /// One output column per field, written by the batch kernel.
     columns: Vec<Vec<Option<f64>>>,
-    /// Per field, the first sample index whose timestamp is after the last point's window end.
-    ///
-    /// Every point in a batch evaluates a later timestamp than the one before it, so a field's
-    /// window end only moves forward: this cursor walks the timestamps once per batch instead of
-    /// binary-searching them once per point. It is relative to the field's retained arrays, which
-    /// [`FieldSamples::advance`] drains, so [`Self::clear_points`] resets it.
+    /// Cursor into each field's retained timestamps; valid across batch flushes, but invalidated
+    /// when `FieldSamples::advance` drains the retained arrays.
     ends: Vec<usize>,
+    /// Whether each cursor has been positioned by binary search since the last drain.
+    positioned: Vec<bool>,
 }
 
 impl PendingBatch {
@@ -237,6 +237,7 @@ impl PendingBatch {
             spans: vec![Vec::new(); fields],
             columns: vec![Vec::new(); fields],
             ends: vec![0; fields],
+            positioned: vec![false; fields],
         }
     }
 
@@ -257,6 +258,7 @@ impl PendingBatch {
             + spans * std::mem::size_of::<Range<usize>>()
             + columns * std::mem::size_of::<Option<f64>>()
             + self.ends.capacity() * std::mem::size_of::<usize>()
+            + self.positioned.capacity() * std::mem::size_of::<bool>()
     }
 
     /// Drops the accumulated points, keeping the allocations.
@@ -266,9 +268,22 @@ impl PendingBatch {
         for spans in &mut self.spans {
             spans.clear();
         }
-        // `advance` drains the retained arrays, so an index into them does not survive a flush.
-        self.ends.fill(0);
     }
+
+    fn reset_cursors(&mut self) {
+        self.ends.fill(0);
+        self.positioned.fill(false);
+    }
+}
+
+#[cfg(test)]
+static POSITION_COMPARISONS: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn timestamp_le(timestamp: i64, eval_ts: i64) -> bool {
+    #[cfg(test)]
+    POSITION_COMPARISONS.fetch_add(1, Ordering::Relaxed);
+    timestamp <= eval_ts
 }
 
 /// Records one point for the next batch call: its evaluation timestamp and, per field, the range
@@ -277,18 +292,23 @@ fn accumulate(pending: &mut PendingBatch, index: usize, eval_ts: i64, fields: &[
     debug_assert_eq!(pending.spans.len(), fields.len());
     pending.indices.push(index);
     pending.eval_ts.push(eval_ts);
-    for ((spans, end), field) in pending
-        .spans
-        .iter_mut()
-        .zip(pending.ends.iter_mut())
-        .zip(fields)
-    {
-        // The window ends after every sample at or before `eval_ts`, and `eval_ts` never goes
-        // backwards within a batch, so the end walks forward instead of being searched for.
-        while *end < field.timestamps.len() && field.timestamps[*end] <= eval_ts {
-            *end += 1;
+    for (field_index, (spans, field)) in pending.spans.iter_mut().zip(fields).enumerate() {
+        // Cursors refer to retained arrays, which are unchanged by flushes. `head` only moves
+        // forward; never revisit samples already behind every remaining window.
+        pending.ends[field_index] = pending.ends[field_index].max(field.head);
+        if !pending.positioned[field_index] {
+            pending.ends[field_index] = field.timestamps[field.head..]
+                .partition_point(|&timestamp| timestamp_le(timestamp, eval_ts))
+                + field.head;
+            pending.positioned[field_index] = true;
+        } else {
+            while pending.ends[field_index] < field.timestamps.len()
+                && timestamp_le(field.timestamps[pending.ends[field_index]], eval_ts)
+            {
+                pending.ends[field_index] += 1;
+            }
         }
-        spans.push(field.head..*end);
+        spans.push(field.head..pending.ends[field_index]);
     }
 }
 
@@ -1389,6 +1409,7 @@ impl RangeEvaluator {
             "`evaluate` flushes the batch before `advance` rewrites the retained arrays a \
              pending span indexes"
         );
+        let mut drains_samples = false;
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
             // histogram checks do not depend on how the series is chunked, but none are kept.
@@ -1397,8 +1418,13 @@ impl RangeEvaluator {
                 field.head = field.timestamps.len();
                 field.histogram_head = field.histograms.len();
             }
+            drains_samples |= field.head > 0;
             field.advance();
             field.advance_histograms();
+        }
+        // A drain shifts retained-array indices. Batch flushes do not, so they leave cursors valid.
+        if drains_samples {
+            self.pending.reset_cursors();
         }
         Ok(())
     }
