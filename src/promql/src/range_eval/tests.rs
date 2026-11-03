@@ -5081,6 +5081,55 @@ fn a_histogram_outside_every_smoothed_window_is_accepted() {
     }
 }
 
+/// One histogram sample of one field, with the reset hint, count and start timestamp the caller
+/// names.
+fn histogram_chunk_hinted(
+    schema: &SeriesSchema,
+    ts: i64,
+    count: f64,
+    reset_hint: CounterResetHint,
+    start_timestamp: Option<i64>,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let mut builder = HistogramBatchBuilder::new();
+    let index = builder
+        .push(HistogramView {
+            schema: 0,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count,
+            sum: count,
+            reset_hint,
+            start_timestamp,
+            custom_values: &[],
+            positive: BucketSideView {
+                span_offsets: &[0],
+                span_lengths: &[1],
+                buckets: &[count],
+            },
+            negative: BucketSideView {
+                span_offsets: &[],
+                span_lengths: &[],
+                buckets: &[],
+            },
+        })
+        .unwrap();
+    let samples = Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(index)]),
+        builder.finish().unwrap(),
+    )
+    .unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from(0u64.to_le_bytes().to_vec()),
+        Some(metric(0)),
+        RawTimestamps::try_new(ScalarBuffer::from(vec![ts])).unwrap(),
+        SeriesFields::try_from_vec(vec![samples]).unwrap(),
+        is_last,
+    )
+    .unwrap()
+}
+
 /// One histogram sample of one field, with the count, sum and start timestamp the caller names.
 fn histogram_chunk_with(
     schema: &SeriesSchema,
@@ -5249,7 +5298,94 @@ fn comparing_a_mixed_series_with_a_scalar_drops_only_the_histogram_positions() {
     );
 }
 
-/// An `offset` that cancels a start timestamp onto zero must not turn it into "no start".
+/// `resets` counts the restarts the payload alone does not show, as the existing planner does.
+///
+/// The existing planner's `NativeHistogramRangeFloatKind::Resets` counts three things: a gauge to
+/// counter edge (a gauge does not continue a counter), a start timestamp inside the window (a
+/// restarted counter whose counts already grew again), and the payload's own drop. Counting only
+/// the payload makes an aggregate over `resets` answer 0 where the existing plan answers 1, which
+/// is a regression: before this route admitted histograms the statement kept the existing plan.
+#[test]
+fn resets_counts_a_start_timestamp_restart_the_counts_do_not_show() {
+    let schema = raw_schema(1);
+    let resets = |chunks: &[RawSeriesChunk]| {
+        let mut evaluator = RangeEvaluator::try_new(
+            &schema,
+            grid(3_000, 1_000, 1),
+            RangeWindow {
+                range_ms: 2_000,
+                offset_ms: 0,
+                anchor_ms: None,
+                modifier: None,
+            },
+            RangeFunction::Resets,
+        )
+        .unwrap();
+        let chunks = collect_chunks(&mut evaluator, chunks);
+        let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+        match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+            SampleRef::Float(value) => value,
+            other => panic!("expected a float, got {}", describe_sample(Some(other))),
+        }
+    };
+
+    // Counts grow from 6 to 7, so the payload shows no reset; the second sample's start of 2.5s
+    // lies inside the window, which is the restart the existing planner counts.
+    assert_eq!(
+        resets(&[
+            histogram_chunk_hinted(&schema, 2_000, 6.0, CounterResetHint::Unknown, None, false),
+            histogram_chunk_hinted(
+                &schema,
+                3_000,
+                7.0,
+                CounterResetHint::Unknown,
+                Some(2_500),
+                true
+            ),
+        ]),
+        1.0,
+        "a start timestamp inside the window is a reset even when the counts grew"
+    );
+
+    // The same counts across a gauge-to-counter edge: Prometheus counts no reset there, and the
+    // golden case `resets 25000 0` pins that. The existing planner counts one, so this is a place
+    // where the two routes deliberately differ — the golden decides, because reproducing the
+    // existing planner's count would make this route answer what Prometheus does not.
+    assert_eq!(
+        resets(&[
+            histogram_chunk_hinted(&schema, 2_000, 6.0, CounterResetHint::Gauge, None, false),
+            histogram_chunk_hinted(&schema, 3_000, 7.0, CounterResetHint::Unknown, None, true),
+        ]),
+        0.0,
+        "Prometheus counts no reset across a gauge-to-counter edge"
+    );
+
+    // Two plain counter samples that grew: no restart, so the answer stays 0.
+    assert_eq!(
+        resets(&[
+            histogram_chunk_hinted(
+                &schema,
+                2_000,
+                6.0,
+                CounterResetHint::NotCounterReset,
+                None,
+                false
+            ),
+            histogram_chunk_hinted(
+                &schema,
+                3_000,
+                7.0,
+                CounterResetHint::NotCounterReset,
+                None,
+                true
+            ),
+        ]),
+        0.0,
+        "a counter that only grew did not restart"
+    );
+}
+
+/// An `offset` that cancels a start timestamp onto zero must not turn it into "no start"./// An `offset` that cancels a start timestamp onto zero must not turn it into "no start".
 ///
 /// A start of `0` on the stored histogram means the sender stated none, so the check reads it as
 /// absent. Moving a real start forward by a negative offset could land it exactly on that marker:

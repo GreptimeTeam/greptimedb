@@ -42,9 +42,7 @@ use crate::grid_series::{
     series_bytes, table_bytes,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
-use crate::histogram_eval::{
-    evaluate_histograms_with_annotations, map_native_histogram_with_annotations,
-};
+use crate::histogram_eval::{evaluate_histograms_with_annotations, map_native_histogram};
 use crate::info::{InfoSelector, info_with_reservation};
 use crate::instant_eval::{
     info_sample_times, select_instant_at, select_instants, timestamp_of_evaluated,
@@ -759,7 +757,6 @@ fn misaligned_field(index: usize, time: &TimeAxis, field: &Samples) -> DataFusio
 /// What a map node applies.
 struct MapRuntime {
     ops: Arc<[MapOp]>,
-    annotations: Option<PromqlAnnotationCollector>,
     /// The schema of what the map produces, which is what its input is checked against.
     schema: Arc<SeriesSchema>,
 }
@@ -2428,12 +2425,19 @@ fn map_workspace_bytes(ops: &[MapOp], series: &Series) -> Result<usize> {
     Ok(bound)
 }
 
-/// An upper bound of what a kernel that maps each dense segment of `series` into a float array of
-/// its length allocates: float math over a series of floats and arithmetic against a constant.
+/// An upper bound of what a kernel that maps each dense segment of `series` into a new array of its
+/// length allocates: float math over a series of floats, and arithmetic against a constant, which
+/// also rebuilds a histogram field sample by sample.
 ///
 /// A mapped segment holds its values, rounded up to Arrow's 64-byte alignment, behind the header
 /// of the allocation they share, and keeps the input's validity and axis; the result is assembled
 /// as [`assembly_bytes`] counts it.
+///
+/// A histogram row is not one `f64`: the kernel copies the whole payload into a builder, buckets
+/// included, so charging a float per row under-counts a wide histogram by three orders of
+/// magnitude. The largest row in the field is the one to charge, for the same reason
+/// [`Self::largest_histograms`] charges it: any row can be the one a position picks, and a series
+/// that carries histograms is rebuilt position by position.
 fn mapped_workspace_bytes(series: &Series) -> Result<usize> {
     let segments = series
         .fields
@@ -2442,12 +2446,17 @@ fn mapped_workspace_bytes(series: &Series) -> Result<usize> {
         .fold(0usize, usize::saturating_add);
     let bound = || {
         let mut bytes = assembly_bytes(series.fields.len(), segments, &series.metric)?;
-        for segment in series.fields.iter().flat_map(|field| field.segments()) {
-            bytes = segment
-                .len()
-                .checked_mul(std::mem::size_of::<f64>())?
-                .checked_add(64 + BUFFER_HEADER_BYTES)?
-                .checked_add(bytes)?;
+        for field in series.fields.iter() {
+            let row = histogram_row_bytes(field).map_or(std::mem::size_of::<f64>(), |histogram| {
+                histogram.max(std::mem::size_of::<f64>())
+            });
+            for segment in field.segments() {
+                bytes = segment
+                    .len()
+                    .checked_mul(row)?
+                    .checked_add(64 + BUFFER_HEADER_BYTES)?
+                    .checked_add(bytes)?;
+            }
         }
         Some(bytes)
     };
@@ -3034,7 +3043,6 @@ impl RuntimeNode {
                         input: Box::new(child),
                         map: Some(MapRuntime {
                             ops: Arc::clone(&op.ops),
-                            annotations: None,
                             schema,
                         }),
                         state,
@@ -3493,12 +3501,10 @@ impl RuntimeNode {
                 }
                 input.set_annotations(collector);
             }
-            RuntimeOp::Map { input, map, .. } => {
-                if let Some(map) = map {
-                    map.annotations = Some(collector.clone());
-                }
-                input.set_annotations(collector);
-            }
+            // A map's kernels record nothing: float math and the native-histogram readers answer
+            // a value per sample with no message of their own, so only its child needs the
+            // collector.
+            RuntimeOp::Map { input, .. } => input.set_annotations(collector),
             RuntimeOp::ParameterizedMap {
                 input, parameters, ..
             } => {
@@ -4630,13 +4636,9 @@ impl NodeState {
             // The timer covers this node's own work only: it is dropped before the driver polls
             // the input again.
             let _timer = metrics.timer();
-            map_chunk(
-                &map.schema,
-                &chunk,
-                &map.ops,
-                map.annotations.as_ref(),
-                &mut |bytes| self.buffer.grow(bytes),
-            )
+            map_chunk(&map.schema, &chunk, &map.ops, &mut |bytes| {
+                self.buffer.grow(bytes)
+            })
         };
         metrics.record_input(1, positions);
         if closing {
@@ -5946,7 +5948,6 @@ fn map_chunk(
     schema: &Arc<SeriesSchema>,
     chunk: &EvaluatedChunk,
     ops: &[MapOp],
-    collector: Option<&PromqlAnnotationCollector>,
     admit: &mut dyn FnMut(usize) -> Result<()>,
 ) -> Result<Option<EvaluatedChunk>> {
     let mut series = chunk.series.clone();
@@ -5958,9 +5959,7 @@ fn map_chunk(
                 continue;
             }
             MapOp::Math(math) => map_math(schema, &series, *math)?,
-            MapOp::Histogram(function) => {
-                map_native_histogram_with_annotations(*function, schema, &series, collector)?
-            }
+            MapOp::Histogram(function) => map_native_histogram(*function, schema, &series)?,
         };
         if let Some(mapped) = mapped {
             series = mapped;

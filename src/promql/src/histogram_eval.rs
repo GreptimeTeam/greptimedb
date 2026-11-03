@@ -319,15 +319,6 @@ pub fn map_native_histogram(
     schema: &Arc<SeriesSchema>,
     series: &Series,
 ) -> Result<Option<Series>> {
-    map_native_histogram_with_annotations(function, schema, series, None)
-}
-
-pub(crate) fn map_native_histogram_with_annotations(
-    function: NativeHistogramFunction,
-    schema: &Arc<SeriesSchema>,
-    series: &Series,
-    _collector: Option<&PromqlAnnotationCollector>,
-) -> Result<Option<Series>> {
     validate_grid_series(schema, series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut buckets = Vec::new();

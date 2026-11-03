@@ -629,10 +629,16 @@ impl FloatHistogram {
             return true;
         }
 
-        // Prometheus reads this as `prevStart > 0 && prevStart != prevTs`, which also fires for a
-        // previous start timestamp later than its own sample. That is not a counter the sender can
-        // have observed, so requiring it to be at or before `previous_ts` keeps such a payload from
-        // being reported as a reset.
+        // The previous sample's own start timestamp witnesses a restart between it and the one
+        // before, which the current sample inherits. Requiring it to be at or before `previous_ts`
+        // keeps a start later than its own sample — which no sender can have observed — from being
+        // read as one.
+        //
+        // What this does NOT implement is the rule that two adjacent samples sharing the same
+        // non-zero start timestamp never restarted between them: here only the previous sample's
+        // start is compared with its own time, so equal starts are not excluded. The existing
+        // planner's `detect_start_timestamp_reset` has the same gap, so the two routes agree, which
+        // is what this route owes it; closing the gap is a change to both.
         previous_start <= previous_ts && previous_start != 0 && previous_start != previous_ts
     }
 

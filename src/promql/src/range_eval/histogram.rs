@@ -150,8 +150,8 @@ pub(super) fn evaluate(
             };
             float(seconds(ts))
         }
-        Resets => float(edges(floats, histograms, EdgeKind::Resets)? as f64),
-        Changes => float(edges(floats, histograms, EdgeKind::Changes)? as f64),
+        Resets => float(edges(floats, histograms, EdgeKind::Resets, offset_ms)? as f64),
+        Changes => float(edges(floats, histograms, EdgeKind::Changes, offset_ms)? as f64),
         SumOverTime | AvgOverTime if floats.is_none() => {
             let op = if function == SumOverTime {
                 HistogramAggregate::Sum
@@ -535,21 +535,40 @@ fn merged<'a>(
 
 /// Prometheus `funcResets` and `funcChanges` over floats and histograms: a change of kind
 /// counts as one edge.
-fn edges(floats: Option<FloatWindow<'_>>, histograms: &Histograms, kind: EdgeKind) -> Result<u64> {
+fn edges(
+    floats: Option<FloatWindow<'_>>,
+    histograms: &Histograms,
+    kind: EdgeKind,
+    offset_ms: i64,
+) -> Result<u64> {
     let mut count = 0;
-    let mut previous: Option<Sample<'_>> = None;
-    for (_, current) in merged(floats, histograms) {
-        if let Some(previous) = previous {
+    let mut previous: Option<(i64, Sample<'_>)> = None;
+    for (timestamp, current) in merged(floats, histograms) {
+        if let Some((previous_ts, previous)) = previous {
             count += match (previous, current) {
                 (Sample::Float(a), Sample::Float(b)) => count_edges(&[a, b], kind),
                 (Sample::Histogram(a), Sample::Histogram(b)) => u64::from(match kind {
-                    EdgeKind::Resets => b.detect_reset(a)?,
+                    // `resets` counts the restarts the payload alone does not show. A start
+                    // timestamp inside the window witnesses a counter that began again, whose
+                    // counts may have grown across the restart, which is the rule `rate` and
+                    // `increase` already read.
+                    //
+                    // A gauge-to-counter edge is deliberately NOT counted, although the existing
+                    // planner counts one (`NativeHistogramRangeFloatKind::Resets`). Prometheus
+                    // does not: the golden case `resets 25000 0` in `histogram_cases.txt` holds a
+                    // gauge sample followed by a counter sample with identical payloads and
+                    // expects 0. Where the two disagree the golden wins, because the existing
+                    // planner's count there is not a behaviour this route can reproduce and stay
+                    // correct.
+                    EdgeKind::Resets => {
+                        b.detect_counter_reset_shifted(a, previous_ts, timestamp, offset_ms)
+                    }
                     EdgeKind::Changes => !b.equals(a),
                 }),
                 _ => 1,
             };
         }
-        previous = Some(current);
+        previous = Some((timestamp, current));
     }
     Ok(count)
 }
