@@ -57,12 +57,16 @@ impl Drop for NativeNodeDepthGuard {
     }
 }
 
+use datafusion::arrow::datatypes::DataType;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 
+use common_query::native_histogram::native_histogram_arrow_type;
+
+use crate::extension_plan::FieldKind;
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::info::InfoSelector;
 use crate::map::MathOp;
@@ -381,56 +385,55 @@ impl NativeType {
     }
 }
 
-/// The sample kind a series field carries.
+/// The [`FieldKind`] every referenced field of a scan carries, or `None` when they disagree or one
+/// is a type this route does not answer.
 ///
-/// This is a property of the samples, not of the frame: one field holds either floats or native
-/// histograms, and the frame's payload branches keep them apart. Consumers that must name an Arrow
-/// column for a field - the physical output conversion, for one - need the kind before the first
-/// batch arrives, which is why the compiled tree can answer it from the kinds its inputs carry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SampleKind {
-    /// One `f64` per sample.
-    Float,
-    /// One canonical native histogram per sample.
-    Histogram,
-}
-
-impl SampleKind {
-    /// The kind of a scan whose selected fields are all `float64`, all native histograms, or -
-    /// `None` - a mixture this model does not describe.
-    pub fn uniform(kinds: impl IntoIterator<Item = Self>) -> Option<Self> {
-        let mut kinds = kinds.into_iter();
-        let first = kinds.next()?;
-        kinds.all(|kind| kind == first).then_some(first)
+/// The route declares one output column per field, so a statement whose selectors carry different
+/// kinds has no column to declare them in and keeps the existing plan. `Float64` and the canonical
+/// native histogram struct are the two kinds this route answers.
+pub fn uniform_field_kind<'a>(
+    kinds: impl IntoIterator<Item = Option<&'a DataType>>,
+) -> Option<FieldKind> {
+    let mut answer = None;
+    for kind in kinds {
+        let this = match kind? {
+            DataType::Float64 => FieldKind::Float,
+            data_type if data_type == &native_histogram_arrow_type() => FieldKind::Histogram,
+            _ => return None,
+        };
+        match answer {
+            None => answer = Some(this),
+            Some(seen) if seen == this => {}
+            Some(_) => return None,
+        }
     }
+    answer
 }
 
 impl NativeNode {
-    /// What kind of sample this node answers with, given the kind its input leaves carry.
+    /// The kind this node's output field carries, given the kind its input carries.
     ///
-    /// `None` means this compiler cannot name the kind for the shape: either the operation changes
-    /// the kind without this walk knowing the rule, or it combines several kinds. A caller that
-    /// must declare an output column treats `None` as "not this route", because guessing the kind
-    /// would declare a column the first batch could not fill.
-    pub fn output_sample_kind(&self, input: SampleKind) -> Option<SampleKind> {
-        let kind_of = |node: &NativeNode| node.output_sample_kind(input);
+    /// `None` means this walk cannot name it: a shape whose samples the model does not describe
+    /// keeps the existing plan rather than declaring a column the first batch might not fill.
+    pub fn output_field_kind(&self, input: FieldKind) -> Option<FieldKind> {
+        let kind_of = |node: &NativeNode| node.output_field_kind(input);
         match &self.expr {
             NativeExpr::Input(_) => Some(input),
             // `timestamp()` replaces each input sample with its evaluation timestamp as a float.
-            NativeExpr::Timestamp { .. } => Some(SampleKind::Float),
+            NativeExpr::Timestamp { .. } => Some(FieldKind::Float),
             // The window functions that answer with a histogram are the ones the range kernel says
             // yield one; every other range function reduces its window to a float.
             NativeExpr::Window { input, op } => {
                 let inner = kind_of(input)?;
                 (!op.function.yields_histograms())
-                    .then_some(SampleKind::Float)
+                    .then_some(FieldKind::Float)
                     .or(Some(inner))
             }
             // An instant selection reads one sample of the field, so it keeps the kind; the two
             // timestamp forms replace the sample with a float of its own time.
             NativeExpr::Instant { input, op } => match op.value {
                 InstantValue::Sample => kind_of(input),
-                InstantValue::Timestamp | InstantValue::InfoTimestamp => Some(SampleKind::Float),
+                InstantValue::Timestamp | InstantValue::InfoTimestamp => Some(FieldKind::Float),
             },
             // `histogram_count` and the other native-histogram readers answer with one float per
             // sample; the map kernels that keep the samples keep their kind as well.
@@ -439,14 +442,14 @@ impl NativeNode {
                 for op in op.ops.iter() {
                     kind = match op {
                         // The native-histogram readers answer one float per sample.
-                        MapOp::Histogram(_) => SampleKind::Float,
+                        MapOp::Histogram(_) => FieldKind::Float,
                         // A label rewrite writes labels only, so the samples it passes on are the
                         // ones it was given, kind included.
                         MapOp::Label(_) => kind,
                         // No math function keeps a histogram, so a histogram reaching one is a
                         // shape this walk does not name rather than a silent float.
-                        MapOp::Math(_) if kind == SampleKind::Histogram => return None,
-                        MapOp::Math(_) => SampleKind::Float,
+                        MapOp::Math(_) if kind == FieldKind::Histogram => return None,
+                        MapOp::Math(_) => FieldKind::Float,
                     };
                 }
                 Some(kind)
@@ -463,10 +466,10 @@ impl NativeNode {
                 // `bool` makes a comparison answer 1 or 0 whatever its operands hold, which is
                 // what the kernel does before it looks at the kinds.
                 if matching.return_bool {
-                    return Some(SampleKind::Float);
+                    return Some(FieldKind::Float);
                 }
                 match (&left.expr, &right.expr) {
-                    (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => Some(SampleKind::Float),
+                    (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => Some(FieldKind::Float),
                     (NativeExpr::Scalar(_), _) => kind_of(right),
                     (_, NativeExpr::Scalar(_)) => kind_of(left),
                     (_, _) => {

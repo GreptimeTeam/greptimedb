@@ -7743,24 +7743,39 @@ async fn histogram_into_an_aggregate_keeps_the_existing_plan_below_any_operator(
     }
 }
 
-/// A float-producing prefix around an aggregate stays on the native route.
+/// A histogram statement runs natively as soon as no aggregate consumes it.
 ///
-/// `count_over_time` over a histogram answers floats, so the aggregate folds floats and the split
-/// is sound; only a histogram entering the aggregate is refused.
+/// This is the admission the route gained: the field's own type decides, so a selector, a range
+/// function that answers histograms and scalar arithmetic over them all run here, while an
+/// aggregate that would fold them keeps the existing plan. `rate` is in the histogram-answering
+/// set, so `sum(rate(h[5m]))` is refused by the same rule as `sum(h)`.
 #[tokio::test]
-async fn float_prefix_into_an_aggregate_still_runs_natively() {
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
-    let plan = build_native_fused_plan_with_provider(
-        "sum(count_over_time(some_metric[5m]))",
-        true,
-        table_provider,
-    )
-    .await;
-    assert!(
-        find_fused_series(&plan).is_some(),
-        "{}",
-        plan.display_indent_schema()
-    );
+async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
+    for query in [
+        "some_metric",
+        "rate(some_metric[5m])",
+        "sum_over_time(some_metric[5m])",
+        "some_metric * 2",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "{query} left the native route: {}",
+            plan.display_indent_schema()
+        );
+    }
+    // `rate` answers histograms, so an aggregate over it folds histograms and keeps the existing
+    // plan; the float-answering prefix case is covered by the kind walk, not by this statement.
+    for query in ["sum(some_metric)", "sum(rate(some_metric[5m]))"] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none() && find_aggregate_finalize(&plan).is_none(),
+            "{query} ran a native fold over histograms: {}",
+            plan.display_indent_schema()
+        );
+    }
 }
 
 /// An instant selection over a native histogram keeps the histogram, so its output column stays the
