@@ -493,7 +493,7 @@ async fn native_hybrid_binary_05_06_08() {
     execute_sql(&instance, &format!("CREATE TABLE {HYBRID_MATCH_RIGHT_UNPARTITIONED} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, v DOUBLE, PRIMARY KEY (job, instance))")).await;
     execute_sql(
         &instance,
-        &format!("INSERT INTO {HYBRID_MATCH_LEFT} VALUES ({EVAL_MILLIS}, 'api', 'a1', 10)"),
+        &format!("INSERT INTO {HYBRID_MATCH_LEFT} VALUES ({EVAL_MILLIS}, 'api', 'a1', 10), ({EVAL_MILLIS}, 'other', 'a2', 11), ({EVAL_MILLIS}, 'other', 'a3', 12)"),
     )
     .await;
     for table in [HYBRID_MATCH_RIGHT, HYBRID_MATCH_RIGHT_UNPARTITIONED] {
@@ -543,12 +543,13 @@ async fn native_hybrid_binary_05_06_08() {
         displayable(frontend.as_ref()).indent(false)
     );
 
-    // On the two-scan route the right side's two `job="other"` series are a duplicate match group,
-    // which Prometheus refuses whether or not the left side has a series to match them with
-    // (`VectorBinop` in engine.go). The 5 above comes from the matcher `{job="api"}` the existing
-    // plan copies to the right side before matching.
-    let unpartitioned =
-        format!("{HYBRID_MATCH_LEFT}{{job=\"api\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}");
+    // Both operands have two `job="other"` series at `EVAL_MILLIS` (inserted above), so this
+    // checks a genuine in-lookback many-to-many duplicate group on both sides. Prometheus refuses
+    // the right-side duplicate (`VectorBinop` in engine.go). The preceding `api` query remains a
+    // separate single-match, successful case.
+    let unpartitioned = format!(
+        "{HYBRID_MATCH_LEFT}{{job=\"other\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}"
+    );
     let mut query_ctx = QueryContext::with_db_name(None);
     query_ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
     let output = instance
