@@ -312,12 +312,11 @@ fn data_free_value_field(stmt: &EvalStmt) -> Arc<str> {
     fn visit(expr: &PromExpr, targets: &mut Vec<String>) {
         match expr {
             PromExpr::Aggregate(aggregate) => {
-                if aggregate.op.id() == token::T_COUNT_VALUES {
-                    if let Some(param) = &aggregate.param {
-                        if let PromExpr::StringLiteral(value) = unparen(param) {
-                            targets.push(value.val.clone());
-                        }
-                    }
+                if aggregate.op.id() == token::T_COUNT_VALUES
+                    && let Some(param) = &aggregate.param
+                    && let PromExpr::StringLiteral(value) = unparen(param)
+                {
+                    targets.push(value.val.clone());
                 }
                 if let Some(modifier) = &aggregate.modifier {
                     match modifier {
