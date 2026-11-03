@@ -952,7 +952,9 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                     .collect(),
                 Grouping::Without(names) => tags
                     .into_iter()
-                    .filter(|tag| !names.iter().any(|name| name.as_ref() == tag))
+                    .filter(|tag| {
+                        tag != METRIC_NAME && !names.iter().any(|name| name.as_ref() == tag)
+                    })
                     .collect(),
             })
         }
@@ -980,8 +982,14 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
             | BoundVectorOp::Sort(_) => native_output_tags(input, source_tags),
-            BoundVectorOp::Histogram(_) => native_output_tags(input, source_tags)
-                .map(|tags| tags.into_iter().filter(|tag| tag != "le").collect()),
+            // Keep in sync with promql::grid_series::METADATA_LABELS, which is crate-private.
+            BoundVectorOp::Histogram(_) => native_output_tags(input, source_tags).map(|tags| {
+                tags.into_iter()
+                    .filter(|tag| {
+                        tag != "le" && tag != "__name__" && tag != "__type__" && tag != "__unit__"
+                    })
+                    .collect()
+            }),
             BoundVectorOp::Absent { labels } => Some(
                 labels
                     .tags()
@@ -1007,7 +1015,9 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                     }
                     Grouping::Without(names) => tags
                         .into_iter()
-                        .filter(|tag| !names.iter().any(|name| name.as_ref() == tag))
+                        .filter(|tag| {
+                            tag != METRIC_NAME && !names.iter().any(|name| name.as_ref() == tag)
+                        })
                         .collect(),
                 })
             }
@@ -1384,7 +1394,7 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, hybrid_binary_admitted,
+        METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, hybrid_binary_admitted,
         independent_scan_pair, native_output_tags, native_promql_requested, scan_time_filter,
     };
 
@@ -1667,6 +1677,43 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn output_tags_without_grouping_drops_metric_name() {
+        let sources = [vec![
+            "instance".to_string(),
+            METRIC_NAME.to_string(),
+            "job".to_string(),
+        ]];
+
+        let sum = compiled_test_tree("sum without (instance) (x)");
+        assert_eq!(
+            Some(vec!["job".to_string()]),
+            native_output_tags(sum.root(), &sources)
+        );
+
+        let count_values = compiled_test_tree("count_values without (instance) (\"sample\", x)");
+        assert_eq!(
+            Some(vec!["job".to_string(), "sample".to_string()]),
+            native_output_tags(count_values.root(), &sources)
+        );
+    }
+
+    #[test]
+    fn histogram_quantile_output_tags_drop_bucket_and_metadata_labels() {
+        let sources = [vec![
+            "le".to_string(),
+            "__name__".to_string(),
+            "__type__".to_string(),
+            "__unit__".to_string(),
+            "job".to_string(),
+        ]];
+        let tree = compiled_test_tree("histogram_quantile(0.9, x)");
+        assert_eq!(
+            Some(vec!["job".to_string()]),
+            native_output_tags(tree.root(), &sources)
+        );
     }
 
     /// A map that only computes values passes its input's labels through unchanged.
