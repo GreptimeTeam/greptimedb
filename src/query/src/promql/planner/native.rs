@@ -1014,9 +1014,17 @@ fn exportable(node: &NativeNode) -> bool {
 /// Both ends of the comparison come from the classification the physical planner applies to the
 /// tree it builds, so a cut here is a tree the physical planner would also have had to gather.
 fn cut_as_segment(node: &NativeNode) -> bool {
-    exportable(node)
-        && !matches!(node.expr, NativeExpr::Input(_))
-        && !matches!(input_locality(node), InputLocality::SinglePartition)
+    if !exportable(node)
+        || matches!(node.expr, NativeExpr::Input(_))
+        || matches!(input_locality(node), InputLocality::SinglePartition)
+    {
+        return false;
+    }
+
+    // A segment builder needs an input, so data-free subtrees stay with their parent.
+    let mut sources = Vec::new();
+    collect_segment_inputs(node, &mut sources);
+    !sources.is_empty()
 }
 
 /// One segment: its tree rewritten to read only its own inputs, the scans it reads, and the
@@ -2417,6 +2425,21 @@ mod tests {
         assert!(!segment.cut.is_empty());
         assert_eq!(segment.cut.len(), 1);
         assert_eq!(vec![0], input_sources(&segment.cut[0]));
+    }
+
+    #[test]
+    fn segmentation_leaves_a_data_free_only_candidate_unchanged() {
+        for query in ["sum(vector(1))", "sum(abs(vector(1)))"] {
+            let tree = compiled_test_tree(query);
+            let segment = cut_segments(tree.root());
+            assert!(segment.sources.is_empty(), "{query}");
+            assert!(segment.cut.is_empty(), "{query}");
+            assert_eq!(
+                tree.to_string(),
+                NativeTree::try_new(segment.node).unwrap().to_string(),
+                "{query}"
+            );
+        }
     }
 
     #[test]

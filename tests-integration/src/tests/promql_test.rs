@@ -7335,8 +7335,8 @@ async fn native_promql_recursive_matching_segments_match_legacy() {
 ///
 /// One statement per shape the cut can meet, each asserting only what the rule says: a tree that
 /// already runs on every partition stays one node, a matching tree routes instead of gathering, a
-/// global fold over per-series work cuts that work out, and a constant is never cut out because a
-/// boundary cannot carry one.
+/// global fold over per-series work cuts that work out, and data-free expressions stay in the
+/// parent instead of becoming segments.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     common_telemetry::init_default_ut_logging();
@@ -7418,23 +7418,28 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
             1usize,
             "a constant is embedded, not cut out",
         ),
+        (
+            "sum(topk(1, seg_a)) + vector(1)",
+            1usize,
+            "the data-free vector stays in the parent while the data prefix is cut",
+        ),
     ] {
         let sql = format!("TQL EVAL (0, 1, '1s') {query}");
         observer.clear();
         let native = eval_text(native_tql_output(&instance, &sql, true).await);
         let root = observer.root_plan();
         let frontend = fused_in(&root);
-        let mut regions = 0;
+        let mut regions = Vec::new();
         for plan in observer.region_plans() {
-            regions += fused_in(&plan).len();
+            regions.extend(fused_in(&plan));
         }
         assert_eq!(
-            frontend.len() + regions,
+            frontend.len() + regions.len(),
             cuts + 1,
             "{query}: {why}: expected {} fused nodes, found {} at the frontend and {} in the region: {}",
             cuts + 1,
             frontend.len(),
-            regions,
+            regions.len(),
             datafusion::physical_plan::displayable(root.as_ref()).indent(true)
         );
         if cuts > 0 {
@@ -7444,6 +7449,28 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
                 "{query}: {why}: the gathered node is the frontend's own: {}",
                 datafusion::physical_plan::displayable(root.as_ref()).indent(true)
             );
+        }
+        if query == "sum(topk(1, seg_a)) + vector(1)" {
+            let parent = datafusion::physical_plan::displayable(frontend[0].as_ref())
+                .indent(true)
+                .to_string();
+            let parent_tree = parent.split_once("NativeTree").unwrap().1;
+            assert!(parent_tree.contains("VectorOf"), "{parent_tree}");
+            assert!(
+                parent_tree.contains("Input evaluated samples source=0"),
+                "the parent must read the data segment: {parent_tree}"
+            );
+            assert!(!parent_tree.contains("Instant"), "{parent_tree}");
+            assert_eq!(regions.len(), 1, "{query}: the data prefix must be cut");
+            let prefix = datafusion::physical_plan::displayable(regions[0].as_ref())
+                .indent(true)
+                .to_string();
+            let prefix_tree = prefix.split_once("NativeTree").unwrap().1;
+            assert!(prefix_tree.contains("Instant"), "{prefix_tree}");
+            assert!(!prefix_tree.contains("VectorOf"), "{prefix_tree}");
+            let mut rows = eval_values(native_tql_output(&instance, &sql, true).await);
+            rows.sort_by_key(|row| row.0);
+            assert_eq!(rows, vec![(0, 12.0), (1_000, 14.0)], "{query}");
         }
         let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
         assert_eq!(native, legacy, "{query}: answers differ");

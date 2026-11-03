@@ -3471,6 +3471,111 @@ async fn native_fused_nested_aggregate_splits_at_the_innermost_aggregate() {
     }
 }
 
+/// A data-free vector stays in the gathered parent while the data-bearing prefix is cut.
+#[tokio::test]
+async fn native_fused_data_free_vector_does_not_block_segmentation() {
+    let query = "sum(topk(1, some_metric)) + vector(1)";
+    let native = build_native_fused_plan(query, true).await;
+    let legacy = build_native_fused_plan(query, false).await;
+    println!("native enabled:\n{}", native.display_indent());
+    println!("legacy:\n{}", legacy.display_indent());
+
+    let LogicalPlan::Extension(Extension { node }) = &native else {
+        panic!("expected a native parent rather than a legacy root: {native}");
+    };
+    let parent = node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .unwrap_or_else(|| panic!("expected a fused root rather than a legacy root: {native}"));
+    assert_eq!(parent.promql(), parser::parse(query).unwrap().to_string());
+    let NativeExpr::Binary { left, right, .. } = &parent.tree().root().expr else {
+        panic!("expected the whole binary expression in the native parent: {native}");
+    };
+    assert!(
+        matches!(&right.expr, NativeExpr::VectorOf { .. }),
+        "the data-free vector must stay in the parent: {native}"
+    );
+    let NativeExpr::Aggregate { input, .. } = &left.expr else {
+        panic!("expected sum in the parent: {native}");
+    };
+    let NativeExpr::Vector { input, .. } = &input.expr else {
+        panic!("expected topk in the parent: {native}");
+    };
+    assert!(
+        matches!(&input.expr, NativeExpr::Input(input) if input.source_index == 0),
+        "the data-bearing prefix must be replaced by a segment input: {native}"
+    );
+    assert_eq!(parent.children().len(), 1, "{native}");
+    let LogicalPlan::Extension(Extension { node }) = &parent.children()[0] else {
+        panic!("expected a fused prefix segment: {native}");
+    };
+    let prefix = node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .unwrap_or_else(|| panic!("expected a fused prefix segment: {native}"));
+    assert!(
+        matches!(&prefix.tree().root().expr, NativeExpr::Instant { .. }),
+        "the prefix must evaluate the selector in its own segment: {native}"
+    );
+    println!("native parent tree: {}", parent.tree());
+    println!("native prefix tree: {}", prefix.tree());
+    assert!(find_fused_series(&legacy).is_none(), "{legacy}");
+}
+
+/// Source-free statements still plan as one native node without needing a segment.
+#[tokio::test]
+async fn native_fused_data_free_aggregate_stays_single_node() {
+    let query = "sum(vector(1))";
+    let plan = build_native_fused_plan(query, true).await;
+    let LogicalPlan::Extension(Extension { node }) = &plan else {
+        panic!("expected a native root: {plan}");
+    };
+    let fused = node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .unwrap_or_else(|| panic!("expected a fused root: {plan}"));
+    let NativeExpr::Aggregate { input, .. } = &fused.tree().root().expr else {
+        panic!("expected the aggregate in the native root: {plan}");
+    };
+    assert!(matches!(&input.expr, NativeExpr::VectorOf { .. }), "{plan}");
+    assert!(fused.children().is_empty(), "{plan}");
+}
+
+/// Scalar broadcasts still leave the data-bearing prefix in its own segment.
+#[tokio::test]
+async fn native_fused_scalar_broadcast_keeps_segmentation() {
+    let query = "sum(topk(1, some_metric)) + 1";
+    let plan = build_native_fused_plan(query, true).await;
+    let LogicalPlan::Extension(Extension { node }) = &plan else {
+        panic!("expected a native parent: {plan}");
+    };
+    let parent = node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .unwrap_or_else(|| panic!("expected a fused parent: {plan}"));
+    let NativeExpr::Binary { left, right, .. } = &parent.tree().root().expr else {
+        panic!("expected the binary in the native parent: {plan}");
+    };
+    assert!(matches!(&right.expr, NativeExpr::Scalar(_)), "{plan}");
+    let NativeExpr::Aggregate { input, .. } = &left.expr else {
+        panic!("expected sum in the parent: {plan}");
+    };
+    let NativeExpr::Vector { input, .. } = &input.expr else {
+        panic!("expected topk in the parent: {plan}");
+    };
+    assert!(
+        matches!(&input.expr, NativeExpr::Input(input) if input.source_index == 0),
+        "the data prefix must remain cut: {plan}"
+    );
+    assert_eq!(parent.children().len(), 1, "{plan}");
+    let prefix = find_fused_series(&parent.children()[0])
+        .unwrap_or_else(|| panic!("expected a fused prefix segment: {plan}"));
+    assert!(
+        matches!(&prefix.tree().root().expr, NativeExpr::Instant { .. }),
+        "{plan}"
+    );
+}
+
 /// A nested multi-source matching subtree is built as a segment consuming each source's explicit frames.
 #[tokio::test]
 async fn native_fused_multi_source_matching_segment_is_constructed() {
