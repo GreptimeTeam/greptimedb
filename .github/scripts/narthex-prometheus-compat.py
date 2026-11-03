@@ -185,13 +185,31 @@ def normalize_greptime(payload: dict, kind: str) -> dict:
     if isinstance(result, list):
         for item in result:
             labels = {k: v for k, v in (item.get("metric") or {}).items() if v != ""}
-            if kind == "instant":
+            if item.get("value") is not None:
                 points = [{"t": millis(item["value"][0]), "v": float(item["value"][1])}]
             else:
+                # An instant answer whose series holds several points comes back as `values`,
+                # the same shape as a range answer.
                 points = [{"t": millis(t), "v": float(v)} for t, v in item.get("values") or []]
             series.append({"labels": labels, "points": points})
 
     return {"type": "vector" if kind == "instant" else "matrix", "series": sort_series(series)}
+
+
+NAMED_FLOATS = {"NaN": math.nan, "+Inf": math.inf, "-Inf": -math.inf}
+
+
+def as_float(value) -> float:
+    """A sample value from either side as a float.
+
+    The oracle writes NaN and the infinities as the strings JSON cannot express, and GreptimeDB's
+    HTTP API writes them the same way, so both need the same reading.
+    """
+    if isinstance(value, str):
+        if value in NAMED_FLOATS:
+            return NAMED_FLOATS[value]
+        return float(value)
+    return float(value)
 
 
 def close_enough(left: float, right: float) -> bool:
@@ -215,6 +233,19 @@ FUNCTIONS_WITHOUT_METRIC_NAME = (
     "idelta(",
     "deriv(",
     "predict_linear(",
+    # Range and subquery aggregation functions change what the samples mean, so Prometheus drops
+    # the metric name on them too.
+    "avg_over_time(",
+    "min_over_time(",
+    "max_over_time(",
+    "sum_over_time(",
+    "count_over_time(",
+    "last_over_time(",
+    "first_over_time(",
+    "stddev_over_time(",
+    "stdvar_over_time(",
+    "quantile_over_time(",
+    "present_over_time(",
 )
 
 
@@ -263,7 +294,7 @@ def compare_series(expected: list[dict], actual: list[dict]) -> list[str]:
         for t in sorted(set(act_points) - set(exp_points)):
             problems.append(f"{key} unexpected point at t={t} (greptimedb={act_points[t]})")
         for t in sorted(set(exp_points) & set(act_points)):
-            if not close_enough(exp_points[t], act_points[t]):
+            if not close_enough(as_float(exp_points[t]), as_float(act_points[t])):
                 problems.append(
                     f"{key} t={t}: prometheus={exp_points[t]!r} greptimedb={act_points[t]!r}"
                 )
@@ -331,7 +362,7 @@ def run_case(args, case_path: Path) -> list[dict]:
             )
 
         if answer.get("type") == "scalar":
-            if not close_enough(answer["scalar"], actual["scalar"]):
+            if not close_enough(as_float(answer["scalar"]), as_float(actual["scalar"])):
                 entry["problems"].append(
                     f"scalar differs: prometheus={answer['scalar']!r}"
                     f" greptimedb={actual['scalar']!r}"

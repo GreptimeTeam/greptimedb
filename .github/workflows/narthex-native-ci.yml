@@ -18,7 +18,7 @@ name: Narthex Native CI
 # fallback: a suite that passes with the switch on does not by itself show that a statement ran
 # natively. These jobs check the native route directly, each on its own axis:
 #
-#   promql-sqlness    every PromQL sqlness case, native expectations kept in `.native.result`
+#   promql-sqlness    every PromQL sqlness case, each case keeps its own `.result`
 #   prometheus-compat GreptimeDB against the pinned Prometheus engine, answer by answer
 #   vm-performance    candidate, the narthex baseline and VictoriaMetrics on one machine
 #
@@ -126,7 +126,7 @@ jobs:
           name: narthex-native-bins
           path: bins
       - name: Check every selected case has a native expectation
-        # Runs before any server starts: a new PromQL case must not pass by reading `.result`.
+        # Runs before any server starts: a new PromQL case must ship its expectation.
         run: python3 .github/scripts/narthex-promql-cases.py --command check
       - name: Stage the selected standalone cases
         run: |
@@ -138,7 +138,7 @@ jobs:
             -c "$RUNNER_TEMP/narthex-cases" \
             --bins-dir ./bins \
             --enable-native-promql \
-            --result-extension native.result \
+            --result-extension result \
             --env-filter '^standalone$' \
             --preserve-state 2>&1 | tee "$RUNNER_TEMP/sqlness-native.log"
       - name: Report which route answered each planned statement
@@ -163,7 +163,7 @@ jobs:
           name: narthex-sqlness-native
           path: |
             ${{ runner.temp }}/sqlness-native.log
-            ${{ runner.temp }}/narthex-cases/**/*.native.result
+            ${{ runner.temp }}/narthex-cases/**/*.result
           retention-days: 7
 
   prometheus-compat:

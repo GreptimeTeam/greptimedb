@@ -47,6 +47,33 @@ import (
 // encoding them as `null` would make a missing sample indistinguishable from NaN.
 type Float float64
 
+func (f *Float) UnmarshalJSON(data []byte) error {
+	var asNumber float64
+	if err := json.Unmarshal(data, &asNumber); err == nil {
+		*f = Float(asNumber)
+		return nil
+	}
+	var asText string
+	if err := json.Unmarshal(data, &asText); err != nil {
+		return fmt.Errorf("sample value is neither a number nor a named float: %s", data)
+	}
+	switch asText {
+	case "NaN":
+		*f = Float(math.NaN())
+	case "+Inf":
+		*f = Float(math.Inf(1))
+	case "-Inf":
+		*f = Float(math.Inf(-1))
+	default:
+		parsed, err := strconv.ParseFloat(asText, 64)
+		if err != nil {
+			return fmt.Errorf("sample value %q: %w", asText, err)
+		}
+		*f = Float(parsed)
+	}
+	return nil
+}
+
 func (f Float) MarshalJSON() ([]byte, error) {
 	v := float64(f)
 	switch {
@@ -191,6 +218,12 @@ func evaluate(c Case) ([]Answer, error) {
 		LookbackDelta:        lookback,
 		EnableAtModifier:     true,
 		EnableNegativeOffset: true,
+		// Without this the engine dereferences a nil function for a subquery that leaves its step
+		// out (`avg_over_time(x[2m:])`). Prometheus' own default is one minute.
+		NoStepSubqueryIntervalFn: func(rangeMillis int64) int64 {
+			_ = rangeMillis
+			return 60_000
+		},
 		// The parser options Prometheus' own test harness enables, so a fixture may use them.
 		Parser: parser.NewParser(parser.Options{
 			EnableExperimentalFunctions:  true,

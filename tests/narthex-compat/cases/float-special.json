@@ -1,0 +1,38 @@
+{
+  "name": "float-special-values",
+  "series": [
+    {
+      "labels": {"__name__": "special_metric", "kind": "nan"},
+      "samples": [{"t": 0, "v": "NaN"}]
+    },
+    {
+      "labels": {"__name__": "special_metric", "kind": "pos_inf"},
+      "samples": [{"t": 0, "v": "+Inf"}]
+    },
+    {
+      "labels": {"__name__": "special_metric", "kind": "neg_inf"},
+      "samples": [{"t": 0, "v": "-Inf"}]
+    },
+    {
+      "labels": {"__name__": "special_metric", "kind": "zero"},
+      "samples": [{"t": 0, "v": 0}]
+    },
+    {
+      "labels": {"__name__": "special_metric", "kind": "neg_zero"},
+      "samples": [{"t": 0, "v": "-0"}]
+    },
+    {
+      "labels": {"__name__": "special_metric", "kind": "tiny"},
+      "samples": [{"t": 0, "v": 1e-300}]
+    }
+  ],
+  "queries": [
+    {"name": "NaN survives a selector", "expr": "special_metric", "kind": "instant", "time": 0},
+    {"name": "NaN propagates through addition", "expr": "special_metric + 1", "kind": "instant", "time": 0},
+    {"name": "infinities survive a selector", "expr": "special_metric", "kind": "instant", "time": 0},
+    {"name": "sum with an infinity", "expr": "sum(special_metric)", "kind": "instant", "time": 0},
+    {"name": "comparison against NaN", "expr": "special_metric > 0", "kind": "instant", "time": 0},
+    {"name": "count includes NaN", "expr": "count(special_metric)", "kind": "instant", "time": 0},
+    {"name": "division by zero yields infinities", "expr": "special_metric / (special_metric - special_metric)", "kind": "instant", "time": 0}
+  ]
+}

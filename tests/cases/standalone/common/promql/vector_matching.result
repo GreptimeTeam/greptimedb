@@ -32,24 +32,24 @@ Affected Rows: 3
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '5s') counter_metric / gauge_metric;
 
-+-------+--------+---------------------+-------------------------------------------------------------+
-| host  | device | ts                  | counter_metric.greptime_value / gauge_metric.greptime_value |
-+-------+--------+---------------------+-------------------------------------------------------------+
-| host1 | eth0   | 1970-01-01T00:00:00 | 5.0                                                         |
-| host1 | eth1   | 1970-01-01T00:00:00 | 5.0                                                         |
-| host2 | eth0   | 1970-01-01T00:00:00 | 6.0                                                         |
-+-------+--------+---------------------+-------------------------------------------------------------+
++---------------------+----------------+-------+--------+
+| ts                  | greptime_value | host  | device |
++---------------------+----------------+-------+--------+
+| 1970-01-01T00:00:00 | 5.0            | host1 | eth0   |
+| 1970-01-01T00:00:00 | 5.0            | host1 | eth1   |
+| 1970-01-01T00:00:00 | 6.0            | host2 | eth0   |
++---------------------+----------------+-------+--------+
 
 -- `on(...)` reduces the result to the matching labels.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} / on(host) gauge_metric{device="eth0"};
 
-+-------+---------------------+-------------------------------------------------------------+
-| host  | ts                  | counter_metric.greptime_value / gauge_metric.greptime_value |
-+-------+---------------------+-------------------------------------------------------------+
-| host1 | 1970-01-01T00:00:00 | 5.0                                                         |
-| host2 | 1970-01-01T00:00:00 | 6.0                                                         |
-+-------+---------------------+-------------------------------------------------------------+
++---------------------+----------------+-------+
+| ts                  | greptime_value | host  |
++---------------------+----------------+-------+
+| 1970-01-01T00:00:00 | 5.0            | host1 |
+| 1970-01-01T00:00:00 | 6.0            | host2 |
++---------------------+----------------+-------+
 
 -- `ignoring(...)` drops the ignored labels, here from operands that don't even share them.
 -- SQLNESS SORT_RESULT 3 1
@@ -85,22 +85,22 @@ TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} > on(host) gauge_metric{devi
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} > bool on(host) gauge_metric{device="eth0"};
 
-+-------+---------------------+-------------------------------------------------------------+
-| host  | ts                  | counter_metric.greptime_value > gauge_metric.greptime_value |
-+-------+---------------------+-------------------------------------------------------------+
-| host1 | 1970-01-01T00:00:00 | 1.0                                                         |
-| host2 | 1970-01-01T00:00:00 | 1.0                                                         |
-+-------+---------------------+-------------------------------------------------------------+
++---------------------+----------------+-------+
+| ts                  | greptime_value | host  |
++---------------------+----------------+-------+
+| 1970-01-01T00:00:00 | 1.0            | host1 |
+| 1970-01-01T00:00:00 | 1.0            | host2 |
++---------------------+----------------+-------+
 
 -- `host1` carries two devices on both sides: the match group repeats on the one side.
 TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric;
 
-Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="host1"} on the right hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="host1"} on the right hand-side of the operation at 0 ms; many-to-many matching not allowed: matching labels must be unique on one side
 
 -- The one side is unique here, the many side is not, and no group modifier makes it explicit.
 TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric{device="eth0"};
 
-Error: 3001(EngineExecuteQuery), Execution error: multiple matches for labels {host="host1"}: many-to-one matching must be explicit (group_left/group_right)
+Error: 3001(EngineExecuteQuery), Execution error: multiple matches for labels {host="host1"} at 0 ms: many-to-one matching must be explicit (group_left/group_right)
 
 -- `group_left` takes the result labels from the many side.
 -- SQLNESS SORT_RESULT 3 1
@@ -187,11 +187,11 @@ Affected Rows: 1
 
 TQL EVAL (0, 0, '5s') collide_left / on(host) collide_right;
 
-+-------+---------------------+------------------------------------------------------------+
-| host  | ts                  | collide_left.greptime_value / collide_right.greptime_value |
-+-------+---------------------+------------------------------------------------------------+
-| host1 | 1970-01-01T00:00:00 | 5.0                                                        |
-+-------+---------------------+------------------------------------------------------------+
++---------------------+----------------+-------+
+| ts                  | greptime_value | host  |
++---------------------+----------------+-------+
+| 1970-01-01T00:00:00 | 5.0            | host1 |
++---------------------+----------------+-------+
 
 DROP TABLE collide_left;
 
@@ -367,30 +367,30 @@ Affected Rows: 2
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '5s') sum without(host) (outer_agg_metric_a / on(host) outer_agg_metric_b);
 
-+---------------------+----------------------------------------------------------------------------+
-| ts                  | sum(outer_agg_metric_a.greptime_value / outer_agg_metric_b.greptime_value) |
-+---------------------+----------------------------------------------------------------------------+
-| 1970-01-01T00:00:00 | 10.0                                                                       |
-+---------------------+----------------------------------------------------------------------------+
++---------------------+----------------+
+| ts                  | greptime_value |
++---------------------+----------------+
+| 1970-01-01T00:00:00 | 10.0           |
++---------------------+----------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '5s') sum by(device) (outer_agg_metric_a / on(host) outer_agg_metric_b);
 
-+---------------------+----------------------------------------------------------------------------+
-| ts                  | sum(outer_agg_metric_a.greptime_value / outer_agg_metric_b.greptime_value) |
-+---------------------+----------------------------------------------------------------------------+
-| 1970-01-01T00:00:00 | 10.0                                                                       |
-+---------------------+----------------------------------------------------------------------------+
++---------------------+----------------+
+| ts                  | greptime_value |
++---------------------+----------------+
+| 1970-01-01T00:00:00 | 10.0           |
++---------------------+----------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_metric_a / on(host) outer_agg_metric_b);
 
-+------+---------------------+----------------------------------------------------------------------------+
-| host | ts                  | sum(outer_agg_metric_a.greptime_value / outer_agg_metric_b.greptime_value) |
-+------+---------------------+----------------------------------------------------------------------------+
-| h1   | 1970-01-01T00:00:00 | 5.0                                                                        |
-| h2   | 1970-01-01T00:00:00 | 5.0                                                                        |
-+------+---------------------+----------------------------------------------------------------------------+
++---------------------+----------------+------+
+| ts                  | greptime_value | host |
++---------------------+----------------+------+
+| 1970-01-01T00:00:00 | 5.0            | h1   |
+| 1970-01-01T00:00:00 | 5.0            | h2   |
++---------------------+----------------+------+
 
 DROP TABLE outer_agg_metric_a;
 

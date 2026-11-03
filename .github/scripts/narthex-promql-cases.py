@@ -22,7 +22,7 @@ matching directory names: PromQL cases live under `common/promql`, but also unde
 Two commands:
 
 - `discover` prints the selected cases and the reason each one was selected.
-- `check` fails when a selected case has no committed `.native.result`, so a run cannot pass by
+- `check` fails when a selected case has no committed `.result`, so a run cannot pass by
   silently falling back to the ordinary expectation.
 """
 
@@ -97,7 +97,7 @@ def stage(
 
     The statements stay the files in `tests/cases`: each is a symlink, so there is still one copy of
     every `.sql` and an edited case is the case that runs. The expectation is a *copy* of the
-    committed `.native.result`, which is what keeps the run honest: sqlness rewrites the file it
+    committed `.result`, which is what keeps the run honest: sqlness rewrites the file it
     compared against before reporting the diff, so pointing it at the repository would let one bad
     run overwrite the reviewed expectation and the next run agree with it. A fresh copy discards
     whatever a run wrote and always starts from what is committed.
@@ -192,8 +192,8 @@ def main() -> int:
     parser.add_argument("--case-dir", default="tests/cases")
     parser.add_argument(
         "--result-extension",
-        default="native.result",
-        help="extension of the native expectation, without the leading dot",
+        default="result",
+        help="extension of the expectation file, without the leading dot",
     )
     parser.add_argument(
         "--command", choices=["discover", "check", "stage", "collect", "failures"], required=True

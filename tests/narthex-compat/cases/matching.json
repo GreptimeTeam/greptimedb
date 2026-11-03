@@ -1,0 +1,132 @@
+{
+  "name": "matching-and-set-operations",
+  "series": [
+    {
+      "labels": {
+        "__name__": "left_metric",
+        "host": "a",
+        "kind": "x"
+      },
+      "samples": [
+        {
+          "t": 0,
+          "v": 10
+        }
+      ]
+    },
+    {
+      "labels": {
+        "__name__": "left_metric",
+        "host": "b",
+        "kind": "y"
+      },
+      "samples": [
+        {
+          "t": 0,
+          "v": 20
+        }
+      ]
+    },
+    {
+      "labels": {
+        "__name__": "right_metric",
+        "host": "a",
+        "site": "z1"
+      },
+      "samples": [
+        {
+          "t": 0,
+          "v": 2
+        }
+      ]
+    },
+    {
+      "labels": {
+        "__name__": "right_metric",
+        "host": "c",
+        "site": "z2"
+      },
+      "samples": [
+        {
+          "t": 0,
+          "v": 4
+        }
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "name": "one-to-one division on host",
+      "expr": "left_metric / on(host) right_metric",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "ignoring the name",
+      "expr": "left_metric / ignoring(__name__) right_metric",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "and keeps matching series",
+      "expr": "left_metric and right_metric",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "and on host",
+      "expr": "left_metric and on(host) right_metric",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "unless on host",
+      "expr": "left_metric unless on(host) right_metric",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "or unions both sides",
+      "expr": "left_metric or right_metric",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "comparison with a scalar",
+      "expr": "left_metric > 15",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "comparison with bool",
+      "expr": "left_metric > bool 15",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "vector to vector comparison",
+      "expr": "left_metric > on(host) right_metric",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "group_left copies a label",
+      "expr": "left_metric / on(host) group_left(site) right_metric",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "unmatched division yields nothing",
+      "expr": "left_metric{host=\"b\"} / on(host) right_metric",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "many-to-many is refused",
+      "expr": "left_metric / on(host) right_metric",
+      "kind": "instant",
+      "time": 0,
+      "expect_error": false
+    }
+  ]
+}

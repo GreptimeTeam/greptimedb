@@ -6,9 +6,14 @@ Three jobs check the native PromQL route independently. They live in
 
 | Job | What it proves | Where |
 | --- | --- | --- |
-| `promql-sqlness` | Every PromQL sqlness case still answers, with the native route switched on, against its own `.native.result` | `narthex-promql-cases.py`, `narthex-native-route.py` |
+| `promql-sqlness` | Every PromQL sqlness case still answers, with the native route switched on, against its own `.result` | `narthex-promql-cases.py`, `narthex-native-route.py` |
 | `prometheus-compat` | GreptimeDB's answers match the pinned Prometheus engine, case by case | `tests/narthex-compat/`, `narthex-prometheus-compat.py` |
 | `vm-performance` | Candidate, the `narthex` baseline and VictoriaMetrics, on one machine | `.github/workflows/vmbench-long-range.yml` (reused) |
+
+## Scope: standalone
+
+The sqlness job runs the standalone environment only. Distributed is out of scope for
+now; see the note below.
 
 ## Where the native route can run
 
@@ -17,7 +22,7 @@ The native route needs `in_process_region_transport`, which only the standalone 
 route. Consequences, both reflected in the selector below:
 
 - `promql-sqlness` runs the native snapshot comparison for **standalone** cases.
-- `distributed` cases keep a `.native.result` equal to `.result`. That is a compatibility check -
+- `distributed` cases keep a `.result` equal to `.result`. That is a compatibility check -
   "the switch does not break the distributed answer" - and is **not** evidence that a distributed
   statement ran natively.
 
@@ -40,17 +45,17 @@ expectation file it just read before reporting the diff. Both are handled by sta
 
 1. `--command stage` builds a temporary tree holding only the selected cases. The `.sql` files are
    symlinks to the repository, so there is still one copy of every statement.
-2. The expectation is a **copy** of the committed `.native.result`, so a run that writes a wrong
+2. The expectation is a **copy** of the committed `.result`, so a run that writes a wrong
    answer cannot make the next run agree with it - the copy is discarded every time.
 3. `--command collect` prints the staged expectations that a run rewrote as a diff against the
    committed ones. Nothing is copied back automatically; a changed expectation is reviewed.
 
-A case with no committed `.native.result` fails the job **before** any server starts
+A case with no committed `.result` fails the job **before** any server starts
 (`--command check`), so a new PromQL case cannot pass by quietly reading the ordinary expectation.
 
 ## Route evidence
 
-A passing `.native.result` does not say which route answered. `narthex-native-route.py` reads the
+A passing `.result` does not say which route answered. `narthex-native-route.py` reads the
 run's own output and classifies each statement:
 
 - `native` when the statement's plan holds `FusedSeries`;
@@ -67,7 +72,7 @@ Setting one without the other silently runs the existing route, so the runner ta
 - `--enable-native-promql` renders `[query] experimental_native_promql = true` into the generated
   config **and** sends `query.experimental_native_promql=true` as a per-request hint.
 
-The result file is chosen separately by `--result-extension native.result`. Choosing the file does
+The result file is chosen separately by `--result-extension result`. Choosing the file does
 not enable the route.
 
 ## Prometheus conformance

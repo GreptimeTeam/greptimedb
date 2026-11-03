@@ -64,11 +64,11 @@ tql eval (0, 0, '1s') (a > b) or b or a;
 -- SQLNESS SORT_RESULT 2 1
 tql eval (0, 0, '1s') abs(a > b);
 
-+---------------------+---------------------+---+
-| ts                  | abs(greptime_value) | k |
-+---------------------+---------------------+---+
-| 1970-01-01T00:00:00 | 3.0                 | x |
-+---------------------+---------------------+---+
++---------------------+----------------+---+
+| ts                  | greptime_value | k |
++---------------------+----------------+---+
+| 1970-01-01T00:00:00 | 3.0            | x |
++---------------------+----------------+---+
 
 -- Regression: scalar-vector comparison (scalar on LHS) without `bool` is a filter that keeps
 -- the vector side's samples/labels (not the scalar side).
