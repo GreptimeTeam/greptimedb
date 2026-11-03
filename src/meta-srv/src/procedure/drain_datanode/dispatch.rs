@@ -125,7 +125,6 @@ impl Dispatch {
 
     /// Rechecks ownership before recording a failed batch build.
     async fn collect_failed_regions(
-        &self,
         ctx: &mut Context,
         region_ids: &[RegionId],
     ) -> Result<Vec<RegionId>> {
@@ -204,7 +203,7 @@ impl Dispatch {
                     if ctx.persistent_ctx.strategy == DrainDatanodeStrategy::FailFast {
                         return Err(e);
                     }
-                    let failed = self.collect_failed_regions(ctx, &region_ids).await?;
+                    let failed = Self::collect_failed_regions(ctx, &region_ids).await?;
                     if !failed.is_empty() {
                         failures.push((e, failed));
                     }
@@ -799,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failed_batch_reconciles_each_region() {
+    async fn test_settled_failed_batch_reconciles_each_region() {
         for strategy in [
             DrainDatanodeStrategy::FailFast,
             DrainDatanodeStrategy::TryAll,

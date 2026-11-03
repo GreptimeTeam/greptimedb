@@ -33,6 +33,9 @@ use crate::procedure::region_migration::manager::{
 };
 use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
 
+/// Buffers a multiple of the round budget to gather same-topic regions while bounding memory.
+const SCAN_BUFFER_FACTOR: usize = 4;
+
 /// Scans region groups, prepares migrations, and confirms completion with a fresh scan.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(crate) struct DrainDatanodeCursor {
@@ -64,7 +67,7 @@ impl DrainDatanodeCursor {
             &ctx.table_metadata_manager,
             node_id,
             ctx.persistent_ctx.parallelism,
-            ctx.persistent_ctx.parallelism * 4,
+            ctx.persistent_ctx.parallelism * SCAN_BUFFER_FACTOR,
         ));
         ctx.volatile_ctx.follower_count = 0;
 
