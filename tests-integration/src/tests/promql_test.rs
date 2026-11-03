@@ -5186,7 +5186,7 @@ async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
     assert_eq!(native_rows, legacy_rows);
 }
 
-/// Whether a Final fused node routes its aggregate state through StateRepartitionExec.
+/// Whether a Final fused node routes its aggregate state through the series repartitioner.
 fn holds_split_merge(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> bool {
     let mut stack = vec![plan.clone()];
     while let Some(node) = stack.pop() {
@@ -5196,7 +5196,7 @@ fn holds_split_merge(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -
         if node.name() == "FusedSeriesExec" && display.contains(" final") {
             let mut descendants = node.children().into_iter().cloned().collect::<Vec<_>>();
             while let Some(child) = descendants.pop() {
-                if child.name() == "StateRepartitionExec" {
+                if child.name() == "SeriesRepartitionExec" {
                     return true;
                 }
                 descendants.extend(child.children().into_iter().cloned());

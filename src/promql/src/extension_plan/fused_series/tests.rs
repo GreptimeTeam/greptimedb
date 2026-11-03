@@ -4585,6 +4585,49 @@ async fn a_partial_root_exports_state_frames_from_every_partition() {
     }
 }
 
+/// A state export releases everything it held: when drained, and when the consumer drops it early.
+///
+/// This is lifecycle coverage, not the regression for the producer hand-off: other reservations are
+/// alive at the same moment, so a positive figure here would not by itself prove the batch is the
+/// charged one. `a_handed_over_state_chunk_keeps_its_charge_until_it_is_dropped` owns that claim.
+#[tokio::test]
+async fn a_state_export_releases_its_charge_on_drain_and_on_early_drop() {
+    const GROUPS: usize = 600;
+    let rows = series_samples(1.0);
+    let chunks = (0..GROUPS)
+        .map(|index| {
+            let host = format!("h{index}");
+            let labels = [(HOST, host.as_str())];
+            labelled_chunk(&host, &labels, &rows, true)
+        })
+        .collect::<Vec<_>>();
+    let exec = partial_plan(
+        rate_tree(),
+        memory_exec(frames(&chunks)),
+        partial_op(AggregateKind::Count, &[HOST]),
+        &[HOST],
+    )
+    .expect("a rate tree with a partial count is executable");
+
+    // Draining: the last batch and the execution behind it release everything.
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let mut stream = exec.execute(0, task_context(&pool)).unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(
+        first.num_rows() > 0,
+        "the exporter answers a batch once the builder reaches its row limit"
+    );
+    stream.try_for_each(|_| async { Ok(()) }).await.unwrap();
+    assert_eq!(0, pool.reserved(), "a drained export holds nothing");
+
+    // Dropping mid-export: the batches the packer never read go with the stream.
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let mut stream = exec.execute(0, task_context(&pool)).unwrap();
+    stream.next().await.unwrap().unwrap();
+    drop(stream);
+    assert_eq!(0, pool.reserved(), "a dropped export holds nothing");
+}
+
 /// Prefix series of one label set on disjoint grid points are legal in state mode.
 ///
 /// The exported states can be merged above this partition-local fold.
@@ -4698,15 +4741,15 @@ async fn a_constant_broadcast_prefix_exports_the_values_the_constant_computes() 
     let values: Vec<Option<f64>> = decoded
         .iter()
         .flat_map(|batch| {
-            let mut values = vec![None; batch.time.len()];
-            for position in 0..batch.time.len() {
-                values[position] = batch
-                    .states
-                    .first()
-                    .and_then(|field| field.get(position).copied().flatten())
-                    .map(|state| state.value);
-            }
-            values
+            (0..batch.time.len())
+                .map(|position| {
+                    batch
+                        .states
+                        .first()
+                        .and_then(|field| field.get(position).copied().flatten())
+                        .map(|state| state.value)
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
     assert_eq!(GRID_LEN as usize, values.len());

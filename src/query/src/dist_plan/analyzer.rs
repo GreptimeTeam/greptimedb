@@ -116,9 +116,9 @@ pub struct DistPlannerAnalyzer {
     ///
     /// A region input normally has to be encoded to Substrait before it can leave the frontend, and
     /// [`PlanRewriter::should_expand`] cuts the plan at the first node that does not encode. In
-    /// process, a native fused plan (a `FusedSeries` node, or the `AggregateFinalize` merge over one)
-    /// travels as a `LogicalPlan` instead and skips that gate; other plans retain the ordinary
-    /// encoding checks.
+    /// process, a native fused plan (a `FusedSeries` node, or a `FusedSeries` pair reading a
+    /// `Partial` producer's state) travels as a `LogicalPlan` instead and skips that gate; other
+    /// plans retain the ordinary encoding checks.
     ///
     /// Whoever builds the query engine sets this, once, from the transport it wired. It is neither a
     /// query-time decision nor a property of a region.
@@ -453,7 +453,8 @@ struct PlanRewriter {
     /// needed when the root itself is the in-process `FusedSeries` exception.
     whole_plan_encodable: bool,
     /// In-process transport skips the encodability gate only when the rewritten root is the native
-    /// route's whole plan: a `FusedSeries` node, or the `AggregateFinalize` merge of one's state.
+    /// route's whole plan: a `FusedSeries` node, or the `Final` `FusedSeries` over a `Partial`
+    /// producer's state.
     skip_encodability_gate: bool,
     /// Current level in the tree
     level: usize,

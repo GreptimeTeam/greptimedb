@@ -97,11 +97,9 @@
 //! records the read outcome, then sender closure lets outputs detect missing EOF or report failure. If the child errors, the failing task records it before cancelling its peers; sender closure makes
 //! every output report that recorded error instead of a clean end.
 //!
-//! A queue closing is not by itself that end: it also closes when the read is stopped - aborted, or
-//! panicked - and a stopped read is missing exactly what it did not route. The read therefore records
-//! how it ended, and an output whose queue has closed reads that record, so only a read that ended on
-//! its own terms ends an output and anything else is an error saying the producer stopped
-//! unexpectedly.
+//! Shared execution records the read outcome before producer senders close, so queue closure together
+//! with that shared outcome distinguishes normal completion from a stopped or failed read. A stopped
+//! read is missing exactly what it did not route and is reported as an error rather than a clean end.
 //!
 //! An output stream owns the read, not the plan it was executed from: DataFusion's
 //! `execute_stream_partitioned` takes the plan by value and keeps only the streams, so a read tied to
@@ -136,8 +134,9 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
+use datatypes::series::aggregate_state::AggregateStateSchema;
 use datatypes::series::frame::{
-    FrameContent, FrameLabelMode, LabelDecodeSpec, SeriesFrameDeclaration,
+    FrameContent, FrameLabelMode, LabelDecodeSpec, SeriesFrameDeclaration, SeriesFrameDecoder,
 };
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{Series, SeriesSchema};
@@ -200,6 +199,7 @@ pub struct SeriesRepartitionExec {
     routing_policy: SeriesRouting,
     identity_completion: IdentityCompletion,
     content: FrameContent,
+    state: Option<Arc<AggregateStateSchema>>,
     ordering: SeriesOrdering,
     /// Started by the first `execute` call, since the output partitions share one read of the child.
     shared: Mutex<Option<Arc<SharedExecution>>>,
@@ -229,12 +229,7 @@ impl SeriesRepartitionExec {
         let policy = match declaration.content() {
             FrameContent::Evaluated => SeriesRouting::CanonicalLabels,
             FrameContent::Raw => SeriesRouting::RawPrimaryKey,
-            FrameContent::AggregateState => {
-                return Err(DataFusionError::NotImplemented(
-                    "SeriesRepartition does not route aggregate state; use StateRepartitionExec"
-                        .into(),
-                ));
-            }
+            FrameContent::AggregateState => SeriesRouting::CanonicalLabels,
         };
         Self::try_new_with_routing(input, outputs, policy)
     }
@@ -313,6 +308,11 @@ impl SeriesRepartitionExec {
                     "SeriesRepartition raw frames cannot use CanonicalLabels routing".into(),
                 ));
             }
+            (FrameContent::AggregateState, SeriesRouting::RawPrimaryKey) => {
+                return Err(DataFusionError::Plan(
+                    "SeriesRepartition aggregate-state frames require canonical labels".into(),
+                ));
+            }
             _ => {}
         }
         let series_schema = Arc::new(declaration.series().clone());
@@ -333,23 +333,24 @@ impl SeriesRepartitionExec {
                 &store_api::region_engine::NO_BOUND_LABEL_SOURCE,
                 ordering,
             )?,
-            FrameContent::AggregateState => {
-                return Err(DataFusionError::NotImplemented(
-                    "SeriesRepartition does not route aggregate state; use StateRepartitionExec"
-                        .into(),
-                ));
-            }
+            FrameContent::AggregateState => input.schema(),
         };
         // The input is re-declared from what it says about itself, not from what this node
         // publishes: the two differ whenever the child carries its labels in its keys.
-        let rebuilt_input = common_query::series_frame::frame_schema_with(
-            &series_schema,
-            declaration.labels(),
-            declaration.label_decode(),
-            ordering,
-        )
-        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
-        if rebuilt_input != input.schema() {
+        let rebuilt_input = if content == FrameContent::AggregateState {
+            None
+        } else {
+            Some(
+                common_query::series_frame::frame_schema_with(
+                    &series_schema,
+                    declaration.labels(),
+                    declaration.label_decode(),
+                    ordering,
+                )
+                .map_err(|error| DataFusionError::Plan(error.to_string()))?,
+            )
+        };
+        if rebuilt_input.is_some_and(|rebuilt| rebuilt != input.schema()) {
             return Err(DataFusionError::Plan(
                 "SeriesRepartition input frame carries a schema this node cannot re-declare"
                     .to_string(),
@@ -365,6 +366,7 @@ impl SeriesRepartitionExec {
         )
         .with_evaluation_type(EvaluationType::Eager)
         .with_scheduling_type(SchedulingType::Cooperative);
+        let state = declaration.aggregate_state().cloned().map(Arc::new);
         let properties = Arc::new(properties);
         Ok(Self {
             input,
@@ -373,6 +375,7 @@ impl SeriesRepartitionExec {
             routing_policy,
             identity_completion,
             content,
+            state,
             ordering,
             shared: Mutex::new(None),
             properties,
@@ -495,6 +498,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
                     &self.input,
                     self.routing.clone(),
                     Arc::clone(&self.series_schema),
+                    self.state.clone(),
                     &context,
                 )?);
             }
@@ -506,6 +510,15 @@ impl ExecutionPlan for SeriesRepartitionExec {
             ))
         })?;
         // Take the queue and its claim on the read together.
+        if self.content == FrameContent::AggregateState {
+            return Ok(Box::pin(StateBatchOutputStream {
+                schema: self.input.schema(),
+                receiver,
+                lease,
+                retained: None,
+                reported: false,
+            }));
+        }
         let inner = RepartitionStream::new(
             receiver,
             lease,
@@ -531,12 +544,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
                 };
                 pack_raw_series(Box::pin(raw))?
             }
-            FrameContent::AggregateState => {
-                return Err(DataFusionError::NotImplemented(
-                    "SeriesRepartition does not route aggregate state; use StateRepartitionExec"
-                        .into(),
-                ));
-            }
+            FrameContent::AggregateState => unreachable!("aggregate state output handled above"),
         };
         let schema = output.schema();
         let output = Box::pin(PackedHandoffStream {
@@ -607,6 +615,7 @@ impl SharedExecution {
         input: &Arc<dyn ExecutionPlan>,
         routing: Routing,
         series_schema: Arc<SeriesSchema>,
+        state: Option<Arc<AggregateStateSchema>>,
         context: &Arc<TaskContext>,
     ) -> DataFusionResult<Arc<Self>> {
         // What the child carries is what it declares, not what the policy suggests: a raw frame
@@ -636,9 +645,10 @@ impl SharedExecution {
                     RoutedInput::Raw(stream)
                 }
                 FrameContent::AggregateState => {
-                    return Err(DataFusionError::NotImplemented(
-                        "SeriesRepartition aggregate-state input is not implemented yet".into(),
-                    ));
+                    let state = state.as_ref().ok_or_else(|| {
+                        DataFusionError::Plan("aggregate state declaration is missing".into())
+                    })?;
+                    RoutedInput::State(frames, Arc::clone(state), Arc::clone(&series_schema))
                 }
             });
         }
@@ -1031,6 +1041,407 @@ impl Inputs {
     }
 }
 
+/// Bounds the decoder's per-batch owned allocations from the input's actual row, span, and label
+/// counts. Decoder allocation sites are the rows vector and, per row, spans, grid-range prefix
+/// rows, label vector, and copied label strings.
+fn state_decode_workspace_bytes(
+    batch: &RecordBatch,
+    state: &AggregateStateSchema,
+    series: &SeriesSchema,
+) -> DataFusionResult<usize> {
+    use datafusion::arrow::array::{
+        Array, BooleanArray, Float64Array, ListArray, StringArray, StructArray,
+    };
+
+    fn down<'a, T: Array + 'static>(
+        array: &'a dyn Array,
+        description: &str,
+    ) -> DataFusionResult<&'a T> {
+        array.as_any().downcast_ref().ok_or_else(|| {
+            DataFusionError::Execution(format!("aggregate-state {description} type mismatch"))
+        })
+    }
+    fn add(total: &mut usize, bytes: usize) -> DataFusionResult<()> {
+        *total = total.checked_add(bytes).ok_or_else(|| {
+            DataFusionError::Execution("aggregate-state workspace overflow".into())
+        })?;
+        Ok(())
+    }
+    fn product(count: usize, size: usize) -> DataFusionResult<usize> {
+        count
+            .checked_mul(size)
+            .ok_or_else(|| DataFusionError::Execution("aggregate-state workspace overflow".into()))
+    }
+
+    let columns = batch.columns();
+    let spans = down::<ListArray>(
+        down::<StructArray>(columns[2].as_ref(), "time")?
+            .column(0)
+            .as_ref(),
+        "spans",
+    )?;
+    let names = down::<StringArray>(columns[4].as_ref(), "metric names")?;
+    let labels = down::<ListArray>(columns[5].as_ref(), "labels")?;
+    let fields_per_row = series.fields.len();
+    let components_per_field = state.components.len();
+    let span_offsets = spans.value_offsets();
+    let label_offsets = labels.value_offsets();
+    let label_values = down::<StructArray>(labels.values().as_ref(), "label entries")?;
+    let label_names = down::<StringArray>(label_values.column(0).as_ref(), "label names")?;
+    let label_text = down::<StringArray>(label_values.column(1).as_ref(), "label values")?;
+    let name_offsets = label_names.value_offsets();
+    let text_offsets = label_text.value_offsets();
+    let mut bytes = product(
+        batch.num_rows(),
+        std::mem::size_of::<datatypes::series::frame::StateFrameRow>(),
+    )?;
+    let per_row_fields = product(
+        fields_per_row,
+        std::mem::size_of::<datafusion::arrow::array::StructArray>()
+            .checked_add(product(
+                components_per_field,
+                std::mem::size_of::<datafusion::arrow::array::ArrayRef>(),
+            )?)
+            .ok_or_else(|| {
+                DataFusionError::Execution("aggregate-state workspace overflow".into())
+            })?,
+    )?;
+    add(&mut bytes, product(batch.num_rows(), per_row_fields)?)?;
+    // row_fields and its validation clone, StateFieldsBatch, and its Vec<StructArray> coexist
+    // with the retained StateFrameRow. `try_from_arrow` also owns one StructArray clone per field.
+    let fields_wrapper_bytes = std::mem::size_of::<datafusion::arrow::array::StructArray>()
+        .checked_mul(2)
+        .and_then(|size| {
+            size.checked_add(std::mem::size_of::<
+                datatypes::series::aggregate_state::StateFieldsBatch,
+            >())
+        })
+        .and_then(|size| {
+            size.checked_add(
+                product(
+                    fields_per_row,
+                    std::mem::size_of::<datafusion::arrow::array::StructArray>(),
+                )
+                .ok()?,
+            )
+        })
+        .and_then(|size| {
+            size.checked_add(
+                product(
+                    fields_per_row,
+                    std::mem::size_of::<datafusion::arrow::array::ArrayRef>(),
+                )
+                .ok()?,
+            )
+        })
+        .ok_or_else(|| DataFusionError::Execution("aggregate-state workspace overflow".into()))?;
+    add(&mut bytes, product(batch.num_rows(), fields_wrapper_bytes)?)?;
+    // `.value(row)` creates one list-value StructArray wrapper for each spans and labels list.
+    add(
+        &mut bytes,
+        product(
+            batch.num_rows(),
+            product(
+                2,
+                std::mem::size_of::<datafusion::arrow::array::StructArray>(),
+            )?,
+        )?,
+    )?;
+    // Each decoded row retains the sliced list wrapper per field, plus a component-array wrapper
+    // per component during recursive StructArray::slice validation. Child refs and component
+    // wrappers coexist; Group's zero components correctly add no component wrappers.
+    let component_wrapper_size =
+        std::mem::size_of::<Float64Array>().max(std::mem::size_of::<BooleanArray>());
+    let per_field_wrappers = std::mem::size_of::<ListArray>()
+        .checked_add(product(components_per_field, component_wrapper_size)?)
+        .ok_or_else(|| DataFusionError::Execution("aggregate-state workspace overflow".into()))?;
+    add(
+        &mut bytes,
+        product(
+            product(batch.num_rows(), fields_per_row)?,
+            per_field_wrappers,
+        )?,
+    )?;
+    // Decoder stack locals retain one child ArrayRef per component of each state field.
+    add(
+        &mut bytes,
+        product(
+            product(batch.num_rows(), fields_per_row)?,
+            product(
+                components_per_field,
+                std::mem::size_of::<datafusion::arrow::array::ArrayRef>(),
+            )?,
+        )?,
+    )?;
+    for row in 0..batch.num_rows() {
+        if !spans.is_null(row) {
+            let span_start = usize::try_from(span_offsets[row]).map_err(|_| {
+                DataFusionError::Execution("aggregate-state span offset overflow".into())
+            })?;
+            let span_end = usize::try_from(span_offsets[row + 1]).map_err(|_| {
+                DataFusionError::Execution("aggregate-state span offset overflow".into())
+            })?;
+            let span_count = span_end.checked_sub(span_start).ok_or_else(|| {
+                DataFusionError::Execution("aggregate-state span offsets are invalid".into())
+            })?;
+            // `decode_aggregate_state` allocates a Vec<GridSpan>; TimeAxis::GridRanges then
+            // allocates Arc<[GridSpan]> and one usize prefix row for each span.
+            // The decoder's Vec<GridSpan> is converted to Arc<[GridSpan]> while the
+            // source vector is still alive, so account for both allocations.
+            add(
+                &mut bytes,
+                product(
+                    span_count,
+                    std::mem::size_of::<datatypes::series::time::GridSpan>(),
+                )?,
+            )?;
+            add(
+                &mut bytes,
+                product(
+                    span_count,
+                    std::mem::size_of::<datatypes::series::time::GridSpan>(),
+                )?,
+            )?;
+            add(
+                &mut bytes,
+                product(2, product(span_count, std::mem::size_of::<usize>())?)?,
+            )?;
+            if span_count > 0 {
+                add(
+                    &mut bytes,
+                    std::mem::size_of::<datatypes::series::time::TimeAxis>(),
+                )?;
+            }
+        }
+        if !names.is_null(row) {
+            add(&mut bytes, names.value(row).len())?;
+            add(&mut bytes, product(2, std::mem::size_of::<usize>())?)?;
+        }
+        if !labels.is_null(row) {
+            let label_start = usize::try_from(label_offsets[row]).map_err(|_| {
+                DataFusionError::Execution("aggregate-state label offset overflow".into())
+            })?;
+            let label_end = usize::try_from(label_offsets[row + 1]).map_err(|_| {
+                DataFusionError::Execution("aggregate-state label offset overflow".into())
+            })?;
+            let label_count = label_end.checked_sub(label_start).ok_or_else(|| {
+                DataFusionError::Execution("aggregate-state label offsets are invalid".into())
+            })?;
+            // The tag Vec is converted to Arc<[Label]> before it is dropped, briefly retaining
+            // both buffers; each copied Arc<str> also owns a separate allocation.
+            add(
+                &mut bytes,
+                product(label_count, std::mem::size_of::<datatypes::series::Label>())?,
+            )?;
+            add(
+                &mut bytes,
+                product(label_count, std::mem::size_of::<datatypes::series::Label>())?,
+            )?;
+            add(
+                &mut bytes,
+                product(label_count, product(2, std::mem::size_of::<usize>())?)?,
+            )?;
+            // Arc<str> copies exactly the byte ranges described by the StringArray offsets.
+            for index in label_start..label_end {
+                let name_len = usize::try_from(name_offsets[index + 1] - name_offsets[index])
+                    .map_err(|_| {
+                        DataFusionError::Execution(
+                            "aggregate-state label name length overflow".into(),
+                        )
+                    })?;
+                let text_len = usize::try_from(text_offsets[index + 1] - text_offsets[index])
+                    .map_err(|_| {
+                        DataFusionError::Execution(
+                            "aggregate-state label value length overflow".into(),
+                        )
+                    })?;
+                add(&mut bytes, name_len)?;
+                add(&mut bytes, text_len)?;
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+/// Bytes allocated by one zero-copy `RecordBatch::slice` for aggregate-state frames.
+///
+/// Arrow 59's RecordBatch allocates a fresh columns Vec, and each `StructArray::slice` allocates
+/// a fresh child ArrayRef Vec and recursively slices its children. `ListArray::slice` only clones
+/// its buffers and does not slice its values, so nested list values are intentionally not counted.
+/// Buffer payloads remain covered once by the shared source-batch reservation.
+fn state_slice_wrapper_bytes(batch: &RecordBatch) -> DataFusionResult<usize> {
+    use datafusion::arrow::array::{Array, StructArray};
+
+    fn add(total: &mut usize, bytes: usize) -> DataFusionResult<()> {
+        *total = total.checked_add(bytes).ok_or_else(|| {
+            DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+        })?;
+        Ok(())
+    }
+    fn array_bytes(array: &dyn Array) -> DataFusionResult<usize> {
+        // Arrow's Arc-backed wrapper clones retain the Arc's two-word strong/weak header.
+        let mut bytes = std::mem::size_of_val(array)
+            .checked_add(
+                2usize
+                    .checked_mul(std::mem::size_of::<usize>())
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "aggregate-state slice wrapper size overflow".into(),
+                        )
+                    })?,
+            )
+            .ok_or_else(|| {
+                DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+            })?;
+        // StructArray::slice collects one new ArrayRef per child before recursing.
+        if let Some(struct_array) = array.as_any().downcast_ref::<StructArray>() {
+            bytes = bytes
+                .checked_add(
+                    struct_array
+                        .num_columns()
+                        .checked_mul(std::mem::size_of::<datafusion::arrow::array::ArrayRef>())
+                        .ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "aggregate-state slice wrapper size overflow".into(),
+                            )
+                        })?,
+                )
+                .ok_or_else(|| {
+                    DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+                })?;
+            for child in struct_array.columns() {
+                bytes = bytes
+                    .checked_add(array_bytes(child.as_ref())?)
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "aggregate-state slice wrapper size overflow".into(),
+                        )
+                    })?;
+            }
+        }
+        Ok(bytes)
+    }
+
+    // RecordBatch itself is inline in Queued; only its newly allocated columns Vec is extra.
+    let mut bytes = 0;
+    add(
+        &mut bytes,
+        batch
+            .columns()
+            .len()
+            .checked_mul(std::mem::size_of::<datafusion::arrow::array::ArrayRef>())
+            .ok_or_else(|| {
+                DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+            })?,
+    )?;
+    for column in batch.columns() {
+        add(&mut bytes, array_bytes(column.as_ref())?)?;
+    }
+    Ok(bytes)
+}
+
+/// Routes state rows without materializing Rust accumulator objects or rebuilding Arrow columns.
+async fn read_state_batches(
+    stream: &mut SendableRecordBatchStream,
+    _partition: usize,
+    routing: &Routing,
+    senders: &[mpsc::UnboundedSender<Queued>],
+    read_ahead: &MemoryReservation,
+    state: &AggregateStateSchema,
+    series: &SeriesSchema,
+) -> Stop {
+    use datatypes::series::frame::FrameLabelMode;
+    let decoder = match SeriesFrameDecoder::try_new_aggregate_state(
+        state,
+        series,
+        FrameLabelMode::Explicit,
+    ) {
+        Ok(decoder) => decoder,
+        Err(error) => return Stop::Failed(Arc::new(DataFusionError::Execution(error.to_string()))),
+    };
+    let expected_schema = match datatypes::series::frame::aggregate_state_frame_schema(
+        state,
+        series,
+        FrameLabelMode::Explicit,
+    ) {
+        Ok(schema) => schema,
+        Err(error) => return Stop::Failed(Arc::new(DataFusionError::Execution(error.to_string()))),
+    };
+    while let Some(next) = stream.next().await {
+        let batch = match next {
+            Ok(batch) => batch,
+            Err(error) => {
+                return Stop::Failed(Arc::new(DataFusionError::External(Box::new(error))));
+            }
+        };
+        if batch.schema().as_ref() != expected_schema.as_ref() {
+            return Stop::Failed(Arc::new(DataFusionError::Execution(
+                "aggregate state frame schema mismatch".into(),
+            )));
+        }
+        let charge = read_ahead.new_empty();
+        if let Err(error) = charge.try_grow(batch.get_array_memory_size()) {
+            return Stop::Failed(Arc::new(error));
+        }
+        let workspace = read_ahead.new_empty();
+        let workspace_bytes = match state_decode_workspace_bytes(&batch, state, series) {
+            Ok(bytes) => bytes,
+            Err(error) => return Stop::Failed(Arc::new(error)),
+        };
+        if let Err(error) = workspace.try_grow(workspace_bytes) {
+            return Stop::Failed(Arc::new(error));
+        }
+        let rows = match decoder.decode_aggregate_state(&batch) {
+            Ok(rows) => rows,
+            Err(error) => {
+                return Stop::Failed(Arc::new(DataFusionError::Execution(error.to_string())));
+            }
+        };
+        if rows.len() != batch.num_rows() {
+            return Stop::Failed(Arc::new(DataFusionError::Execution(
+                "aggregate-state decoder row count differs from input batch".into(),
+            )));
+        }
+        let charge = Arc::new(charge);
+        // The recursive array wrapper layout is invariant across row slices. Compute it once;
+        // each queued row receives its own reservation for that row's actual slice wrappers.
+        let slice_charge = match state_slice_wrapper_bytes(&batch) {
+            Ok(bytes) => bytes,
+            Err(error) => return Stop::Failed(Arc::new(error)),
+        };
+        let slice_metadata_bytes = match std::mem::size_of::<Queued>().checked_add(slice_charge) {
+            Some(bytes) => bytes,
+            None => {
+                return Stop::Failed(Arc::new(DataFusionError::Execution(
+                    "aggregate-state slice wrapper size overflow".into(),
+                )));
+            }
+        };
+        for (index, row) in rows.iter().enumerate() {
+            let output = routing.output_labels(row.metric());
+            if senders[output].is_closed() {
+                continue;
+            }
+            // All slices retain the same parent buffers; a shared reservation charges them once.
+            let metadata = read_ahead.new_empty();
+            if let Err(error) = metadata.try_grow(slice_metadata_bytes) {
+                return Stop::Failed(Arc::new(error));
+            }
+            if let Err(error) = senders[output].send(Queued::StateBatch {
+                batch: batch.slice(index, 1),
+                _charge: Arc::clone(&charge),
+                _metadata: metadata,
+            }) {
+                drop(error.0);
+            }
+        }
+        drop(rows);
+        drop(workspace);
+        tokio::task::coop::consume_budget().await;
+    }
+    Stop::Ended
+}
+
 /// One input partition's task: reads its own child, assembles chains, and sends each complete chain to
 /// its canonical owner. Output queues are unbounded, so sending does not wait for an owner to poll;
 /// queued chains remain charged to the pool until consumed or dropped. Each task records its outcome
@@ -1051,6 +1462,18 @@ async fn route_partition(
         }
         RoutedInput::Raw(stream) => {
             read_raw_chains(stream, partition, &routing, &senders, &read_ahead).await
+        }
+        RoutedInput::State(stream, state, series) => {
+            read_state_batches(
+                stream,
+                partition,
+                &routing,
+                &senders,
+                &read_ahead,
+                state,
+                series,
+            )
+            .await
         }
     };
     if matches!(&stop, Stop::Ended) {
@@ -1527,6 +1950,11 @@ enum Ending {
 enum RoutedInput {
     Evaluated(SendableEvaluatedSeriesStream),
     Raw(SendableRawSeriesStream),
+    State(
+        SendableRecordBatchStream,
+        Arc<AggregateStateSchema>,
+        Arc<SeriesSchema>,
+    ),
 }
 
 enum RoutedChain {
@@ -1543,6 +1971,11 @@ enum Queued {
     },
     Eof {
         input: usize,
+        _metadata: MemoryReservation,
+    },
+    StateBatch {
+        batch: RecordBatch,
+        _charge: Arc<MemoryReservation>,
         _metadata: MemoryReservation,
     },
 }
@@ -1782,6 +2215,83 @@ struct ReadyCharges {
 }
 
 /// One owner processes identities as soon as every input has closed or contributed its final chain.
+struct StateBatchOutputStream {
+    schema: SchemaRef,
+    receiver: mpsc::UnboundedReceiver<Queued>,
+    lease: OutputLease,
+    retained: Option<(Arc<MemoryReservation>, MemoryReservation)>,
+    reported: bool,
+}
+
+impl RecordBatchStream for StateBatchOutputStream {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
+impl Stream for StateBatchOutputStream {
+    type Item = DataFusionResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.reported {
+            return Poll::Ready(None);
+        }
+        self.retained = None;
+        loop {
+            if let Ending::Failed(error) = self.lease.shared.ending() {
+                self.reported = true;
+                self.receiver.close();
+                while self.receiver.try_recv().is_ok() {}
+                self.retained = None;
+                return Poll::Ready(Some(Err(DataFusionError::from(&error))));
+            }
+            match self.receiver.poll_recv(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Queued::StateBatch {
+                    batch,
+                    _charge,
+                    _metadata,
+                })) => {
+                    // Keep the router reservation through the next poll so Final can admit the
+                    // returned batch's retained component arrays before releasing router charge.
+                    self.retained = Some((_charge, _metadata));
+                    return Poll::Ready(Some(Ok(batch)));
+                }
+                Poll::Ready(Some(Queued::Eof { input, _metadata })) => {
+                    // The shared Ending state and channel closure establish stream completion;
+                    // this message is only a queue-order barrier for the routed state stream.
+                    let _ = input;
+                    drop(_metadata);
+                }
+                Poll::Ready(Some(Queued::Chain { .. })) => {
+                    let error = DataFusionError::Internal(
+                        "series router received a non-state message".into(),
+                    );
+                    self.lease.fail(Arc::new(DataFusionError::Internal(
+                        "series router received a non-state message".into(),
+                    )));
+                    self.reported = true;
+                    self.receiver.close();
+                    while self.receiver.try_recv().is_ok() {}
+                    self.retained = None;
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Ready(None) => {
+                    self.reported = true;
+                    self.retained = None;
+                    return match self.lease.ending() {
+                        Some(Err(error)) => {
+                            Poll::Ready(Some(Err(DataFusionError::External(Box::new(error)))))
+                        }
+                        Some(Ok(_)) => unreachable!(),
+                        None => Poll::Ready(None),
+                    };
+                }
+            }
+        }
+    }
+}
+
 struct RepartitionStream {
     receiver: mpsc::UnboundedReceiver<Queued>,
     lease: OutputLease,
@@ -2128,6 +2638,11 @@ impl Stream for RepartitionStream {
                 return Poll::Pending;
             }
             match this.receiver.poll_recv(cx) {
+                Poll::Ready(Some(Queued::StateBatch { .. })) => {
+                    this.lease.fail(Arc::new(DataFusionError::Internal(
+                        "non-state output received an aggregate-state batch".into(),
+                    )));
+                }
                 Poll::Ready(Some(Queued::Chain {
                     input,
                     chain,
@@ -2328,8 +2843,6 @@ impl Routing {
             SeriesRouting::Matching(policy) => {
                 crate::vector_match::group_key(metric, policy).hash(&mut hasher)
             }
-            // A raw frame routed by its stored key never reaches here: its destination is the
-            // stored key itself, not a label hash. Evaluated frames never use this policy.
             SeriesRouting::RawPrimaryKey => {
                 debug_assert!(
                     false,

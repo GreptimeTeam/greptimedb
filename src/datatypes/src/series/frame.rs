@@ -1180,18 +1180,16 @@ impl SeriesFrameCursor {
         {
             return invalid_series("aggregate state chunk grid does not match schema");
         }
-        let mut contributing = Vec::new();
-        for i in 0..series.time.len() {
-            let any = state.kind == crate::series::aggregate_state::AggregateStateKind::Group
-                || series.states.iter().any(|field| field[i].is_some());
-            if any {
-                contributing.push(i);
-            }
-        }
+        let contributing = (0..series.time.len())
+            .map(|row| {
+                state.kind == crate::series::aggregate_state::AggregateStateKind::Group
+                    || series.states.iter().any(|field| field[row].is_some())
+            })
+            .collect::<Vec<_>>();
         let carried = series
             .time
             .positions()
-            .filter_map(|(position, row)| contributing.contains(&row).then_some(position))
+            .filter_map(|(position, row)| contributing[row].then_some(position))
             .collect::<Vec<_>>();
         let spans = positions_to_spans(&carried);
         let time =
@@ -1200,9 +1198,10 @@ impl SeriesFrameCursor {
             .states
             .iter()
             .map(|field| {
-                contributing
+                field
                     .iter()
-                    .map(|row| field[*row])
+                    .zip(&contributing)
+                    .filter_map(|(value, contributes)| contributes.then_some(*value))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -2872,4 +2871,126 @@ fn err(reason: impl Into<String>) -> crate::error::Error {
 
 fn arrow<T>(result: std::result::Result<T, arrow::error::ArrowError>) -> Result<T> {
     result.map_err(|e| err(e.to_string()))
+}
+
+#[cfg(test)]
+mod aggregate_state_contribution_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::series::aggregate_state::{
+        AggregateStateKind as Kind, AggregateStateValues as Values, StateComponent as Component,
+    };
+    use crate::series::samples::FieldSpec;
+
+    fn schema(len: usize) -> SeriesSchema {
+        SeriesSchema {
+            fields: ["a", "b"]
+                .into_iter()
+                .map(|name| FieldSpec {
+                    name: Arc::from(name),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            eval_grid: Some(Arc::new(
+                EvalGrid::try_new(GridSpec::try_new(0, 1, len as u64).unwrap()).unwrap(),
+            )),
+        }
+    }
+
+    fn cursor(
+        kind: Kind,
+        schema: &SeriesSchema,
+        spans: Vec<GridSpan>,
+        states: Vec<Vec<Option<Values>>>,
+    ) -> SeriesFrameCursor {
+        let components = match kind {
+            Kind::Group => vec![],
+            _ => vec![Component::Value, Component::Compensation],
+        };
+        let state = AggregateStateSchema::try_new(kind, components).unwrap();
+        SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            schema,
+            StateSeries {
+                metric: SeriesLabels::try_new(None, vec![]).unwrap(),
+                time: TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap(),
+                states,
+            },
+            true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sparse_rows_are_filtered_and_group_keeps_all_rows() {
+        let schema = schema(12);
+        let sparse = cursor(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 5), GridSpan::new(7, 4)],
+            vec![
+                vec![
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                vec![
+                    None,
+                    None,
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                ],
+            ],
+        );
+        let ChunkWalk::State(walk) = sparse.walk else {
+            panic!("expected state walk")
+        };
+        assert_eq!(
+            walk.series.time.positions().collect::<Vec<_>>(),
+            vec![(1, 0), (3, 1), (4, 2), (8, 3)]
+        );
+        assert_eq!(
+            walk.series
+                .time
+                .runs()
+                .map(|run| (run.position, run.len))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (3, 2), (8, 1)]
+        );
+        assert_eq!(
+            walk.series.states[0],
+            vec![Some(Values::default()), None, Some(Values::default()), None]
+        );
+        assert_eq!(
+            walk.series.states[1],
+            vec![None, Some(Values::default()), None, Some(Values::default())]
+        );
+
+        let group = cursor(
+            Kind::Group,
+            &schema,
+            vec![GridSpan::new(2, 3), GridSpan::new(8, 2)],
+            vec![vec![None; 5], vec![None; 5]],
+        );
+        let ChunkWalk::State(walk) = group.walk else {
+            panic!("expected state walk")
+        };
+        assert_eq!(
+            walk.series.time.positions().collect::<Vec<_>>(),
+            vec![(2, 0), (3, 1), (4, 2), (8, 3), (9, 4)]
+        );
+        assert_eq!(walk.series.states, vec![vec![None; 5], vec![None; 5]]);
+    }
 }

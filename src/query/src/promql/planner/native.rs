@@ -18,7 +18,7 @@
 //! compiler and, when the compiler accepts it, replaces everything the existing path would plan
 //! below the root with one [`FusedSeries`] node over the selector's own table scan. A tree that
 //! folds across series - an aggregate - is split instead: its per-series prefix and a `Partial`
-//! aggregate run in a `FusedSeries` producer, a [`StateRepartitionExec`] routes that state, and a
+//! aggregate run in a `FusedSeries` producer, a [`SeriesRepartitionExec`] routes that state, and a
 //! second `FusedSeries` runs the `Final` aggregate over it, because a region holds only part of a
 //! group. Declining is the normal answer: every shape the
 //! compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps the
@@ -1499,6 +1499,7 @@ async fn segment_tree(
 }
 
 /// Applies the legacy expression-derived names to a completed segmented aggregate.
+#[allow(clippy::type_complexity)]
 fn segmented_aggregate_projection(
     planner: &PromPlanner,
     query_engine_state: &QueryEngineState,
@@ -1761,7 +1762,7 @@ fn fused_output_schema(
 /// aggregate at its root, so each partition exports the state it folded. The second is a
 /// [`FusedSeries`] over the first running the `Final` aggregate and everything the split moved
 /// above it: it reads state where the first reads series, and answers the statement's rows. Between
-/// them the physical planner puts a [`StateRepartitionExec`], which is what makes every row of a
+/// them the physical planner puts a [`SeriesRepartitionExec`], which is what makes every row of a
 /// group reach one final partition.
 ///
 /// The statement's output value columns must match the partial state's accumulator count; a
@@ -1802,7 +1803,7 @@ fn plan_split_aggregate(
         vec![rawinput],
     )
     .context(DataFusionPlanningSnafu)?;
-    Ok(FusedSeries::try_new(
+    FusedSeries::try_new(
         promql,
         final_tree,
         binding,
@@ -1811,7 +1812,7 @@ fn plan_split_aggregate(
         })],
         output_schema,
     )
-    .context(DataFusionPlanningSnafu)?)
+    .context(DataFusionPlanningSnafu)
 }
 
 /// The time-range filter a selector's scan reads, from the bounds its compiled requirement names.

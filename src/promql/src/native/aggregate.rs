@@ -238,6 +238,7 @@ impl AggregateRuntime {
         let description = self.describe();
         let merger = self.merger.as_mut().ok_or_else(|| no_fold(&description))?;
         merger.merge_row(&row, |bytes| buffer.resize(pending.saturating_add(bytes)))?;
+        drop(row);
         buffer.resize(merger.state_bytes())
     }
 

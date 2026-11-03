@@ -87,7 +87,6 @@ use table::table::scan::SeriesScanExec;
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
-use crate::extension_plan::state_repartition::StateRepartitionExec;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, Grouping, InstantValue, NativeExpr, NativeNode,
@@ -719,7 +718,7 @@ impl FusedSeries {
         let tags = if matches!(self.tree.root().output, NativeType::AggregateState(_)) {
             self.binding.tags.clone()
         } else {
-            self.output_tags()
+            self.output_tags()?
         };
         let evaluated = inputs.iter().any(|(input, _, _)| {
             SeriesFrameDeclaration::parse(input.schema().as_ref())
@@ -793,12 +792,12 @@ impl FusedSeries {
                         StateGroup::Grouped => target_partitions.unwrap_or(count).max(1),
                     };
                     let has_router = input
-                        .downcast_ref::<StateRepartitionExec>()
+                        .downcast_ref::<SeriesRepartitionExec>()
                         .is_some_and(|router| router.outputs() == required);
                     if count == required && (has_router || required == 1) {
                         return Ok((input, label_source, ordering));
                     }
-                    let routed = Arc::new(StateRepartitionExec::try_new(input, required)?)
+                    let routed = Arc::new(SeriesRepartitionExec::try_new(input, required)?)
                         as Arc<dyn ExecutionPlan>;
                     let ordering = series_frame_ordering(routed.schema().as_ref())?;
                     return Ok((routed, RawLabelSource::Explicit, ordering));
@@ -914,11 +913,40 @@ impl FusedSeries {
     ///
     /// The planner decides them from the whole tree - a match narrows them, `or` joins both sides'
     /// and a wrapper around either keeps them - and the output schema is where it records that.
-    fn output_tags(&self) -> Vec<String> {
+    ///
+    /// A tree reading aggregate state cannot match root fields by name: its value columns carry the
+    /// statement's legacy names, which name the whole expression (`sum(m.v)`), while the root's
+    /// fields name the one metric field (`v`). It therefore relies on the order the split's output
+    /// schema is built in - the time index, then one column per root field, then the tags - which is
+    /// what `classify_aggregate_state_output` checks against the actual types rather than trusting.
+    fn output_tags(&self) -> DataFusionResult<Vec<String>> {
         let Some(root) = self.tree.root().output.samples() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        self.output_schema
+        if self.reads_aggregate_state() {
+            let non_time_columns = self
+                .output_schema
+                .fields()
+                .iter()
+                .filter(|field| field.name() != &self.binding.time_index)
+                .map(|field| field.name())
+                .collect::<Vec<_>>();
+            let value_count = root.fields.len();
+            if non_time_columns.len() < value_count {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeries output has {} non-time columns, fewer than the {} root value fields required for aggregate-state output",
+                    non_time_columns.len(),
+                    value_count
+                )));
+            }
+            return Ok(non_time_columns
+                .into_iter()
+                .skip(value_count)
+                .cloned()
+                .collect());
+        }
+        Ok(self
+            .output_schema
             .fields()
             .iter()
             .map(|field| field.name())
@@ -930,7 +958,7 @@ impl FusedSeries {
                         .any(|field| field.name.as_ref() == name.as_str())
             })
             .cloned()
-            .collect()
+            .collect())
     }
 }
 
@@ -1731,6 +1759,95 @@ fn scalar_root_fields(
     }])
 }
 
+/// Classifies aggregate-state output columns by their planner-defined positions.
+fn classify_aggregate_state_output(
+    output_schema: &SchemaRef,
+    value_count: usize,
+    tags: &[String],
+    time_column: &str,
+) -> DataFusionResult<Vec<OutputColumn>> {
+    let time_indices = output_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| field.name().as_str() == time_column)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let time_index = match time_indices.as_slice() {
+        [] => {
+            return Err(DataFusionError::Plan(format!(
+                "missing time column {time_column:?} in FusedSeriesExec output schema"
+            )));
+        }
+        [index] => *index,
+        _ => {
+            return Err(DataFusionError::Plan(format!(
+                "duplicate time column {time_column:?} in FusedSeriesExec output schema"
+            )));
+        }
+    };
+    let non_time_count = output_schema.fields().len() - 1;
+    let tag_count = non_time_count.saturating_sub(value_count);
+    if non_time_count < value_count || tag_count != tags.len() {
+        return Err(DataFusionError::Plan(format!(
+            "aggregate-state output has {non_time_count} non-time columns ({value_count} value columns and {tag_count} tag columns), but expected {value_count} value columns and {} tag columns",
+            tags.len()
+        )));
+    }
+
+    let mut classification = Vec::with_capacity(output_schema.fields().len());
+    let mut value_index = 0;
+    let mut tag_index = 0;
+    for (index, field) in output_schema.fields().iter().enumerate() {
+        let name = field.name();
+        if index == time_index {
+            match field.data_type() {
+                DataType::Timestamp(TimeUnit::Millisecond, None) => {}
+                other => {
+                    return Err(DataFusionError::Plan(format!(
+                        "time column {name:?} of FusedSeriesExec must be Timestamp(Millisecond, None), got {other:?}"
+                    )));
+                }
+            }
+            if field.is_nullable() {
+                return Err(DataFusionError::Plan(format!(
+                    "time column {name:?} of FusedSeriesExec must not be nullable"
+                )));
+            }
+            classification.push(OutputColumn::Time);
+        } else if value_index < value_count {
+            if field.data_type() != &DataType::Float64 {
+                return Err(DataFusionError::Plan(format!(
+                    "field column {name:?} of FusedSeriesExec must be Float64, got {:?}",
+                    field.data_type()
+                )));
+            }
+            if !field.is_nullable() {
+                return Err(DataFusionError::Plan(format!(
+                    "field column {name:?} of FusedSeriesExec must be nullable, because a grid point can be missing"
+                )));
+            }
+            classification.push(OutputColumn::Field(value_index));
+            value_index += 1;
+        } else {
+            if field.data_type() != &DataType::Utf8 {
+                return Err(DataFusionError::Plan(format!(
+                    "tag column {name:?} of FusedSeriesExec must be Utf8, got {:?}",
+                    field.data_type()
+                )));
+            }
+            if !field.is_nullable() {
+                return Err(DataFusionError::Plan(format!(
+                    "tag column {name:?} of FusedSeriesExec must be nullable, because range functions and map kernels drop the metric name"
+                )));
+            }
+            classification.push(OutputColumn::Tag(tag_index));
+            tag_index += 1;
+        }
+    }
+    Ok(classification)
+}
+
 /// Classifies every output column, rejecting anything the conversion cannot produce.
 pub(crate) fn classify_output(
     output_schema: &SchemaRef,
@@ -2102,6 +2219,19 @@ impl FusedSeriesExec {
         };
         let classification = if partial_root || frame_schema {
             Vec::new()
+        } else if tree_inputs(&tree)
+            .iter()
+            .any(|input| matches!(input.output, NativeType::AggregateState(_)))
+        {
+            let output_series = output_series
+                .as_ref()
+                .ok_or_else(|| DataFusionError::Plan("FusedSeries output is not samples".into()))?;
+            classify_aggregate_state_output(
+                &output_schema,
+                output_series.fields.len(),
+                &tags,
+                &time_column,
+            )?
         } else if scalar_root {
             let scalar_fields = scalar_root_fields(&output_schema, &tags, &time_column)?;
             classify_output(&output_schema, &scalar_fields, &tags, &time_column)?
@@ -2589,7 +2719,8 @@ impl ExecutionPlan for FusedSeriesExec {
                 });
                 let source: SendableStateSeriesStream = Box::pin(FusedStateStream {
                     source: stream,
-                    pending: VecDeque::new(),
+                    pending: Vec::new().into_iter(),
+                    reservation: None,
                 });
                 Ok(pack_aggregate_state(
                     source,
@@ -2711,7 +2842,7 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
 }
 
 /// One chunk a child handed over, in the form the child's frame declared it in.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum FusedChunk {
     /// Raw samples: one scan series, with its own timestamps.
     Raw(RawSeriesChunk),
@@ -2803,12 +2934,31 @@ impl FusedSeriesStream {
         let last = input_ids.len().saturating_sub(1);
         let mut chunk = Some(feed.chunk);
         for (index, input_id) in input_ids.iter().enumerate() {
-            let chunk = if index == last {
-                chunk.take().unwrap()
-            } else {
-                chunk.as_ref().unwrap().clone()
+            let Some(owned) = (index == last).then(|| chunk.take().unwrap()) else {
+                // One source feeding several runtime inputs hands each the same value. State read
+                // from a frame arrives as one row per feed, so it is copied; a producer's batch
+                // carries the charge for its whole payload and cannot be shared, and no tree binds
+                // one such source twice.
+                match chunk.as_ref().expect("the feed is consumed once") {
+                    FusedChunk::Raw(value) => {
+                        executor.push_raw(*input_id, value.clone())?;
+                    }
+                    FusedChunk::Evaluated(value) => {
+                        executor.push_evaluated(*input_id, value.clone())?;
+                    }
+                    FusedChunk::State(StateChunk::Row(row)) => {
+                        executor.push_state(*input_id, StateChunk::Row(row.clone()))?;
+                    }
+                    FusedChunk::State(StateChunk::Series { .. }) => {
+                        return Err(DataFusionError::Execution(
+                            "one producer state batch cannot feed several runtime inputs"
+                                .to_string(),
+                        ));
+                    }
+                }
+                continue;
             };
-            match chunk {
+            match owned {
                 FusedChunk::Raw(chunk) => executor.push_raw(*input_id, chunk)?,
                 FusedChunk::Evaluated(chunk) => executor.push_evaluated(*input_id, chunk)?,
                 FusedChunk::State(chunk) => executor.push_state(*input_id, chunk)?,
@@ -3068,7 +3218,18 @@ impl Stream for FusedEvaluatedStream {
 
 struct FusedStateStream {
     source: FusedSeriesStream,
-    pending: VecDeque<datatypes::series::aggregate_state::StateSeries>,
+    /// The series of the one producer chunk being handed out.
+    pending: std::vec::IntoIter<datatypes::series::aggregate_state::StateSeries>,
+    /// What that chunk still holds, released once its last series has been handed out.
+    reservation: Option<MemoryReservation>,
+}
+
+impl FusedStateStream {
+    /// Drops what this stream still held and ends it: the packer above reads nothing more.
+    fn finish(&mut self) {
+        self.pending = Vec::new().into_iter();
+        self.reservation = None;
+    }
 }
 
 impl Stream for FusedStateStream {
@@ -3076,25 +3237,40 @@ impl Stream for FusedStateStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            if let Some(series) = self.pending.pop_front() {
+            if let Some(series) = self.pending.next() {
                 // is_last closes this producer's partial chunk chain; Final still merges every
                 // producer's contribution before completing a group.
                 return Poll::Ready(Some(Ok((series, true))));
             }
+            // Every series of that chunk has been handed out, so its charge and the buffer those
+            // series came from both go back before the next chunk is read. Holding the charge until
+            // this point is what keeps the last series' payload accounted for while the packer
+            // still reads it; dropping the exhausted iterator here keeps its spare capacity from
+            // outliving the charge that covered it.
+            self.reservation = None;
+            self.pending = Vec::new().into_iter();
             match Pin::new(&mut self.source).poll_output(cx) {
                 Poll::Ready(Some(Ok(FusedOutput::State(chunk)))) => {
-                    let StateChunk::Series { series, .. } = chunk else {
+                    let StateChunk::Series {
+                        series,
+                        reservation,
+                        ..
+                    } = chunk
+                    else {
                         Pin::new(&mut self.source).fail();
+                        self.finish();
                         return Poll::Ready(Some(Err(BoxedError::new(
                             common_query::error::Error::from(DataFusionError::Internal(
                                 "row state reached state export stream".into(),
                             )),
                         ))));
                     };
-                    self.pending.extend(series);
+                    self.pending = series.into_iter();
+                    self.reservation = reservation;
                 }
                 Poll::Ready(Some(Ok(_))) => {
                     Pin::new(&mut self.source).fail();
+                    self.finish();
                     return Poll::Ready(Some(Err(BoxedError::new(
                         common_query::error::Error::from(DataFusionError::Internal(
                             "non-state output reached state stream".into(),
@@ -3102,11 +3278,15 @@ impl Stream for FusedStateStream {
                     ))));
                 }
                 Poll::Ready(Some(Err(error))) => {
+                    self.finish();
                     return Poll::Ready(Some(Err(BoxedError::new(
                         common_query::error::Error::from(error),
                     ))));
                 }
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    self.finish();
+                    return Poll::Ready(None);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }

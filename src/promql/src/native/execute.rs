@@ -498,6 +498,26 @@ impl NodeBuffer {
         Ok(())
     }
 
+    /// Moves `bytes` of what this node holds into a reservation of its own.
+    ///
+    /// The bytes stay charged to the pool: only who holds them changes, so a consumer that keeps
+    /// the handed-over chunk remains accountable for it. The returned reservation reports what it
+    /// took, which is what the caller no longer holds.
+    fn transfer(&mut self, bytes: usize) -> Result<MemoryReservation> {
+        // A chunk is queued with the figure this node grew by, so the two agree unless the
+        // accounting drifted. Refusing is what keeps a drift from either panicking inside the
+        // memory path or handing out a chunk nobody is charged for.
+        if bytes > self.reservation.size() {
+            return Err(DataFusionError::Internal(format!(
+                "a queued chunk holds {bytes} bytes, more than the {} its node reserves",
+                self.reservation.size()
+            )));
+        }
+        let reservation = self.reservation.split(bytes);
+        self.record();
+        Ok(reservation)
+    }
+
     /// Reports what this node now reserves.
     fn record(&self) {
         self.metrics.record_reserved_bytes(self.reservation.size());
@@ -4428,16 +4448,31 @@ impl NodeState {
     /// input's figure has always been its positions, while a kernel's result holds one value per
     /// field and a field may have none at a position it decided.
     fn pop_queued(&mut self, values: fn(&NativeChunk) -> usize) -> Result<Option<NativeChunk>> {
-        let Some((chunk, bytes)) = self.queued.pop_front() else {
+        let Some((mut chunk, bytes)) = self.queued.pop_front() else {
             return Ok(None);
+        };
+        // A producer hands its state to a consumer that packs rows from the batch across polls, so
+        // that chunk's charge travels with it instead of being returned here.
+        let moved = match &mut chunk {
+            NativeChunk::AggregateState(StateChunk::Series { reservation, .. }) => {
+                debug_assert!(
+                    reservation.is_none(),
+                    "a handed-over state chunk was charged to a queue twice"
+                );
+                let transferred = self.buffer.transfer(bytes)?;
+                let moved = transferred.size();
+                *reservation = Some(transferred);
+                moved
+            }
+            _ => 0,
         };
         let metrics = Arc::clone(&self.buffer.metrics);
         {
             // An input node's own work is handing the chunk over, so its self time covers that and
-            // nothing its producer did. The chunk leaves this node, so the pool no longer has to
-            // hold it.
+            // nothing its producer did. Whatever the chunk did not take with it, the pool no longer
+            // has to hold.
             let _timer = metrics.timer();
-            self.buffer.shrink(bytes)?;
+            self.buffer.shrink(bytes - moved)?;
             self.release_queued_tables()?;
         }
         metrics.record_output(1, values(&chunk));

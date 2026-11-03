@@ -24,7 +24,9 @@
 use std::mem::{size_of, size_of_val};
 use std::sync::Arc;
 
+use datafusion::arrow::array::Array;
 use datafusion::error::{DataFusionError, Result};
+use datafusion::execution::memory_pool::MemoryReservation;
 use datatypes::series::aggregate_state::{
     AggregateStateKind, AggregateStateValues, StateComponent, StateSeries,
 };
@@ -36,11 +38,17 @@ use crate::aggregate::{AggregateOp, PartialAggregate, PartialGroup};
 use crate::native::plan::AggregateStateSchema;
 
 /// One partition's aggregate state, either in producer series form or as a decoded consumer row.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum StateChunk {
     Series {
         series: Vec<StateSeries>,
         state_schema: Arc<AggregateStateSchema>,
+        /// The producer charge this chunk carries once it has left its node's queue.
+        ///
+        /// A state chunk is charged to the node that folded it until the chunk is handed over. The
+        /// consumer keeps the batch across polls while it packs rows from it, so the charge travels
+        /// with those series rather than being returned the moment the producer lets go.
+        reservation: Option<MemoryReservation>,
     },
     Row(crate::aggregate::state::StateRow),
 }
@@ -169,6 +177,7 @@ pub(crate) fn state_chunk_from_partial(
     let chunk = StateChunk::Series {
         series,
         state_schema,
+        reservation: None,
     };
     budget(state_bytes(&chunk))?;
     Ok(chunk)
@@ -251,22 +260,41 @@ pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
     }
 }
 
-/// Bytes held by one decoded state row's owned wrappers.
+/// Bytes held by one decoded state row's owned wrappers and retained payloads.
 pub(crate) fn state_row_bytes(row: &crate::aggregate::state::StateRow) -> usize {
     let fields = row.fields.len();
-    // Child value buffers are shared with the frame batch; charging them here would double-count.
     size_of::<StateChunk>()
         .saturating_add(size_of::<crate::aggregate::state::StateRow>())
         .saturating_add(fields.saturating_mul(size_of::<datafusion::arrow::array::StructArray>()))
         .saturating_add(
             (0..fields)
                 .filter_map(|index| row.fields.field(index))
-                .map(|field| {
-                    field
-                        .num_columns()
-                        .saturating_mul(size_of::<datafusion::arrow::array::ArrayRef>())
-                })
+                .map(Array::get_array_memory_size)
                 .fold(0usize, usize::saturating_add),
+        )
+        .saturating_add(
+            row.metric
+                .name()
+                .map_or(0, str::len)
+                .saturating_add(size_of_val(row.metric.tags()))
+                .saturating_add(
+                    row.metric
+                        .tags()
+                        .iter()
+                        .map(|tag| tag.name.len().saturating_add(tag.value.len()))
+                        .sum::<usize>(),
+                ),
+        )
+        .saturating_add(
+            row.time
+                .runs()
+                .count()
+                .saturating_mul(size_of::<GridSpan>().saturating_add(size_of::<usize>()))
+                .saturating_add(if row.time.is_empty() {
+                    0
+                } else {
+                    size_of::<TimeAxis>()
+                }),
         )
 }
 
@@ -279,6 +307,7 @@ pub(crate) fn state_bytes(chunk: &StateChunk) -> usize {
     let StateChunk::Series {
         series,
         state_schema,
+        ..
     } = chunk
     else {
         let StateChunk::Row(row) = chunk else {

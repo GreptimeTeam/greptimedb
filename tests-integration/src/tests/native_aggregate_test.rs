@@ -27,12 +27,11 @@
 //! itself, or the one transparent cooperative-scheduling wrapper the engine may put above it, but
 //! never an exchange - and `native.root.output_values` for every one of the four scan partitions;
 //! the metric is read after the result stream was drained, the only point at which it is complete.
-//! The frontend tree must hold an outer Final `FusedSeriesExec` over a `StateRepartitionExec` and
-//! an inner Partial `FusedSeriesExec`. The inner node reaches the `MergeScanExec` leaf that stands
-//! for the region subtree; there it reads `SeriesScanExec` directly, with one partition-local
-//! evaluation per scan partition and one merge over all of their states. Plans are observed through
-//! [`PhysicalPlanWrapper`], which both query engines install, so what is checked is the tree that ran
-//! rather than a re-plan made for an `EXPLAIN`.
+//! The frontend tree holds a Final `FusedSeriesExec` over a `SeriesRepartitionExec` and its
+//! `MergeScanExec` leaf. The Partial producer and its raw `SeriesScanExec` input are in the
+//! separately captured region physical plan, not in that frontend tree. Both trees are checked
+//! independently through [`PhysicalPlanWrapper`], which both query engines install, so what is
+//! checked is the plan that ran rather than a re-plan made for an `EXPLAIN`.
 //!
 //! Two tables carry the queries. [`COUNTER_TABLE`] holds the same five series in the same four
 //! persisted files and one memtable range as [`GAUGE_TABLE`], but its samples are a counter's, so
@@ -65,22 +64,24 @@
 //! natively without the split.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use common_base::Plugins;
 use common_query::OutputData;
 use common_recordbatch::RecordBatches;
 use common_recordbatch::util::collect_batches;
+use datafusion::physical_plan::DisplayFormatType;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::metrics::MetricValue;
-use datafusion::physical_plan::projection::ProjectionExec;
 use datatypes::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
+use datatypes::series::frame::{FrameContent, SeriesFrameDeclaration};
 use frontend::instance::Instance;
-use promql::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+use promql::extension_plan::{FusedSeriesExec, SeriesRepartitionExec, SeriesRouting};
 use promql::vector_match::MatchingLabels;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::dist_plan::MergeScanExec;
@@ -99,6 +100,8 @@ const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
 const FUSED_EXEC_NAME: &str = "FusedSeriesExec";
 /// The metric a fused producer registers for the values its own root node produced, per partition.
 const ROOT_OUTPUT_VALUES_METRIC: &str = "native.root.output_values";
+/// The number of sample positions consumed by the root node, per partition.
+const ROOT_INPUT_SAMPLES_METRIC: &str = "native.root.input_samples";
 /// The parallelism the scan is asked to split its ranges into.
 const SCAN_PARTITIONS: usize = 4;
 /// The first sample of the fixture, in seconds since the epoch.
@@ -242,15 +245,21 @@ impl PhysicalPlanWrapper for NativePlanObserver {
     }
 }
 
-/// The native nodes one query's plans hold: the partition-local producers, one per region the query
-/// read, and the frontend-side merges of the state they export.
-///
-/// The two are observed in different trees, so the lists are never matched against each other by
-/// `Arc`; the schema the producer exports is what ties them.
+/// The native nodes one query's captured plans hold: region-side Partial producers and frontend
+/// Final merges. The two are observed in different trees, so the lists are never matched by `Arc`; the
+/// region producer's typed state-frame schema and the frontend routing chain are checked separately.
 #[derive(Default)]
 struct NativeCapture {
     fused: Vec<Arc<dyn ExecutionPlan>>,
     finalize: Vec<Arc<dyn ExecutionPlan>>,
+}
+
+struct NodeDisplay<'a>(&'a dyn ExecutionPlan);
+
+impl fmt::Display for NodeDisplay<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt_as(DisplayFormatType::Default, formatter)
+    }
 }
 
 impl NativeCapture {
@@ -259,8 +268,10 @@ impl NativeCapture {
         let mut capture = Self::default();
         let mut stack = plans.to_vec();
         while let Some(node) = stack.pop() {
-            if node.name() == FUSED_EXEC_NAME {
-                let display = displayable(node.as_ref()).indent(false).to_string();
+            if node.downcast_ref::<FusedSeriesExec>().is_some() {
+                // Invoke this node's formatter directly: the execution-plan display formatter
+                // recursively includes children and can misclassify an ancestor as Final.
+                let display = NodeDisplay(node.as_ref()).to_string();
                 if display.contains(" final") {
                     capture.finalize.push(Arc::clone(&node));
                 } else {
@@ -288,6 +299,8 @@ struct ResultRow {
 struct QueryResult {
     /// Every column name, in schema order.
     columns: Vec<String>,
+    /// Every column type, in schema order.
+    column_types: Vec<DataType>,
     /// The rows, in a canonical order.
     rows: Vec<ResultRow>,
 }
@@ -302,6 +315,10 @@ impl QueryResult {
         let columns = fields
             .iter()
             .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        let column_types = fields
+            .iter()
+            .map(|field| field.data_type().clone())
             .collect::<Vec<_>>();
         let time_index = fields
             .iter()
@@ -369,7 +386,11 @@ impl QueryResult {
             (left.ts_millis, &left.labels).cmp(&(right.ts_millis, &right.labels))
         });
 
-        Self { columns, rows }
+        Self {
+            columns,
+            column_types,
+            rows,
+        }
     }
 }
 
@@ -391,6 +412,8 @@ struct AggregateCase {
     /// Native output schema. The native aggregate preserves its source field name (`v`), rather
     /// than the legacy planner's computed-expression name.
     native_value_column: &'static str,
+    /// Whether this case's global aggregate has an explicitly specified single owner.
+    single_owner: bool,
 }
 
 /// Builds one case from a PromQL expression and its `(labels, value)` rows.
@@ -412,6 +435,7 @@ fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool
         root_values: None,
         partial_state: None,
         native_value_column: "v",
+        single_owner: false,
     }
 }
 
@@ -458,11 +482,27 @@ async fn run_query(
         .do_query(&sql, Arc::new(query_ctx))
         .await
         .remove(0)
-        .unwrap_or_else(|err| panic!("`{sql}` failed: {err}"));
+        .unwrap_or_else(|err| {
+            // The top-level Display is one line; the chain names what actually failed, and without
+            // it a planning error inside the operator layer is indistinguishable from a scan error.
+            let mut chain = String::new();
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+            while let Some(error) = source {
+                chain.push_str(&format!("\n  caused by: {error}"));
+                source = error.source();
+            }
+            panic!("`{sql}` failed: {err}{chain}");
+        });
     let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream)
-            .await
-            .unwrap_or_else(|err| panic!("`{sql}` produced no batches: {err}")),
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap_or_else(|err| {
+            let mut chain = String::new();
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+            while let Some(error) = source {
+                chain.push_str(&format!("\n  caused by: {error}"));
+                source = error.source();
+            }
+            panic!("`{sql}` produced no batches: {err}{chain}");
+        }),
         OutputData::RecordBatches(batches) => batches,
         other => panic!("`{sql}` produced no batches: {other:?}"),
     };
@@ -922,8 +962,11 @@ async fn check_hybrid_binary_cases(instance: &Arc<Instance>, observer: &NativePl
                 fused: vec![Arc::clone(fused)],
                 finalize: Vec::new(),
             };
-            let counts =
-                fused_output_values_per_partition(&per_fused, &format!("hybrid `{promql}`"));
+            let counts = fused_root_metric_per_partition(
+                &per_fused,
+                ROOT_OUTPUT_VALUES_METRIC,
+                &format!("hybrid `{promql}`"),
+            );
             assert!(
                 counts.iter().all(|count| count.is_some_and(|n| n > 0)),
                 "{promql}: each scan partition must emit values, got {counts:?}"
@@ -1250,15 +1293,99 @@ fn assert_native_schema(
     );
 }
 
+/// Asserts both routes report the answer with the same columns.
+///
+/// Compare column names independent of schema order.
+fn assert_same_columns(native: &QueryResult, legacy: &QueryResult, query: &str) {
+    let sorted = |result: &QueryResult| {
+        let mut columns = result.columns.clone();
+        columns.sort();
+        columns
+    };
+    assert_eq!(
+        sorted(legacy),
+        sorted(native),
+        "`{query}`: native column names must match legacy"
+    );
+}
+
+/// Compare complete name/type pairs independent of schema order.
+fn assert_same_name_types(native: &QueryResult, legacy: &QueryResult, query: &str) {
+    assert_same_name_types_except_count_value(native, legacy, query, false);
+}
+
+/// Compare ordinary native results with legacy, allowing only the documented count value type
+/// difference (legacy Int64 versus native Float64) when the case is an explicit count query.
+fn assert_same_name_types_except_count_value(
+    native: &QueryResult,
+    legacy: &QueryResult,
+    query: &str,
+    count_value_exception: bool,
+) {
+    let sorted = |result: &QueryResult| {
+        let mut columns = result
+            .columns
+            .iter()
+            .cloned()
+            .zip(result.column_types.iter().cloned())
+            .collect::<Vec<_>>();
+        columns.sort_by(|left, right| left.0.cmp(&right.0));
+        columns
+    };
+    if count_value_exception {
+        let value_type = |result: &QueryResult| {
+            result
+                .column_types
+                .iter()
+                .find(|ty| ty.is_numeric())
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(
+            DataType::Int64,
+            value_type(legacy),
+            "`{query}` legacy count type"
+        );
+        assert_eq!(
+            DataType::Float64,
+            value_type(native),
+            "`{query}` native count type"
+        );
+        let mut legacy_pairs = sorted(legacy);
+        let mut native_pairs = sorted(native);
+        let legacy_value = legacy_pairs
+            .iter()
+            .position(|(_, ty)| *ty == DataType::Int64)
+            .unwrap();
+        let native_value = native_pairs
+            .iter()
+            .position(|(_, ty)| *ty == DataType::Float64)
+            .unwrap();
+        legacy_pairs[legacy_value].1 = DataType::Null;
+        native_pairs[native_value].1 = DataType::Null;
+        assert_eq!(
+            legacy_pairs, native_pairs,
+            "`{query}`: all non-count name/type pairs must match"
+        );
+    } else {
+        assert_eq!(
+            sorted(legacy),
+            sorted(native),
+            "`{query}`: native name/type pairs must match legacy"
+        );
+    }
+}
+
 /// The `native.root.output_values` counts of the fused producers in `capture`, per partition.
 ///
 /// An entry stays [`None`] when the producer never registered the metric for a partition, which is a
 /// different failure from a partition that produced nothing; both are reported as they are.
-fn fused_node_output_values_per_partition(
+fn fused_node_metric_per_partition(
     fused: &Arc<dyn ExecutionPlan>,
+    metric_name: &str,
     context: &str,
 ) -> Vec<Option<usize>> {
-    fused_node_count_per_partition(fused, ROOT_OUTPUT_VALUES_METRIC, context)
+    fused_node_count_per_partition(fused, metric_name, context)
 }
 
 /// Reads a named native count from the fused node's registered per-partition metrics.
@@ -1292,17 +1419,50 @@ fn fused_node_count_per_partition(
     per_partition
 }
 
-/// The `native.root.output_values` counts of all fused producers in `capture`, per partition.
-fn fused_output_values_per_partition(capture: &NativeCapture, context: &str) -> Vec<Option<usize>> {
+/// The named root metric of all fused producers in `capture`, per partition.
+fn fused_root_metric_per_partition(
+    capture: &NativeCapture,
+    metric_name: &str,
+    context: &str,
+) -> Vec<Option<usize>> {
     let mut per_partition = vec![None; SCAN_PARTITIONS];
     for fused in &capture.fused {
-        for (partition, count) in fused_node_output_values_per_partition(fused, context)
+        for (partition, count) in fused_node_metric_per_partition(fused, metric_name, context)
             .into_iter()
             .enumerate()
         {
             if let Some(count) = count {
                 per_partition[partition] = Some(per_partition[partition].unwrap_or(0) + count);
             }
+        }
+    }
+    per_partition
+}
+
+/// The Final tree's aggregate input-sample counts, summed across its runtime nodes per partition.
+fn final_input_samples_per_partition(capture: &NativeCapture, context: &str) -> Vec<usize> {
+    let mut per_partition = vec![0; SCAN_PARTITIONS];
+    for finalize in &capture.finalize {
+        let plan = displayable(finalize.as_ref()).indent(false).to_string();
+        let metrics = finalize
+            .metrics()
+            .unwrap_or_else(|| panic!("{context}: Final reports no metrics:\n{plan}"));
+        for metric in metrics.iter() {
+            let MetricValue::Count { count, .. } = metric.value() else {
+                continue;
+            };
+            let name = metric.value().name();
+            if !name.starts_with("native.") || !name.ends_with(".input_samples") {
+                continue;
+            }
+            let partition = metric.partition().unwrap_or_else(|| {
+                panic!("{context}: Final `{name}` is not labelled with its partition")
+            });
+            assert!(
+                partition < SCAN_PARTITIONS,
+                "{context}: Final `{name}` partition {partition} exceeds {SCAN_PARTITIONS}:\n{plan}"
+            );
+            per_partition[partition] += count.value();
         }
     }
     per_partition
@@ -1377,10 +1537,11 @@ fn through_cooperative(node: &Arc<dyn ExecutionPlan>) -> &Arc<dyn ExecutionPlan>
     }
 }
 
-/// Asserts the outer Final node reads the state exported by the inner Partial node.
+/// Asserts the frontend Final node routes through the unified series repartitioner into the region boundary.
 fn assert_finalize_reads_region_state(
     finalize: &Arc<dyn ExecutionPlan>,
     producer: &Arc<dyn ExecutionPlan>,
+    expect_single_owner: bool,
     context: &str,
 ) {
     let plan = displayable(finalize.as_ref()).indent(false).to_string();
@@ -1390,97 +1551,149 @@ fn assert_finalize_reads_region_state(
         children.len(),
         "{context}: Final node must have one input:\n{plan}"
     );
-    let repartition = through_cooperative(&children[0]);
-    assert_eq!(
-        "StateRepartitionExec",
-        repartition.name(),
-        "{context}: expected state repartition:\n{plan}"
-    );
-    let routed = repartition.children();
-    assert_eq!(
-        1,
-        routed.len(),
-        "{context}: state repartition must have one input:\n{plan}"
-    );
-    let partial = through_cooperative(&routed[0]);
-    assert_eq!(
-        FUSED_EXEC_NAME,
-        partial.name(),
-        "{context}: expected inner Partial node:\n{plan}"
-    );
-    let partial_plan = displayable(partial.as_ref()).indent(false).to_string();
-    assert!(
-        partial_plan.contains(" partial"),
-        "{context}: inner node must be Partial:\n{partial_plan}"
-    );
-    assert_eq!(
-        partial.schema(),
-        producer.schema(),
-        "{context}: captured Partial must match chain node:\n{plan}"
-    );
-    let children = partial.children();
-    assert_eq!(
-        1,
-        children.len(),
-        "{context}: Partial must have one scan input:\n{plan}"
-    );
-    let mut boundary = through_cooperative(&children[0]);
-    if boundary.is::<ProjectionExec>() {
-        let projected = boundary.children();
+    let input = through_cooperative(children[0]);
+    if expect_single_owner {
+        assert!(
+            input.is::<MergeScanExec>(),
+            "{context}: the specified single-owner Final must read MergeScanExec directly, got {}:\n{plan}",
+            input.name()
+        );
         assert_eq!(
             1,
-            projected.len(),
-            "{context}: projection must have one input:\n{plan}"
+            input.properties().output_partitioning().partition_count(),
+            "{context}: single-owner Final input must have one partition:\n{plan}"
         );
-        boundary = through_cooperative(&projected[0]);
+        assert_eq!(
+            1,
+            finalize
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            "{context}: single-owner Final must have one partition:\n{plan}"
+        );
+        assert!(
+            input.children().is_empty(),
+            "{context}: MergeScanExec must be a leaf:\n{plan}"
+        );
+    } else {
+        let repartition = input;
+        assert!(
+            repartition.is::<SeriesRepartitionExec>(),
+            "{context}: Final must route its input through SeriesRepartitionExec, got {}:\n{plan}",
+            repartition.name()
+        );
+        assert_eq!(
+            SCAN_PARTITIONS,
+            repartition
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            "{context}: grouped Final input router must have {SCAN_PARTITIONS} partitions:\n{plan}"
+        );
+        assert_eq!(
+            SCAN_PARTITIONS,
+            finalize
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            "{context}: grouped Final must have {SCAN_PARTITIONS} partitions:\n{plan}"
+        );
+        let routed = repartition.children();
+        assert_eq!(
+            1,
+            routed.len(),
+            "{context}: repartition must have one input:\n{plan}"
+        );
+        let boundary = through_cooperative(routed[0]);
+        assert!(
+            boundary.is::<MergeScanExec>(),
+            "{context}: Final repartition must read the region MergeScanExec, got {}:\n{plan}",
+            boundary.name()
+        );
+        assert!(
+            boundary.children().is_empty(),
+            "{context}: MergeScanExec must be a leaf:\n{plan}"
+        );
+        assert_eq!(
+            producer.schema(),
+            repartition.schema(),
+            "{context}: frontend router must preserve the Partial state-frame schema:\n{plan}"
+        );
     }
-    assert!(
-        boundary.is::<MergeScanExec>(),
-        "{context}: Partial must reach MergeScanExec, got {}:\n{plan}",
-        boundary.name()
-    );
-    assert!(
-        boundary.children().is_empty(),
-        "{context}: MergeScanExec must be a leaf:\n{plan}"
-    );
-    // What the producer exports is named here, column by column, before the merge's input schema is
-    // compared with it: two schemas that agree on finished values would agree with each other just
-    // as well, and a merge over answers is not the bridge this case is about. The state layout is
-    // the metric name, one column per tag, the point and field a value belongs to, the four
-    // accumulators and the incremental-mean flag; the tag count is read off the schema, so the
-    // assertion holds for both fixtures without repeating either tag list.
-    const STATE_ACCUMULATORS: [&str; 5] =
-        ["value", "mean", "compensation", "count", "incremental_mean"];
-    const STATE_POSITION: [&str; 2] = ["point", "field"];
-    let state_columns = producer
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| field.name().clone())
-        .collect::<Vec<_>>();
-    let fixed_columns = 1 + STATE_POSITION.len() + STATE_ACCUMULATORS.len();
-    assert!(
-        state_columns.len() >= fixed_columns,
-        "{context}: the producer must export aggregate state, but its {} columns are \
-         {state_columns:?}:\n{plan}",
-        state_columns.len()
-    );
-    let tags = state_columns.len() - fixed_columns;
-    let mut expected_columns = Vec::with_capacity(state_columns.len());
-    expected_columns.push("metric_name".to_string());
-    expected_columns.extend((0..tags).map(|at| format!("tag_{at}")));
-    expected_columns.extend(STATE_POSITION.map(str::to_string));
-    expected_columns.extend(STATE_ACCUMULATORS.map(str::to_string));
+
+    let producer_schema = producer.schema();
     assert_eq!(
-        expected_columns, state_columns,
-        "{context}: the producer must export the aggregate state layout, not one value per \
-         group:\n{plan}"
+        producer_schema,
+        input.schema(),
+        "{context}: Final input must preserve the Partial state-frame schema:\n{plan}"
     );
+    let producer_plan = NodeDisplay(producer.as_ref()).to_string();
+    let root_line = producer_plan
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("root ") || line.starts_with("root:"))
+        .unwrap_or_default();
+    assert!(
+        root_line.contains("Aggregate") && root_line.contains("partial"),
+        "{context}: captured region producer must have a Partial root, got `{root_line}`:\n{producer_plan}"
+    );
+    let declaration =
+        SeriesFrameDeclaration::parse(producer_schema.as_ref()).unwrap_or_else(|error| {
+            panic!("{context}: invalid Partial frame declaration: {error}:\n{producer_plan}")
+        });
     assert_eq!(
-        producer.schema(),
-        repartition.schema(),
-        "{context}: the outer node must read the state schema the Partial exports:\n{plan}"
+        FrameContent::AggregateState,
+        declaration.content(),
+        "{context}: Partial declaration must be aggregate-state content:\n{producer_plan}"
     );
+    let state = declaration.aggregate_state().unwrap_or_else(|| {
+        panic!("{context}: Partial declaration lacks aggregate kind/components:\n{producer_plan}")
+    });
+    let fields = producer_schema
+        .field_with_name("fields")
+        .unwrap_or_else(|error| {
+            panic!("{context}: state frame lacks `fields` column: {error}:\n{producer_plan}")
+        });
+    let DataType::Struct(field_values) = fields.data_type() else {
+        panic!(
+            "{context}: state frame `fields` column must be Struct, got {:?}:\n{producer_plan}",
+            fields.data_type()
+        );
+    };
+    assert!(
+        !field_values.is_empty(),
+        "{context}: state frame must declare at least one field:\n{producer_plan}"
+    );
+    for field in field_values {
+        let DataType::List(item) = field.data_type() else {
+            panic!(
+                "{context}: state field `{}` must be List, got {:?}:\n{producer_plan}",
+                field.name(),
+                field.data_type()
+            );
+        };
+        let DataType::Struct(components) = item.data_type() else {
+            panic!(
+                "{context}: state field `{}` must contain Struct values, got {:?}:\n{producer_plan}",
+                field.name(),
+                item.data_type()
+            );
+        };
+        assert_eq!(
+            state
+                .components
+                .iter()
+                .map(|component| component.as_str())
+                .collect::<Vec<_>>(),
+            components
+                .iter()
+                .map(|component| component.name().as_str())
+                .collect::<Vec<_>>(),
+            "{context}: state field `{}` components disagree with declared {:?} kind:\n{producer_plan}",
+            field.name(),
+            state.kind
+        );
+    }
 }
 
 /// Checks one query the native route declines: it must stay declined on both routes, and both must
@@ -1611,8 +1824,9 @@ async fn check_two_source_segregation(
             "`{query}`: segment {index} must have one child; plan:\n{plan}"
         );
         assert_fused_reads_scan_directly(segment, &format!("native `{query}` segment {index}"));
-        vectors.push(fused_node_output_values_per_partition(
+        vectors.push(fused_node_metric_per_partition(
             segment,
+            ROOT_OUTPUT_VALUES_METRIC,
             &format!("native `{query}` segment {index}"),
         ));
     }
@@ -1641,6 +1855,29 @@ async fn check_two_source_segregation(
 }
 
 /// Checks one case on both routes: the legacy run first, then the native one.
+async fn check_nested_aggregate_case(
+    instance: &Arc<Instance>,
+    observer: &NativePlanObserver,
+    case: &AggregateCase,
+) {
+    let query = tql_eval(&case.promql);
+    let (legacy, legacy_capture) = run_query(instance, &case.promql, false, observer).await;
+    assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
+    assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
+
+    let (native, capture) = run_query(instance, &case.promql, true, observer).await;
+    assert_same_name_types(&native, &legacy, &query);
+    assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
+    assert!(
+        !capture.fused.is_empty(),
+        "`{query}` must execute native fused nodes"
+    );
+    assert!(
+        capture.finalize.is_empty(),
+        "`{query}` must use the native fused path without a Final node"
+    );
+}
+
 async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, case: &AggregateCase) {
     let promql = case.promql.as_str();
     let query = tql_eval(promql);
@@ -1653,6 +1890,12 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
 
     let (native, capture) = run_query(instance, promql, true, observer).await;
     assert_native_schema(&native, case.native_value_column, &case.expected, &query);
+    assert_same_name_types_except_count_value(
+        &native,
+        &legacy,
+        &query,
+        promql.starts_with("count "),
+    );
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
 
     assert_eq!(
@@ -1666,7 +1909,71 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         "`{query}`: expected one outer Final node"
     );
     for fused in &capture.fused {
+        let producer_plan = NodeDisplay(fused.as_ref()).to_string();
         assert_fused_reads_scan_directly(fused, &format!("native `{query}`"));
+        let declaration =
+            SeriesFrameDeclaration::parse(fused.schema().as_ref()).unwrap_or_else(|error| {
+                panic!("`{query}`: invalid Partial frame declaration: {error}:\n{producer_plan}")
+            });
+        assert_eq!(
+            FrameContent::AggregateState,
+            declaration.content(),
+            "`{query}`: captured Partial must declare aggregate-state content:\n{producer_plan}"
+        );
+        let state = declaration.aggregate_state().unwrap_or_else(|| {
+            panic!("`{query}`: Partial declaration must include aggregate kind/components:\n{producer_plan}")
+        });
+        let fused_schema = fused.schema();
+        let fields = fused_schema.field_with_name("fields").unwrap_or_else(|error| {
+            panic!("`{query}`: Partial state frame has no `fields` column: {error}:\n{producer_plan}")
+        });
+        let DataType::Struct(field_values) = fields.data_type() else {
+            panic!(
+                "`{query}`: Partial `fields` column must be Struct, got {:?}:\n{producer_plan}",
+                fields.data_type()
+            );
+        };
+        assert!(
+            !field_values.is_empty(),
+            "`{query}`: Partial must declare state fields:\n{producer_plan}"
+        );
+        for (index, field) in field_values.iter().enumerate() {
+            let DataType::List(item) = field.data_type() else {
+                panic!(
+                    "`{query}`: state field {} `{}` must be List, got {:?}:\n{producer_plan}",
+                    index,
+                    field.name(),
+                    field.data_type()
+                );
+            };
+            let DataType::Struct(components) = item.data_type() else {
+                panic!(
+                    "`{query}`: state field {} `{}` must contain a Struct, got {:?}:\n{producer_plan}",
+                    index,
+                    field.name(),
+                    item.data_type()
+                );
+            };
+            assert_eq!(
+                state
+                    .components
+                    .iter()
+                    .map(|component| component.as_str())
+                    .collect::<Vec<_>>(),
+                components
+                    .iter()
+                    .map(|component| component.name().as_str())
+                    .collect::<Vec<_>>(),
+                "`{query}`: state field {} `{}` components must match the declared {:?} state kind:\n{producer_plan}",
+                index,
+                field.name(),
+                state.kind
+            );
+        }
+        assert!(
+            !state.kind.as_str().is_empty(),
+            "`{query}`: state declaration must name an aggregate kind"
+        );
         if let Some(partial_state) = case.partial_state {
             let plan = displayable(fused.as_ref()).indent(false).to_string();
             assert!(
@@ -1682,11 +1989,34 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         assert_finalize_reads_region_state(
             finalize,
             &capture.fused[0],
+            case.single_owner,
             &format!("native `{query}`"),
         );
     }
 
-    let per_partition = fused_output_values_per_partition(&capture, &format!("native `{query}`"));
+    if !case.single_owner {
+        // These counters belong to the Final runtime tree, not the Partial producer. The Final
+        // aggregate consumes routed AggregateState chunks at `native.root.input_samples`.
+        let final_samples =
+            final_input_samples_per_partition(&capture, &format!("native `{query}`"));
+        common_telemetry::info!(
+            "`{query}` native Final per-partition `.input_samples` counts: {final_samples:?}"
+        );
+        assert!(
+            final_samples.iter().sum::<usize>() > 0,
+            "`{query}`: Final must consume aggregate state, got {final_samples:?}"
+        );
+        assert!(
+            final_samples.iter().filter(|&&samples| samples > 0).count() >= 2,
+            "`{query}`: aggregate state must reach at least two of the {SCAN_PARTITIONS} Final partitions, got {final_samples:?}"
+        );
+    }
+
+    let per_partition = fused_root_metric_per_partition(
+        &capture,
+        ROOT_OUTPUT_VALUES_METRIC,
+        &format!("native `{query}`"),
+    );
     common_telemetry::info!(
         "`{query}` native per-partition `{ROOT_OUTPUT_VALUES_METRIC}` counts: {per_partition:?}"
     );
@@ -1708,34 +2038,31 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     if let Some(root_values) = case.root_values {
         // One value per series that folded, so the partitions' counts add up to the number of series
         // the scan selected - every counter series, or only the ones a matcher kept.
-        let counts = per_partition
-            .iter()
-            .map(|values| values.unwrap_or(0))
-            .collect::<Vec<_>>();
+        let input_samples = fused_root_metric_per_partition(
+            &capture,
+            ROOT_INPUT_SAMPLES_METRIC,
+            &format!("native `{query}`"),
+        );
+        common_telemetry::info!(
+            "`{query}` native per-partition `{ROOT_INPUT_SAMPLES_METRIC}` counts: {input_samples:?}"
+        );
+        assert!(
+            input_samples
+                .iter()
+                .all(|samples| samples.is_some_and(|n| n > 0)),
+            "`{query}`: every partition must report positive root input samples, got {input_samples:?}"
+        );
         assert_eq!(
             root_values,
-            counts.iter().sum::<usize>(),
-            "`{query}`: the partitions must fold one value per selected series, {root_values} in \
-             all, got {counts:?}"
+            input_samples.iter().flatten().sum::<usize>(),
+            "`{query}`: root input sample total must match the selected fixture series"
         );
-        // A case whose four partitions are all asserted nonempty above splits those values as
-        // evenly as four positive counts allow, so no partition holds more than
-        // `root_values - (SCAN_PARTITIONS - 1)`: a group of three series (`count by (job)` below
-        // reports three for `job = a`) therefore cannot sit in one partition, and the group's
-        // states have to be merged across at least two of them. A case a matcher narrows pins only
-        // the total: which partitions keep a selected series depends on how the scan ranges were
-        // spread, and the answer itself - not a bound on the split - is what shows the unselected
-        // series were dropped.
-        if case.per_partition {
-            let largest = counts.iter().copied().max().unwrap_or(0);
-            assert_eq!(
-                root_values - (SCAN_PARTITIONS - 1),
-                largest,
-                "`{query}`: {root_values} values over {SCAN_PARTITIONS} nonempty partitions leave \
-                 no partition holding more than {}, got {counts:?}",
-                root_values - (SCAN_PARTITIONS - 1)
-            );
+        if root_values == COUNTER_SERIES.len() {
+            assert_eq!(2, input_samples.iter().flatten().copied().max().unwrap());
         }
+        // Root output counts are grid points grouped into output series, not input-series
+        // contributions. Keep the per-partition activity check above; contribution totals belong
+        // to the exact native root input_samples metric checked here.
     }
 }
 
@@ -1806,21 +2133,20 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
             &by_job(18.0, 12.0),
             true,
         ),
-        // The inner average is one value per group and the outer sum over the ungrouped result is a
-        // single 12, so the merge's suffix really runs on merged values.
-        case(
-            format!("sum(avg({GAUGE_TABLE}) by (job))"),
-            &[(&[], 12.0)],
-            true,
-        ),
         // A literal scalar above the fold: `sum` over the gauge's 2, 6, 10, 4 and 8 is 30, and the
-        // merge's suffix doubles the merged value.
-        case(format!("sum({GAUGE_TABLE}) * 2"), &[(&[], 60.0)], true),
+        // merge's suffix doubles the merged value. The global aggregate has one owner.
+        AggregateCase {
+            single_owner: true,
+            ..case(format!("sum({GAUGE_TABLE}) * 2"), &[(&[], 60.0)], true)
+        },
         // A gauge over a constant value has a rate of exactly zero, so these two only cover the
         // zero-rate case: every series has both samples inside the 5m window, hence every partition
         // must fold a value. They cannot tell a computed rate from a dropped one, which is what the
-        // counter table's cases below are for.
-        case(format!("sum(rate({GAUGE_TABLE}[5m]))"), &[(&[], 0.0)], true),
+        // counter table's cases below are for. The global aggregate has one owner.
+        AggregateCase {
+            single_owner: true,
+            ..case(format!("sum(rate({GAUGE_TABLE}[5m]))"), &[(&[], 0.0)], true)
+        },
         case(
             format!("sum by (job) (rate({GAUGE_TABLE}[5m]))"),
             &by_job(0.0, 0.0),
@@ -1839,20 +2165,26 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         // series rule that out - so its mean and its standard deviation are merged across at least
         // two partitions. A standard deviation finished per partition and then averaged would
         // report 0.5 or 1.0 for the 2+1 splits the counts leave possible, never sqrt(8/3).
-        counter_case(
-            format!("sum(rate({COUNTER_TABLE}[5m]))"),
-            &[(&[], 15.0)],
-            "sum by [] partial",
-        ),
+        AggregateCase {
+            single_owner: true,
+            ..counter_case(
+                format!("sum(rate({COUNTER_TABLE}[5m]))"),
+                &[(&[], 15.0)],
+                "sum by [] partial",
+            )
+        },
         // The same sum with a literal scalar above the fold: the merge's suffix doubles the merged
         // 15 to 30, where a suffix run over one partition's share - at most 10 of the 15 - would
         // answer at most 20, and a suffix that divided instead would answer 7.5. The cut is still
-        // the ungrouped `sum`, which the producer's plan line names.
-        counter_case(
-            format!("sum(rate({COUNTER_TABLE}[5m])) * 2"),
-            &[(&[], 30.0)],
-            "sum by [] partial",
-        ),
+        // the ungrouped `sum`, which the producer's plan line names. The global aggregate has one owner.
+        AggregateCase {
+            single_owner: true,
+            ..counter_case(
+                format!("sum(rate({COUNTER_TABLE}[5m])) * 2"),
+                &[(&[], 30.0)],
+                "sum by [] partial",
+            )
+        },
         counter_case(
             format!("sum by (job) (rate({COUNTER_TABLE}[5m]))"),
             &by_job(9.0, 6.0),
@@ -1863,6 +2195,7 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         // series cannot populate all four scan partitions, so this case checks that some producer
         // output exists without applying the unfiltered fixture's four-nonempty-partition assertion.
         AggregateCase {
+            single_owner: true,
             partial_state: Some("sum by [] partial"),
             ..case(
                 format!("sum(rate({COUNTER_TABLE}{{job=\"a\"}}[5m]))"),
@@ -1911,68 +2244,100 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         // inner aggregate's merged values, so it really runs on merged values rather than on one
         // partition's answer. Each group's mean is 3, so the suffix sums to 6 - and the cut is the
         // inner `avg`, which is what the producer's own plan line has to name.
-        counter_case(
-            format!("sum(abs(avg(rate({COUNTER_TABLE}[5m])) by (job)))"),
-            &[(&[], 6.0)],
-            "avg by [job] partial",
-        ),
-        // The same, with the map above both aggregates instead of between them.
-        counter_case(
-            format!("abs(sum(avg(rate({COUNTER_TABLE}[5m])) by (job)))"),
-            &[(&[], 6.0)],
-            "avg by [job] partial",
-        ),
         // A literal scalar below the fold is carried in the per-series prefix, so the state folds
         // `8 * rate`: the rates 1, 3, 5, 2 and 4 become 8, 24, 40, 16 and 32 and the merge answers
         // 120, where a state built without the multiplication would answer 15. The multiplication
         // distributes over the sum, so 120 alone cannot say which side of the merge computed it;
         // what this case pins down is that the constant is admitted below the cut and that the four
         // nonempty partitions still fold one value per series into that one state.
-        counter_case(
-            format!("sum(8 * rate({COUNTER_TABLE}[5m]))"),
-            &[(&[], 120.0)],
-            "sum by [] partial",
-        ),
+        AggregateCase {
+            single_owner: true,
+            ..counter_case(
+                format!("sum(8 * rate({COUNTER_TABLE}[5m]))"),
+                &[(&[], 120.0)],
+                "sum by [] partial",
+            )
+        },
         // The same below-the-fold placement with an operator the fold does not commute with: the
         // maximum of the prefix-computed `10 - rate`. The rates 1, 3, 5, 2 and 4 become 9, 7, 5, 8
         // and 6, whose maximum is 9 - so the answer tells the prefix from the suffix, where
         // `10 - max(rate)` would answer 5, and from a prefix that swapped the operands, where
         // `max(rate - 10)` would answer -5.
-        counter_case(
-            format!("max(10 - rate({COUNTER_TABLE}[5m]))"),
-            &[(&[], 9.0)],
-            "max by [] partial",
-        ),
+        AggregateCase {
+            single_owner: true,
+            ..counter_case(
+                format!("max(10 - rate({COUNTER_TABLE}[5m]))"),
+                &[(&[], 9.0)],
+                "max by [] partial",
+            )
+        },
         // A literal scalar above the fold is rebuilt in the merge's suffix over the merged value,
         // with the operands in the order the query wrote them: the mean rate is 3, so `100 - 3` is
         // 97 where a swapped pair would report -97, and `100 / 15` is the sum's own answer where
         // 15/100 would be the reciprocal. A negation is the same broadcast with `-1` on the left.
-        counter_case(
-            format!("100 - avg(rate({COUNTER_TABLE}[5m]))"),
-            &[(&[], 97.0)],
-            "avg by [] partial",
-        ),
-        counter_case(
-            format!("100 / sum(rate({COUNTER_TABLE}[5m]))"),
-            &[(&[], 100.0 / 15.0)],
-            "sum by [] partial",
-        ),
-        counter_case(
-            format!("-sum(rate({COUNTER_TABLE}[5m]))"),
-            &[(&[], -15.0)],
-            "sum by [] partial",
-        ),
+        AggregateCase {
+            single_owner: true,
+            ..counter_case(
+                format!("100 - avg(rate({COUNTER_TABLE}[5m]))"),
+                &[(&[], 97.0)],
+                "avg by [] partial",
+            )
+        },
+        AggregateCase {
+            single_owner: true,
+            ..counter_case(
+                format!("100 / sum(rate({COUNTER_TABLE}[5m]))"),
+                &[(&[], 100.0 / 15.0)],
+                "sum by [] partial",
+            )
+        },
+        AggregateCase {
+            single_owner: true,
+            ..counter_case(
+                format!("-sum(rate({COUNTER_TABLE}[5m]))"),
+                &[(&[], -15.0)],
+                "sum by [] partial",
+            )
+        },
         // The range table holds one series in one partition, so this is a correctness smoke test of
         // one populated partition rather than a parallel acceptance. Its one series folds one
         // `count_over_time` value at the single grid point.
-        case(
-            format!("sum(count_over_time({RANGE_TABLE}[10m]))"),
-            &[(&[], 2.0)],
-            false,
-        ),
+        AggregateCase {
+            single_owner: true,
+            ..case(
+                format!("sum(count_over_time({RANGE_TABLE}[10m]))"),
+                &[(&[], 2.0)],
+                false,
+            )
+        },
     ];
     for case in &cases {
         check_case(&instance, &observer, case).await;
+    }
+
+    // Nested aggregates require actual fused execution without a frontend Final merge.
+    let nested_cases = [
+        AggregateCase {
+            single_owner: true,
+            ..case(
+                format!("sum(avg({GAUGE_TABLE}) by (job))"),
+                &[(&[], 12.0)],
+                true,
+            )
+        },
+        counter_case(
+            format!("sum(abs(avg(rate({COUNTER_TABLE}[5m])) by (job)))"),
+            &[(&[], 6.0)],
+            "avg by [job] partial",
+        ),
+        counter_case(
+            format!("abs(sum(avg(rate({COUNTER_TABLE}[5m])) by (job)))"),
+            &[(&[], 6.0)],
+            "avg by [job] partial",
+        ),
+    ];
+    for case in &nested_cases {
+        check_nested_aggregate_case(&instance, &observer, case).await;
     }
 
     let time = case("time()".to_string(), &[(&[], EVAL_SECS as f64)], false);
@@ -2102,6 +2467,304 @@ async fn native_histogram_quantile_over_the_cut_answers_what_the_complete_input_
             native.rows,
             legacy.rows,
             plans.join("\n")
+        );
+    }
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn native_bare_selector_aggregate_value_columns() {
+    common_telemetry::init_default_ut_logging();
+    let observer = Arc::new(NativePlanObserver::default());
+    let plugins = Plugins::new();
+    plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_bare_selector_aggregate")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = Arc::clone(standalone.fe_instance());
+    setup_fixture(&instance).await;
+
+    const ONE: &str = "native_bare_one_value";
+    const TWO: &str = "native_bare_two_values";
+    // Report the whole error chain: the top-level Display of a DDL failure names nothing useful.
+    async fn statement(instance: &Arc<Instance>, sql: &str) {
+        for result in instance.do_query(sql, QueryContext::arc()).await {
+            if let Err(err) = result {
+                let mut chain = String::new();
+                let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+                while let Some(error) = source {
+                    chain.push_str(&format!("\n  caused by: {error}"));
+                    source = error.source();
+                }
+                panic!("`{sql}` failed: {err}{chain}");
+            }
+        }
+    }
+    statement(
+        &instance,
+        &format!("CREATE TABLE {ONE} (ts TIMESTAMP(3) TIME INDEX, job STRING, v DOUBLE, PRIMARY KEY (job))"),
+    )
+    .await;
+    statement(
+        &instance,
+        &format!("CREATE TABLE {TWO} (ts TIMESTAMP(3) TIME INDEX, job STRING, a DOUBLE, b DOUBLE, PRIMARY KEY (job))"),
+    )
+    .await;
+    statement(
+        &instance,
+        &format!(
+            "INSERT INTO {ONE} VALUES ({EVAL_MILLIS}, 'api', 3), ({EVAL_MILLIS}, 'worker', 7)"
+        ),
+    )
+    .await;
+    statement(
+        &instance,
+        &format!("INSERT INTO {TWO} VALUES ({EVAL_MILLIS}, 'api', 2, 20), ({EVAL_MILLIS}, 'worker', 5, 30)"),
+    )
+    .await;
+
+    // Direct batch reader: unlike QueryResult, each row intentionally carries all numeric value
+    // columns, as a bare selector over a multi-field table may return more than one.
+    async fn read(
+        instance: &Arc<Instance>,
+        observer: &NativePlanObserver,
+        promql: &str,
+        native: bool,
+    ) -> (
+        Vec<String>,
+        Vec<DataType>,
+        Vec<(Vec<(String, String)>, Vec<f64>)>,
+        NativeCapture,
+    ) {
+        let sql = tql_eval(promql);
+        let mark = observer.mark();
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, SCAN_PARTITIONS.to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, native.to_string());
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap_or_else(|err| panic!("`{sql}` failed: {err}"));
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            other => panic!("`{sql}` produced no batches: {other:?}"),
+        };
+        let schema = batches.schema();
+        let fields = schema.arrow_schema().fields();
+        let names = fields.iter().map(|f| f.name().clone()).collect::<Vec<_>>();
+        let types = fields
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect::<Vec<_>>();
+        let labels = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                matches!(
+                    f.data_type(),
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                )
+            })
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        let numbers = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.data_type().is_numeric())
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        assert!(
+            !numbers.is_empty(),
+            "`{sql}` has no numeric value fields: {names:?}"
+        );
+        for &index in &numbers {
+            assert_eq!(
+                DataType::Float64,
+                types[index],
+                "`{sql}` value column {} must be Float64",
+                names[index]
+            );
+        }
+        let mut rows = Vec::new();
+        for batch in batches.iter() {
+            let label_arrays = labels
+                .iter()
+                .map(|&i| {
+                    let a = cast(batch.column(i), &DataType::Utf8).unwrap();
+                    (names[i].clone(), a)
+                })
+                .collect::<Vec<_>>();
+            let value_arrays = numbers
+                .iter()
+                .map(|&i| {
+                    (
+                        names[i].clone(),
+                        cast(batch.column(i), &DataType::Float64).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for row in 0..batch.num_rows() {
+                let mut row_labels = label_arrays
+                    .iter()
+                    .filter_map(|(name, a)| {
+                        let a = a.as_any().downcast_ref::<StringArray>().unwrap();
+                        (!a.is_null(row)).then(|| (name.clone(), a.value(row).to_string()))
+                    })
+                    .collect::<Vec<_>>();
+                // Labels are an identity set here, not an ordered vector.
+                row_labels.sort();
+                let row_values = value_arrays
+                    .iter()
+                    .map(|(_, a)| {
+                        let a = a.as_any().downcast_ref::<Float64Array>().unwrap();
+                        assert!(!a.is_null(row), "`{sql}` null in value column");
+                        a.value(row)
+                    })
+                    .collect::<Vec<_>>();
+                rows.push((row_labels, row_values));
+            }
+        }
+        rows.sort_by(|l, r| l.0.cmp(&r.0));
+        (
+            names,
+            types,
+            rows,
+            NativeCapture::from_plans(&observer.since(mark)),
+        )
+    }
+
+    let cases = [
+        (format!("sum({ONE})"), vec![(vec![], vec![10.0])], true, 1),
+        (
+            format!("sum by (job) ({ONE})"),
+            vec![
+                (vec![("job".into(), "api".into())], vec![3.0]),
+                (vec![("job".into(), "worker".into())], vec![7.0]),
+            ],
+            false,
+            1,
+        ),
+        (
+            format!("sum({TWO})"),
+            vec![(vec![], vec![7.0, 50.0])],
+            true,
+            2,
+        ),
+        (
+            format!("sum by (job) ({TWO})"),
+            vec![
+                (vec![("job".into(), "api".into())], vec![2.0, 20.0]),
+                (vec![("job".into(), "worker".into())], vec![5.0, 30.0]),
+            ],
+            false,
+            2,
+        ),
+    ];
+    for (promql, expected, single_owner, expected_values) in cases {
+        let query = tql_eval(&promql);
+        let (legacy_names, legacy_types, legacy_rows, legacy_capture) =
+            read(&instance, &observer, &promql, false).await;
+        assert!(
+            legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty(),
+            "`{query}` legacy plan unexpectedly contains native nodes"
+        );
+        assert_eq!(
+            expected_values,
+            legacy_types.iter().filter(|t| t.is_numeric()).count(),
+            "`{query}` legacy value count"
+        );
+        let mark = observer.mark();
+        let (native_names, native_types, native_rows, capture) =
+            read(&instance, &observer, &promql, true).await;
+        // Column order is not part of the answer the two routes must agree on; the existing
+        // harness compares the same way. Names must still pair with the same types.
+        let pairs = |names: &[String], types: &[DataType]| {
+            let mut pairs = names
+                .iter()
+                .cloned()
+                .zip(types.iter().cloned())
+                .collect::<Vec<_>>();
+            pairs.sort_by(|left, right| left.0.cmp(&right.0));
+            pairs
+        };
+        assert_eq!(
+            pairs(&legacy_names, &legacy_types),
+            pairs(&native_names, &native_types),
+            "`{query}` column name/type pairs"
+        );
+        assert_eq!(
+            expected_values,
+            native_types.iter().filter(|t| t.is_numeric()).count(),
+            "`{query}` native value count"
+        );
+        assert_eq!(
+            expected, legacy_rows,
+            "`{query}` legacy independent fixture result"
+        );
+        assert_eq!(
+            expected, native_rows,
+            "`{query}` native independent fixture result"
+        );
+        assert_eq!(legacy_rows, native_rows, "`{query}` native == legacy");
+        assert!(
+            observer.mark() > mark,
+            "`{query}` native execution must be observed"
+        );
+
+        // Every case here is a shape the native route answers: one- and two-value-field bare
+        // selectors, global and grouped. A silent fall back to legacy would therefore be a
+        // regression, so the plan assertions below are unconditional.
+        assert_eq!(
+            1,
+            capture.fused.len(),
+            "`{query}` must have one Partial producer"
+        );
+        assert_eq!(
+            1,
+            capture.finalize.len(),
+            "`{query}` must have one Final merge"
+        );
+        assert_fused_reads_scan_directly(&capture.fused[0], &format!("native `{query}`"));
+        assert_finalize_reads_region_state(
+            &capture.finalize[0],
+            &capture.fused[0],
+            single_owner,
+            &format!("native `{query}`"),
+        );
+        let schema = capture.fused[0].schema();
+        let declaration = SeriesFrameDeclaration::parse(schema.as_ref())
+            .expect("Partial state frame declaration");
+        assert_eq!(
+            FrameContent::AggregateState,
+            declaration.content(),
+            "`{query}` Partial frame content"
+        );
+        let fields = schema
+            .field_with_name("fields")
+            .expect("aggregate state fields");
+        assert!(
+            matches!(fields.data_type(), DataType::Struct(_)),
+            "`{query}` state components must be Struct"
+        );
+        for field in match fields.data_type() {
+            DataType::Struct(fields) => fields,
+            _ => unreachable!(),
+        } {
+            assert!(
+                matches!(field.data_type(), DataType::List(item) if matches!(item.data_type(), DataType::Struct(_))),
+                "`{query}` state component {} must be List<Struct>",
+                field.name()
+            );
+        }
+        let plans = observer.since(mark);
+        assert!(
+            !plans.is_empty(),
+            "`{query}` observer should capture frontend and region plans"
         );
     }
 }

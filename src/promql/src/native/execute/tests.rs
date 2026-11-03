@@ -11297,6 +11297,96 @@ fn aggregate_with_output(input: NativeNode, op: BoundAggregate, output: NativeTy
     }
 }
 
+/// A state chunk the producer hands over stays charged until the consumer drops it.
+///
+/// The producer queues a chunk against its own reservation and gives that reservation back when the
+/// chunk leaves the queue. A consumer that keeps the batch - the state exporter packs rows from it
+/// across polls - must then be the one holding those bytes, or the pool admits memory nobody
+/// accounts for. The charge therefore moves with the chunk, and dropping the chunk returns exactly
+/// that figure.
+#[test]
+fn a_handed_over_state_chunk_keeps_its_charge_until_it_is_dropped() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let (state_kind, components) = crate::native::plan::aggregate_state_binding(AggregateKind::Sum)
+        .expect("sum keeps a mergeable state");
+    let state_schema = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([])),
+        kind: state_kind,
+        components: components.into(),
+        accumulators: schema.fields.clone(),
+        grid: Arc::clone(&grid),
+    });
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(evaluated_input(Arc::clone(&grid))),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Partial,
+            },
+        },
+        output: NativeType::AggregateState(Arc::clone(&state_schema)),
+    })
+    .unwrap();
+
+    let memory_pool = bounded_pool(1 << 20);
+    let mut exec = executor(&tree, Arc::clone(&memory_pool));
+    exec.push_evaluated(
+        InputId::new(0),
+        evaluated_chunk(&schema, 0, vec![1.0, 2.0], true),
+    )
+    .unwrap();
+    exec.end_of_input().unwrap();
+
+    let chunk = exec
+        .next_state()
+        .unwrap()
+        .expect("a partial sum exports one state chunk");
+    let crate::native::state::StateChunk::Series {
+        reservation,
+        state_schema: exported,
+        ..
+    } = &chunk
+    else {
+        panic!("a partial producer exports series state, not a decoded row");
+    };
+    assert_eq!(
+        state_kind, exported.kind,
+        "the exported state keeps its kind"
+    );
+    assert_eq!(
+        state_schema.components.as_ref(),
+        exported.components.as_ref(),
+        "the exported state keeps its components"
+    );
+    let carried = reservation
+        .as_ref()
+        .expect("the handed-over chunk carries the charge the queue released")
+        .size();
+    assert!(carried > 0, "a state chunk is worth more than no bytes");
+    assert_eq!(
+        crate::native::state::state_bytes(&chunk),
+        carried,
+        "the chunk carries exactly what the same chunk is worth, so nothing is left behind"
+    );
+    assert!(
+        memory_pool.reserved() >= carried,
+        "the pool still holds the handed-over bytes: reserved {}, carried {carried}",
+        memory_pool.reserved()
+    );
+
+    let held = memory_pool.reserved();
+    drop(chunk);
+    assert_eq!(
+        held - carried,
+        memory_pool.reserved(),
+        "dropping the chunk returns exactly the bytes it carried"
+    );
+    drop(exec);
+    assert_eq!(0, memory_pool.reserved(), "the execution released its own");
+}
+
 #[test]
 fn partial_final_matches_complete_over_concatenated_input() {
     for kind in [
@@ -11344,6 +11434,7 @@ fn partial_final_matches_complete_over_concatenated_input() {
             .unwrap()
         };
         let mut partial_states = Vec::new();
+        let mut backing_probe = None;
         for vals in [vec![1.0, 2.0], vec![3.0, 4.0]] {
             let tree = aggregate_tree(AggregateStage::Partial);
             let mut exec = executor(&tree, pool());
@@ -11386,10 +11477,150 @@ fn partial_final_matches_complete_over_concatenated_input() {
                 let row = row.unwrap();
                 let row =
                     crate::native::state::state_row_from_frame_row(row, &state_schema).unwrap();
+                if kind == AggregateKind::Sum && backing_probe.is_none() {
+                    let mut row = row.clone();
+                    let field = row.fields.field(0).unwrap();
+                    let value_len = field
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .len();
+                    let retained_len = 4096;
+                    let values = Float64Array::from(vec![7.0; retained_len]);
+                    let compensations = Float64Array::from(vec![0.0; retained_len]);
+                    let value_slice = values.slice(0, value_len);
+                    let compensation_slice = compensations.slice(0, value_len);
+                    let item_fields = field.fields().clone();
+                    let sliced = datatypes::arrow::array::StructArray::try_new(
+                        item_fields,
+                        vec![Arc::new(value_slice), Arc::new(compensation_slice)],
+                        None,
+                    )
+                    .unwrap();
+                    let list_field = Arc::new(datatypes::arrow::datatypes::Field::new(
+                        "item",
+                        sliced.data_type().clone(),
+                        false,
+                    ));
+                    let list = datatypes::arrow::array::ListArray::new(
+                        list_field.clone(),
+                        datatypes::arrow::buffer::OffsetBuffer::new(
+                            vec![0_i32, value_len as i32].into(),
+                        ),
+                        Arc::new(sliced),
+                        None,
+                    );
+                    let fields = datatypes::arrow::array::StructArray::try_new(
+                        vec![Arc::new(datatypes::arrow::datatypes::Field::new(
+                            "v0",
+                            list.data_type().clone(),
+                            false,
+                        ))]
+                        .into(),
+                        vec![Arc::new(list)],
+                        None,
+                    )
+                    .unwrap();
+                    row.fields =
+                        datatypes::series::aggregate_state::StateFieldsBatch::try_from_arrow(
+                            fields,
+                            &datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                                state_kind,
+                                state_schema.components.to_vec(),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    assert_eq!(row.fields.field(0).unwrap().len(), value_len);
+                    assert!(values.values().inner().capacity() > value_len * 100);
+                    assert!(compensations.values().inner().capacity() > value_len * 100);
+                    let retained_value = row
+                        .fields
+                        .field(0)
+                        .unwrap()
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+                    assert_eq!(
+                        retained_value.values().inner().as_ptr(),
+                        values.values().inner().as_ptr()
+                    );
+                    backing_probe = Some(crate::native::state::StateChunk::Row(row));
+                }
                 partial_states.push(crate::native::state::StateChunk::Row(row));
             }
         }
         let tree_final = aggregate_tree(AggregateStage::Final);
+        if let Some(state) = backing_probe {
+            let crate::native::state::StateChunk::Row(row) = &state else {
+                unreachable!("decoded final input is a row");
+            };
+            let item = row.fields.field(0).unwrap();
+            let visible_len = item.len();
+            let value = item
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let compensation = item
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            // Each slice shares a primitive backing vector allocated at `retained_len` above.
+            let backing_bytes = 2 * 4096 * std::mem::size_of::<f64>();
+            assert_eq!(
+                visible_len, 2,
+                "the state row remains the fixture's two points"
+            );
+            assert!(value.values().inner().capacity() > visible_len * 100);
+            assert!(compensation.values().inner().capacity() > visible_len * 100);
+
+            // Independently model the old wrapper-only charge: state/chunk wrappers, one
+            // StructArray per logical field, and the child ArrayRef vector, but no buffers.
+            let wrappers = std::mem::size_of::<crate::native::state::StateChunk>()
+                + std::mem::size_of::<crate::aggregate::state::StateRow>()
+                + row.fields.len() * std::mem::size_of::<datatypes::arrow::array::StructArray>()
+                + 2 * std::mem::size_of::<datatypes::arrow::array::ArrayRef>()
+                + row.metric.name().map_or(0, str::len)
+                + std::mem::size_of_val(row.metric.tags())
+                + row
+                    .metric
+                    .tags()
+                    .iter()
+                    .map(|tag| tag.name.len() + tag.value.len())
+                    .sum::<usize>()
+                + std::mem::size_of::<datatypes::series::time::TimeAxis>()
+                + std::mem::size_of::<datatypes::series::time::GridSpan>();
+            assert!(backing_bytes > wrappers);
+            let rejecting_budget = (wrappers + backing_bytes) / 2;
+            assert!(rejecting_budget > wrappers);
+            assert!(rejecting_budget < backing_bytes);
+            let mut constrained = executor(&tree_final, bounded_pool(rejecting_budget));
+            let error = constrained
+                .push_state(
+                    InputId::new(0),
+                    crate::native::state::StateChunk::Row(row.clone()),
+                )
+                .expect_err("admission must account for retained Arrow backing");
+            assert!(is_resources_exhausted(&error), "{error}");
+            assert_eq!(constrained.state().reserved_bytes(), 0);
+
+            // The backing lower bound is exact, but this fixture also owns Arrow list/struct
+            // offsets, schema metadata, labels, and executor bookkeeping. Allow a bounded 64 KiB
+            // for that overhead; this check proves admission and release, not exact estimation.
+            let sufficient_pool = bounded_pool(backing_bytes + 64 * 1024);
+            let mut sufficient = executor(&tree_final, Arc::clone(&sufficient_pool));
+            sufficient
+                .push_state(InputId::new(0), state)
+                .expect("the budget covers wrappers and retained Arrow backing");
+            assert!(sufficient.state().reserved_bytes() >= backing_bytes);
+            assert!(sufficient_pool.reserved() >= backing_bytes);
+            drop(sufficient);
+            assert_eq!(sufficient_pool.reserved(), 0);
+        }
         let mut final_exec = executor(&tree_final, pool());
         let mut first_row_cost = None;
         for state in partial_states {
@@ -11401,8 +11632,8 @@ fn partial_final_matches_complete_over_concatenated_input() {
             final_exec.push_state(InputId::new(0), state).unwrap();
         }
         assert!(
-            first_row_cost.unwrap() > 0,
-            "a queued state row must report the wrappers it owns"
+            first_row_cost.unwrap() >= 2 * std::mem::size_of::<f64>(),
+            "a queued state row must include retained Arrow component buffers"
         );
         assert!(
             final_exec.state().reserved_bytes() > 0,
