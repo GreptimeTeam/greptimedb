@@ -14,10 +14,11 @@
 
 use std::sync::{Arc, LazyLock};
 
-use common_base::secrets::SecretString;
+use common_base::secrets::{ExposeSecret, SecretString};
 use digest::Digest;
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
+use serde::Serializer;
 use sha1::Sha1;
 use sha2::Sha256;
 use snafu::{OptionExt, ensure};
@@ -38,6 +39,9 @@ pub const PBKDF2_SHA256_HASH_LEN: usize = 32;
 pub const MAX_PBKDF2_SHA256_ITERATIONS: u32 = 1_000_000;
 pub const MAX_PBKDF2_SHA256_SALT_LEN: usize = 1024;
 pub const PG_SCRAM_SHA256_KEY_LEN: usize = 32;
+
+/// Placeholder used when rendering user-provider passwords.
+const REDACTED_USER_PROVIDER_PASSWORD: &str = "[REDACTED]";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -71,6 +75,58 @@ pub fn user_provider_from_option(opt: &str) -> Result<UserProviderRef> {
         }
         .fail(),
     }
+}
+
+/// Serializes a `user_provider` option with inline passwords redacted.
+///
+/// The option is held as a [`SecretString`] so `Debug` and the default
+/// serializer never print it. This serializer exposes the value only to keep
+/// the non-secret parts (provider name, usernames and file paths) visible in
+/// configuration dumps such as the `/config` endpoint.
+pub fn serialize_user_provider_option<S>(
+    value: &Option<SecretString>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => {
+            serializer.serialize_some(&redact_user_provider_option(value.expose_secret()))
+        }
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Replaces the passwords of the inline `static_user_provider:cmd:` form with
+/// a placeholder.
+///
+/// The `file:` forms only carry a path and are returned unchanged, as are
+/// unknown providers.
+pub fn redact_user_provider_option(value: &str) -> String {
+    let Some((provider, rest)) = value.split_once(':') else {
+        return value.to_string();
+    };
+    if provider != STATIC_USER_PROVIDER {
+        return value.to_string();
+    }
+    let Some((mode, users)) = rest.split_once(':') else {
+        return value.to_string();
+    };
+    if mode != "cmd" {
+        return value.to_string();
+    }
+
+    let users = users
+        .split(',')
+        .map(|entry| match entry.split_once('=') {
+            Some((name, _password)) => format!("{name}={REDACTED_USER_PROVIDER_PASSWORD}"),
+            // A malformed entry carries no password to redact.
+            None => entry.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{provider}:{mode}:{users}")
 }
 
 pub fn static_user_provider_from_option(opt: &str) -> Result<StaticUserProvider> {
@@ -649,6 +705,33 @@ mod tests {
             let verifier = PgScramSha256Verifier::from_password(password, b"salt", 4096).unwrap();
             assert!(verifier.verify_plain_password(password).unwrap());
         }
+    }
+
+    #[test]
+    fn test_redact_user_provider_option() {
+        assert_eq!(
+            redact_user_provider_option(
+                "static_user_provider:cmd:alice=secret,bob=pbkdf2_sha256:4096:aa:bb"
+            ),
+            "static_user_provider:cmd:alice=[REDACTED],bob=[REDACTED]"
+        );
+        assert_eq!(
+            redact_user_provider_option("static_user_provider:file:/etc/greptimedb/users"),
+            "static_user_provider:file:/etc/greptimedb/users"
+        );
+        assert_eq!(
+            redact_user_provider_option("watch_file_user_provider:/etc/greptimedb/users"),
+            "watch_file_user_provider:/etc/greptimedb/users"
+        );
+        assert_eq!(
+            redact_user_provider_option("ldap_user_provider:/etc/greptimedb/ldap.toml"),
+            "ldap_user_provider:/etc/greptimedb/ldap.toml"
+        );
+        // Malformed entries carry no password to redact.
+        assert_eq!(
+            redact_user_provider_option("static_user_provider:cmd:alice"),
+            "static_user_provider:cmd:alice"
+        );
     }
 
     #[test]

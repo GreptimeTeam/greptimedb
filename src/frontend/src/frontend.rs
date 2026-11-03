@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+use common_base::secrets::SecretString;
 use common_config::config::Configurable;
 use common_event_recorder::EventRecorderOptions;
 use common_memory_manager::OnExhaustedPolicy;
@@ -77,7 +78,13 @@ pub struct FrontendOptions {
     pub datanode: DatanodeClientOptions,
     /// Retry policy for retryable distributed write failures.
     pub write_retry: WriteRetryOptions,
-    pub user_provider: Option<String>,
+    /// The user provider for authentication.
+    ///
+    /// The inline `static_user_provider:cmd:` form carries plaintext
+    /// passwords, so the value is held as a [`SecretString`] and serialized
+    /// with those passwords redacted.
+    #[serde(serialize_with = "auth::serialize_user_provider_option")]
+    pub user_provider: Option<SecretString>,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
     pub slow_query: SlowQueryOptions,
@@ -196,6 +203,7 @@ mod tests {
     use async_trait::async_trait;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_config::Configurable;
     use common_error::ext::ErrorExt;
     use common_error::from_header_to_err_code_msg;
     use common_error::status_code::StatusCode;
@@ -228,6 +236,57 @@ mod tests {
 
     type GrpcStream<T> =
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
+
+    #[test]
+    fn test_user_provider_redacts_cmd_passwords_in_config() {
+        use common_base::secrets::ExposeSecret;
+
+        let options = FrontendOptions {
+            user_provider: Some(
+                "static_user_provider:cmd:alice=secret,bob=pbkdf2_sha256:4096:aa:bb"
+                    .to_string()
+                    .into(),
+            ),
+            ..Default::default()
+        };
+
+        let serialized = options.to_toml().unwrap();
+        assert!(serialized.contains("alice=[REDACTED]"));
+        assert!(serialized.contains("bob=[REDACTED]"));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("pbkdf2_sha256"));
+
+        assert_eq!(
+            options
+                .user_provider
+                .as_ref()
+                .map(|value| value.expose_secret().as_str()),
+            Some("static_user_provider:cmd:alice=secret,bob=pbkdf2_sha256:4096:aa:bb")
+        );
+
+        let debug = format!("{options:?}");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("pbkdf2_sha256"));
+    }
+
+    #[test]
+    fn test_user_provider_file_path_is_not_redacted_in_config() {
+        let options = FrontendOptions {
+            user_provider: Some(
+                "static_user_provider:file:/etc/greptimedb/users"
+                    .to_string()
+                    .into(),
+            ),
+            ..Default::default()
+        };
+
+        assert!(
+            options
+                .to_toml()
+                .unwrap()
+                .contains("static_user_provider:file:/etc/greptimedb/users")
+        );
+    }
 
     #[test]
     fn test_pipeline_host_access_config() {

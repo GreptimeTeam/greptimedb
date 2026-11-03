@@ -31,6 +31,7 @@ use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
+use common_base::secrets::SecretString;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_error::ext::BoxedError;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -237,7 +238,7 @@ pub struct StartCommand {
     #[clap(long)]
     tls_watch: bool,
     #[clap(long)]
-    user_provider: Option<String>,
+    user_provider: Option<SecretString>,
     #[clap(long)]
     disable_dashboard: Option<bool>,
     #[clap(long, default_value = "GREPTIMEDB_FRONTEND")]
@@ -652,7 +653,6 @@ mod tests {
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use servers::grpc::GrpcOptions;
-    use servers::http::HttpOptions;
 
     use super::*;
     use crate::options::GlobalOptions;
@@ -839,16 +839,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_try_from_start_command_to_anymap() {
-        let fe_opts = frontend::frontend::FrontendOptions {
-            http: HttpOptions {
-                disable_dashboard: false,
-                ..Default::default()
-            },
-            meta_client: Some(MetaClientOptions::default()),
-            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            ..Default::default()
-        };
+    async fn test_user_provider_cli_redacts_passwords() {
+        let command = StartCommand::try_parse_from([
+            "frontend",
+            "--user-provider",
+            "static_user_provider:cmd:test=cli-secret",
+        ])
+        .unwrap();
+        let debug = format!("{command:#?}");
+        assert!(!debug.contains("cli-secret"));
+        assert!(debug.contains("[REDACTED]"));
+
+        let fe_opts = command.load_options(&Default::default()).unwrap().component;
 
         let mut plugins = Plugins::new();
         plugins::setup_frontend_plugins_pre_build(&mut plugins, &[], &fe_opts, None)
@@ -859,7 +861,7 @@ mod tests {
         let result = provider
             .authenticate(
                 Identity::UserId("test", None),
-                Password::PlainText("test".to_string().into()),
+                Password::PlainText("cli-secret".to_string().into()),
             )
             .await;
         let _ = result.unwrap();
