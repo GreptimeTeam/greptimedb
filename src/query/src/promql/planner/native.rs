@@ -771,7 +771,6 @@ impl PromPlanner {
                 &time,
                 &tags,
                 &segment_metric,
-                !required_placement,
             ))
             .await?;
             if let Some(plan) = plan {
@@ -1361,7 +1360,6 @@ async fn segment_tree(
     time_index: &str,
     tags: &[String],
     metric: &Option<Arc<str>>,
-    must_improve_locality: bool,
 ) -> Result<Option<LogicalPlan>> {
     if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
         return Ok(None);
@@ -1447,14 +1445,11 @@ async fn segment_tree(
         return Ok(None);
     }
     let parent = current_tree;
-    if must_improve_locality
-        && matches!(
-            input_locality(parent.root()),
-            InputLocality::SinglePartition
-        )
-    {
-        return Ok(None);
-    }
+    // Segmentation is useful even when the resulting parent is still single-partition: each
+    // exported per-series subtree remains a separate input and is bound to its own source. The
+    // locality may not improve at the root (for example, a three-way pointwise tree), but
+    // rejecting that plan makes the caller fuse all sources into one gathered child. `changed`
+    // above already guarantees that segmentation created at least one real boundary.
     let inputs = current_children;
     let child_tags = current_tags;
     // Nothing below can fall back once physical planning starts, so every tree this route commits

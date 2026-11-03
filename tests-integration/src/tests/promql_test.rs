@@ -1825,6 +1825,18 @@ impl NativePlanObserver {
             .expect("native fused plan was captured")
     }
 
+    /// The first fused node in the frontend root, rather than a fused region subplan wrapped later.
+    fn root_fused(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        let mut stack = vec![self.root_plan()];
+        while let Some(plan) = stack.pop() {
+            if plan.name() == "FusedSeriesExec" {
+                return plan;
+            }
+            stack.extend(plan.children().into_iter().cloned());
+        }
+        panic!("frontend root contains no FusedSeriesExec")
+    }
+
     /// The fused node the last wrapped plan contained, if any; `take` requires one instead.
     fn fused(&self) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
         self.0.lock().unwrap().clone()
@@ -3836,7 +3848,7 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
             observer.clear();
             let (native_columns, native) =
                 native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
-            let plan = observer.take();
+            let plan = observer.root_fused();
             assert_eq!(plan.name(), "FusedSeriesExec", "{context}");
             assert_eq!(plan.children().len(), 2, "{context}");
             assert_eq!(observer.take_raw_sources().len(), 2, "{context}");
@@ -3937,18 +3949,22 @@ async fn native_promql_three_selector_trees_bind_every_occurrence() {
             .map(|host| (5_000, format!("h{host}"), value(host as f64)))
             .collect::<Vec<_>>()
     };
-    for (query, raw_sources, columns, expected) in [
+    for (query, raw_sources, columns, expected, expected_source_paths, require_four_way_routes) in [
         (
             "native_3_a + native_3_b + native_3_c",
             3,
             vec!["host", "kind", "ts", "val"],
             at_five(|h| 10.0 * h + 5.0 + 10.0 + (100.0 + h)),
+            3,
+            true,
         ),
         (
             "(native_3_a - native_3_b) / on(host) native_3_c",
             3,
             vec!["host", "ts", "val"],
             at_five(|h| (10.0 * h + 5.0 - 10.0) / (100.0 + h)),
+            3,
+            true,
         ),
         (
             "native_3_s{kind=\"x\"} - on(host) native_3_s{kind=\"y\"} + on(host) \
@@ -3956,26 +3972,63 @@ async fn native_promql_three_selector_trees_bind_every_occurrence() {
             0,
             vec!["host", "ts", "val"],
             at_five(|h| 10.0 * h + 5.0 - 10.0 + (100.0 + h)),
+            3,
+            false,
         ),
         (
             "native_3_a{host=\"h0\"} and native_3_b or native_3_c",
             3,
             vec!["host", "kind", "ts", "val"],
             at_five(|h| if h == 0.0 { 5.0 } else { 100.0 + h }),
+            3,
+            true,
         ),
         (
             "(native_3_a{host=\"h0\"} or native_3_b) + native_3_c",
             3,
             vec!["host", "kind", "ts", "val"],
             at_five(|h| if h == 0.0 { 5.0 } else { 10.0 } + (100.0 + h)),
+            3,
+            true,
         ),
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        let plan = observer.take();
+        let plan = observer.root_fused();
         assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
-        assert_eq!(plan.children().len(), 3, "{query}");
+        assert!(plan.children().len() >= 2, "{query}: {plan:?}");
+        let mut nodes = vec![plan.clone()];
+        let (mut merge_scans, mut series_scans) = (0, 0);
+        let mut source_routes = Vec::new();
+        while let Some(node) = nodes.pop() {
+            assert!(
+                !node.name().contains("HashJoin"),
+                "legacy join in {query}: {node:?}"
+            );
+            match node.name() {
+                "MergeScanExec" => merge_scans += 1,
+                "SeriesScanExec" => series_scans += 1,
+                "RawSeriesSourceExec" => {}
+                _ => {}
+            }
+            if node.name() == "SeriesRepartitionExec" {
+                source_routes.push(node.output_partitioning().partition_count());
+            }
+            nodes.extend(node.children().into_iter().cloned());
+        }
+        let source_paths = merge_scans + series_scans;
+        eprintln!(
+            "{query}: MergeScanExec={merge_scans}, SeriesScanExec={series_scans}, repartition_widths={source_routes:?}"
+        );
+        assert_eq!(source_paths, expected_source_paths, "{query}");
+        if require_four_way_routes {
+            assert!(!source_routes.is_empty(), "{query}: {source_routes:?}");
+            assert!(
+                source_routes.iter().all(|&width| width == 4),
+                "{query}: {source_routes:?}"
+            );
+        }
         assert_eq!(observer.take_raw_sources().len(), raw_sources, "{query}");
         let mut plan_columns = plan
             .schema()
@@ -4441,7 +4494,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     let sql = format!("TQL EVAL (0, {last}, '1s') {selector} - ({selector} * 2)");
     observer.clear();
     let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-    let plan = observer.take();
+    let plan = observer.root_fused();
     assert_eq!(plan.name(), "FusedSeriesExec");
     assert_two_source_native_plan(&plan, true);
     assert_eq!(native_rows, expected);
@@ -4454,7 +4507,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     observer.clear();
     let direct_rows =
         native_result_rows(native_tql_output(&instance, &direct_sql, true).await).await;
-    let direct_plan = observer.take();
+    let direct_plan = observer.root_fused();
     assert_eq!(direct_plan.name(), "FusedSeriesExec");
     assert_two_source_native_plan(&direct_plan, true);
     let direct_expected = (0..POINTS_PER_HOST)
