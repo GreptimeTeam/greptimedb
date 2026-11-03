@@ -55,7 +55,7 @@ use promql::extension_plan::{
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
     BoundAggregate, BoundInput, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, reads_across_series,
+    NativeType, fused_output_tags, reads_across_series,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, Matchers};
@@ -179,18 +179,15 @@ impl PromPlanner {
         // remove labels while producing the fused node, so publish only columns actually in
         // that node's output schema to the binary matcher.
         let mut output_ctx = operand_ctx;
-        output_ctx.tag_columns.retain(|tag| {
-            plan.schema()
-                .fields()
-                .iter()
-                .any(|field| field.name() == tag)
-        });
-        output_ctx.field_columns.retain(|field| {
-            plan.schema()
-                .fields()
-                .iter()
-                .any(|column| column.name() == field)
-        });
+        let fields = plan.schema().fields();
+        output_ctx.tag_columns = fields
+            .iter()
+            .filter(|field| field.data_type() == &ArrowDataType::Utf8)
+            .map(|field| field.name().clone())
+            .collect();
+        output_ctx
+            .field_columns
+            .retain(|field| fields.iter().any(|column| column.name() == field));
         output_ctx.use_tsid = false;
         self.ctx = output_ctx.clone();
         let table_ref = self.table_ref();
@@ -1614,189 +1611,6 @@ fn promql_metadata_labels() -> [&'static str; 3] {
     [METRIC_NAME, "__type__", "__unit__"]
 }
 
-/// The label columns `node` reports, from the tags of the scan each input reads.
-///
-/// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
-/// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
-/// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
-/// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
-/// labels this walk does not derive - an aggregate's groups, a whole-vector operation, or a label
-/// rewrite, which renames the labels below it - so a tree holding one reports no label set here.
-/// A node whose labels cannot be derived is declined by the native planner.
-fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
-    match &node.expr {
-        NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
-        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } | NativeExpr::VectorOf { .. } => {
-            Some(Vec::new())
-        }
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Timestamp { input } => fused_output_tags(input, source_tags),
-        // A label rewrite changes the label set itself: `label_replace` adds its destination label
-        // and an empty replacement removes it, so the input's labels are not the output's. A map of
-        // math alone keeps them.
-        NativeExpr::Map { input, op } => {
-            if op.ops.iter().any(|op| matches!(op, MapOp::Label(_))) {
-                return None;
-            }
-            fused_output_tags(input, source_tags)
-        }
-        // Its parameters are scalars, which carry no labels, so what the node reports are its
-        // input's labels.
-        NativeExpr::ParameterizedMap { input, .. } => fused_output_tags(input, source_tags),
-        // An aggregate reports the grouping labels its input carries: `by(...)` keeps exactly the
-        // ones it names, and `without(...)` keeps the rest and drops the metric name, as Prometheus
-        // does.
-        //
-        // What this derives is the set of *output columns*, which is what the node's schema needs.
-        // It is not the complete runtime label set: a chunk's labels also carry the metric name,
-        // which is bound separately from these tag columns rather than being one of them. A
-        // grouping by `__name__` keeps that name in the labels while contributing no column here,
-        // and `sum by (__name__)` over one metric is still one column set.
-        NativeExpr::Aggregate { input, op } => {
-            let input_tags = fused_output_tags(input, source_tags)?;
-            Some(match &op.group {
-                Grouping::By(kept) => input_tags
-                    .into_iter()
-                    .filter(|tag| kept.iter().any(|name| name.as_ref() == tag.as_str()))
-                    .collect(),
-                Grouping::Without(dropped) => input_tags
-                    .into_iter()
-                    .filter(|tag| {
-                        tag != METRIC_NAME
-                            && !dropped.iter().any(|name| name.as_ref() == tag.as_str())
-                    })
-                    .collect(),
-            })
-        }
-        // Selecting some of the input's series keeps each one's own labels; `count_values` writes a
-        // new label and `histogram` folds bucket series into one histogram, so neither reports the
-        // input's set.
-        NativeExpr::Vector { input, op } => match op {
-            BoundVectorOp::TopK { .. }
-            | BoundVectorOp::LimitK { .. }
-            | BoundVectorOp::LimitRatio { .. }
-            | BoundVectorOp::Sort(_) => fused_output_tags(input, source_tags),
-            BoundVectorOp::Absent { labels } => {
-                let input_tags = fused_output_tags(input, source_tags)?;
-                let named = labels
-                    .tags()
-                    .iter()
-                    .map(|label| label.name.as_ref())
-                    .collect::<Vec<_>>();
-                // `absent` reports matcher-named labels, not all input labels or the table's columns;
-                // only named labels present as input columns can be represented as frame columns.
-                if named
-                    .iter()
-                    .any(|name| !input_tags.iter().any(|tag| tag == name))
-                {
-                    return None;
-                }
-                Some(
-                    input_tags
-                        .into_iter()
-                        .filter(|tag| named.contains(&tag.as_str()))
-                        .collect(),
-                )
-            }
-            BoundVectorOp::CountValues { .. } => None,
-            BoundVectorOp::Histogram(_) => {
-                let mut tags = fused_output_tags(input, source_tags)?;
-                tags.retain(|tag| tag != "le" && !promql_metadata_labels().contains(&tag.as_str()));
-                Some(tags)
-            }
-        },
-        NativeExpr::Merge { .. } => None,
-        NativeExpr::Binary {
-            left,
-            right,
-            matching,
-        } => match (&left.output, &right.output) {
-            (NativeType::Scalar(_), _) => fused_output_tags(right, source_tags),
-            (_, NativeType::Scalar(_)) => fused_output_tags(left, source_tags),
-            _ => {
-                let kept = |tags: Vec<String>| -> Vec<String> {
-                    match &matching.labels {
-                        MatchingLabels::On(names) if !names.is_empty() => tags
-                            .into_iter()
-                            .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
-                            .collect(),
-                        MatchingLabels::Ignoring(names) => tags
-                            .into_iter()
-                            .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
-                            .collect(),
-                        MatchingLabels::On(_) => tags,
-                    }
-                };
-                let left_tags = fused_output_tags(left, source_tags)?;
-                let right_tags = fused_output_tags(right, source_tags)?;
-                let mut tags = match &matching.cardinality {
-                    Cardinality::OneToOne => kept(left_tags.clone()),
-                    Cardinality::ManyToOne(_) => left_tags.clone(),
-                    Cardinality::OneToMany(_) => right_tags.clone(),
-                };
-                let includes = match &matching.cardinality {
-                    Cardinality::OneToOne => &[][..],
-                    Cardinality::ManyToOne(labels) | Cardinality::OneToMany(labels) => labels,
-                };
-                let include_tags = match &matching.cardinality {
-                    Cardinality::ManyToOne(_) => &right_tags,
-                    Cardinality::OneToMany(_) => &left_tags,
-                    Cardinality::OneToOne => &[][..],
-                };
-                for tag in include_tags {
-                    if includes.iter().any(|label| label.as_ref() == tag.as_str())
-                        && !tags.contains(tag)
-                    {
-                        tags.push(tag.clone());
-                    }
-                }
-                // A filled left side takes an unmatched right series' matching labels, so those
-                // results carry the right side's tags.
-                if matching.fill.lhs.is_some() {
-                    for tag in kept(fused_output_tags(right, source_tags)?) {
-                        if !tags.contains(&tag) {
-                            tags.push(tag);
-                        }
-                    }
-                }
-                Some(tags)
-            }
-        },
-        NativeExpr::Set { left, right, op } => {
-            let mut tags = fused_output_tags(left, source_tags)?;
-            if op.op == SetOp::Or {
-                for tag in fused_output_tags(right, source_tags)? {
-                    if !tags.contains(&tag) {
-                        tags.push(tag);
-                    }
-                }
-            }
-            Some(tags)
-        }
-        // A base series keeps its labels and takes the data labels of its info series: the ones the
-        // selector names, or all of them when it names none.
-        NativeExpr::Info {
-            base,
-            info,
-            selector,
-        } => {
-            let mut tags = fused_output_tags(base, source_tags)?;
-            for tag in fused_output_tags(info, source_tags)? {
-                let copied = selector.data_labels.is_empty()
-                    || selector
-                        .data_labels
-                        .iter()
-                        .any(|label| label.as_ref() == tag.as_str());
-                if copied && !tags.contains(&tag) {
-                    tags.push(tag);
-                }
-            }
-            Some(tags)
-        }
-    }
-}
-
 /// Whether `node` reads no data at all: a constant, the evaluation time, or an operation between
 /// them. Every execution computes the same value for it.
 fn data_free(node: &NativeNode) -> bool {
@@ -2059,7 +1873,11 @@ fn label_rewrites_have_fresh_destinations(expr: &PromExpr, input_tags: &[String]
             }
             PromExpr::Unary(unary) => check(&unary.expr, tags),
             PromExpr::Aggregate(aggregate) => check(&aggregate.expr, tags),
-            PromExpr::Binary(binary) => check(&binary.lhs, tags) && check(&binary.rhs, tags),
+            PromExpr::Binary(binary) => {
+                let mut left_tags = tags.clone();
+                let mut right_tags = tags.clone();
+                check(&binary.lhs, &mut left_tags) && check(&binary.rhs, &mut right_tags)
+            }
             PromExpr::Call(call) => call.args.args.iter().all(|arg| check(arg, tags)),
             _ => true,
         }
@@ -2139,7 +1957,7 @@ mod tests {
 
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::native::plan::{NativeExpr, NativeNode, NativeTree};
+    use promql::native::plan::{NativeExpr, NativeNode, NativeTree, fused_output_tags};
     use session::context::QueryContextBuilder;
 
     use super::{

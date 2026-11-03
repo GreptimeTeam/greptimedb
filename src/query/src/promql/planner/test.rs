@@ -3449,12 +3449,12 @@ async fn native_fused_nested_aggregate_splits_at_the_innermost_aggregate() {
     for (query, merge, partial) in [
         (
             "sum(avg(some_metric) by (tag_0))",
-            r#"AggregateFinalize: sum(avg by (tag_0) (some_metric)) [Avg By(["tag_0"]) Complete []]"#,
+            r#"AggregateFinalize: sum(avg by (tag_0) (some_metric)) [Avg By(["tag_0"]) Complete]"#,
             "[partial avg by (tag_0) Complete]",
         ),
         (
             "ceil(sum(rate(some_metric[5m])) by (tag_0))",
-            r#"AggregateFinalize: ceil(sum by (tag_0) (rate(some_metric[5m]))) [Sum By(["tag_0"]) Complete ["tag_0"]]"#,
+            r#"AggregateFinalize: ceil(sum by (tag_0) (rate(some_metric[5m]))) [Sum By(["tag_0"]) Complete]"#,
             "[partial sum by (tag_0) Complete]",
         ),
     ] {

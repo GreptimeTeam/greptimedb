@@ -2402,6 +2402,47 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         "the aggregate boundary must carry the label the prefix created"
     );
 
+    observer.clear();
+    let nested = run(r#"sum(avg by (host) (probe{host=~"a|c"}))"#, "(0, 0, '1s')")
+        .await
+        .unwrap();
+    let (_, nested_rows) = native_labelled_rows(nested).await;
+    assert_eq!(nested_rows.len(), 1);
+    assert_eq!(nested_rows[0].2, 4.0, "sum of per-host averages");
+
+    observer.clear();
+    let matched = run(
+        r#"label_replace(probe{host=~"a|b"}, "dst", "$1", "host", "(.*)") + on(dst) label_replace(probe{host=~"a|b"}, "dst", "$1", "host", "(.*)")"#,
+        "(0, 0, '1s')",
+    )
+    .await
+    .unwrap();
+    let (_, matched_rows) = native_labelled_rows(matched).await;
+    assert_eq!(
+        matched_rows.len(),
+        2,
+        "matching must retain dst on both vectors"
+    );
+    assert_eq!(
+        matched_rows
+            .iter()
+            .map(|row| (row.1.get("dst").unwrap().clone(), row.2))
+            .collect::<Vec<_>>(),
+        vec![("a".to_string(), 2.0), ("b".to_string(), 4.0)]
+    );
+
+    observer.clear();
+    let dynamic_scalar = run(r#"round(probe, time() / 1e9) + time()"#, "(0, 0, '1s')")
+        .await
+        .unwrap();
+    assert_eq!(native_result_rows(dynamic_scalar).await.len(), 16);
+    let dynamic_plan = observer.take();
+    assert_eq!(
+        dynamic_plan.output_partitioning().partition_count(),
+        4,
+        "a per-series dynamic scalar must preserve scan parallelism"
+    );
+
     // Two series rewritten to one label set can only collide across execution partitions when each
     // partition holds one of them: a route that keeps per-partition duplicate state then sees no
     // collision at all. Prove the two series really are split first, on the fresh-destination form

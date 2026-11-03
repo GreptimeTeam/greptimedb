@@ -632,13 +632,13 @@ async fn the_tree_above_the_cut_runs_over_the_merged_series() {
         state_of_series(
             &cut_schema(),
             cut_op(kind),
-            &[],
+            &[K0],
             vec![series_at(&cut_schema(), -2.0)],
         ),
         state_of_series(
             &cut_schema(),
             cut_op(kind),
-            &[],
+            &[K0],
             vec![
                 series_at(&cut_schema(), -6.0),
                 series_at(&cut_schema(), -10.0),
@@ -647,7 +647,7 @@ async fn the_tree_above_the_cut_runs_over_the_merged_series() {
     ];
     let root = complete(AggregateKind::Sum, by(&[]))(map_over(avg_tree(kind), vec![MathOp::Abs]));
     let plan = finalize(root, output_schema("sum(abs(avg(v0)))", &[]))
-        .to_execution_plan(state_input_with(&[], state))
+        .to_execution_plan(state_input_with(&[K0], state))
         .expect("the suffix runs over merged values");
     let batches = collect(plan, SessionContext::default().task_ctx())
         .await

@@ -146,12 +146,30 @@ impl AggregateFinalize {
                 split.schema.fields.len()
             )));
         }
-        let grouping_tags = output_schema
-            .fields()
-            .iter()
-            .filter(|field| field.data_type() == &DataType::Utf8)
-            .map(|field| field.name().to_string())
-            .collect::<Vec<_>>();
+        // State is keyed by the cut aggregate's output labels, not the final statement's
+        // projection. Derive the prefix's labels with the same tree walker the planner uses, so
+        // rewrites in the prefix are reflected in `Without` keys.
+        let grouping_tags: Vec<String> = match &split.op.group {
+            Grouping::By(names) => names
+                .iter()
+                .filter(|name| name.as_ref() != "__name__")
+                .map(|name| name.to_string())
+                .collect(),
+            Grouping::Without(names) => {
+                let prefix = NativeTree::try_new(split.prefix.clone())?;
+                let Some(prefix_tags) =
+                    crate::native::plan::fused_output_tags(prefix.root(), &[binding.tags.clone()])
+                else {
+                    return Err(declined(
+                        "cannot derive prefix output labels for without grouping",
+                    ));
+                };
+                prefix_tags
+                    .into_iter()
+                    .filter(|tag| !names.iter().any(|name| name.as_ref() == tag))
+                    .collect()
+            }
+        };
         let partial = FusedSeries::try_new_partial(
             Arc::clone(&promql),
             NativeTree::try_new(split.prefix)?,
@@ -241,10 +259,9 @@ impl AggregateFinalize {
     /// [`BoundAggregate`] carries no `Eq`/`Hash` - a quantile's parameter is an `f64` - so its
     /// `Debug` rendering stands in, the way [`FusedSeries`] renders the tree it runs.
     fn key(&self) -> String {
-        format!(
-            "{:?} {:?} {:?} {:?}",
-            self.op.kind, self.op.group, self.op.stage, self.grouping_tags
-        )
+        // The state's label columns are an execution detail: two plans that differ only in them are
+        // the same statement, so they do not belong on the plan line or in the node's identity.
+        format!("{:?} {:?} {:?}", self.op.kind, self.op.group, self.op.stage)
     }
 }
 
