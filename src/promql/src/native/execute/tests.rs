@@ -11578,46 +11578,35 @@ fn partial_final_matches_complete_over_concatenated_input() {
             assert!(value.values().inner().capacity() > visible_len * 100);
             assert!(compensation.values().inner().capacity() > visible_len * 100);
 
-            // Independently model the old wrapper-only charge: state/chunk wrappers, one
-            // StructArray per logical field, and the child ArrayRef vector, but no buffers.
-            let wrappers = std::mem::size_of::<crate::native::state::StateChunk>()
-                + std::mem::size_of::<crate::aggregate::state::StateRow>()
-                + row.fields.len() * std::mem::size_of::<datatypes::arrow::array::StructArray>()
-                + 2 * std::mem::size_of::<datatypes::arrow::array::ArrayRef>()
-                + row.metric.name().map_or(0, str::len)
-                + std::mem::size_of_val(row.metric.tags())
-                + row
-                    .metric
-                    .tags()
-                    .iter()
-                    .map(|tag| tag.name.len() + tag.value.len())
-                    .sum::<usize>()
-                + std::mem::size_of::<datatypes::series::time::TimeAxis>()
-                + std::mem::size_of::<datatypes::series::time::GridSpan>();
-            assert!(backing_bytes > wrappers);
-            let rejecting_budget = (wrappers + backing_bytes) / 2;
-            assert!(rejecting_budget > wrappers);
-            assert!(rejecting_budget < backing_bytes);
-            let mut constrained = executor(&tree_final, bounded_pool(rejecting_budget));
+            // The charge is the row's own extent, not the 4096-element buffers it borrows: a
+            // Final row is a one-row slice of the frame's list values, and charging the parent per
+            // row is what multiplied a chained router's figure.
+            let own = crate::native::state::state_row_bytes(row);
+            assert!(
+                own < backing_bytes,
+                "a row must not be charged the backing it borrows: own {own}, backing {backing_bytes}"
+            );
+            assert!(
+                own >= 2 * visible_len * std::mem::size_of::<f64>(),
+                "the charge still covers the values the row carries: {own}"
+            );
+            let mut constrained = executor(&tree_final, bounded_pool(own - 1));
             let error = constrained
                 .push_state(
                     InputId::new(0),
                     crate::native::state::StateChunk::Row(row.clone()),
                 )
-                .expect_err("admission must account for retained Arrow backing");
+                .expect_err("admission must account for the row it queues");
             assert!(is_resources_exhausted(&error), "{error}");
             assert_eq!(constrained.state().reserved_bytes(), 0);
 
-            // The backing lower bound is exact, but this fixture also owns Arrow list/struct
-            // offsets, schema metadata, labels, and executor bookkeeping. Allow a bounded 64 KiB
-            // for that overhead; this check proves admission and release, not exact estimation.
-            let sufficient_pool = bounded_pool(backing_bytes + 64 * 1024);
+            let sufficient_pool = bounded_pool(own + 64 * 1024);
             let mut sufficient = executor(&tree_final, Arc::clone(&sufficient_pool));
             sufficient
                 .push_state(InputId::new(0), state)
-                .expect("the budget covers wrappers and retained Arrow backing");
-            assert!(sufficient.state().reserved_bytes() >= backing_bytes);
-            assert!(sufficient_pool.reserved() >= backing_bytes);
+                .expect("the budget covers the row and its bookkeeping");
+            assert!(sufficient.state().reserved_bytes() >= own);
+            assert!(sufficient_pool.reserved() >= own);
             drop(sufficient);
             assert_eq!(sufficient_pool.reserved(), 0);
         }

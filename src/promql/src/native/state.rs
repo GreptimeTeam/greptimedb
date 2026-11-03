@@ -25,6 +25,7 @@ use std::mem::{size_of, size_of_val};
 use std::sync::Arc;
 
 use datafusion::arrow::array::Array;
+use datafusion::arrow::record_batch;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::MemoryReservation;
 use datatypes::series::aggregate_state::{
@@ -172,6 +173,36 @@ pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
     }
 }
 
+/// Bytes an array's own extent needs, rather than the buffers it borrows.
+///
+/// A one-row slice of a batch still points at the whole buffer, and `get_array_memory_size`
+/// reports that whole buffer. Charging it per row multiplies the parent by the row count once two
+/// routers are chained, so the figure here is the one the slice itself would occupy.
+pub(crate) fn slice_bytes(array: &dyn Array) -> usize {
+    array
+        .to_data()
+        .get_slice_memory_size()
+        .unwrap_or_else(|_| array.get_array_memory_size())
+}
+
+/// Bytes a batch's own extent needs, excluding spare buffer capacity it shares with a parent.
+pub(crate) fn batch_slice_bytes(batch: &record_batch::RecordBatch) -> usize {
+    std::mem::size_of::<record_batch::RecordBatch>()
+        .saturating_add(
+            batch
+                .columns()
+                .len()
+                .saturating_mul(std::mem::size_of::<datafusion::arrow::array::ArrayRef>()),
+        )
+        .saturating_add(
+            batch
+                .columns()
+                .iter()
+                .map(|column| slice_bytes(column.as_ref()))
+                .fold(0usize, usize::saturating_add),
+        )
+}
+
 /// Bytes held by one decoded state row's owned wrappers and retained payloads.
 pub(crate) fn state_row_bytes(row: &crate::aggregate::state::StateRow) -> usize {
     let fields = row.fields.len();
@@ -181,7 +212,7 @@ pub(crate) fn state_row_bytes(row: &crate::aggregate::state::StateRow) -> usize 
         .saturating_add(
             (0..fields)
                 .filter_map(|index| row.fields.field(index))
-                .map(Array::get_array_memory_size)
+                .map(|field| slice_bytes(field))
                 .fold(0usize, usize::saturating_add),
         )
         .saturating_add(

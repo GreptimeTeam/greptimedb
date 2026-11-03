@@ -1115,7 +1115,8 @@ async fn aggregate_state_slice_wrappers_remain_charged_until_terminal_cleanup() 
         .expect("state batch is emitted")
         .expect("state batch packs successfully");
     assert_eq!(ROWS, batch.num_rows());
-    let backing_bytes = batch.get_array_memory_size();
+    // What the batch's own rows need, which is what the router now charges.
+    let backing_bytes = crate::native::state::batch_slice_bytes(&batch);
     let slice_wrappers = state_slice_wrapper_bytes(batch.schema().as_ref()).unwrap();
     // Hand-count the declared shape: 23 sliced array nodes; list values are not collected.
     // There are 17 struct-child refs and six root-column refs.
@@ -1202,6 +1203,82 @@ async fn aggregate_state_slice_wrappers_remain_charged_until_terminal_cleanup() 
         0,
         pool.reserved(),
         "terminal cleanup releases slice reservations"
+    );
+}
+
+/// A one-row slice is charged for its own row, not for the buffer it borrows.
+///
+/// Two routers are chained in production: the region exit emits state rows, and the Final router
+/// reads those slices. `RecordBatch::get_array_memory_size` reports the whole parent buffer for a
+/// one-row slice, so charging it per row multiplies the parent by the row count. This pins the
+/// figure the router uses instead: the slice's own extent scales with the row, not with the parent.
+#[test]
+fn a_one_row_state_slice_is_charged_for_its_own_extent() {
+    let grid = grid();
+    let fields = (0..8)
+        .map(|index| FieldSpec {
+            name: Arc::from(format!("field_{index}")),
+        })
+        .collect::<Vec<_>>();
+    let series = Arc::new(SeriesSchema {
+        fields: fields.into(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let wire = Arc::new(
+        AggregateStateSchema::try_new(
+            AggregateStateKind::Sum,
+            vec![StateComponent::Value, StateComponent::Compensation],
+        )
+        .unwrap(),
+    );
+    let rows = (0..16)
+        .map(|position| {
+            Ok((
+                StateSeries {
+                    metric: labels("slice-extent"),
+                    time: TimeAxis::from_grid_spans(
+                        Arc::clone(&grid),
+                        vec![GridSpan::new(position, 1)],
+                    )
+                    .unwrap(),
+                    states: vec![vec![Some(AggregateStateValues::default())]; series.fields.len()],
+                },
+                true,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut frames = common_query::series_frame::pack_aggregate_state(
+        Box::pin(futures::stream::iter(rows)),
+        Arc::clone(&wire),
+        Arc::clone(&series),
+    )
+    .unwrap();
+    let batch = futures::executor::block_on(futures::future::poll_fn(|cx| {
+        match frames.as_mut().poll_next(cx) {
+            Poll::Ready(batch) => Poll::Ready(batch.expect("state batch is emitted")),
+            Poll::Pending => Poll::Pending,
+        }
+    }))
+    .unwrap();
+    assert_eq!(16, batch.num_rows());
+
+    let slice = batch.slice(3, 1);
+    let parent = slice.get_array_memory_size();
+    let own = crate::native::state::batch_slice_bytes(&slice);
+    // The slice's own extent, not the parent's. It is not as small as one sixteenth: a `List`'s
+    // values array is not sliced, so its child buffers are still part of the slice's extent. What
+    // matters is that the figure scales with the row rather than with the parent, which is the
+    // 74x over-charge the review measured across two chained routers.
+    assert!(
+        own.saturating_mul(2) < parent,
+        "a one-row slice of a sixteen-row batch must be charged for its own extent: own {own}, \
+         parent {parent}"
+    );
+    // And the whole batch is charged roughly what its rows are worth, not sixteen parents.
+    let whole = crate::native::state::batch_slice_bytes(&batch);
+    assert!(
+        whole < parent.saturating_mul(2),
+        "the whole batch is worth about one parent: whole {whole}, parent {parent}"
     );
 }
 

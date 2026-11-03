@@ -2377,8 +2377,17 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     }
 }
 
+/// A histogram function above the cut keeps the segmented route, and answers what one execution does.
+///
+/// The function needs every bucket group of one label set, and a `Final` partition owns only its own
+/// groups, so the split declines this shape: no `Partial` state is exported and no `Final` merge
+/// runs. The statement keeps the existing segmentation, where the aggregate runs `Complete` in one
+/// parent segment. The trade is measured in the PR description: the boundary then carries evaluated
+/// series (one per bucket series) instead of group state (one per distinct `le`). This test pins the
+/// route that is taken and the answer it produces, so a future boundary that restores group-state
+/// crossing has to change the assertion deliberately.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_histogram_quantile_over_the_cut_answers_what_the_complete_input_answers() {
+async fn native_histogram_quantile_over_the_cut_falls_back_to_the_segmented_route() {
     common_telemetry::init_default_ut_logging();
 
     let observer = Arc::new(NativePlanObserver::default());
@@ -2429,18 +2438,24 @@ async fn native_histogram_quantile_over_the_cut_answers_what_the_complete_input_
 
         let mark = observer.mark();
         let (native, capture) = run_query(&instance, promql, true, &observer).await;
+        // Declined on purpose: a `Final` partition owns only its own groups, so a histogram function
+        // that reads every bucket of a label set cannot run there. Nothing partial may be exported
+        // either, or the statement would be answering from incomplete state.
         assert!(
-            !capture.finalize.is_empty(),
-            "`{query}`: the split must answer a histogram function above the cut, so the native run \
-             must merge the state the scan partitions export; instead its plans held {} fused \
-             producers and {} frontend merges - a fall back - and it answered {} rows against the \
-             legacy run's {}",
-            capture.fused.len(),
+            capture.finalize.is_empty(),
+            "`{query}`: a whole-vector suffix must not split, but the native run merged {} Final \
+             nodes over {} fused producers",
             capture.finalize.len(),
-            native.rows.len(),
-            legacy.rows.len()
+            capture.fused.len()
         );
-        assert_native_schema(&native, "v", &legacy.rows, &query);
+        for fused in &capture.fused {
+            let plan = displayable(fused.as_ref()).indent(false).to_string();
+            assert!(
+                !plan.contains(" partial"),
+                "`{query}`: a declined suffix must not export aggregate state:\n{plan}"
+            );
+        }
+        assert_same_columns(&native, &legacy, &query);
         // The equivalence the admission rests on: the rows the same statement reports over the
         // complete input, labels included.
         assert_rows(

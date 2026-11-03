@@ -1150,7 +1150,10 @@ async fn read_state_batches(
             )));
         }
         let charge = read_ahead.new_empty();
-        if let Err(error) = charge.try_grow(batch.get_array_memory_size()) {
+        // Charge what this batch's own rows need, not the buffers it borrows: a batch that is
+        // already a one-row slice of a router above would otherwise be charged for that whole
+        // parent, once per row.
+        if let Err(error) = charge.try_grow(crate::native::state::batch_slice_bytes(&batch)) {
             return Stop::Failed(Arc::new(error));
         }
         let labels = match decoder.decode_aggregate_state_labels(&batch) {
