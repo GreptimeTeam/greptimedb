@@ -31,7 +31,7 @@ mod test_util;
 mod union_distinct_on;
 
 pub use absent::{Absent, AbsentExec, AbsentStream};
-pub use aggregate_finalize::AggregateFinalize;
+pub use aggregate_finalize::{AggregateFinalize, PreparedSplit};
 use common_query::native_histogram::{SUM_FIELD, native_histogram_value_type};
 use common_query::prometheus::is_prometheus_stale_nan;
 use datafusion::arrow::array::{Array, Float64Array, StructArray};
@@ -44,8 +44,9 @@ use datafusion::logical_expr::{Expr, Extension, LogicalPlan};
 use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
 pub use fused_series::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesStream,
-    InputLocality, input_locality, matching_operands_drop_key, tree_source_fields,
+    CanonicalBoundary, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec,
+    FusedSeriesStream, InputLocality, input_locality, matching_operands_drop_key,
+    tree_source_fields,
 };
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,

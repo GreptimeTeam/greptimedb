@@ -22,7 +22,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, reads_across_series,
+    NativeType, duplicates_canonical_labels, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::info::InfoSelector;
@@ -1475,4 +1475,206 @@ fn info_reads_the_sample_times_of_one_field() {
         let error = info_of(value, fields).validate().unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+/// `label_replace(x, dst, "$1", src, "(.*)")` over `inner`, a rewrite that writes `dst`.
+fn rewritten(inner: NativeNode, dst: &str, src: &str) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(inner),
+            op: BoundMap {
+                ops: Arc::new([MapOp::Label(Arc::new(
+                    crate::map_label::LabelRewrite::replace(dst, "$1", src, "(.*)")
+                        .expect("the rewrite compiles"),
+                ))]),
+            },
+        },
+        output,
+    }
+}
+
+/// `Merge(inner)`: the canonical collection over `inner`.
+fn merge_over(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    }
+}
+
+/// The labels the fixture scan reports: one tag, which is what its series are told apart by.
+fn scan_tags() -> Vec<Vec<String>> {
+    vec![vec!["host".to_string()]]
+}
+
+/// A rewrite that writes a label the input does not carry cannot make two series equal, which is
+/// what lets a query like `label_replace(x, "dst", "$1", "host", "(.*)")` keep every partition.
+#[test]
+fn a_fresh_destination_does_not_alias() {
+    let out = grid(0, 60_000, 4);
+    let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(!duplicates_canonical_labels(
+        &rewritten(inner, "dst", "host"),
+        &scan_tags()
+    ));
+}
+
+/// A rewrite that writes a label the input carries can fold two series into one, which is what a
+/// canonical merge has to collect.
+#[test]
+fn a_rewrite_of_an_existing_label_aliases() {
+    let out = grid(0, 60_000, 4);
+    let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(duplicates_canonical_labels(
+        &rewritten(inner, "host", "host"),
+        &scan_tags()
+    ));
+}
+
+/// A source the caller says nothing about proves nothing: the pass has to assume the destination
+/// was one of its labels, because two series sharing one is exactly the wrong answer to ship.
+#[test]
+fn an_unknown_source_may_alias() {
+    let out = grid(0, 60_000, 4);
+    let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(duplicates_canonical_labels(
+        &rewritten(inner, "dst", "host"),
+        &[]
+    ));
+}
+
+/// Dropping the metric name is not aliasing within one metric: the remaining tags are the primary
+/// key, so two series that agree on all of them are the same stored series.
+#[test]
+fn dropping_the_metric_name_keeps_the_inputs_answer() {
+    let out = grid(0, 60_000, 4);
+    let plain = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(!duplicates_canonical_labels(&plain, &scan_tags()));
+    assert!(!duplicates_canonical_labels(
+        &map_over(rewritten(plain, "dst", "host")),
+        &scan_tags()
+    ));
+}
+
+/// A consumer that files its rows by the label set a sample ends under answers one series per set,
+/// so a rewrite beneath it is not something above it has to collect again.
+#[test]
+fn a_whole_vector_consumer_answers_one_series_per_set() {
+    let out = grid(0, 60_000, 4);
+    let aliasing = || {
+        rewritten(
+            window_fields(input_with_fields(1), Arc::clone(&out), 1),
+            "host",
+            "host",
+        )
+    };
+    for op in [
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::new([])),
+        },
+        BoundVectorOp::Absent {
+            labels: datatypes::series::SeriesLabels::try_new(None, Vec::new()).unwrap(),
+        },
+        BoundVectorOp::CountValues {
+            label: Arc::from("v"),
+            group: Grouping::By(Arc::new([])),
+        },
+    ] {
+        let node = NativeNode {
+            expr: NativeExpr::Vector {
+                input: Box::new(aliasing()),
+                op,
+            },
+            output: evaluated(fields(1), Arc::clone(&out)),
+        };
+        assert!(node.validate().is_ok());
+    }
+}
+
+/// The merge is the collection, so a second pass over a collected node finds nothing to collect.
+#[test]
+fn a_merge_answers_one_series_per_set() {
+    let out = grid(0, 60_000, 4);
+    let aliasing = rewritten(
+        window_fields(input_with_fields(1), Arc::clone(&out), 1),
+        "host",
+        "host",
+    );
+    assert!(!duplicates_canonical_labels(
+        &merge_over(aliasing),
+        &scan_tags()
+    ));
+}
+
+/// `info` reads its info side through a canonical merge: the merge only collects the pieces of one
+/// label set, so the sample times it hands over are the ones the selection produced.
+#[test]
+fn info_sees_through_a_canonical_merge() {
+    let out = grid(0, 60_000, 4);
+    let info = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(input_with_fields(1)),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::InfoTimestamp,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let node = NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            info: Box::new(merge_over(info)),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: true,
+            },
+        },
+        output: evaluated(fields(1), out),
+    };
+    node.validate()
+        .expect("a merge above the info selection keeps its meaning");
+}
+
+/// The same tree without the merge is the tree the check was written for, so the check is not
+/// simply accepting every info side.
+#[test]
+fn info_still_refuses_an_evaluated_value_vector() {
+    let out = grid(0, 60_000, 4);
+    let values = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(input_with_fields(1)),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::Sample,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let node = NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            info: Box::new(merge_over(values)),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: true,
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let error = node.validate().expect_err("a value vector is not a time");
+    assert!(error.to_string().contains("not their values"), "{error}");
 }

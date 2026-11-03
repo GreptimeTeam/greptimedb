@@ -245,6 +245,59 @@ pub struct FusedSeries {
     grouping_tags: Option<Vec<String>>,
     /// Fixed output representation; partial state export always remains PlainRows.
     format: FusedOutputFormat,
+    /// Which half of a canonical boundary this node is, if either.
+    ///
+    /// A [`NativeExpr::Merge`] collects every fragment of one canonical label set, which a node that
+    /// runs per scan partition cannot promise in general - and it is why a tree holding one is
+    /// normally gathered into a single execution. A canonical boundary splits that collection in
+    /// two so the query keeps its width: a producer merges what each partition holds, a canonical
+    /// router collects the pieces of one label set across partitions, and a receiver merges what
+    /// arrived. Which half a node is cannot be read off its tree - both hold a merge at the root -
+    /// so it is stated here by the caller that built the boundary.
+    canonical: Option<CanonicalBoundary>,
+}
+
+/// One end of a canonical boundary: where a label set's pieces are collected.
+///
+/// The two ends are separate nodes with different jobs and different execution contracts, and the
+/// router between them is the existing `SeriesRepartitionExec`. Keeping them apart is what lets the
+/// producer stay parallel: a single node doing all three would have to gather every partition it
+/// reads, which is the workaround this boundary exists to avoid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CanonicalBoundary {
+    /// The tree ends in a merge that collects what each input partition holds.
+    ///
+    /// The node runs one execution per input partition and exports one series per canonical label
+    /// set per partition as a series frame. It is *not* a claim that the label set is complete: the
+    /// pieces other partitions hold are the router's to collect, and a duplicate position among the
+    /// pieces this partition holds is refused here, before anything is routed.
+    Producer,
+    /// The tree's root merge collects what the canonical router handed over.
+    ///
+    /// The node's evaluated input is routed by canonical label set before it is read, so each
+    /// partition it runs holds whole label sets and its merge is the final assembly: complementary
+    /// evaluation points are joined and two values at one point are the error Prometheus reports.
+    Receiver,
+}
+
+fn canonical_evaluated_local_prefix(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(input) => input
+            .output
+            .samples()
+            .is_some_and(|schema| schema.eval_grid.is_some()),
+        NativeExpr::Merge { input } => canonical_evaluated_local_prefix(input),
+        NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } => {
+            canonical_evaluated_local_prefix(input)
+        }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            canonical_evaluated_local_prefix(input)
+                && parameters.iter().all(canonical_evaluated_local_prefix)
+        }
+        _ => false,
+    }
 }
 
 impl FusedSeries {
@@ -261,6 +314,11 @@ impl FusedSeries {
         if self.partial_fold.is_some() {
             return Err(DataFusionError::NotImplemented(
                 "FusedSeries serialization does not support partial_fold".into(),
+            ));
+        }
+        if self.canonical.is_some() {
+            return Err(DataFusionError::NotImplemented(
+                "FusedSeries serialization does not support a canonical boundary".into(),
             ));
         }
         fn text(out: &mut Vec<u8>, s: &str) -> DataFusionResult<()> {
@@ -490,6 +548,7 @@ impl FusedSeries {
             partial_fold: None,
             grouping_tags: None,
             format,
+            canonical: None,
         })
     }
 
@@ -526,7 +585,109 @@ impl FusedSeries {
             partial_fold: Some(op),
             grouping_tags: Some(grouping_tags.to_vec()),
             format: FusedOutputFormat::PlainRows,
+            canonical: None,
         })
+    }
+
+    /// Creates a producer whose terminal canonical merge is answered per input partition.
+    ///
+    /// The tree's root has to be a [`NativeExpr::Merge`], because that is the node this flag changes
+    /// the meaning of: instead of collecting every piece of a label set in one execution, the node
+    /// collects the pieces its own partition holds and exports one series per label set as a series
+    /// frame. What that leaves undone - the pieces of one label set that landed in other partitions -
+    /// is the canonical router's work above this node, and the caller that builds it is the one that
+    /// knows the pieces are split that way.
+    ///
+    /// `output_schema` is the frame the evaluated root declares; it is derived here rather than
+    /// taken from the caller so the two cannot disagree.
+    pub fn try_new_canonical_producer(
+        promql: Arc<str>,
+        tree: NativeTree,
+        binding: FusedSeriesBinding,
+        children: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        let NativeExpr::Merge { input } = &tree.root().expr else {
+            return Err(DataFusionError::Plan(
+                "a canonical merge producer requires a merge at the tree's root".into(),
+            ));
+        };
+        if !matches!(input_locality(input), InputLocality::PartitionLocal)
+            && !canonical_evaluated_local_prefix(input)
+        {
+            return Err(DataFusionError::Plan(
+                "a canonical merge producer requires a partition-local prefix".into(),
+            ));
+        }
+        validate_binding(&tree, &binding, children.len())?;
+        let frame = Self::series_frame_schema(&tree)?;
+        let output_schema = Arc::new(datafusion::common::DFSchema::try_from(
+            frame.as_ref().clone(),
+        )?);
+        Ok(Self {
+            promql,
+            tree,
+            binding,
+            children,
+            output_schema,
+            partial_fold: None,
+            grouping_tags: None,
+            format: FusedOutputFormat::SeriesFrame,
+            canonical: Some(CanonicalBoundary::Producer),
+        })
+    }
+
+    /// Creates the receiving half of a canonical boundary over `producer`.
+    ///
+    /// The tree is the one the boundary's merge denotes, with its input replaced by the source the
+    /// routed frames arrive on; the caller that built the producer knows the fields and grid, so
+    /// `evaluated` is the schema both sides agree on. `format` is [`FusedOutputFormat::PlainRows`]
+    /// when this node is the statement's root and a series frame when something above it still has
+    /// to run.
+    pub fn try_new_canonical_receiver(
+        promql: Arc<str>,
+        tree: NativeTree,
+        binding: FusedSeriesBinding,
+        producer: LogicalPlan,
+        output_schema: DFSchemaRef,
+        format: FusedOutputFormat,
+    ) -> DataFusionResult<Self> {
+        if !matches!(tree.root().expr, NativeExpr::Merge { .. }) {
+            return Err(DataFusionError::Plan(
+                "a canonical merge receiver requires a merge at the tree's root".into(),
+            ));
+        }
+        validate_binding(&tree, &binding, 1)?;
+        if format == FusedOutputFormat::SeriesFrame {
+            let expected = Self::series_frame_schema(&tree)?;
+            if output_schema.as_arrow() != expected.as_ref() {
+                return Err(DataFusionError::Plan(
+                    "a canonical merge receiver's frame schema does not match its tree".into(),
+                ));
+            }
+        }
+        Ok(Self {
+            promql,
+            tree,
+            binding,
+            children: vec![producer],
+            output_schema,
+            partial_fold: None,
+            grouping_tags: None,
+            format,
+            canonical: Some(CanonicalBoundary::Receiver),
+        })
+    }
+
+    /// Whether a canonical producer's input prefix is safe to run at its local execution width.
+    pub fn canonical_producer_prefix_is_local(&self) -> bool {
+        matches!(&self.tree.root().expr, NativeExpr::Merge { input }
+            if matches!(input_locality(input), InputLocality::PartitionLocal)
+                || canonical_evaluated_local_prefix(input))
+    }
+
+    /// Which half of a canonical boundary this node is, if either.
+    pub fn canonical_boundary(&self) -> Option<CanonicalBoundary> {
+        self.canonical
     }
 
     /// The aggregate whose partition-local state this node exports.
@@ -602,8 +763,9 @@ impl FusedSeries {
             SeriesFrameDeclaration::parse(input.schema().as_ref())
                 .is_ok_and(|declaration| declaration.content() == FrameContent::Evaluated)
         });
-        let locality = input_locality(self.tree.root());
+        let locality = self.execution_locality();
         let normalize = matches!(locality, InputLocality::SinglePartition);
+
         let matching_policy = match &locality {
             InputLocality::MatchingLocal(policy) => Some(policy.clone()),
             _ => None,
@@ -745,7 +907,7 @@ impl FusedSeries {
                 }
             })
             .collect::<DataFusionResult<Vec<_>>>()?;
-        Ok(Arc::new(FusedSeriesExec::build(
+        let exec: Arc<dyn ExecutionPlan> = Arc::new(FusedSeriesExec::build(
             Arc::clone(&self.promql),
             inputs,
             Arc::new(self.tree.clone()),
@@ -758,7 +920,61 @@ impl FusedSeries {
                 .map(|tags| Arc::from(tags.clone())),
             self.format,
             target_partitions,
+            self.canonical,
+        )?);
+        Ok(self.with_canonical_router(exec, target_partitions)?)
+    }
+
+    /// Routes a canonical producer's frames by label set, which is the half of the collection the
+    /// producer itself cannot do.
+    ///
+    /// The producer answers one series per label set *per partition*: it merged what it found there.
+    /// The pieces of one set that landed in other partitions are still apart, and every consumer
+    /// above this boundary reads whole label sets, so they are collected here - by canonical label
+    /// set, not by matching key, and by the conservative completion contract, because a producer can
+    /// only promise one series per set per partition and not that each set lives in one partition.
+    ///
+    /// This router is the boundary's middle stage and nothing else: a query whose tree holds no
+    /// canonical merge never reaches this code, and a merge that is not a boundary stays where it is.
+    fn with_canonical_router(
+        &self,
+        exec: Arc<dyn ExecutionPlan>,
+        target_partitions: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        if self.canonical != Some(CanonicalBoundary::Producer) {
+            return Ok(exec);
+        }
+        // The producer's own partitions are where the pieces are, so the router neither invents
+        // more owners than there is work for nor collects everything into one: it asks for the
+        // caller's width, capped by the partitions the pieces actually come from.
+        let count = exec.properties().partitioning.partition_count();
+        let outputs = if count <= 1 {
+            1
+        } else {
+            target_partitions.unwrap_or(count).clamp(1, count)
+        };
+        Ok(Arc::new(SeriesRepartitionExec::try_new_with_routing(
+            exec,
+            outputs,
+            SeriesRouting::CanonicalLabels,
         )?))
+    }
+
+    /// The locality this node's physical execution runs at.
+    ///
+    /// Normally that is the tree's own classification: a tree that reads across series answers one
+    /// partition and gathers what it reads. A partition-local canonical merge is the one deliberate
+    /// exception, and it is a fact about *this* node's contract rather than about the tree, so it is
+    /// read here and not inferred from the root: the caller that built the node knows its inputs are
+    /// whole per partition, and the merge it ends with collects only that partition's fragments.
+    /// Treating every merge as partition-local would instead let a merge that needs every piece run
+    /// where it cannot see them.
+    fn execution_locality(&self) -> InputLocality {
+        if self.canonical.is_some() {
+            InputLocality::PartitionLocal
+        } else {
+            input_locality(self.tree.root())
+        }
     }
 
     /// The label columns of the output: every column that is neither the time index nor a field of
@@ -813,6 +1029,14 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
                 self.promql,
                 render_partial_fold(op)
             ),
+            None if self.canonical == Some(CanonicalBoundary::Producer) => write!(
+                f,
+                "FusedSeries: {} (output: series_frame, per-partition canonical merge)",
+                self.promql
+            ),
+            None if self.canonical == Some(CanonicalBoundary::Receiver) => {
+                write!(f, "FusedSeries: {} (input: canonical routing)", self.promql)
+            }
             None if self.format == FusedOutputFormat::SeriesFrame => {
                 write!(f, "FusedSeries: {} (output: series_frame)", self.promql)
             }
@@ -835,6 +1059,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
             partial_fold: self.partial_fold.clone(),
             grouping_tags: self.grouping_tags.clone(),
             format: self.format,
+            canonical: self.canonical,
         })
     }
 }
@@ -854,6 +1079,7 @@ impl PartialEq for FusedSeries {
             && partial_key(self.partial_fold.as_ref()) == partial_key(other.partial_fold.as_ref())
             && self.grouping_tags == other.grouping_tags
             && self.format == other.format
+            && self.canonical == other.canonical
     }
 }
 
@@ -868,6 +1094,7 @@ impl Hash for FusedSeries {
         partial_key(self.partial_fold.as_ref()).hash(state);
         self.grouping_tags.hash(state);
         self.format.hash(state);
+        self.canonical.hash(state);
     }
 }
 
@@ -900,6 +1127,10 @@ impl PartialOrd for FusedSeries {
             ord => return Some(ord),
         }
         match self.format.cmp(&other.format) {
+            Ordering::Equal => {}
+            ord => return Some(ord),
+        }
+        match self.canonical.cmp(&other.canonical) {
             Ordering::Equal => {}
             ord => return Some(ord),
         }
@@ -1745,6 +1976,8 @@ pub struct FusedSeriesExec {
     grouping_tags: Option<Arc<[String]>>,
     format: FusedOutputFormat,
     matching_parallelism: Option<usize>,
+    /// Which half of a canonical boundary this node is (see the logical node's field).
+    canonical: Option<CanonicalBoundary>,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -1845,6 +2078,7 @@ impl FusedSeriesExec {
             None,
             FusedOutputFormat::PlainRows,
             None,
+            None,
         )
     }
 
@@ -1860,8 +2094,34 @@ impl FusedSeriesExec {
         grouping_tags: Option<Arc<[String]>>,
         format: FusedOutputFormat,
         matching_parallelism: Option<usize>,
+        canonical: Option<CanonicalBoundary>,
     ) -> DataFusionResult<Self> {
-        let locality = input_locality(tree.root());
+        // A partition-local canonical merge is an explicit contract about this node's inputs, so it
+        // replaces the tree's own classification rather than being folded into it: the tree's root
+        // merge reads across series in general, and only the caller knows that these partitions each
+        // hold whole series.
+        let locality = if canonical.is_some() {
+            InputLocality::PartitionLocal
+        } else {
+            input_locality(tree.root())
+        };
+        if let Some(boundary) = canonical {
+            if !matches!(tree.root().expr, NativeExpr::Merge { .. }) {
+                return Err(DataFusionError::Plan(
+                    "a canonical boundary requires a merge at the tree's root".into(),
+                ));
+            }
+            if partial_fold.is_some() {
+                return Err(DataFusionError::Plan(
+                    "a canonical boundary exports series frames, not aggregate state".into(),
+                ));
+            }
+            if boundary == CanonicalBoundary::Producer && format != FusedOutputFormat::SeriesFrame {
+                return Err(DataFusionError::Plan(
+                    "a canonical merge producer exports a series frame".into(),
+                ));
+            }
+        }
         let raw_schemas = validate_physical_tree(&tree)?;
         if inputs.len() != raw_schemas.len() {
             return Err(DataFusionError::Plan(format!(
@@ -2069,6 +2329,7 @@ impl FusedSeriesExec {
             grouping_tags,
             format,
             matching_parallelism,
+            canonical,
         })
     }
 
@@ -2171,6 +2432,7 @@ impl ExecutionPlan for FusedSeriesExec {
             self.grouping_tags.clone(),
             self.format,
             self.matching_parallelism,
+            self.canonical,
         )?))
     }
 

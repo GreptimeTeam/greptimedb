@@ -2538,9 +2538,10 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
     ] {
         observer.clear();
         let native = run(expr, "(0, 0, '1s')").await;
-        assert!(
-            observer.fused().is_none(),
-            "{shape}: unsafe rewrite must decline native"
+        assert_eq!(
+            observer.fused().as_ref().map(|plan| plan.name()),
+            Some("FusedSeriesExec"),
+            "{shape}: collapsing rewrite uses canonical native boundary"
         );
         let legacy = instance
             .do_query(
@@ -2557,9 +2558,13 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
             Ok(output) => collect_error(output).await,
             Err(error) => error.to_string(),
         };
-        assert_eq!(
-            native_error, legacy_error,
-            "{shape}: native must preserve legacy outcome"
+        assert!(
+            native_error.contains("cannot contain metrics with the same labelset"),
+            "{shape}: native must surface the underlying duplicate-label error, got: {native_error}"
+        );
+        assert!(
+            legacy_error.contains("cannot contain metrics with the same labelset"),
+            "{shape}: legacy must report the same conflict, got: {legacy_error}"
         );
     }
 
@@ -2624,12 +2629,11 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
                 "{shape}: a rewrite that cannot make two series equal stays spread"
             );
         } else {
-            // Deleting a tag that distinguishes series can fold them together, and a per-partition
-            // duplicate check cannot see that across partitions, so the route keeps the existing
-            // plan for this shape until rewrite outputs are routed by canonical label set.
-            assert!(
-                observer.fused().is_none(),
-                "{shape}: a deletion that may collapse series must not run natively"
+            // The canonical boundary merges rewritten label identities before publishing output.
+            assert_eq!(
+                observer.fused().as_ref().map(|plan| plan.name()),
+                Some("FusedSeriesExec"),
+                "{shape}: a collapsing deletion uses the canonical native boundary"
             );
         }
     }
@@ -8753,4 +8757,417 @@ async fn native_promql_corpus_route_matrix() {
         "label | route | gate-if-legacy | rows==legacy | max rel diff | native value column | partitions used\n{}",
         table_rows.join("\n")
     );
+}
+
+/// Walks a physical plan and reports whether `name` appears, and how many times.
+fn count_plan_nodes(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
+    let mut count = 0;
+    let mut stack = vec![Arc::clone(plan)];
+    while let Some(node) = stack.pop() {
+        if node.name() == name {
+            count += 1;
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    count
+}
+
+/// Renders `plan` as an indented tree, so a failing boundary assertion shows what it found.
+fn display_plan_tree(plan: &Arc<dyn ExecutionPlan>) -> String {
+    fn visit(plan: &Arc<dyn ExecutionPlan>, depth: usize, out: &mut String) {
+        out.push_str(&format!("{}{}\n", "  ".repeat(depth), plan.name()));
+        for child in plan.children() {
+            visit(child, depth + 1, out);
+        }
+    }
+    let mut out = String::new();
+    visit(plan, 0, &mut out);
+    out
+}
+
+/// The first node named `name` in `plan`, which is the boundary's own stage when there is one.
+fn find_plan_node(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Option<Arc<dyn ExecutionPlan>> {
+    let mut stack = vec![Arc::clone(plan)];
+    while let Some(node) = stack.pop() {
+        if node.name() == name {
+            return Some(node);
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    None
+}
+
+/// A label rewrite that folds every series of one metric into one label set, answered from the
+/// statement root.
+///
+/// Every stored series ends under the same label set, so the answer is one series whose points are
+/// the union of what the scan partitions held - which is what a canonical merge has to assemble.
+/// The scan still spans four partitions, and the value of the test is that it stays that way: a
+/// route that gathered the partitions into one execution would answer correctly and take the
+/// caller's parallelism away, and a route that answered per partition would report several series
+/// under one label set, or the error a duplicate position raises.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
+    common_telemetry::init_default_ut_logging();
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_root_canonical_merge")
+            .with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    // Sixteen series over one timestamp: each partition holds four of them, and every one of them
+    // is rewritten to the same label set.
+    execute_all(
+        &instance,
+        "CREATE TABLE root_fold_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true'); \
+         CREATE TABLE root_fold (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='root_fold_phy'); \
+         INSERT INTO root_fold (host,ts,val) VALUES ('a',0,1),('b',0,2),('c',0,3),('d',0,4),('e',0,5),('f',0,6),('g',0,7),('h',0,8),('i',0,9),('j',0,10),('k',0,11),('l',0,12),('m',0,13),('n',0,14),('o',0,15),('p',0,16)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expr = r#"label_replace(root_fold, "host", "same", "host", ".*")"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {expr}");
+    observer.clear();
+    let native = instance
+        .do_query(&sql, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
+    let plan = observer.root_plan();
+    // The boundary is three stages, and each is checked by name so a plan that answers the query
+    // another way fails here rather than silently passing on the answer alone.
+    assert_eq!(
+        1,
+        count_plan_nodes(&plan, "FusedSeriesExec"),
+        "the frontend has only the receiver; the producer is regional: {}, regions={:?}",
+        display_plan_tree(&plan),
+        observer
+            .region_plans()
+            .iter()
+            .map(display_plan_tree)
+            .collect::<Vec<_>>()
+    );
+    let region_plan = observer
+        .region_plans()
+        .into_iter()
+        .find(|plan| count_plan_nodes(plan, "FusedSeriesExec") > 0)
+        .expect("the producer and router run in the region plan");
+    assert_eq!(
+        1,
+        count_plan_nodes(&region_plan, "FusedSeriesExec"),
+        "the producer stays regional: {}",
+        display_plan_tree(&region_plan)
+    );
+    let router = find_plan_node(&region_plan, "SeriesRepartitionExec").unwrap_or_else(|| {
+        panic!(
+            "the boundary routes by canonical label set: {}",
+            display_plan_tree(&region_plan)
+        )
+    });
+    assert_eq!(
+        4,
+        router.properties().output_partitioning().partition_count(),
+        "the router keeps the scan width"
+    );
+
+    // Every stored series carries a value at the one evaluation point, so rewriting them to one
+    // label set makes the point two values at once - the error Prometheus reports - and it is
+    // raised before any of them is published.
+    let error = collect_error(native).await;
+    assert!(
+        error.contains("cannot contain metrics with the same labelset"),
+        "a same-point overlap is the documented error, got: {error}"
+    );
+
+    // Exactly two stored series, expected to be in different scan partitions, provide the smallest
+    // cross-partition collision case: producer-local merge cannot report this overlap itself.
+    execute_all(
+        &instance,
+        "CREATE TABLE root_collision_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true'); \
+         CREATE TABLE root_collision (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='root_collision_phy'); \
+         INSERT INTO root_collision (host,ts,val) VALUES ('a',0,1),('b',0,2)",
+        QueryContext::arc(),
+    )
+    .await;
+    observer.clear();
+    let two_host_collision = instance
+        .do_query(
+            r#"TQL EVAL (0, 0, '1s') label_replace(root_collision, "host", "same", "host", ".*")"#,
+            native_query_context(true, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let two_host_plan = observer
+        .fused()
+        .expect("the two-host producer ran natively");
+    let occupied = two_host_plan
+        .metrics()
+        .expect("two-host producer metrics")
+        .iter()
+        .filter(|metric| metric.value().name() == "native.root.output_values")
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { count, .. } => {
+                Some((metric.partition(), count.value()))
+            }
+            _ => None,
+        })
+        .filter(|(_, count)| *count > 0)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        occupied.len(),
+        2,
+        "two series each occupy one distinct nonempty source partition: {occupied:?}"
+    );
+    assert_ne!(occupied[0].0, occupied[1].0);
+    let two_host_error = collect_error(two_host_collision).await;
+    assert!(
+        two_host_error.contains("cannot contain metrics with the same labelset"),
+        "the cross-partition canonical router, not the local producer, catches the collision: {two_host_error}"
+    );
+    let two_host_region = observer
+        .region_plans()
+        .into_iter()
+        .find(|plan| count_plan_nodes(plan, "SeriesRepartitionExec") > 0)
+        .expect("two-host collision uses the canonical router");
+    assert_eq!(
+        4,
+        find_plan_node(&two_host_region, "SeriesRepartitionExec")
+            .unwrap()
+            .properties()
+            .output_partitioning()
+            .partition_count()
+    );
+
+    // Two series rewritten onto one label set whose points do not meet: the merge joins them into
+    // one series instead of reporting a duplicate, which is the other half of the contract. They
+    // are ten minutes apart - twice the five-minute lookback - so exactly one of them answers at
+    // any evaluation point.
+    execute_all(
+        &instance,
+        "CREATE TABLE root_pair_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true'); \
+         CREATE TABLE root_pair (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='root_pair_phy'); \
+         INSERT INTO root_pair (host,ts,val) VALUES ('a',0,1),('b',600000,2)",
+        QueryContext::arc(),
+    )
+    .await;
+    let pair_expr = r#"label_replace(root_pair, "host", "same", "host", ".*")"#;
+    observer.clear();
+    let pair = instance
+        .do_query(
+            &format!("TQL EVAL (0, 600, '1m') {pair_expr}"),
+            native_query_context(true, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let pair_plan = observer.root_plan();
+    assert_eq!(
+        1,
+        count_plan_nodes(&pair_plan, "FusedSeriesExec"),
+        "the pair receiver stays in the frontend plan: {}",
+        display_plan_tree(&pair_plan)
+    );
+    let pair_region = observer
+        .region_plans()
+        .into_iter()
+        .find(|plan| count_plan_nodes(plan, "SeriesRepartitionExec") > 0)
+        .expect("the pair's canonical router runs in the region plan");
+    assert_eq!(
+        1,
+        count_plan_nodes(&pair_region, "FusedSeriesExec"),
+        "the pair producer stays regional: {}",
+        display_plan_tree(&pair_region)
+    );
+    let (_, pair_rows) = native_labelled_rows(pair).await;
+    assert_eq!(
+        pair_rows,
+        vec![
+            (0, [("host".to_string(), "same".to_string())].into(), 1.0),
+            (
+                60_000,
+                [("host".to_string(), "same".to_string())].into(),
+                1.0
+            ),
+            (
+                120_000,
+                [("host".to_string(), "same".to_string())].into(),
+                1.0
+            ),
+            (
+                180_000,
+                [("host".to_string(), "same".to_string())].into(),
+                1.0
+            ),
+            (
+                240_000,
+                [("host".to_string(), "same".to_string())].into(),
+                1.0
+            ),
+            (
+                300_000,
+                [("host".to_string(), "same".to_string())].into(),
+                1.0
+            ),
+            (
+                600_000,
+                [("host".to_string(), "same".to_string())].into(),
+                2.0
+            ),
+        ],
+        "the complementary samples form exactly one rewritten series without duplicate rows"
+    );
+
+    // A consumer of the whole label set must see the overlap as an error *before* it hides the
+    // duplicate: a fold sums the pieces it is handed, and `topk` counts them against `k`, so either
+    // would answer a number instead of reporting what Prometheus reports. Both are checked here so
+    // the boundary is known to sit below the consumer and not above it.
+    for (shape, consumer) in [
+        (
+            "a fold",
+            r#"sum(label_replace(root_fold, "host", "same", "host", ".*"))"#.to_string(),
+        ),
+        (
+            "a ranking",
+            r#"topk(1, label_replace(root_fold, "host", "same", "host", ".*"))"#.to_string(),
+        ),
+    ] {
+        observer.clear();
+        let output = instance
+            .do_query(
+                &format!("TQL EVAL (0, 0, '1s') {consumer}"),
+                native_query_context(true, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let error = collect_error(output).await;
+        assert!(
+            error.contains("cannot contain metrics with the same labelset"),
+            "{shape}: the consumer must not hide the overlap, got: {error}"
+        );
+        let plan = observer.root_plan();
+        assert!(
+            count_plan_nodes(&plan, "SeriesRepartitionExec") > 0,
+            "{shape}: the boundary is still the canonical router, not a gather: {}",
+            display_plan_tree(&plan)
+        );
+    }
+
+    // A rewrite above a whole-vector consumer must not make that consumer partition-local. The
+    // router assembles its input first, then topk runs globally and the rewrite publishes its result.
+    let rewritten_topk = r#"label_replace(topk(1, root_fold), "host", "same", "host", ".*")"#;
+    observer.clear();
+    let topk_rows = native_labelled_rows(
+        instance
+            .do_query(
+                &format!("TQL EVAL (0, 0, '1s') {rewritten_topk}"),
+                native_query_context(true, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await
+    .1;
+    assert_eq!(
+        topk_rows.len(),
+        1,
+        "topk executes after its input is assembled"
+    );
+    assert_eq!(topk_rows[0].2, 16.0, "topk must choose the global winner");
+    assert!(
+        count_plan_nodes(&observer.root_plan(), "SeriesRepartitionExec") > 0,
+        "rewrite(topk(...)) must keep the canonical router"
+    );
+
+    // An aggregate after a colliding rewrite cannot hide the same-point conflict: the merge must
+    // validate its canonical input before the aggregate consumes it.
+    let rewritten_sum = r#"sum(label_replace(root_fold, "host", "same", "host", ".*"))"#;
+    observer.clear();
+    let sum_output = instance
+        .do_query(
+            &format!("TQL EVAL (0, 0, '1s') {rewritten_sum}"),
+            native_query_context(true, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let sum_error = collect_error(sum_output).await;
+    assert!(
+        sum_error.contains("cannot contain metrics with the same labelset"),
+        "the aggregate must not hide the overlap, got: {sum_error}"
+    );
+    assert!(count_plan_nodes(&observer.root_plan(), "SeriesRepartitionExec") > 0);
+
+    // A rewrite above the aggregate is pointwise on its single globally computed output, and must
+    // preserve that output while the scan stays partitioned below the aggregate boundary.
+    let rewrite_sum = r#"label_replace(sum(root_fold), "dst", "sum", "host", ".*")"#;
+    observer.clear();
+    let rewrite_sum_rows = native_labelled_rows(
+        instance
+            .do_query(
+                &format!("TQL EVAL (0, 0, '1s') {rewrite_sum}"),
+                native_query_context(true, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await
+    .1;
+    assert_eq!(
+        rewrite_sum_rows,
+        vec![(0, [("dst".to_string(), "sum".to_string())].into(), 136.0)],
+        "outer rewrite receives the globally summed output exactly once"
+    );
+
+    // An inner rewrite aliases every input at the sole evaluation point. That overlap must fail
+    // before topk sees the vector; an outer rewrite must not hide or move the error.
+    let rewrite_topk_rewrite = r#"label_replace(topk(1, label_replace(root_fold, "host", "inner", "host", ".*")), "host", "outer", "host", ".*")"#;
+    observer.clear();
+    let nested_output = instance
+        .do_query(
+            &format!("TQL EVAL (0, 0, '1s') {rewrite_topk_rewrite}"),
+            native_query_context(true, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let nested_error = collect_error(nested_output).await;
+    assert!(
+        nested_error.contains("cannot contain metrics with the same labelset"),
+        "the inner rewrite overlaps before topk, got: {nested_error}"
+    );
+    assert!(
+        count_plan_nodes(&observer.root_plan(), "SeriesRepartitionExec") > 0,
+        "the nested rewrite still uses canonical routing"
+    );
+
+    // The legacy plan reports the same error for the same shape, so the native route is a
+    // different implementation of one answer and not a different answer.
+    for consumer in [
+        r#"label_replace(root_fold, "host", "same", "host", ".*")"#,
+        r#"sum(label_replace(root_fold, "host", "same", "host", ".*"))"#,
+        r#"topk(1, label_replace(root_fold, "host", "same", "host", ".*"))"#,
+    ] {
+        let legacy = instance
+            .do_query(
+                &format!("TQL EVAL (0, 0, '1s') {consumer}"),
+                native_query_context(false, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let legacy_error = collect_error(legacy).await;
+        assert!(
+            legacy_error.contains("cannot contain metrics with the same labelset"),
+            "the existing plan reports the overlap too: {consumer}: {legacy_error}"
+        );
+    }
 }

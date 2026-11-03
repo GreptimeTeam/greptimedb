@@ -66,10 +66,18 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
         // and an empty replacement removes it, so the input's labels are not the output's. A map of
         // math alone keeps them.
         NativeExpr::Map { input, op } => {
-            if op.ops.iter().any(|op| matches!(op, MapOp::Label(_))) {
-                return None;
+            let mut tags = fused_output_tags(input, source_tags)?;
+            for operation in op.ops.iter() {
+                if let MapOp::Label(rewrite) = operation {
+                    let destination = rewrite.destination();
+                    if destination == "__name__" {
+                        return None;
+                    }
+                    tags.retain(|tag| tag != destination);
+                    tags.push(destination.to_string());
+                }
             }
-            fused_output_tags(input, source_tags)
+            Some(tags)
         }
         // Its parameters are scalars, which carry no labels, so what the node reports are its
         // input's labels.
@@ -131,7 +139,7 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             }
             BoundVectorOp::CountValues { .. } | BoundVectorOp::Histogram(_) => None,
         },
-        NativeExpr::Merge { .. } => None,
+        NativeExpr::Merge { input } => fused_output_tags(input, source_tags),
         NativeExpr::Binary {
             left,
             right,
@@ -140,9 +148,6 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             (NativeType::Scalar(_), _) => fused_output_tags(right, source_tags),
             (_, NativeType::Scalar(_)) => fused_output_tags(left, source_tags),
             _ => {
-                if matching.cardinality != Cardinality::OneToOne {
-                    return None;
-                }
                 let kept = |tags: Vec<String>| -> Vec<String> {
                     match &matching.labels {
                         MatchingLabels::On(names) if !names.is_empty() => tags
@@ -156,7 +161,31 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                         MatchingLabels::On(_) => tags,
                     }
                 };
-                let mut tags = kept(fused_output_tags(left, source_tags)?);
+                let left_tags = fused_output_tags(left, source_tags)?;
+                let right_tags = fused_output_tags(right, source_tags)?;
+                // `on`/`ignoring` narrow which of the many side's labels survive; a group modifier
+                // then copies the names it lists *from the one side*, with that side's values. The
+                // names are bound in the modifier and the values come from the series, so both
+                // halves are needed to say what the output carries: a `group_left(container)`
+                // keeps the left side's labels and adds `container`, which only the right side has.
+                let mut tags = match &matching.cardinality {
+                    Cardinality::OneToOne => kept(left_tags.clone()),
+                    Cardinality::ManyToOne(_) => left_tags.clone(),
+                    Cardinality::OneToMany(_) => right_tags.clone(),
+                };
+                let (includes, include_tags): (&[Arc<str>], &Vec<String>) =
+                    match &matching.cardinality {
+                        Cardinality::OneToOne => (&[], &left_tags),
+                        Cardinality::ManyToOne(labels) => (labels, &right_tags),
+                        Cardinality::OneToMany(labels) => (labels, &left_tags),
+                    };
+                for tag in include_tags {
+                    if includes.iter().any(|label| label.as_ref() == tag.as_str())
+                        && !tags.contains(tag)
+                    {
+                        tags.push(tag.clone());
+                    }
+                }
                 // A filled left side takes an unmatched right series' matching labels, so those
                 // results carry the right side's tags.
                 if matching.fill.lhs.is_some() {
@@ -590,6 +619,125 @@ pub struct NativeNode {
     pub output: NativeType,
 }
 
+/// Whether this tree can hand over two series that share one canonical label set.
+///
+/// A canonical label set is the identity a [`NativeExpr::Merge`] groups by: the metric name plus the
+/// ordinary labels, which is exactly what [`SeriesLabels`] holds. One scan partition holds one
+/// series per such set - a stored series is one identity, and the scan splits rows by storage key
+/// rather than by label set - so only a computation that *writes* an existing label can turn two of
+/// those identities into one. A `label_replace` or `label_join` does exactly that, and it may name
+/// the very label that told its input's series apart.
+///
+/// The rewrite is judged by the labels it writes and the ones its input carries, which is why the
+/// caller supplies what it knows about each source's tags, indexed by the `source_index` the leaves
+/// were bound to: a destination that names no label of the input writes a fresh one, and a fresh
+/// label cannot make two series equal. That is the difference between `label_replace(x, "dst", "$1",
+/// "host", "(.*)")` - which no merge has to collect - and `label_replace(x, "host", "same", "host",
+/// ".*")`, which folds every series of `x` into one label set.
+///
+/// Everything else either keeps the set it read or answers a set of its own:
+///
+/// - A map of math or a histogram function drops the metric name, and an arithmetic broadcast does
+///   too, but within one metric the remaining tags are the primary key: two stored series of one
+///   metric that agree on every other label are the same series, so dropping the name cannot make
+///   them one. Each of those nodes hands its input's answer on rather than claiming one of its own.
+/// - An `Aggregate` answers its groups, a `Vector` and a `Binary` that read whole vectors file their
+///   rows by the label set a sample *ends* under and refuse two values of a field at one point, a
+///   `Set` does the same, and `info` merges the results that share a label set. Each answers one
+///   series per set it names.
+/// - A node that hands its input's series over unchanged - a selection, a window, a timestamp, a
+///   parameterized map, `topk` and its ranking siblings - passes the answer on: an alias below it is
+///   still an alias above it.
+///
+/// This is the fact [`merge_label_rewrites`](crate::native::canonicalize::merge_label_rewrites)
+/// inserts a `Merge` for: a consumer that reads a whole label set cannot answer from pieces, and this
+/// says where pieces of one set can exist at all. A `Merge` is the collection itself, so it answers
+/// `false` - which is what makes the pass idempotent.
+pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>]) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_)
+        | NativeExpr::Scalar(_)
+        | NativeExpr::EvalTime { .. }
+        | NativeExpr::VectorOf { .. } => false,
+        // The collection itself: one series per label set comes out of it.
+        NativeExpr::Merge { .. } => false,
+        // These hand each series over as they read it, so what aliases below them still aliases.
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::ParameterizedMap { input, .. } => {
+            duplicates_canonical_labels(input, source_tags)
+        }
+        // A rewrite writes a caller-chosen destination label, so two series can end under one set -
+        // but only if that label was one of the input's, because writing a label no series carries
+        // leaves every series' identity distinct. `map_writes_existing_label` is that question, and
+        // an input whose labels this walk cannot derive is collected rather than trusted.
+        NativeExpr::Map { input, op } => {
+            map_writes_existing_label(input, op, source_tags).unwrap_or(true)
+                || duplicates_canonical_labels(input, source_tags)
+        }
+        // A fold answers one series per group, which is one label set per group.
+        NativeExpr::Aggregate { .. } => false,
+        NativeExpr::Vector { input, op } => match op {
+            // These keep and order the series they read, so they alias exactly as their input does.
+            BoundVectorOp::TopK { .. }
+            | BoundVectorOp::LimitK { .. }
+            | BoundVectorOp::LimitRatio { .. }
+            | BoundVectorOp::Sort(_) => duplicates_canonical_labels(input, source_tags),
+            // `absent` reports one series, `count_values` one per distinct value, and the histogram
+            // functions fold the bucket series of one histogram into one series.
+            BoundVectorOp::Absent { .. }
+            | BoundVectorOp::Histogram(_)
+            | BoundVectorOp::CountValues { .. } => false,
+        },
+        NativeExpr::Binary { left, right, .. } => {
+            let vector = |side: &NativeNode| side.output.samples().is_some();
+            if vector(left) && vector(right) {
+                // Two vectors are matched by label, and the kernel files its rows by the label set a
+                // sample ends under, refusing two values of one field at one point.
+                false
+            } else {
+                // A broadcast reaches each series of its vector side as it is.
+                let carried = if vector(left) { left } else { right };
+                duplicates_canonical_labels(carried, source_tags)
+            }
+        }
+        // A set operation keeps each side's samples and files them by result label set, refusing two
+        // values of one field at one point.
+        NativeExpr::Set { .. } => false,
+        // `info` indexes the info side by identifying labels and merges the results that share a
+        // label set.
+        NativeExpr::Info { .. } => false,
+    }
+}
+
+/// Whether `op`, applied to `input`'s series, writes a label those series already carry.
+///
+/// The walk is over the ops in written order, starting from the labels the input reports. A
+/// destination the input already carries can fold two series into one; a fresh destination cannot.
+/// `None` when the input's label set is not derivable, which is treated as "it may carry the
+/// destination" by the caller: an unknown set proves nothing, so the conservative answer is the one
+/// that collects.
+fn map_writes_existing_label(
+    input: &NativeNode,
+    op: &crate::native::plan::BoundMap,
+    source_tags: &[Vec<String>],
+) -> Option<bool> {
+    let mut tags = fused_output_tags(input, source_tags)?;
+    let mut existing = false;
+    for operation in op.ops.iter() {
+        if let MapOp::Label(rewrite) = operation {
+            let destination = rewrite.destination();
+            if destination == "__name__" || tags.iter().any(|tag| tag == destination) {
+                existing = true;
+            }
+            if !tags.iter().any(|tag| tag == destination) {
+                tags.push(destination.to_string());
+            }
+        }
+    }
+    Some(existing)
+}
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
 /// An `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two vectors' series

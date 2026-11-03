@@ -2273,6 +2273,19 @@ fn grid_position(grid: &EvalGrid, timestamp: i64) -> Result<usize> {
     Ok(position as usize)
 }
 
+/// Checks that an evaluated series lies on the grid its consumer is bound to.
+fn ensure_grid(grid: Option<&EvalGrid>, time: &TimeAxis) -> Result<()> {
+    if grid.is_none_or(|grid| {
+        time.grid()
+            .is_none_or(|actual| actual.spec() != grid.spec())
+    }) {
+        return Err(DataFusionError::Execution(
+            "vector() input does not match its evaluation grid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// The layout of a scalar's value carrier: one field on `grid`.
 fn scalar_schema(grid: Arc<EvalGrid>) -> SeriesSchema {
     SeriesSchema {
@@ -3363,6 +3376,7 @@ impl RuntimeNode {
                         "vector() consumes an evaluated scalar, not raw samples".to_string(),
                     ));
                 };
+                ensure_grid(schema.eval_grid.as_deref(), &series.time)?;
                 let series = Series::try_new(schema, series.metric, series.time, series.fields)
                     .map_err(series_error)?;
                 Ok(Some(NativeChunk::Evaluated(EvaluatedChunk::try_new(
@@ -5704,9 +5718,9 @@ fn occupied_position(
     previous: &Run,
 ) -> DataFusionError {
     DataFusionError::Execution(format!(
-        "the node produces two series under the label set {labels:?} that both hold a value of field \
-         {field} at position {position}: one occupies {previous:?} and another {run:?}, and no merge \
-         resolves two values of one field at one position",
+        "vector cannot contain metrics with the same labelset {}: two series hold a value of field \
+         {field} at position {position} ({previous:?} and {run:?})",
+        crate::grid_series::render_label_set(labels),
         position = run.start.max(previous.start),
     ))
 }

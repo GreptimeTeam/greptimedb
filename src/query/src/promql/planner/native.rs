@@ -54,10 +54,10 @@ use promql::extension_plan::{
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    BoundAggregate, BoundInput, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeTree,
+    BoundAggregate, BoundInput, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree,
     NativeType, fused_output_tags, reads_across_series,
 };
-use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
+use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::{METRIC_NAME, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -608,10 +608,6 @@ impl PromPlanner {
             .iter()
             .map(|(_, _, _, _, tags)| tags.clone())
             .collect::<Vec<_>>();
-        let rewrite_input_tags = source_tags.iter().flatten().cloned().collect::<Vec<_>>();
-        if !label_rewrites_have_fresh_destinations(prom_expr, &rewrite_input_tags) {
-            return Ok(None);
-        }
         // A segment carries one source's identity. Keeping each occurrence's scan and metadata
         // aligned here lets the cutting step name that source independently of selector count.
         let bare_scans = prepared
@@ -649,7 +645,17 @@ impl PromPlanner {
         // Admission and placement are separate: `independent_scan_pair` admits nested native
         // matches, while the physical locality classification decides whether their inputs need
         // gathering or segmentation.
-        let root = compiled.tree.root();
+        // A label rewrite can give two series one label set, which every consumer that answers a
+        // whole label set has to see as one series. The pass puts a [`NativeExpr::Merge`] where that
+        // matters and nowhere else, so a tree with no collapsing rewrite keeps every partition.
+        let tree = match promql::native::canonicalize::merge_label_rewrites(
+            &compiled.tree,
+            &source_tags,
+        ) {
+            Ok(tree) => tree,
+            Err(_) => return Ok(None),
+        };
+        let root = tree.root();
         // The split is only ever a one-child plan: it exports each partition's leaf state and merges
         // them above the region. A tree over two metric logical tables of ONE physical table is not
         // split, because a node whose locality is `SinglePartition` normalizes every input to one
@@ -690,15 +696,34 @@ impl PromPlanner {
         // `limitk` or CountValues groupings; it does not cover data-dependent errors raised while
         // executing the tree.
         if multi_input
-            && NativeExecutionState::try_new(
-                &compiled.tree,
-                Arc::new(UnboundedMemoryPool::default()),
-                None,
-            )
-            .is_err()
+            && NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
+                .is_err()
         {
             return Ok(None);
         }
+        // A tree that ends in a canonical merge answers one series per label set, and the pieces of
+        // one set were spread over the scan's partitions by the rewrite that created them. Lowering
+        // that boundary keeps the scan width: each partition merges the pieces it holds and exports
+        // series frames, a canonical router collects the pieces of one label set from every
+        // partition, and the receiver runs the merge over the routed frames. Declining here would
+        // hand the statement back to a path that answers it per partition.
+        if !multi_input
+            && selectors.len() == 1
+            && matches!(&tree.root().expr, NativeExpr::Merge { input } if pointwise_operand(input) && canonical_local_prefix(input) && !contains_global_consumer(input))
+            && let Some(plan) = canonical_boundary_plan(
+                prom_expr,
+                &tree,
+                &children,
+                &source_tags,
+                &grid,
+                &time,
+                &tags,
+                &metric,
+            )
+        {
+            return Ok(Some((plan, single_input_context)));
+        }
+        let root = tree.root();
         let per_partition =
             !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
         let locality = input_locality(root);
@@ -712,7 +737,7 @@ impl PromPlanner {
             // which are the ones its per-series prefix cannot express.
             if !multi_input
                 && selectors.len() == 1
-                && AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
+                && AggregateFinalize::can_split(&tree, &series_schema.fields, &time)
             {
                 let output_fields = match &compiled.tree.root().output {
                     NativeType::Samples(schema) => schema
@@ -733,7 +758,7 @@ impl PromPlanner {
                 };
                 let node = match AggregateFinalize::try_new(
                     Arc::from(prom_expr.to_string()),
-                    compiled.tree,
+                    tree.clone(),
                     FusedSeriesBinding {
                         grid,
                         time_index: time,
@@ -754,6 +779,26 @@ impl PromPlanner {
                     single_input_context,
                 )));
             }
+            // A fold whose prefix a rewrite made collapse is the same split with one more stage in
+            // front of it: the prefix ends in a canonical merge, which a partition cannot answer
+            // alone, so it is lowered into a boundary and the partial fold reads the frames the
+            // boundary assembles. The state, the suffix and the merge above them are unchanged.
+            if !multi_input
+                && selectors.len() == 1
+                && let Some(plan) = prepared_canonical_split(
+                    prom_expr,
+                    &tree,
+                    &children,
+                    &source_tags,
+                    &grid,
+                    &time,
+                    &tags,
+                    &metric,
+                )
+                .await?
+            {
+                return Ok(Some((plan, single_input_context)));
+            }
             // Preserve the established refusal for repeated same-table operands unless
             // segmentation is needed to preserve a computed matching key.
             if selectors.len() != 1 && !cross_table && !computed_key_case {
@@ -764,7 +809,7 @@ impl PromPlanner {
             let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = Box::pin(segment_tree(
                 prom_expr,
-                &compiled.tree,
+                &tree,
                 &children,
                 &source_tags,
                 &bare_scans,
@@ -783,7 +828,6 @@ impl PromPlanner {
             }
         }
         // Multi-input fused execution already reads every input in this execution.
-        let tree = compiled.tree;
         // The tags are asked for before the fields, because the walk answers for a tree the
         // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
         // the walk derives; an unknown set declines the native plan.
@@ -1021,7 +1065,8 @@ fn exportable(node: &NativeNode) -> bool {
 fn cut_as_segment(node: &NativeNode) -> bool {
     if !exportable(node)
         || matches!(node.expr, NativeExpr::Input(_))
-        || matches!(input_locality(node), InputLocality::SinglePartition)
+        || (!matches!(node.expr, NativeExpr::Merge { .. })
+            && matches!(input_locality(node), InputLocality::SinglePartition))
     {
         return false;
     }
@@ -1030,6 +1075,52 @@ fn cut_as_segment(node: &NativeNode) -> bool {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
     !sources.is_empty()
+}
+
+/// Whether the merge producer's entire prefix can run on each scan partition independently.
+fn canonical_local_prefix(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) => true,
+        NativeExpr::Merge { input } => canonical_local_prefix(input),
+        NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Instant { input, .. } => canonical_local_prefix(input),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => canonical_local_prefix(input) && parameters.iter().all(canonical_local_prefix),
+        _ => false,
+    }
+}
+
+fn contains_global_consumer(node: &NativeNode) -> bool {
+    if is_global_consumer(node) {
+        return true;
+    }
+    node_children(&node.expr)
+        .into_iter()
+        .any(contains_global_consumer)
+}
+
+/// Whole-vector consumers remain global, but can be cut out as evaluated segments so a pointwise
+/// parent does not inherit their single-partition placement.
+fn is_global_consumer(node: &NativeNode) -> bool {
+    matches!(
+        node.expr,
+        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. }
+    ) && matches!(input_locality(node), InputLocality::SinglePartition)
+}
+
+/// Whether a subtree becomes its own segment for a reason of its own.
+///
+/// Two things make a subtree worth cutting out. The first is locality: the parent reads across
+/// series, so it gathers whatever it reads, and a per-series prefix does not need that gather. The
+/// second is a canonical merge: it collects the pieces of one label set, which only a canonical
+/// router can do across partitions - so it is built as a boundary of its own and the parent reads
+/// one frame per owner instead of gathering the scan. Leaving it inside the parent would work and
+/// would take the caller's parallelism away, which is the trade this route does not make.
+fn is_canonical_cut(node: &NativeNode) -> bool {
+    matches!(node.expr, NativeExpr::Merge { .. })
+        || !matches!(input_locality(node), InputLocality::SinglePartition)
 }
 
 /// One segment: its tree rewritten to read only its own inputs, the scans it reads, and the
@@ -1168,6 +1259,250 @@ fn cut_segments(node: &NativeNode) -> Segment {
     }
 }
 
+/// Plans a fold whose prefix a collapsing rewrite made several stored series share.
+///
+/// The compiled shape is `Aggregate(Merge(Map(...)))`: the merge is there because the rewrite can
+/// give two stored series one label set, and a fold that summed those pieces separately would answer
+/// a group twice. Running that per partition is wrong and gathering every partition is the
+/// workaround the route does not take, so the merge is lowered into the same canonical boundary a
+/// root merge gets - per-partition producer, canonical router, receiver - and the aggregate split
+/// stays exactly what it was: the prefix folds per partition, `AggregateFinalize` merges the
+/// exported state and runs the suffix.
+///
+/// The prefix is the whole subtree below the cut aggregate, boundary included, so the state that
+/// reaches the finalizer is the state of *assembled* series. `None` for a tree without such a shape.
+#[allow(clippy::too_many_arguments)]
+async fn prepared_canonical_split(
+    prom_expr: &PromExpr,
+    tree: &NativeTree,
+    children: &[LogicalPlan],
+    source_tags: &[Vec<String>],
+    grid: &Arc<EvalGrid>,
+    time_index: &str,
+    tags: &[String],
+    metric: &Option<Arc<str>>,
+) -> Result<Option<LogicalPlan>> {
+    let Ok(source_fields) = tree_source_fields(tree) else {
+        return Ok(None);
+    };
+    let fields = source_fields
+        .iter()
+        .flatten()
+        .map(|name| FieldSpec {
+            name: name.as_str().into(),
+        })
+        .collect::<Vec<_>>();
+    let Some(prepared) = AggregateFinalize::split_canonical(tree, &fields, time_index) else {
+        return Ok(None);
+    };
+    // The producer runs the boundary's own merge - `Merge(P)` - on every scan partition, and the
+    // receiver assembles what the router collected. Frames leave the receiver because the split's
+    // producer folds them, so this is the same boundary the statement root gets with a different
+    // output representation.
+    let boundary_tree = match NativeTree::try_new(prepared.canonical.clone()) {
+        Ok(tree) => tree,
+        Err(_) => return Ok(None),
+    };
+    let Some((assembled, assembled_tags)) = canonical_boundary_stages(
+        prom_expr,
+        &boundary_tree,
+        children,
+        source_tags,
+        grid,
+        time_index,
+        tags,
+        metric,
+        FusedOutputFormat::SeriesFrame,
+    ) else {
+        return Ok(None);
+    };
+    let output_fields = match &tree.root().output {
+        NativeType::Samples(schema) => schema
+            .fields
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect::<Vec<_>>(),
+        NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
+        NativeType::AggregateState(_) => return Ok(None),
+    };
+    let Some(output_tags) = fused_output_tags(tree.root(), source_tags) else {
+        return Ok(None);
+    };
+    let output_schema = fused_output_schema(&output_fields, &output_tags, time_index)?;
+    let suffix = match NativeTree::try_new(prepared.suffix) {
+        Ok(tree) => tree,
+        Err(_) => return Ok(None),
+    };
+    let node = match AggregateFinalize::try_new_prepared(
+        Arc::from(prom_expr.to_string()),
+        prepared.op,
+        suffix,
+        prepared.schema,
+        assembled,
+        assembled_tags,
+        metric.clone(),
+        FusedSeriesBinding {
+            grid: Arc::clone(grid),
+            time_index: time_index.to_string(),
+            tags: tags.to_vec(),
+            metric_name: metric.clone(),
+        },
+        output_schema,
+    ) {
+        Ok(node) => node,
+        Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+        Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+    };
+    Ok(Some(LogicalPlan::Extension(Extension {
+        node: Arc::new(node),
+    })))
+}
+
+/// Lowers a tree whose root is a canonical merge into a producer, a router and a receiver.
+///
+/// The tree says the statement answers one series per canonical label set; what it cannot say is
+/// where the pieces of one set are, because a rewrite created them after the scan split the rows.
+/// So the pieces have to meet before the answer is written, and there are only two honest ways to
+/// make them meet: read every partition in one execution, or route each label set to one owner. The
+/// first takes the caller's parallelism away for the whole query; this is the second.
+///
+/// Three nodes come out of it, and each has one job:
+///
+/// - the **producer** runs the tree's root merge on every scan partition. Its merge collects the
+///   pieces that partition holds - which is what makes a same-partition collision an error here,
+///   before anything is routed - and it exports one series per label set as a series frame. It is
+///   explicitly partition-local: the same node without that distinction would gather its inputs and
+///   answer everything in one execution.
+/// - the **router** is `SeriesRepartitionExec`'s canonical routing, which collects the pieces of one
+///   label set from *every* input partition. It is the conservative router - a label set is
+///   published only once every producer contributed it or ended - because a producer promises one
+///   series per set *per partition*, not that each set lives in one partition. A second piece of one
+///   set that holds a position another piece already holds is the same error, raised before the
+///   receiver sees anything.
+/// - the **receiver** runs the same merge over the routed frames, which is where the answer is
+///   assembled: one series per label set, complementary points joined, two values at one point
+///   refused. It runs one execution per router output, and that is correct rather than lucky: the
+///   router sends each canonical label set to exactly one of its outputs, so each of them holds
+///   whole label sets and needs no piece from the others.
+///
+/// `None` when the boundary cannot be built, so the caller keeps the plan it would have chosen.
+#[allow(clippy::too_many_arguments)]
+fn canonical_boundary_plan(
+    prom_expr: &PromExpr,
+    tree: &NativeTree,
+    children: &[LogicalPlan],
+    source_tags: &[Vec<String>],
+    grid: &Arc<EvalGrid>,
+    time_index: &str,
+    tags: &[String],
+    metric: &Option<Arc<str>>,
+) -> Option<LogicalPlan> {
+    let (plan, _) = canonical_boundary_stages(
+        prom_expr,
+        tree,
+        children,
+        source_tags,
+        grid,
+        time_index,
+        tags,
+        metric,
+        FusedOutputFormat::PlainRows,
+    )?;
+    Some(plan)
+}
+
+/// The two stages of a canonical boundary over `tree`, and the columns its frames carry.
+#[allow(clippy::too_many_arguments)]
+fn canonical_boundary_stages(
+    prom_expr: &PromExpr,
+    tree: &NativeTree,
+    children: &[LogicalPlan],
+    source_tags: &[Vec<String>],
+    grid: &Arc<EvalGrid>,
+    time_index: &str,
+    tags: &[String],
+    metric: &Option<Arc<str>>,
+    format: FusedOutputFormat,
+) -> Option<(LogicalPlan, Vec<String>)> {
+    let NativeExpr::Merge { .. } = &tree.root().expr else {
+        return None;
+    };
+    let NativeType::Samples(schema) = &tree.root().output else {
+        return None;
+    };
+    if schema.eval_grid.is_none() {
+        return None;
+    }
+    let fields = schema
+        .fields
+        .iter()
+        .map(|field| field.name.to_string())
+        .collect::<Vec<_>>();
+    let output_tags = fused_output_tags(tree.root(), source_tags)?;
+    let output_schema = fused_output_schema(&fields, &output_tags, time_index).ok()?;
+
+    // The producer: the statement's own tree, run per partition, exporting a frame.
+    let producer = FusedSeries::try_new_canonical_producer(
+        Arc::from(prom_expr.to_string()),
+        tree.clone(),
+        FusedSeriesBinding {
+            grid: Arc::clone(grid),
+            time_index: time_index.to_string(),
+            tags: tags.to_vec(),
+            metric_name: metric.clone(),
+        },
+        children.to_vec(),
+    )
+    .ok()?;
+    let producer = LogicalPlan::Extension(Extension {
+        node: Arc::new(producer),
+    });
+
+    // The receiver: the same merge over the routed frames, assembled into the statement's rows.
+    let evaluated = NativeType::Samples(Arc::clone(schema));
+    let source = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
+            output: evaluated.clone(),
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: evaluated.clone(),
+    };
+    let receiver_tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(source),
+        },
+        output: evaluated,
+    })
+    .ok()?;
+    // A frame names each series' own metric, so the binding names one only when a tag column does.
+    let receiver_metric = if output_tags.iter().any(|tag| tag == METRIC_NAME) {
+        metric.clone()
+    } else {
+        None
+    };
+    let receiver = FusedSeries::try_new_canonical_receiver(
+        Arc::from(prom_expr.to_string()),
+        receiver_tree,
+        FusedSeriesBinding {
+            grid: Arc::clone(grid),
+            time_index: time_index.to_string(),
+            tags: output_tags.clone(),
+            metric_name: receiver_metric,
+        },
+        producer,
+        output_schema,
+        format,
+    )
+    .ok()?;
+    Some((
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(receiver),
+        }),
+        output_tags,
+    ))
+}
+
 fn is_raw_series_source(plan: &LogicalPlan) -> bool {
     match plan {
         LogicalPlan::Extension(extension) => extension.node.as_any().is::<RawSeriesSource>(),
@@ -1184,8 +1519,9 @@ fn find_input_node(node: &NativeNode, source_index: usize) -> Option<&BoundInput
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn build_evaluated_segment(
+    prom_expr: &PromExpr,
     node: &NativeNode,
     children: &[LogicalPlan],
     source_tags: &[Vec<String>],
@@ -1238,6 +1574,23 @@ fn build_evaluated_segment(
         }
     }
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
+    // A canonical merge is not a segment: it is the middle of a boundary whose two frame nodes and
+    // router are what answer one series per label set across partitions, so it is built as that
+    // boundary and read as a frame.
+    if matches!(tree.root().expr, NativeExpr::Merge { .. }) {
+        let (plan, tags) = canonical_boundary_stages(
+            prom_expr,
+            &tree,
+            &inputs,
+            &local_tags,
+            grid,
+            time_index,
+            &[],
+            &None,
+            FusedOutputFormat::SeriesFrame,
+        )?;
+        return Some((plan, tags));
+    }
     let output_tags = fused_output_tags(tree.root(), &local_tags)?;
     if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
     {
@@ -1421,13 +1774,47 @@ async fn segment_tree(
             .map(|&index| current_source_ids.get(index).copied().flatten())
             .collect::<Vec<_>>();
         for cut in &segment.cut {
-            let built = if first_iteration {
-                build_inner_segment(cut, bare_scans, per_source, grid)
+            // A canonical merge is never a plain inner segment: one built directly under this node
+            // would gather the scan to answer the merge, which is the shape the boundary exists to
+            // avoid. It goes straight to the boundary builder instead.
+            let canonical = matches!(cut.expr, NativeExpr::Merge { .. });
+            let built = if first_iteration && !canonical {
+                if is_global_consumer(cut) {
+                    let Some(cut_tree) = NativeTree::try_new(cut.clone()).ok() else {
+                        return Ok(None);
+                    };
+                    let plan = Box::pin(segment_tree(
+                        prom_expr,
+                        &cut_tree,
+                        &current_children,
+                        &current_tags,
+                        bare_scans,
+                        per_source,
+                        grid,
+                        time_index,
+                        tags,
+                        metric,
+                        false,
+                    ))
+                    .await?;
+                    match plan {
+                        Some(plan) => {
+                            let Some(cut_tags) = fused_output_tags(cut, &current_tags) else {
+                                return Ok(None);
+                            };
+                            Some((plan, cut_tags))
+                        }
+                        None => None,
+                    }
+                } else {
+                    build_inner_segment(cut, bare_scans, per_source, grid)
+                }
             } else {
                 None
             }
             .or_else(|| {
                 build_evaluated_segment(
+                    prom_expr,
                     cut,
                     &current_children,
                     &current_tags,
@@ -1848,47 +2235,6 @@ fn collect_selectors<'a>(
     true
 }
 
-/// Whether every label rewrite in `expr` writes a destination fresh for its input.
-fn label_rewrites_have_fresh_destinations(expr: &PromExpr, input_tags: &[String]) -> bool {
-    fn check(expr: &PromExpr, tags: &mut std::collections::HashSet<String>) -> bool {
-        match expr {
-            PromExpr::Paren(paren) => check(&paren.expr, tags),
-            PromExpr::Call(call) if matches!(call.func.name, "label_replace" | "label_join") => {
-                let Some(vector) = call.args.args.first() else {
-                    return false;
-                };
-                if !check(vector, tags) {
-                    return false;
-                }
-                let Some(PromExpr::StringLiteral(destination)) =
-                    call.args.args.get(1).map(|arg| arg.as_ref())
-                else {
-                    return false;
-                };
-                let destination = destination.val.as_str();
-                if destination == "__name__" || !tags.insert(destination.to_string()) {
-                    return false;
-                }
-                true
-            }
-            PromExpr::Unary(unary) => check(&unary.expr, tags),
-            PromExpr::Aggregate(aggregate) => check(&aggregate.expr, tags),
-            PromExpr::Binary(binary) => {
-                let mut left_tags = tags.clone();
-                let mut right_tags = tags.clone();
-                check(&binary.lhs, &mut left_tags) && check(&binary.rhs, &mut right_tags)
-            }
-            PromExpr::Call(call) => call.args.args.iter().all(|arg| check(arg, tags)),
-            _ => true,
-        }
-    }
-
-    // A rewrite collision is observable only when every contribution for a label set executes
-    // together, but this route does not place rewrite outputs that way. Keep such shapes on the
-    // existing plan until rewrite outputs are routed by canonical label set.
-    check(expr, &mut input_tags.iter().cloned().collect())
-}
-
 /// Whether `engine` can serve raw series frames to the fused-series node.
 ///
 /// A whitelist avoids probing a region from logical planning; declining only costs the native route.
@@ -1957,7 +2303,7 @@ mod tests {
 
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::native::plan::{NativeExpr, NativeNode, NativeTree, fused_output_tags};
+    use promql::native::plan::{NativeExpr, NativeNode, NativeTree};
     use session::context::QueryContextBuilder;
 
     use super::{
@@ -2273,13 +2619,21 @@ mod tests {
             fused_output_tags(topk.root(), &sources),
             "topk keeps the labels of the series it selects"
         );
-        // A label rewrite renames the label set below it, which this walk does not derive either.
         for query in [
             r#"label_replace(x, "dst", "$1", "src", "(.*)")"#,
             r#"label_join(x, "dst", "-", "src", "src")"#,
         ] {
             let rewrite = compiled_test_tree(query);
-            assert_eq!(None, fused_output_tags(rewrite.root(), &sources), "{query}");
+            assert_eq!(
+                Some(
+                    vec!["host", "kind", "zone", "dst"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect()
+                ),
+                fused_output_tags(rewrite.root(), &sources),
+                "{query}"
+            );
         }
     }
 

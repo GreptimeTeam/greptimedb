@@ -21,8 +21,8 @@ use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
-    AggregateFinalize, EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate,
-    RawSeriesSource, SeriesDivide, SeriesNormalize,
+    AggregateFinalize, CanonicalBoundary, EmptyMetric, FusedOutputFormat, FusedSeries,
+    InstantManipulate, RangeManipulate, RawSeriesSource, SeriesDivide, SeriesNormalize,
 };
 use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -31,6 +31,40 @@ use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
+
+fn canonical_boundary_region_node(fused: &FusedSeries) -> bool {
+    let Some(boundary) = fused.canonical_boundary() else {
+        return false;
+    };
+    if boundary == CanonicalBoundary::Receiver {
+        return matches!(fused.children(), [LogicalPlan::Extension(extension)]
+        if extension.node.as_any().downcast_ref::<FusedSeries>()
+            .is_some_and(|producer| {
+                producer.canonical_boundary() == Some(CanonicalBoundary::Producer)
+                    && canonical_boundary_region_node(producer)
+            }));
+    }
+    match boundary {
+        CanonicalBoundary::Producer => {
+            fused.format() == FusedOutputFormat::SeriesFrame
+                && fused.canonical_producer_prefix_is_local()
+                && !fused.children().is_empty()
+                && fused.children().iter().all(|child| match child {
+                    LogicalPlan::TableScan(_) => true,
+                    LogicalPlan::Extension(extension)
+                        if extension.node.as_any().is::<RawSeriesSource>() =>
+                    {
+                        matches!(
+                            extension.node.inputs().as_slice(),
+                            [LogicalPlan::TableScan(_)]
+                        )
+                    }
+                    _ => false,
+                })
+        }
+        CanonicalBoundary::Receiver => unreachable!("receivers returned above"),
+    }
+}
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -245,6 +279,9 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
+                if canonical_boundary_region_node(fused) {
+                    return Commutativity::Commutative;
+                }
                 // The raw-series reader supports one scan, or the narrow same-table multi-scan
                 // one-to-one case. This classification is for region-local execution only.
                 let children = fused.children();

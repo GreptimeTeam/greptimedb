@@ -604,11 +604,36 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
     let Some(fused) = partial.node.as_any().downcast_ref::<FusedSeries>() else {
         return false;
     };
-    fused.partial_fold().is_some()
+    if fused.partial_fold().is_some()
         && matches!(
             partial.node.inputs().as_slice(),
             [LogicalPlan::TableScan(_)]
         )
+    {
+        return true;
+    }
+    fused.partial_fold().is_some()
+        && matches!(
+            partial.node.inputs().as_slice(),
+            [LogicalPlan::Extension(boundary)]
+                if boundary.node.as_any().downcast_ref::<FusedSeries>()
+                    .is_some_and(validated_canonical_receiver)
+        )
+}
+
+fn validated_canonical_receiver(receiver: &FusedSeries) -> bool {
+    if receiver.canonical_boundary() != Some(promql::extension_plan::CanonicalBoundary::Receiver) {
+        return false;
+    }
+    let [LogicalPlan::Extension(producer)] = receiver.children() else {
+        return false;
+    };
+    let Some(producer) = producer.node.as_any().downcast_ref::<FusedSeries>() else {
+        return false;
+    };
+    producer.canonical_boundary() == Some(promql::extension_plan::CanonicalBoundary::Producer)
+        && producer.format() == promql::extension_plan::FusedOutputFormat::SeriesFrame
+        && matches!(producer.children(), [LogicalPlan::TableScan(_)])
 }
 
 impl PlanRewriter {
