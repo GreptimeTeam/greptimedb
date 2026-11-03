@@ -134,8 +134,49 @@ impl AggregateFinalize {
         let Some(split) = split(full_tree.root(), &fields, &binding.time_index)? else {
             return Err(declined("the tree holds no splittable aggregate"));
         };
-        let grouping_tags = derive_grouping_tags(&split.op, &split.suffix, &output_schema)?;
-        check_value_columns(&promql, split.schema.fields.len(), &output_schema)?;
+        let values = output_schema
+            .fields()
+            .iter()
+            .filter(|field| field.data_type() == &DataType::Float64)
+            .count();
+        if values != split.schema.fields.len() {
+            return Err(DataFusionError::Plan(format!(
+                "the aggregate of `{promql}` folds {} field(s), and the output schema declares \
+                 {values} value column(s)",
+                split.schema.fields.len()
+            )));
+        }
+        // State is keyed by the cut aggregate's output labels, not the final statement's projection:
+        // an outer aggregate that drops its input's labels must not empty the inner groups' keys.
+        let grouping_tags: Vec<String> = match &split.op.group {
+            Grouping::By(names) => names
+                .iter()
+                .filter(|name| name.as_ref() != "__name__")
+                .map(|name| name.to_string())
+                .collect(),
+            Grouping::Without(names) => {
+                // `by(names)` above is fully determined by the grouping itself. `without` is not:
+                // its keys are the prefix's labels minus `names`, and the prefix may create a label
+                // (`label_replace`) that the tree walker refuses to name. The declared output
+                // columns do name it - the planner builds them from the existing plan, which
+                // handles every rewrite - but only when the cut aggregate is the statement root.
+                // Beneath a suffix the statement's labels may be narrower than the cut's, so that
+                // shape keeps the existing plan rather than exporting state under keys that would
+                // merge groups the statement still separates.
+                if !matches!(split.suffix.expr, NativeExpr::Input(_)) {
+                    return Err(declined(
+                        "cannot derive cut labels for without grouping beneath a suffix",
+                    ));
+                }
+                output_schema
+                    .fields()
+                    .iter()
+                    .filter(|field| field.data_type() == &DataType::Utf8)
+                    .map(|field| field.name().to_string())
+                    .filter(|tag| !names.iter().any(|name| name.as_ref() == tag))
+                    .collect()
+            }
+        };
         let partial = FusedSeries::try_new_partial(
             Arc::clone(&promql),
             NativeTree::try_new(split.prefix)?,
@@ -328,62 +369,6 @@ impl PartialOrd for AggregateFinalize {
         }
         (self.output_schema == other.output_schema).then_some(Ordering::Equal)
     }
-}
-
-/// Checks that the statement's value columns are the ones the cut aggregate folds.
-fn check_value_columns(promql: &str, fields: usize, output_schema: &DFSchemaRef) -> DfResult<()> {
-    let values = output_schema
-        .fields()
-        .iter()
-        .filter(|field| field.data_type() == &DataType::Float64)
-        .count();
-    if values != fields {
-        return Err(DataFusionError::Plan(format!(
-            "the aggregate of `{promql}` folds {fields} field(s), and the output schema declares \
-             {values} value column(s)"
-        )));
-    }
-    Ok(())
-}
-
-/// The labels the cut aggregate's exported state is keyed by.
-///
-/// State is keyed by the cut aggregate's output labels, not the final statement's projection: an
-/// outer aggregate that drops its input's labels must not empty the inner groups' keys.
-///
-/// `by(names)` is fully determined by the grouping itself. `without` is not: its keys are the
-/// prefix's labels minus `names`, and the prefix may create a label (`label_replace`) that the tree
-/// walker refuses to name. The declared output columns do name it - the planner builds them from the
-/// existing plan, which handles every rewrite - but only when the cut aggregate is the statement
-/// root. Beneath a suffix the statement's labels may be narrower than the cut's, so that shape keeps
-/// the existing plan rather than exporting state under keys that would merge groups the statement
-/// still separates.
-fn derive_grouping_tags(
-    op: &BoundAggregate,
-    suffix: &NativeNode,
-    output_schema: &DFSchemaRef,
-) -> DfResult<Vec<String>> {
-    Ok(match &op.group {
-        Grouping::By(names) => names
-            .iter()
-            .filter(|name| name.as_ref() != "__name__")
-            .map(|name| name.to_string())
-            .collect(),
-        Grouping::Without(names) => {
-            if !matches!(suffix.expr, NativeExpr::Input(_)) {
-                return Err(declined(
-                    "cannot derive cut labels for without grouping beneath a suffix",
-                ));
-            }
-            output_schema
-                .fields()
-                .iter()
-                .filter(|field| field.data_type() == &DataType::Utf8)
-                .map(|field| field.name().to_string())
-                .filter(|tag| !names.iter().any(|name| name.as_ref() == tag))
-                .collect()
-        }
-    })
 }
 
 /// One split: the two halves the tree was cut into, and what the cut aggregate folds.

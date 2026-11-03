@@ -6013,6 +6013,131 @@ async fn native_promql_declines_count_values_groupings_the_node_cannot_honor() {
     }
 }
 
+/// `count_values` labels its result with the value it counted, and the native route has to name that
+/// label in the schema it declares: the grouping's labels plus the one the node writes.
+///
+/// A rewrite of the label it writes is a rewrite of an existing label, so it is what the canonical
+/// merge exists for: where the rewrite makes two of the node's series share a label set, the merge
+/// is handed two values at one point; where it does not, the assembled answer is the existing plan's
+/// and the label set says so. A rewrite of a fresh destination cannot fold anything, so nothing is
+/// collected.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_rewrites_the_label_count_values_writes() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_count_values_rewrite",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_cv_rewrite (host STRING, zone STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY (host, zone)) ENGINE=mito; \
+         INSERT INTO native_cv_rewrite (host, zone, ts, val) VALUES \
+         ('a', 'left', 0, 1), ('b', 'left', 0, 1), ('c', 'right', 0, 2)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // One expected row, so a failure names the label set that did not match.
+    let row = |labels: &[(&str, &str)], value: f64| {
+        (
+            0,
+            labels
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            value,
+        )
+    };
+
+    // `by (host)` keeps one of the scan's tags and the node writes `sample`; `zone` is not part of
+    // the grouping, so the columns the node declares must not claim it. The destination is fresh,
+    // so there is nothing for a canonical merge to collect.
+    let fresh = r#"label_replace(count_values by (host) ("sample", native_cv_rewrite), "dst", "same", "sample", ".*")"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {fresh}");
+    observer.clear();
+    let (columns, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(
+        observer.fused().as_ref().map(|plan| plan.name()),
+        Some("FusedSeriesExec"),
+        "{fresh}: the statement must run on the native route: {}",
+        display_plan_tree(&observer.root_plan())
+    );
+    assert!(
+        !columns.contains(&"zone".to_string()),
+        "{fresh}: `by (host)` drops `zone`, so the node must not declare it: {columns:?}"
+    );
+    assert!(
+        canonical_router(&observer).is_none(),
+        "{fresh}: a fresh destination folds nothing, so no boundary is built: {}",
+        display_plan_tree(&observer.root_plan())
+    );
+    let expected = vec![
+        row(&[("host", "a"), ("sample", "1"), ("dst", "same")], 1.0),
+        row(&[("host", "b"), ("sample", "1"), ("dst", "same")], 1.0),
+        row(&[("host", "c"), ("sample", "2"), ("dst", "same")], 1.0),
+    ];
+    assert_eq!(native_rows, expected, "{fresh}: the labels and the counts");
+    let (_, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native_rows, legacy_rows, "{fresh}: full labelled rows");
+
+    // Rewriting `sample` itself is a rewrite of a label the node wrote. The grouping keeps `host`,
+    // so the three results stay distinct: the collection runs and the answer is the existing plan's.
+    let grouped = r#"label_replace(count_values by (host) ("sample", native_cv_rewrite), "sample", "same", "sample", ".*")"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {grouped}");
+    observer.clear();
+    let (_, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(
+        observer.fused().as_ref().map(|plan| plan.name()),
+        Some("FusedSeriesExec"),
+        "{grouped}: the rewrite of the label `count_values` writes must stay on the native route"
+    );
+    assert!(
+        canonical_router(&observer).is_some(),
+        "{grouped}: the rewrite writes an existing label, so the pieces are collected: {}",
+        display_plan_tree(&observer.root_plan())
+    );
+    let expected = vec![
+        row(&[("host", "a"), ("sample", "same")], 1.0),
+        row(&[("host", "b"), ("sample", "same")], 1.0),
+        row(&[("host", "c"), ("sample", "same")], 1.0),
+    ];
+    assert_eq!(
+        native_rows, expected,
+        "{grouped}: the labels and the counts"
+    );
+    let (_, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native_rows, legacy_rows, "{grouped}: full labelled rows");
+
+    // Without a grouping both values land under one label set once the rewrite renames it, so the
+    // collection is handed two values at one point: the duplicate Prometheus reports, raised while
+    // the pieces are assembled rather than answered as two rows under one label set.
+    let folded = r#"label_replace(count_values ("sample", native_cv_rewrite), "sample", "same", "sample", ".*")"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {folded}");
+    observer.clear();
+    let native_error = collect_error(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(
+        observer.fused().as_ref().map(|plan| plan.name()),
+        Some("FusedSeriesExec"),
+        "{folded}: the conflicting rewrite must reach the native route: {}",
+        display_plan_tree(&observer.root_plan())
+    );
+    assert!(
+        native_error.contains("cannot contain metrics with the same labelset"),
+        "{folded}: the assembled label set holds two values at one point: {native_error}"
+    );
+    let legacy_error = collect_error(native_tql_output(&instance, &sql, false).await).await;
+    assert!(
+        legacy_error.contains("cannot contain metrics with the same labelset"),
+        "{folded}: the existing plan reports the same overlap: {legacy_error}"
+    );
+}
+
 /// `topk`/`bottomk` key their groups by series labels, while the existing plan also accepts a value
 /// field there and forms one group per sample value. A `by(<value field>)` therefore keeps every
 /// group's winner on the existing plan and must not reach the native node, which would fold both

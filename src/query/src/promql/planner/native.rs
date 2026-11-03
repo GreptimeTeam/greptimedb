@@ -266,9 +266,9 @@ impl PromPlanner {
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
             // A statement that reads no data has no scan: no metric, no tags, and the value under
-            // the name the existing path gives a bare literal, or the one `vector()` binds. A tree
-            // whose labels the walk cannot derive, such as `count_values("l", vector(1))`, would
-            // lose the labels it generates, so it is left to the existing plan.
+            // the name the existing path gives a bare literal, or the one `vector()` binds. This
+            // scan-free root path only carries that empty label set; generated labels remain on
+            // the existing plan.
             if fused_output_tags(tree.root(), &[]).is_none_or(|tags| !tags.is_empty()) {
                 return Ok(None);
             }

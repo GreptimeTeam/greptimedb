@@ -463,6 +463,86 @@ fn rewrites_after_ranking_or_grouping_are_collected() {
 }
 
 #[test]
+fn a_rewrite_above_a_match_collects_the_matches_own_labels() {
+    let out = grid(0, 1000, 2);
+    // A match answers one series per label set, but those labels are its operands': renaming `host`
+    // to a constant above it puts both sides' results under one set, so the consumer above the
+    // rewrite is the one that has to collect them. The match itself reads its operands as they are.
+    let matched = binary_over(selected(&out), abs_map(selected(&out)), Arc::clone(&out));
+    let renamed = map_ops(
+        matched,
+        vec![MapOp::Label(Arc::new(
+            LabelRewrite::replace("host", "same", "host", ".*").unwrap(),
+        ))],
+    );
+    let tree = passed(renamed, &scan_tags());
+    assert_eq!(1, merges(&tree));
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the statement must collect the rewrite above the match");
+    };
+    let NativeExpr::Map { input, .. } = &input.expr else {
+        panic!("the merge sits above the rewrite, not below it");
+    };
+    assert!(
+        matches!(input.expr, NativeExpr::Binary { .. }),
+        "the match is not handed the rewritten operand"
+    );
+    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    assert_eq!(tree.to_string(), twice.to_string());
+    assert_eq!(1, merges(&twice));
+}
+
+#[test]
+fn a_rewrite_of_the_label_count_values_writes_is_collected() {
+    let out = grid(0, 1000, 2);
+    // `count_values` answers one series per distinct value under the label it writes, so renaming
+    // that label to a constant folds every one of them into one label set.
+    let counted = vector_over(
+        selected(&out),
+        BoundVectorOp::CountValues {
+            label: Arc::from("value"),
+            group: Grouping::By(Arc::from([])),
+        },
+    );
+    let renamed = map_ops(
+        counted,
+        vec![MapOp::Label(Arc::new(
+            LabelRewrite::replace("value", "same", "value", ".*").unwrap(),
+        ))],
+    );
+    let tree = passed(renamed, &scan_tags());
+    assert_eq!(1, merges(&tree));
+    let NativeExpr::Merge { input } = &tree.root().expr else {
+        panic!("the statement must collect the rewrite of the label `count_values` writes");
+    };
+    let NativeExpr::Map { input, .. } = &input.expr else {
+        panic!("the merge sits above the rewrite, not above count_values");
+    };
+    assert!(matches!(input.expr, NativeExpr::Vector { .. }));
+}
+
+#[test]
+fn a_fresh_destination_above_count_values_needs_no_collection() {
+    let out = grid(0, 1000, 2);
+    // `dst` is not a label `count_values` reports - its grouping's are, and so is the one it writes
+    // - so no two of its series can end under one label set, and deriving that set is what says a
+    // fresh destination above it has nothing to collect.
+    let counted = vector_over(
+        selected(&out),
+        BoundVectorOp::CountValues {
+            label: Arc::from("value"),
+            group: Grouping::By(Arc::from([])),
+        },
+    );
+    let tree = passed(rewrite(counted, "dst", "value"), &scan_tags());
+    assert_eq!(0, merges(&tree), "a fresh destination cannot alias");
+    assert!(
+        matches!(tree.root().expr, NativeExpr::Map { .. }),
+        "the root stays the rewrite"
+    );
+}
+
+#[test]
 fn a_pointwise_map_reads_each_piece_as_it_is() {
     let out = grid(0, 1000, 2);
     let tree = passed(

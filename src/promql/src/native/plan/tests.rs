@@ -22,7 +22,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, duplicates_canonical_labels, reads_across_series,
+    NativeType, duplicates_canonical_labels, fused_output_tags, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::info::InfoSelector;
@@ -858,6 +858,46 @@ fn two_scalars_cannot_produce_a_vector() {
     );
 }
 
+/// `vector(s)` materializes its scalar on the grid that scalar is evaluated on, so an output on
+/// another grid would address positions the scalar does not have.
+#[test]
+fn vector_of_keeps_its_scalars_grid() {
+    let shared = grid(0, 60_000, 4);
+    let vector_of = |output: NativeType| NativeNode {
+        expr: NativeExpr::VectorOf {
+            input: Box::new(scalar_on(1.0, Arc::clone(&shared))),
+        },
+        output,
+    };
+
+    // The same spec on another allocation is the grid the scalar is on.
+    let same = vector_of(evaluated(fields(1), grid(0, 60_000, 4)));
+    assert!(same.validate().is_ok(), "{}", same.validate().unwrap_err());
+
+    // Without a grid there are no positions to materialize the scalar on.
+    let missing = vector_of(NativeType::Samples(Arc::new(SeriesSchema {
+        fields: fields(1),
+        eval_grid: None,
+    })));
+    let error = missing.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("vector() produces values without a grid"),
+        "{error}"
+    );
+
+    // Another grid addresses positions that scalar has no value at.
+    let mismatched = vector_of(evaluated(fields(1), grid(0, 30_000, 8)));
+    let error = mismatched.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("vector() declares a grid its output does not carry"),
+        "{error}"
+    );
+}
+
 /// A constant operand is broadcast to each series the other side answers, so such an operation reads
 /// one series at a time exactly when that other side does.
 ///
@@ -1624,6 +1664,66 @@ fn a_rewrite_after_ranking_or_grouping_may_alias() {
             "{name}"
         );
     }
+}
+
+/// `count_values` reports the grouping applied to the labels its input carries, plus the label it
+/// writes. What it does not report is the input's own set: a `by` narrows it, a `without` narrows
+/// it the other way, and the destination is a column no scan has.
+#[test]
+fn count_values_reports_its_grouping_and_the_label_it_writes() {
+    let out = grid(0, 60_000, 4);
+    let counted = |label: &str, group: Grouping| NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            op: BoundVectorOp::CountValues {
+                label: Arc::from(label),
+                group,
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let source_tags = vec![vec!["host".to_string(), "zone".to_string()]];
+    let tags = |names: &[&str]| {
+        Some(
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    // `by (zone)` keeps one of the input's labels and adds the one the node writes.
+    assert_eq!(
+        tags(&["zone", "value"]),
+        fused_output_tags(
+            &counted("value", Grouping::By(Arc::new([Arc::from("zone")]))),
+            &source_tags
+        )
+    );
+    // `without (host)` keeps the rest, and the destination with it.
+    assert_eq!(
+        tags(&["zone", "value"]),
+        fused_output_tags(
+            &counted("value", Grouping::Without(Arc::new([Arc::from("host")]))),
+            &source_tags
+        )
+    );
+    // A `without` naming the destination removes the label the node just wrote.
+    assert_eq!(
+        tags(&["zone"]),
+        fused_output_tags(
+            &counted("host", Grouping::Without(Arc::new([Arc::from("host")]))),
+            &source_tags
+        )
+    );
+    // A destination naming the metric name writes no column this walk can name.
+    assert_eq!(
+        None,
+        fused_output_tags(
+            &counted("__name__", Grouping::By(Arc::new([]))),
+            &source_tags
+        )
+    );
 }
 
 /// A consumer that files its rows by the label set a sample ends under answers one series per set,

@@ -50,16 +50,19 @@ const LE_LABEL: &str = "le";
 /// Metadata labels the runtime removes from histogram result label sets.
 const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
-/// The label columns `node` reports, from the tags of the scan each input reads.
+/// The label columns `node` reports, from the tags of the scan each input reads and the labels the
+/// nodes above it write.
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
 /// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
-/// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
-/// labels this walk does not derive - an aggregate's groups, a whole-vector operation, or a label
-/// rewrite, which renames the labels below it - so a tree holding one reports no label set here.
-/// `None` is not the query's answer: the caller asks the existing planner for the columns the node is
-/// named after instead of declining the query.
+/// of each value keeps its operand's; a scalar and `vector(s)` have none; `count_values` keeps its
+/// grouping and the label it writes. `None` for a node whose labels this walk does not derive - a
+/// label rewrite of the metric name, an `absent` naming a label no input column carries, and a
+/// `count_values` whose destination is the metric name or no label at all, none of which is a column
+/// here - so a tree holding one reports no label set here. `None` is not the query's answer: the
+/// caller asks the existing planner for the columns the node is named after instead of declining the
+/// query.
 pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
@@ -114,9 +117,9 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                     .collect(),
             })
         }
-        // Selecting some of the input's series keeps each one's own labels; `count_values` writes a
-        // new label and `histogram` folds bucket series into one histogram, so neither reports the
-        // input's set.
+        // Selecting some of the input's series keeps each one's own labels, and `count_values`
+        // keeps its grouping's; `histogram` folds bucket series into one histogram, so it does not
+        // report the input's set.
         NativeExpr::Vector { input, op } => match op {
             BoundVectorOp::TopK { .. }
             | BoundVectorOp::LimitK { .. }
@@ -143,6 +146,42 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                         .filter(|tag| named.contains(&tag.as_str()))
                         .collect(),
                 )
+            }
+            // `count_values` writes the value it counts into its own label and then keeps its
+            // grouping: `by(...)` keeps the labels named plus that destination, `without(...)`
+            // keeps the rest minus the labels named and the metric name. What the node reports is
+            // therefore the grouping applied to the labels its input carries, with the destination
+            // among them - not the input's set, and not the scan's, since the grouping narrows both.
+            //
+            // The destination is a column the node creates, so a rewrite of it above this node is a
+            // rewrite of an existing label. A destination naming the metric name, or no label at
+            // all, writes something that is not a column here, which leaves the set underivable for
+            // the same reason a map's `__name__` destination does. This walk derives the labels; it
+            // does not decide which groupings the kernel accepts, and those refusals stay where they
+            // are.
+            BoundVectorOp::CountValues { label, group }
+                if !label.is_empty() && label.as_ref() != "__name__" =>
+            {
+                let mut tags = fused_output_tags(input, source_tags)?;
+                let keeps_destination = match group {
+                    Grouping::By(kept) => {
+                        tags.retain(|tag| kept.iter().any(|name| name.as_ref() == tag.as_str()));
+                        // `by` keeps the label the node writes whether the input carried it or not.
+                        true
+                    }
+                    Grouping::Without(dropped) => {
+                        tags.retain(|tag| {
+                            tag != "__name__"
+                                && !dropped.iter().any(|name| name.as_ref() == tag.as_str())
+                        });
+                        // `without` removes it only when the grouping names it.
+                        !dropped.iter().any(|name| name.as_ref() == label.as_ref())
+                    }
+                };
+                if keeps_destination && !tags.iter().any(|tag| tag.as_str() == label.as_ref()) {
+                    tags.push(label.to_string());
+                }
+                Some(tags)
             }
             BoundVectorOp::CountValues { .. } => None,
             // A classic histogram function folds the bucket series that share the other labels into
@@ -871,13 +910,16 @@ impl NativeNode {
             }
             NativeExpr::VectorOf { input } => {
                 input.validate()?;
-                if !matches!(input.output, NativeType::Scalar(_)) {
+                let NativeType::Scalar(input_grid) = &input.output else {
                     return Err(invalid("vector() consumes a scalar"));
-                }
+                };
                 ensure_samples(&self.output, "vector()")?;
                 if !self.output.samples().is_some_and(|s| s.fields.len() == 1) {
                     return Err(invalid("vector() produces one field"));
                 }
+                // The scalar is materialized on the grid it is evaluated on, so an output on another
+                // grid would address positions the scalar does not have.
+                ensure_grid(&self.output, input_grid, "vector()")?;
             }
             NativeExpr::Instant { input, op } => {
                 input.validate()?;
