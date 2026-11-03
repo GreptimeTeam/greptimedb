@@ -138,7 +138,12 @@ async fn build(
     let (purger, _) = series_index_channel(store.clone());
     SamplesFileHandle::new(
         RegionFileId::new(meta.region_id, file_id),
-        SamplesEntry { file_id, artifact },
+        SamplesEntry {
+            file_id,
+            artifact,
+            source_file_ids: Vec::new(),
+            window: None,
+        },
         purger,
     )
 }
@@ -678,16 +683,24 @@ async fn malformed_framing_and_payload_corruption() {
     assert!(format.reader(store, bad).await.is_err());
 }
 
+#[rstest::rstest]
+#[case(vec![1000, 2000], 1, true)]
+#[case(vec![-1, 0, 86_399_999, 86_400_000], 3, true)]
+#[case(vec![86_399_999, 86_400_000], 2, false)]
 #[tokio::test]
-async fn real_samples_reconcile_reopen_and_retire() {
+async fn real_samples_reconcile_reopen_and_retire(
+    #[case] expected_times: Vec<i64>,
+    #[case] windows: usize,
+    #[case] flush_each: bool,
+) {
     use crate::config::MitoConfig;
     use crate::series_index::format::SeriesFormats;
     use crate::series_index::maintenance::reconcile_series_indexes;
     use crate::test_util::TestEnv;
     let mut env = TestEnv::with_prefix("columnar-samples-reconcile").await;
-    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata(
+    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata_and_flush(
         &mut env,
-        &[1000, 2000],
+        &expected_times,
         MitoConfig {
             experimental_enable_series_index: true,
             experimental_series_index_maintenance_interval: Duration::from_secs(3600),
@@ -695,8 +708,24 @@ async fn real_samples_reconcile_reopen_and_retire() {
             ..Default::default()
         },
         metadata(),
+        flush_each,
     )
     .await;
+    if !flush_each {
+        assert!(
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|l| l.files())
+                .any(|f| {
+                    let (a, b) = f.time_range();
+                    crate::series_index::builder::sample_day(a)
+                        != crate::series_index::builder::sample_day(b)
+                })
+        );
+    }
     let format = Arc::new(ColumnarSamplesFormat::default());
     *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
         samples: Some(format.clone()),
@@ -716,13 +745,32 @@ async fn real_samples_reconcile_reopen_and_retire() {
             true,
         )
     };
-    assert_eq!(reconcile().await.unwrap().built_samples, 2);
+    assert_eq!(reconcile().await.unwrap().built_samples, windows);
     assert_eq!(reconcile().await.unwrap().built_samples, 0);
     let reopened =
         crate::series_index::catalog::load_version_control(&store, region.region_id, &purger).await;
-    assert_eq!(reopened.current().samples.len(), 2);
+    assert_eq!(reopened.current().samples.len(), windows);
     let mut timestamps = Vec::new();
     for handle in reopened.current().samples.values() {
+        let day = handle.entry().window.unwrap();
+        let manifest_path = format!(
+            "{}manifest.json",
+            samples_prefix(
+                region.region_id.as_u64(),
+                handle.entry().artifact.generation
+            )
+        );
+        let manifest: Manifest =
+            serde_json::from_slice(&store.read(&manifest_path).await.unwrap().to_bytes()).unwrap();
+        // All source chunks for this series/day are repacked into one block.
+        assert_eq!(manifest.files.iter().map(|p| p.num_blocks).sum::<u64>(), 1);
+        assert!(
+            manifest
+                .files
+                .iter()
+                .all(|p| p.min_timestamp.div_euclid(86_400_000) == day
+                    && p.max_timestamp.div_euclid(86_400_000) == day)
+        );
         let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
         let batches = reader
             .read(full_request())
@@ -733,7 +781,7 @@ async fn real_samples_reconcile_reopen_and_retire() {
         timestamps.extend(collect_rows(&batches).into_iter().map(|row| row.2));
     }
     timestamps.sort_unstable();
-    assert_eq!(timestamps, vec![1000, 2000]);
+    assert_eq!(timestamps, expected_times);
     // A missing artifact triggers rebuilding; failure to publish its replacement
     // must retain the prior snapshot/catalog and retire only the new generation.
     let before = region.series_index_version();
@@ -829,6 +877,8 @@ async fn fixture(store: &ObjectStore) -> SamplesFileHandle {
             manifest.source_file_id,
         ),
         SamplesEntry {
+            source_file_ids: Vec::new(),
+            window: None,
             file_id: manifest.source_file_id,
             artifact,
         },

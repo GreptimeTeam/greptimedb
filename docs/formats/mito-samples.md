@@ -13,7 +13,9 @@ The catalog identifier is `columnar-samples`. Its file and manifest version is 1
 independent of the series format's version and both formats' codec identifiers.
 Existing `parquet` and `columnar-series` identifiers keep their meaning.
 
-One artifact is derived from one immutable source SST. It owns these objects:
+An artifact is derived either from one immutable source SST (legacy) or from
+all snapshot SSTs contributing to one UTC day (daily consolidation PoC). It owns
+these objects:
 
 ```text
 <region_id>/samples/<generation>/manifest.json
@@ -21,6 +23,23 @@ One artifact is derived from one immutable source SST. It owns these objects:
 <region_id>/samples/<generation>/part-1.samples
 ...
 ```
+
+Daily catalog entries add `source_file_ids` (the complete, sorted source SST
+set) and `window` (signed UTC day number since the Unix epoch). Missing fields
+retain legacy whole-SST semantics. The catalog key and manifest owner ID for a
+daily artifact are its unique generation ID, not an individual source SST.
+Rows are filtered to the day before merging; sequence numbers, deletion markers,
+and duplicate versions are preserved. Blocks and parts retain their existing
+size bounds. An SST crossing midnight contributes to multiple artifacts.
+
+Publication uses the existing atomic samples catalog, which also commits series
+and range indexes. Readers pin each generation once. A grouped artifact is
+ineligible if any source SST is absent from the query's data snapshot; exact
+sequence-range or SST-sequence-pruned scans fall back to the existing path.
+Maintenance rebuilds a day when its source set changes and retires old objects
+only after publication and release of reader handles. Source Parquet SSTs are
+never modified by the builder. The PoC rereads a crossing SST for each daily
+window and does not yet optimize this build-time I/O.
 
 The source file ID and generation use existing `FileId` serialization. The
 generation is unique for each build. A manifest contains:
@@ -30,7 +49,7 @@ generation is unique for each build. A manifest contains:
 | `format` | String `columnar-samples` |
 | `version` | Integer 1 |
 | `region_id` | Physical region ID, u64 |
-| `source_file_id` | SST `FileId` matching `SamplesEntry.file_id` |
+| `source_file_id` | Artifact owner ID matching `SamplesEntry.file_id`; the SST ID for legacy artifacts, or the generation ID for daily artifacts |
 | `generation` | `FileId` matching the catalog artifact generation |
 | `timestamp` | Object with `column_id`, `name`, and `unit` |
 | `fields` | Ordered objects with `column_id`, `name`, `type`, and `nullable` |

@@ -305,7 +305,36 @@ impl ScanRegion {
         mut self,
         series_index: Option<SeriesIndexReadContext>,
     ) -> Self {
-        self.series_index = series_index;
+        self.series_index = series_index.map(|mut context| {
+            // A daily artifact cannot be partially selected by source SST identity. Pin only
+            // generations whose complete source set is still visible in this data snapshot.
+            let visible = self
+                .version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|l| l.files())
+                .map(|f| f.file_id().file_id())
+                .collect();
+            let previous = &context.version;
+            context.version = Arc::new(crate::series_index::SeriesIndexVersion {
+                samples: previous
+                    .samples
+                    .iter()
+                    .filter(|(_, h)| {
+                        h.entry().sources_visible(&visible)
+                            && (h.entry().window.is_none()
+                                || (self.request.sst_min_sequence.is_none()
+                                    && !self.request.exact_sequence_range))
+                    })
+                    .map(|(id, h)| (*id, h.clone()))
+                    .collect(),
+                range_indexes: previous.range_indexes.clone(),
+                series_indexes: previous.series_indexes.clone(),
+                index_buckets: previous.index_buckets.clone(),
+            });
+            context
+        });
         self
     }
 

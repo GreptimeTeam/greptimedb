@@ -216,11 +216,11 @@ fn collect_inputs(
         if !covered {
             ready = false;
         }
-        if index
-            .version
-            .samples
-            .get(&file.file_id().file_id())
-            .is_none_or(|handle| handle.entry().artifact.format != ArtifactFormat::ColumnarSamples)
+        if !crate::series_index::artifact::samples_cover_file(&index.version.samples, file)
+            || index.version.samples.values().any(|h| {
+                h.entry().covers(file.file_id().file_id())
+                    && h.entry().artifact.format != ArtifactFormat::ColumnarSamples
+            })
         {
             ready = false;
         }
@@ -313,9 +313,16 @@ impl ColumnarPreparedSource {
             .cache_strategy
             .columnar_metadata(index.cache_namespace);
         let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
-        for file_idx in files {
-            let file = &input.files[file_idx];
-            let handle = &index.version.samples[&file.file_id().file_id()];
+        let assigned: HashSet<_> = files
+            .iter()
+            .map(|i| input.files[*i].file_id().file_id())
+            .collect();
+        for handle in index
+            .version
+            .samples
+            .values()
+            .filter(|h| assigned.iter().any(|id| h.entry().covers(*id)))
+        {
             let reader = crate::series_index::samples::reader::SamplesReader::open_cached(
                 index.store.clone(),
                 handle.clone(),

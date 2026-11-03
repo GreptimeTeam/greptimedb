@@ -904,8 +904,15 @@ async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType
 
     build(&engine, &region).await;
     let rebuilt = region.series_index_version();
-    for (id, old) in &original.samples {
-        let new = &rebuilt.samples[id];
+    for old in original.samples.values() {
+        let new = rebuilt
+            .samples
+            .values()
+            .find(|new| {
+                new.entry().window == old.entry().window
+                    && new.entry().source_file_ids == old.entry().source_file_ids
+            })
+            .unwrap();
         assert_eq!(
             semantic_type == SemanticType::Tag,
             old.entry().artifact.generation == new.entry().artifact.generation

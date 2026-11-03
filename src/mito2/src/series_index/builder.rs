@@ -320,11 +320,145 @@ pub(crate) async fn build_samples(
     Ok(Some(SamplesFileHandle::new(
         file_id,
         SamplesEntry {
+            source_file_ids: Vec::new(),
+            window: None,
             file_id: file_id.file_id(),
             artifact,
         },
         purger.clone(),
     )))
+}
+
+/// UTC day for any supported timestamp unit, including timestamps before the epoch.
+pub(crate) fn sample_day(timestamp: common_time::Timestamp) -> i64 {
+    use common_time::timestamp::TimeUnit;
+    let value = timestamp.value();
+    let unit = timestamp.unit();
+    value.div_euclid(match unit {
+        TimeUnit::Second => 86_400,
+        TimeUnit::Millisecond => 86_400_000,
+        TimeUnit::Microsecond => 86_400_000_000,
+        TimeUnit::Nanosecond => 86_400_000_000_000,
+    })
+}
+
+/// Plans independent daily outputs. SSTs spanning midnight participate in both windows.
+pub(crate) fn sample_windows(
+    files: &[FileHandle],
+) -> std::collections::BTreeMap<i64, Vec<FileHandle>> {
+    let mut windows = std::collections::BTreeMap::<i64, Vec<FileHandle>>::new();
+    for file in files {
+        let (start, end) = file.time_range();
+        for day in sample_day(start)..=sample_day(end) {
+            windows.entry(day).or_default().push(file.clone());
+        }
+    }
+    for files in windows.values_mut() {
+        files.sort_unstable_by_key(|file| file.file_id().file_id().to_string());
+    }
+    windows
+}
+
+/// Merges a pinned set of SSTs into one daily generation, preserving all row versions.
+/// The existing sample writer bounds both blocks and output file sizes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_sample_window(
+    store: &ObjectStore,
+    region: &MitoRegionRef,
+    version: &VersionRef,
+    files: &[FileHandle],
+    day: i64,
+    backend: &dyn crate::series_index::format::SamplesFormat,
+    purger: &IndexFilePurger,
+) -> Result<crate::series_index::artifact::SamplesFileHandle> {
+    use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
+    use crate::sst::file::RegionFileId;
+    use datatypes::arrow::array::BooleanArray;
+    use datatypes::arrow::compute::filter_record_batch;
+    use datatypes::timestamp::timestamp_array_to_primitive;
+
+    let mapper = FlatProjectionMapper::new(
+        &version.metadata,
+        0..version.metadata.column_metadatas.len(),
+    )?;
+    let schema = mapper.input_arrow_schema(false);
+    let timestamp_name = version
+        .metadata
+        .time_index_column()
+        .column_schema
+        .name
+        .clone();
+    let mut sources = Vec::<BoxedRecordBatchStream>::new();
+    for file in files {
+        let (context, mut selection) = region
+            .access_layer
+            .read_sst(file.clone())
+            .build_reader_input(&mut ReaderMetrics::default())
+            .await?
+            .context(UnexpectedSnafu {
+                reason: "daily samples source has no readable input",
+            })?;
+        let context = Arc::new(context);
+        let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
+        let timestamp_name = timestamp_name.clone();
+        sources.push(Box::pin(try_stream! {
+            while let Some((row_group, selection)) = selection.pop_first() {
+                let parquet = context.reader_builder().build(context.build_context(row_group, Some(selection), None)).await?;
+                let mut reader = FlatPruneReader::new_with_row_group_reader(
+                    context.clone(), FlatRowGroupReader::new(context.clone(), parquet),
+                    context.pre_filter_mode().skip_fields());
+                while let Some(batch) = reader.next_batch().await? {
+                    let batch = match &compat { Some(compat) => compat.compat(batch)?, None => batch };
+                    let column = batch.column_by_name(&timestamp_name).context(UnexpectedSnafu { reason: "missing daily sample timestamp" })?;
+                    let (values, unit) = timestamp_array_to_primitive(column).context(UnexpectedSnafu { reason: "invalid daily sample timestamp" })?;
+                    let mask = BooleanArray::from(values.values().iter().map(|v| sample_day(common_time::Timestamp::new(*v, unit.into())) == day).collect::<Vec<_>>());
+                    let batch = filter_record_batch(&batch, &mask).map_err(|e| crate::error::UnexpectedSnafu { reason: e.to_string() }.build())?;
+                    if batch.num_rows() > 0 { yield batch; }
+                }
+            }
+        }));
+    }
+    let generation = store_api::storage::FileId::random();
+    let prefix =
+        crate::series_index::samples::samples_prefix(region.region_id.as_u64(), generation);
+    let mut merged = Box::pin(
+        FlatMergeReader::new(schema, sources, 8192, None)
+            .await?
+            .into_stream(),
+    );
+    let mut writer = backend
+        .writer(
+            version.metadata.clone(),
+            store.clone(),
+            &prefix,
+            generation,
+            generation,
+        )
+        .await?;
+    let result: Result<()> = async {
+        while let Some(batch) = merged.try_next().await? {
+            writer.write(&batch).await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        if let Err(cleanup) = writer.abort().await {
+            warn!(cleanup; "Failed to abort daily samples build");
+        }
+        return Err(error);
+    }
+    let artifact = writer.finish().await?;
+    Ok(SamplesFileHandle::new(
+        RegionFileId::new(region.region_id, generation),
+        SamplesEntry {
+            file_id: generation,
+            artifact,
+            source_file_ids: files.iter().map(|f| f.file_id().file_id()).collect(),
+            window: Some(day),
+        },
+        purger.clone(),
+    ))
 }
 
 #[cfg(test)]
@@ -347,6 +481,28 @@ mod tests {
     use crate::series_index::purger::series_index_channel;
     use crate::series_index::tests::prepare_region;
     use crate::test_util::TestEnv;
+
+    #[test]
+    fn daily_windows_floor_timestamps_in_every_unit() {
+        use common_time::timestamp::TimeUnit;
+        for (unit, ticks) in [
+            (TimeUnit::Second, 86_400),
+            (TimeUnit::Millisecond, 86_400_000),
+            (TimeUnit::Microsecond, 86_400_000_000),
+            (TimeUnit::Nanosecond, 86_400_000_000_000),
+        ] {
+            for (value, day) in [
+                (-ticks - 1, -2),
+                (-ticks, -1),
+                (-1, -1),
+                (0, 0),
+                (ticks - 1, 0),
+                (ticks, 1),
+            ] {
+                assert_eq!(sample_day(common_time::Timestamp::new(value, unit)), day);
+            }
+        }
+    }
 
     fn build_input(version: &VersionRef) -> (SeriesBucket, SeriesIndexEntry) {
         let files = version
