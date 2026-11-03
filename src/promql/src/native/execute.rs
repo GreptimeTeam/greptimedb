@@ -2140,6 +2140,22 @@ impl BroadcastRuntime {
         }
     }
 
+    /// Reports the samples a binary operation had to drop because it has no histogram form.
+    ///
+    /// Prometheus answers no value for a histogram under an operator it has no meaning for — a
+    /// scalar divided by a histogram, a histogram ordered against a scalar — and the existing
+    /// planner states the same rule with this wording and at `info` level
+    /// (`NativeHistogramDrop`). Failing the query instead would turn one unsupported sample into
+    /// no answer at all, and saying nothing would leave the reader unable to tell a dropped sample
+    /// from one that was never there.
+    fn record_dropped_histograms(&self, dropped_histogram: bool, op: impl std::fmt::Display) {
+        if dropped_histogram && let Some(collector) = &self.annotations {
+            collector.record_info(format!(
+                "{op}: dropped native histogram samples because this binary operation is not supported for native histograms"
+            ));
+        }
+    }
+
     /// The label set a chunk of the vector side's `metric` becomes under this operation.
     ///
     /// It is what a series closes under when the operation emptied every position: the labels say
@@ -2161,29 +2177,20 @@ impl BroadcastRuntime {
     fn apply(&self, chunk: &EvaluatedChunk) -> Result<Option<Series>> {
         let output = match &self.scalar {
             BroadcastScalar::Literal(operand) => match self.op {
-                BroadcastOp::Arithmetic(op) => Some(map_arithmetic_literal(
-                    &self.sample_schema,
-                    &chunk.series,
-                    op,
-                    *operand,
-                )?),
+                BroadcastOp::Arithmetic(op) => {
+                    let (output, dropped_histogram) =
+                        map_arithmetic_literal(&self.sample_schema, &chunk.series, op, *operand)?;
+                    self.record_dropped_histograms(dropped_histogram, op);
+                    Some(output)
+                }
                 BroadcastOp::Compare(comparison) => {
-                    // A histogram has no ordering against a scalar, so the positions it holds
-                    // answer nothing. Prometheus drops those samples and the existing planner says
-                    // so with an info (`NativeHistogramDrop`), which is what this mirrors; failing
-                    // the query instead would turn one unsupported sample into no answer at all.
                     let (output, dropped_histogram) = map_compare_literal(
                         &self.sample_schema,
                         &chunk.series,
                         comparison,
                         *operand,
                     )?;
-                    if dropped_histogram && let Some(collector) = &self.annotations {
-                        collector.record_info(format!(
-                            "{}: dropped native histogram samples because this binary operation is not supported for native histograms",
-                            comparison,
-                        ));
-                    }
+                    self.record_dropped_histograms(dropped_histogram, comparison);
                     output
                 }
             },
@@ -2209,7 +2216,14 @@ impl BroadcastRuntime {
                         map_arithmetic_series(&self.sample_schema, &chunk.series, op, operand)?
                     }
                     BroadcastOp::Compare(comparison) => {
-                        map_compare_series(&self.sample_schema, &chunk.series, comparison, operand)?
+                        let (output, dropped_histogram) = map_compare_series(
+                            &self.sample_schema,
+                            &chunk.series,
+                            comparison,
+                            operand,
+                        )?;
+                        self.record_dropped_histograms(dropped_histogram, comparison);
+                        output
                     }
                 }
             }

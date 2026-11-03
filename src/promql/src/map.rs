@@ -110,6 +110,22 @@ pub enum ArithmeticOp {
     Atan2,
 }
 
+impl std::fmt::Display for ArithmeticOp {
+    /// The operator as the query wrote it, which is how the existing planner names it in the info
+    /// it records for a dropped histogram sample.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Modulo => "%",
+            Self::Power => "^",
+            Self::Atan2 => "atan2",
+        })
+    }
+}
+
 /// The scalar's position in a binary expression; noncommutative operators retain this order.
 #[derive(Clone, Copy, Debug)]
 pub enum ScalarOperand {
@@ -198,17 +214,23 @@ pub fn map_arithmetic(
 
 /// Applies literal scalar arithmetic to float and histogram samples. Float-only series retain the
 /// original kernel unchanged; histogram-capable fields are traversed sample-by-sample.
+///
+/// The second element of the answer reports whether a histogram sample was dropped because the
+/// operation has no histogram form — `2 / h`, or `h + 1`, which Prometheus answers by dropping the
+/// sample rather than failing the query. The caller records the info; this kernel is also used on
+/// paths that hold no collector.
 pub(crate) fn map_arithmetic_literal(
     schema: &SeriesSchema,
     series: &Series,
     op: ArithmeticOp,
     scalar: ScalarOperand,
-) -> Result<Series> {
+) -> Result<(Series, bool)> {
     validate_grid_series(schema, series)?;
     if is_float_series(series) {
-        return map_arithmetic(schema, series, op, scalar);
+        return Ok((map_arithmetic(schema, series, op, scalar)?, false));
     }
 
+    let mut dropped_histogram = false;
     let fields = series
         .fields
         .iter()
@@ -216,7 +238,11 @@ pub(crate) fn map_arithmetic_literal(
             let segments = samples
                 .segments()
                 .iter()
-                .map(|segment| map_arithmetic_segment(segment, op, scalar))
+                .map(|segment| {
+                    let (segment, dropped) = map_arithmetic_segment(segment, op, scalar)?;
+                    dropped_histogram |= dropped;
+                    Ok(segment)
+                })
                 .collect::<Result<Vec<_>>>()?;
             Samples::try_from_chunks(segments).map_err(series_error)
         })
@@ -229,18 +255,21 @@ pub(crate) fn map_arithmetic_literal(
     )
     .map_err(series_error)?;
     output.metric = drop_metric_name(&output.metric)?;
-    Ok(output)
+    Ok((output, dropped_histogram))
 }
 
+/// Applies one literal scalar operation to one run of samples, reporting whether any histogram
+/// position had no answer.
 fn map_arithmetic_segment(
     samples: &Samples,
     op: ArithmeticOp,
     scalar: ScalarOperand,
-) -> Result<Samples> {
+) -> Result<(Samples, bool)> {
     let mut floats = Float64Builder::with_capacity(samples.len());
     let mut indices = UInt32Builder::with_capacity(samples.len());
     let mut histograms = HistogramBatchBuilder::new();
 
+    let mut dropped_histogram = false;
     for index in 0..samples.len() {
         match samples.sample(index) {
             SampleRef::Missing => {
@@ -277,6 +306,7 @@ fn map_arithmetic_segment(
                     let index = histogram.push_to(&mut histograms)?;
                     indices.append_value(index);
                 } else {
+                    dropped_histogram = true;
                     indices.append_null();
                 }
             }
@@ -286,7 +316,9 @@ fn map_arithmetic_segment(
     let histogram_samples =
         HistogramSamples::try_new(indices.finish(), histograms.finish().map_err(series_error)?)
             .map_err(series_error)?;
-    Samples::try_from_mixed(floats.finish(), histogram_samples).map_err(series_error)
+    let samples =
+        Samples::try_from_mixed(floats.finish(), histogram_samples).map_err(series_error)?;
+    Ok((samples, dropped_histogram))
 }
 
 /// Produces an unlabelled scalar over exactly the requested evaluated range.

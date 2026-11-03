@@ -176,28 +176,28 @@ fn time_varying_comparison_keeps_vector_values_and_trims() {
             Some(9.0),
         ]),
     );
-    let output = mapped(
-        map_compare_series(
-            &schema,
-            &input,
-            Comparison::Filter(ComparisonOp::Less),
-            ScalarSeriesOperand::Left(&scalar),
-        )
-        .unwrap(),
-    );
+    let (filtered, dropped) = map_compare_series(
+        &schema,
+        &input,
+        Comparison::Filter(ComparisonOp::Less),
+        ScalarSeriesOperand::Left(&scalar),
+    )
+    .unwrap();
+    assert!(!dropped, "the vector holds floats only");
+    let output = mapped(filtered);
     // Only position 10 passes, and it is the whole result: one run, one row.
     assert_eq!(run_ranges(&output), vec![(10, 1)]);
     assert_eq!(run_floats(&output, 0), vec![((10, 1), vec![Some(4.0)])]);
     assert_eq!(output.metric, input.metric);
-    let output = mapped(
-        map_compare_series(
-            &schema,
-            &input,
-            Comparison::Bool(ComparisonOp::Equal),
-            ScalarSeriesOperand::Right(&scalar),
-        )
-        .unwrap(),
-    );
+    let (booleans, dropped) = map_compare_series(
+        &schema,
+        &input,
+        Comparison::Bool(ComparisonOp::Equal),
+        ScalarSeriesOperand::Right(&scalar),
+    )
+    .unwrap();
+    assert!(!dropped, "the vector holds floats only");
+    let output = mapped(booleans);
     // Bool emits at every position where both operands exist. The scalar holds no value at grid
     // position 7, so that position has no row and ends a run; 8 to 10 follow it.
     assert_eq!(run_ranges(&output), vec![(6, 1), (9, 3)]);
@@ -398,14 +398,15 @@ fn a_vector_scalar_operation_of_sparse_operands_keeps_the_shared_positions() {
     assert_result_eq(Some(&output), &expected, &without_name);
 
     // A filter against the scalar keeps the vector value where it passes and drops the rest.
-    let output = map_compare_series(
+    let (output, dropped) = map_compare_series(
         &vector_schema,
         &vector,
         Comparison::Filter(ComparisonOp::Greater),
         ScalarSeriesOperand::Right(&scalar),
     )
-    .unwrap()
-    .expect("both shared positions pass");
+    .unwrap();
+    assert!(!dropped, "the vector holds floats only");
+    let output = output.expect("both shared positions pass");
     assert_eq!(run_ranges(&output), vec![(5, 1), (9, 1)]);
     let mut expected: Dense = vec![vec![None]; points_on_grid];
     expected[5] = vec![Some(50.0)];
@@ -427,6 +428,7 @@ fn a_vector_scalar_operation_of_sparse_operands_keeps_the_shared_positions() {
             ScalarSeriesOperand::Right(&high),
         )
         .unwrap()
+        .0
         .is_none(),
         "nothing passes, so there is no result series"
     );

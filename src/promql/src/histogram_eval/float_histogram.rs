@@ -638,9 +638,17 @@ impl FloatHistogram {
 
     /// Detects a counter reset for a window whose timestamps an `offset` has already moved.
     ///
-    /// The stored start timestamps are shifted by `offset_ms` before they are compared, which is
-    /// the axis `range_eval` hands its windows. Shifting them here rather than in a copy of each
-    /// histogram keeps the check allocation-free on the per-point path.
+    /// `range_eval` hands its windows at `timestamp + offset_ms` while a histogram's start
+    /// timestamp stays on the axis the sender wrote it on, so one of the two has to move. The
+    /// window timestamps are moved back here rather than the start timestamps forward, because a
+    /// start of `0` means "the sender stated none" and moving it forward can cancel the offset
+    /// into a real instant: a start of 2500ms under `offset -2.5s` would become that `0` and stop
+    /// being read as a reset. Restoring the sample times keeps the absence meaning what it means.
+    ///
+    /// The subtraction wraps, which is what Go's `int64` arithmetic does and what
+    /// [`crate::range_eval::function::extrapolation_factor`] relies on for the same reason: real
+    /// timestamps are nowhere near the range where the two disagree, and wrapping cannot turn a
+    /// missing start timestamp into a present one.
     pub(crate) fn detect_counter_reset_shifted(
         &self,
         previous: &Self,
@@ -648,16 +656,11 @@ impl FloatHistogram {
         current_ts: i64,
         offset_ms: i64,
     ) -> bool {
-        let shifted = |start: Option<i64>| {
-            start
-                .and_then(|start| start.checked_add(offset_ms))
-                .unwrap_or_default()
-        };
         Self::start_timestamp_reset(
-            shifted(self.start_timestamp),
-            shifted(previous.start_timestamp),
-            previous_ts,
-            current_ts,
+            self.start_timestamp.unwrap_or_default(),
+            previous.start_timestamp.unwrap_or_default(),
+            previous_ts.wrapping_sub(offset_ms),
+            current_ts.wrapping_sub(offset_ms),
         ) || self.detect_reset(previous).unwrap_or(false)
     }
 

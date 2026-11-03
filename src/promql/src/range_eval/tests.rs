@@ -5249,6 +5249,52 @@ fn comparing_a_mixed_series_with_a_scalar_drops_only_the_histogram_positions() {
     );
 }
 
+/// An `offset` that cancels a start timestamp onto zero must not turn it into "no start".
+///
+/// A start of `0` on the stored histogram means the sender stated none, so the check reads it as
+/// absent. Moving a real start forward by a negative offset could land it exactly on that marker:
+/// 2500ms under `offset -2.5s` becomes 0. Restoring the sample times instead of moving the start
+/// keeps the two meanings apart, which is what this pins.
+#[test]
+fn an_offset_that_cancels_a_start_timestamp_still_reads_it_as_a_reset() {
+    let schema = raw_schema(1);
+    let counts = |offset_ms: i64, eval_ts: i64| {
+        let mut evaluator = RangeEvaluator::try_new(
+            &schema,
+            grid(eval_ts, 1_000, 1),
+            RangeWindow {
+                range_ms: 2_000,
+                offset_ms,
+                anchor_ms: None,
+                modifier: None,
+            },
+            RangeFunction::Increase,
+        )
+        .unwrap();
+        let chunks = collect_chunks(
+            &mut evaluator,
+            &[
+                histogram_chunk_with(&schema, 2_000, 6.0, None, false),
+                // 2500ms is strictly inside the window, so it witnesses a restart.
+                histogram_chunk_with(&schema, 3_000, 7.0, Some(2_500), true),
+            ],
+        );
+        let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+        match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+            SampleRef::Histogram(histogram) => histogram.count,
+            other => panic!("expected a histogram, got {}", describe_sample(Some(other))),
+        }
+    };
+    let plain = counts(0, 3_000);
+    // The same window, read with an offset that cancels the start timestamp onto zero.
+    let cancelled = counts(-2_500, 500);
+    assert!(
+        (plain - cancelled).abs() < 1e-12,
+        "the start timestamp of 2500ms read as {plain} with no offset and {cancelled} under \
+         `offset -2.5s`, so the offset cancelled it into the no-start marker"
+    );
+}
+
 /// `irate` reads the counter reset its two points witness, start timestamps included.
 ///
 /// The existing planner's `idelta_value` is this query's oracle: it uses `detect_counter_reset`,
