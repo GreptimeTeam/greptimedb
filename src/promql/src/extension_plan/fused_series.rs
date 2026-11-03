@@ -1701,12 +1701,12 @@ fn bound_tags_cover_primary_key(label_source: &RawLabelSource) -> bool {
         .iter()
         .map(|tag| tag.column_id)
         .collect::<std::collections::HashSet<_>>();
+    let table_id = store_api::storage::consts::ReservedColumnId::table_id();
+    let tsid = store_api::storage::consts::ReservedColumnId::tsid();
     physical_metadata.primary_key_columns().all(|column| {
-        let name = column.column_schema.name.as_str();
-        let metric_engine_internal = name
-            == store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME
-            || name == store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
-        metric_engine_internal || bound_ids.contains(&column.column_id)
+        column.column_id == table_id
+            || column.column_id == tsid
+            || bound_ids.contains(&column.column_id)
     })
 }
 

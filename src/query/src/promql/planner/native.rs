@@ -1157,10 +1157,6 @@ fn cut_segments(node: &NativeNode) -> Segment {
     }
 }
 
-/// Builds one segment's plan from a subtree, binding its scan inputs without cutting again.
-///
-/// Returns the plan and the output columns the segment reports, which its parent names its own
-/// columns by. `None` when any part cannot be built, so the statement keeps the plan it had.
 fn is_raw_series_source(plan: &LogicalPlan) -> bool {
     match plan {
         LogicalPlan::Extension(extension) => extension.node.as_any().is::<RawSeriesSource>(),
@@ -1259,6 +1255,10 @@ fn build_evaluated_segment(
     ))
 }
 
+/// Builds one segment's plan from a subtree, binding its scan inputs without cutting again.
+///
+/// Returns the plan and the output columns the segment reports, which its parent names its own
+/// columns by. `None` when any part cannot be built, so the statement keeps the plan it had.
 #[allow(clippy::type_complexity)]
 fn build_inner_segment(
     node: &NativeNode,
