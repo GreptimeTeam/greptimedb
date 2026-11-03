@@ -24,7 +24,7 @@ use promql::extension_plan::{
     AggregateFinalize, CanonicalBoundary, EmptyMetric, FusedOutputFormat, FusedSeries,
     InstantManipulate, RangeManipulate, RawSeriesSource, SeriesDivide, SeriesNormalize,
 };
-use promql::native::plan::{reads_across_series, reads_only_raw_scans};
+use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -295,17 +295,9 @@ impl Categorizer {
                 }
                 let root = fused.tree().root();
                 let per_series = pointwise_operand(root) || independent_scan_pair(root);
-                // A node that reads across series gathers its input into one execution itself: the
-                // physical node routes every input partition to a single owner and answers there.
-                // Running that in a region is what the native route is: it is only planned when the
-                // region transport is in-process, so the region below this node holds the metric
-                // whole and the gather the node performs is exactly the one a single execution
-                // needs. Nothing here claims a distributed series merge - a region that held part
-                // of the metric could not answer this, which is why the route is gated.
-                let gathers_its_own_scan = children.len() == 1
-                    && matches!(children[0], LogicalPlan::TableScan(_))
-                    && reads_only_raw_scans(root);
-                if reads_across_series(root) && !per_series && !gathers_its_own_scan {
+                // A gather of one raw scan does not establish region-global ownership. Cross-series
+                // consumers need their existing split or frontend placement.
+                if reads_across_series(root) && !per_series {
                     return Commutativity::NonCommutative;
                 }
 

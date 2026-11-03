@@ -654,14 +654,14 @@ pub struct NativeNode {
 ///
 /// Everything else either keeps the set it read or answers a set of its own:
 ///
-/// - A map of math or a histogram function drops the metric name, and an arithmetic broadcast does
-///   too, but within one metric the remaining tags are the primary key: two stored series of one
-///   metric that agree on every other label are the same series, so dropping the name cannot make
-///   them one. Each of those nodes hands its input's answer on rather than claiming one of its own.
-/// - An `Aggregate` answers its groups, a `Vector` and a `Binary` that read whole vectors file their
-///   rows by the label set a sample *ends* under and refuse two values of a field at one point, a
-///   `Set` does the same, and `info` merges the results that share a label set. Each answers one
-///   series per set it names.
+/// - A map of math drops the metric name, and an arithmetic broadcast does too, but within one
+///   metric the remaining tags are the primary key: two stored series of one metric that agree on
+///   every other label are the same series, so dropping the name cannot make them one. Each of
+///   those nodes hands its input's answer on rather than claiming one of its own.
+/// - An `Aggregate` answers its groups, a `Vector` that folds series answers its result sets, and a
+///   `Binary` that reads whole vectors files its rows by the label set a sample *ends* under and
+///   refuses two values of a field at one point. A `Set` does the same, and `info` merges the
+///   results that share a label set. Each answers one series per set it names.
 /// - A node that hands its input's series over unchanged - a selection, a window, a timestamp, a
 ///   parameterized map, `topk` and its ranking siblings - passes the answer on: an alias below it is
 ///   still an alias above it.
@@ -688,20 +688,11 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
         // A rewrite writes a caller-chosen destination label, so two series can end under one set -
         // but only if that label was one of the input's, because writing a label no series carries
         // leaves every series' identity distinct. `map_writes_existing_label` is that question, and
-        // an input whose labels this walk cannot derive is collected rather than trusted.
-        //
-        // A rewrite over a whole-vector consumer aliases nothing that needs collecting: the consumer
-        // below it already reads the entire vector in one execution, so the series this map renames
-        // are that execution's answers and are all in one place. Collecting them would merge four
-        // partitions' answers of one global operation - `topk` over a quarter of the vector each -
-        // which is not the series the statement asked about.
+        // an input whose labels this walk cannot derive is collected rather than trusted. Even a
+        // whole-vector consumer can emit distinct series whose labels a later rewrite makes equal.
         NativeExpr::Map { input, op } => {
-            if reads_across_series(input) {
-                false
-            } else {
-                map_writes_existing_label(input, op, source_tags).unwrap_or(true)
-                    || duplicates_canonical_labels(input, source_tags)
-            }
+            map_writes_existing_label(input, op, source_tags).unwrap_or(true)
+                || duplicates_canonical_labels(input, source_tags)
         }
         // A fold answers one series per group, which is one label set per group.
         NativeExpr::Aggregate { .. } => false,
@@ -782,57 +773,6 @@ fn map_writes_existing_label(
 /// Both a region-side placement and the native route's admission ask this, and they must agree: a
 /// tree admitted here but refused there becomes a node the physical layer cannot build, and one
 /// refused here but admitted there would be pushed to a region that holds part of the metric.
-/// Whether every input `node` reads is a raw scan, which is what a region can supply.
-///
-/// A native execution reads one kind of frame per source: raw samples when the source's compiled
-/// layout has no evaluation grid, evaluated values when it does. A tree whose every input is raw is
-/// therefore a tree a region scan can feed, whatever else it computes - including the whole-vector
-/// operations that gather their own input into one execution.
-pub fn reads_only_raw_scans(node: &NativeNode) -> bool {
-    let mut inputs = Vec::new();
-    collect_raw_inputs(node, &mut inputs);
-    !inputs.is_empty()
-        && inputs.iter().all(|input| {
-            input
-                .output
-                .samples()
-                .is_some_and(|s| s.eval_grid.is_none())
-        })
-}
-
-fn collect_raw_inputs<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a BoundInput>) {
-    match &node.expr {
-        NativeExpr::Input(input) => inputs.push(input),
-        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. }
-        | NativeExpr::VectorOf { input } => collect_raw_inputs(input, inputs),
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        } => {
-            collect_raw_inputs(input, inputs);
-            for parameter in parameters {
-                collect_raw_inputs(parameter, inputs);
-            }
-        }
-        NativeExpr::Binary { left, right, .. }
-        | NativeExpr::Set { left, right, .. }
-        | NativeExpr::Info {
-            base: left,
-            info: right,
-            ..
-        } => {
-            collect_raw_inputs(left, inputs);
-            collect_raw_inputs(right, inputs);
-        }
-    }
-}
-
 pub fn reads_across_series(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,

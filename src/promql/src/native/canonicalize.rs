@@ -34,8 +34,7 @@
 //! | --- | --- | --- |
 //! | the root | yes | the answer names one series per label set, so two rows sharing one set are the error Prometheus reports |
 //! | `Aggregate` | yes | a fold sums the values it is handed at a point, so two pieces of one series are summed as if the query said so twice |
-//! | `Vector` that ranks/orders/keeps series | yes | `topk` counts the series it is handed against `k`, and the ranking is per label set |
-//! | `Vector` that reads presence or folds at a point (`absent`, `count_values`, `histogram_*`) | no | each folds every contribution at a point, which is the sum a merge would deliver |
+//! | `Vector` | yes | ranking, presence checks and folds must read canonical series rather than duplicate fragments |
 //! | `Binary`/`Set` over two vectors | yes, on both sides | each side is matched by label, and the kernel refuses two values of one field at a point only after the pair was matched |
 //! | `Info` | yes, on both sides | it looks the info series up by identifying labels, so the pieces of one label set have to be one series first |
 //! | `Window` over an evaluated vector | yes | a window folds a range of one series, so it reads the series whole |
@@ -50,15 +49,13 @@
 //! than only at the statement root.
 //!
 //! What this pass does *not* decide is placement: whether the merge can be answered inside one
-//! execution is the lowering's question (see `PromPlanner::canonical_boundary`), which is why the
-//! pass never declines a query and never rewrites a tree into a shape the runtime cannot place. A
-//! merge it inserts is a merge the planner lowers into a boundary with a producer, a canonical
-//! router and a receiver.
+//! execution is the lowering's question (see `PromPlanner::canonical_boundary`). A merge may need
+//! a boundary with a producer, a canonical router and a receiver.
 
 use datafusion::error::Result as DfResult;
 
 use crate::native::plan::{
-    BoundVectorOp, NativeExpr, NativeNode, NativeTree, NativeType, duplicates_canonical_labels,
+    NativeExpr, NativeNode, NativeTree, NativeType, duplicates_canonical_labels,
 };
 
 #[cfg(test)]
@@ -75,7 +72,10 @@ mod tests;
 /// series a consumer reads and not what the query computes. The result is checked by
 /// [`NativeTree::try_new`], because a merge has to sit over an evaluated vector and the pass may
 /// only put it there.
-pub fn merge_label_rewrites(tree: &NativeTree, source_tags: &[Vec<String>]) -> DfResult<NativeTree> {
+pub fn merge_label_rewrites(
+    tree: &NativeTree,
+    source_tags: &[Vec<String>],
+) -> DfResult<NativeTree> {
     let root = rewrite(tree.root(), source_tags)?;
     // The root is a consumer too: whatever reads this tree reads one series per label set.
     NativeTree::try_new(canonical(root, source_tags))
@@ -168,26 +168,12 @@ fn rewrite(node: &NativeNode, source_tags: &[Vec<String>]) -> DfResult<NativeNod
             input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
         },
-        // A vector operation decides one operator at a time. The ones that rank, order or keep the
-        // series they read count and compare them per label set, so they read each set whole. The
-        // ones that fold every contribution at a point (`absent`, `count_values`, `histogram_*`) read
-        // the pieces correctly as they come.
-        NativeExpr::Vector { input, op } => {
-            let input = rewrite(input, source_tags)?;
-            let input = match op {
-                BoundVectorOp::TopK { .. }
-                | BoundVectorOp::LimitK { .. }
-                | BoundVectorOp::LimitRatio { .. }
-                | BoundVectorOp::Sort(_) => canonical(input, source_tags),
-                BoundVectorOp::Absent { .. }
-                | BoundVectorOp::Histogram(_)
-                | BoundVectorOp::CountValues { .. } => input,
-            };
-            NativeExpr::Vector {
-                input: Box::new(input),
-                op: op.clone(),
-            }
-        }
+        // Vector operations consume canonical series: ranking counts them, and presence checks and
+        // folds must not silently consume overlapping fragments that a merge would reject.
+        NativeExpr::Vector { input, op } => NativeExpr::Vector {
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
+            op: op.clone(),
+        },
         // Each side of a binary or set operation is matched by label on its own, so each is
         // canonicalized on its own. A constant side has nothing to canonicalize and a merge could not
         // sit over one, which `canonical` leaves it as.

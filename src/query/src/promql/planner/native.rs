@@ -55,7 +55,7 @@ use promql::extension_plan::{
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
     BoundAggregate, BoundInput, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree,
-    NativeType, fused_output_tags, reads_across_series, reads_only_raw_scans,
+    NativeType, fused_output_tags, reads_across_series,
 };
 use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::{METRIC_NAME, Matchers};
@@ -804,21 +804,6 @@ impl PromPlanner {
             if selectors.len() != 1 && !cross_table && !computed_key_case {
                 return Ok(None);
             }
-            // A canonical merge below a node that cannot itself run where the merge's boundary does
-            // has no plan: the boundary answers the region in frames, and a node above it that has
-            // to gather stays in the frontend, where a frame-producing child is not something it can
-            // read. That is the shape of a rewrite over a whole-vector consumer over a collapsing
-            // rewrite - the collapse is collected in the region, then the ranking and the outer
-            // rewrite gather its answers again. Declining keeps the statement on the plan that
-            // already answers it, which raises the duplicate-label error too instead of a number
-            // that hid the overlap.
-            //
-            // A whole-vector consumer at the root is not that shape: it is the node that gathers,
-            // and it gathers its own region-local prefix, so its boundary's frames never cross the
-            // region edge.
-            if contains_canonical_merge(root) && !is_global_consumer(root) {
-                return Ok(None);
-            }
         }
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
@@ -838,23 +823,10 @@ impl PromPlanner {
             if let Some(plan) = plan {
                 return Ok(Some((plan, single_input_context)));
             }
-            // A tree that reads across series and holds nothing to hand to a segment still has one
-            // way to answer natively: the node gathers its own input and runs in one execution. That
-            // is what the physical node does at `SinglePartition`, and the region it runs in holds
-            // the whole metric under the in-process transport this route is gated on, so the gather
-            // is the collection a single execution needs and not a merge of partial answers.
-            //
-            // Two shapes are not among them. A tree holding a canonical merge is not: its pieces
-            // are the statement's own scan partitions, and collecting them through a gather is the
-            // workaround its boundary exists to avoid. Neither is a tree the runtime cannot execute:
-            // the split above refuses what it has no kernel for, and this state is the same answer
-            // one step later, where a refusal can no longer hand the statement back to the plan it
-            // had.
-            let gathers_in_region = reads_only_raw_scans(root)
-                && !contains_canonical_merge(root)
-                && NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))
-                    .is_ok();
-            if required_placement && !multi_input && !gathers_in_region {
+            // A raw scan alone does not prove a region contains all contributions required by a
+            // cross-series consumer. Without a split or segmentation, keep that consumer out of
+            // the region rather than treating its local gather as a global answer.
+            if required_placement && !multi_input {
                 return Ok(None);
             }
         }

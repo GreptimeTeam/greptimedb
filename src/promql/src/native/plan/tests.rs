@@ -1559,6 +1559,73 @@ fn dropping_the_metric_name_keeps_the_inputs_answer() {
     ));
 }
 
+/// A rewrite can alias distinct outputs of a whole-vector operation, even when they were unique
+/// before the rewrite. Grouped topk(1) and an aggregate can each produce more than one series.
+#[test]
+fn a_rewrite_after_ranking_or_grouping_may_alias() {
+    let out = grid(0, 60_000, 4);
+    let selected = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    let vector = |op| NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(selected()),
+            op,
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let group = || Grouping::By(Arc::new([Arc::from("host")]));
+    let grouped_sum = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(selected()),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: group(),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let source_tags = vec![vec!["host".to_string(), "zone".to_string()]];
+    for (name, inner) in [
+        (
+            "topk(2)",
+            vector(BoundVectorOp::TopK {
+                k: 2.0,
+                top: true,
+                group: Grouping::By(Arc::new([])),
+            }),
+        ),
+        (
+            "topk(1) by host",
+            vector(BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: group(),
+            }),
+        ),
+        ("sum by host", grouped_sum),
+    ] {
+        assert!(!duplicates_canonical_labels(&inner, &source_tags), "{name}");
+        let output = inner.output.clone();
+        let renamed = NativeNode {
+            expr: NativeExpr::Map {
+                input: Box::new(inner),
+                op: BoundMap {
+                    ops: Arc::new([MapOp::Label(Arc::new(
+                        crate::map_label::LabelRewrite::replace("host", "same", "host", ".*")
+                            .unwrap(),
+                    ))]),
+                },
+            },
+            output,
+        };
+        assert!(renamed.validate().is_ok(), "{name}");
+        assert!(
+            duplicates_canonical_labels(&renamed, &source_tags),
+            "{name}"
+        );
+    }
+}
+
 /// A consumer that files its rows by the label set a sample ends under answers one series per set,
 /// so a rewrite beneath it is not something above it has to collect again.
 #[test]

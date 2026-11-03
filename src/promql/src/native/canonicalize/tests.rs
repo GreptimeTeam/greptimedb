@@ -114,9 +114,7 @@ fn map_ops(inner: NativeNode, ops: Vec<MapOp>) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Map {
             input: Box::new(inner),
-            op: BoundMap {
-                ops: ops.into(),
-            },
+            op: BoundMap { ops: ops.into() },
         },
         output,
     }
@@ -140,13 +138,13 @@ fn abs_map(inner: NativeNode) -> NativeNode {
 /// `sum without() (inner)` at `stage`, which folds every series it is handed into one group.
 fn aggregate_over(inner: NativeNode, out: Arc<EvalGrid>, stage: AggregateStage) -> NativeNode {
     let output = match stage {
-        AggregateStage::Partial => NativeType::AggregateState(Arc::new(
-            crate::native::plan::AggregateStateSchema {
+        AggregateStage::Partial => {
+            NativeType::AggregateState(Arc::new(crate::native::plan::AggregateStateSchema {
                 group: Grouping::By(Arc::from([])),
                 accumulators: fields(1),
                 grid: Arc::clone(&out),
-            },
-        )),
+            }))
+        }
         AggregateStage::Complete | AggregateStage::Final => evaluated(fields(1), out),
     };
     NativeNode {
@@ -221,7 +219,11 @@ fn set_over(left: NativeNode, right: NativeNode, out: Arc<EvalGrid>) -> NativeNo
 }
 
 /// `rate(inner[5m])`, a window that folds `inner` onto `out` and drops the metric name.
-fn window_over(inner: NativeNode, input_grid: Option<Arc<EvalGrid>>, out: Arc<EvalGrid>) -> NativeNode {
+fn window_over(
+    inner: NativeNode,
+    input_grid: Option<Arc<EvalGrid>>,
+    out: Arc<EvalGrid>,
+) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Window {
             input: Box::new(inner),
@@ -369,17 +371,95 @@ fn a_ranking_operation_is_handed_one_series_per_set() {
 }
 
 #[test]
-fn a_presence_reading_vector_operation_collects_nothing() {
+fn presence_and_folding_vector_operations_collect_aliasing_inputs() {
     let out = grid(0, 1000, 2);
-    // `absent` folds every contribution at a point, so the pieces are the presence it reads.
-    let absent = || BoundVectorOp::Absent {
-        labels: datatypes::series::SeriesLabels::try_new(None, Vec::new()).unwrap(),
-    };
-    let tree = passed(
-        vector_over(rewrite(selected(&out), "host", "host"), absent()),
-        &scan_tags(),
+    let ops = [
+        BoundVectorOp::Absent {
+            labels: datatypes::series::SeriesLabels::try_new(None, Vec::new()).unwrap(),
+        },
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+        BoundVectorOp::CountValues {
+            label: Arc::from("value"),
+            group: Grouping::By(Arc::from([])),
+        },
+    ];
+    for op in ops {
+        // Distinct host values can become the same label set, including at an overlapping point.
+        let aliasing = map_ops(
+            selected(&out),
+            vec![MapOp::Label(Arc::new(
+                LabelRewrite::replace("host", "same", "host", ".*").unwrap(),
+            ))],
+        );
+        let tree = passed(vector_over(aliasing, op.clone()), &scan_tags());
+        assert_eq!(1, merges(&tree), "{op:?}");
+        let NativeExpr::Vector { input, .. } = &tree.root().expr else {
+            panic!("the root stays the vector operation: {op:?}");
+        };
+        let NativeExpr::Merge { input } = &input.expr else {
+            panic!("{op:?} must read a canonical series");
+        };
+        assert!(matches!(input.expr, NativeExpr::Map { .. }), "{op:?}");
+
+        let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+        assert_eq!(1, merges(&twice), "{op:?}");
+        assert_eq!(tree.to_string(), twice.to_string(), "{op:?}");
+    }
+}
+
+#[test]
+fn rewrites_after_ranking_or_grouping_are_collected() {
+    let out = grid(0, 1000, 2);
+    let source_tags = vec![tags(&["host", "zone"])];
+    // Different hosts may both survive topk(2). With topk(1) by host, one series survives in each
+    // host group. Sum by host likewise produces one output per host, not one for the whole vector.
+    let top_two = vector_over(selected(&out), topk(2.0));
+    let grouped_top_one = vector_over(
+        selected(&out),
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::new([Arc::from("host")])),
+        },
     );
-    assert_eq!(0, merges(&tree));
+    let mut grouped_sum =
+        aggregate_over(selected(&out), Arc::clone(&out), AggregateStage::Complete);
+    let NativeExpr::Aggregate { op, .. } = &mut grouped_sum.expr else {
+        unreachable!("aggregate_over constructs an aggregate");
+    };
+    op.group = Grouping::By(Arc::new([Arc::from("host")]));
+
+    for (name, inner) in [
+        ("topk(2)", top_two),
+        ("topk(1) by host", grouped_top_one),
+        ("sum by host", grouped_sum),
+    ] {
+        // Unlike copying host to itself, a fixed destination can actually make those outputs equal.
+        let renamed = map_ops(
+            inner,
+            vec![MapOp::Label(Arc::new(
+                LabelRewrite::replace("host", "same", "host", ".*").unwrap(),
+            ))],
+        );
+        let tree = passed(renamed, &source_tags);
+        assert_eq!(1, merges(&tree), "{name}");
+        let NativeExpr::Merge { input } = &tree.root().expr else {
+            panic!("the statement must collect the rewrite after {name}");
+        };
+        let NativeExpr::Map { input, .. } = &input.expr else {
+            panic!("the merge must sit directly above the rewrite after {name}");
+        };
+        assert!(
+            matches!(
+                input.expr,
+                NativeExpr::Vector { .. } | NativeExpr::Aggregate { .. }
+            ),
+            "{name}"
+        );
+        let twice = merge_label_rewrites(&tree, &source_tags).unwrap();
+        assert_eq!(tree.to_string(), twice.to_string(), "{name}");
+        assert_eq!(1, merges(&twice), "{name}");
+    }
 }
 
 #[test]
@@ -476,7 +556,11 @@ fn info_collects_the_side_that_aliases() {
 fn a_scalar_side_of_a_broadcast_is_not_collected() {
     let out = grid(0, 1000, 2);
     let tree = passed(
-        binary_over(scalar(1.0, Arc::clone(&out)), selected(&out), Arc::clone(&out)),
+        binary_over(
+            scalar(1.0, Arc::clone(&out)),
+            selected(&out),
+            Arc::clone(&out),
+        ),
         &scan_tags(),
     );
     assert_eq!(0, merges(&tree), "a constant holds no label set");
@@ -493,6 +577,17 @@ fn a_scalar_root_is_never_collected() {
 fn a_raw_root_is_never_collected() {
     let tree = passed(raw_input(0), &scan_tags());
     assert_eq!(0, merges(&tree));
+}
+
+#[test]
+fn aggregate_state_is_not_collected() {
+    let out = grid(0, 1000, 2);
+    let state = aggregate_over(selected(&out), out, AggregateStage::Partial);
+    let tree = passed(state, &scan_tags());
+    assert_eq!(0, merges(&tree));
+    assert!(matches!(tree.root().output, NativeType::AggregateState(_)));
+    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    assert_eq!(tree.to_string(), twice.to_string());
 }
 
 #[test]
@@ -554,14 +649,26 @@ fn a_sort_keeps_the_alias_of_its_input() {
 }
 
 #[test]
-fn a_histogram_fold_collects_nothing() {
+fn presence_and_folding_vector_operations_do_not_collect_distinct_inputs() {
     let out = grid(0, 1000, 2);
-    let tree = passed(
-        vector_over(
-            rewrite(selected(&out), "host", "host"),
-            BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
-        ),
-        &scan_tags(),
-    );
-    assert_eq!(0, merges(&tree), "the kernel merges the buckets it reads");
+    for op in [
+        BoundVectorOp::Absent {
+            labels: datatypes::series::SeriesLabels::try_new(None, Vec::new()).unwrap(),
+        },
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+        BoundVectorOp::CountValues {
+            label: Arc::from("value"),
+            group: Grouping::By(Arc::from([])),
+        },
+    ] {
+        let tree = passed(
+            vector_over(rewrite(selected(&out), "dst", "host"), op.clone()),
+            &scan_tags(),
+        );
+        assert_eq!(0, merges(&tree), "{op:?}");
+        let NativeExpr::Vector { input, .. } = &tree.root().expr else {
+            panic!("the root stays the vector operation: {op:?}");
+        };
+        assert!(matches!(input.expr, NativeExpr::Map { .. }), "{op:?}");
+    }
 }
