@@ -122,12 +122,23 @@ jobs:
                 }
                 if (!dryRun) {
                   // GitHub enforces branch rules; never bypass or enable auto-merge.
-                  await github.graphql(`
+                  try {
+                    await github.graphql(`
                     mutation($id: ID!, $sha: GitObjectID!) {
                       enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $sha}) {
                         mergeQueueEntry { id }
                       }
                     }`, { id: pr.id, sha: pr.headRefOid });
+                  } catch (error) {
+                    // Stacked PRs require a different API and are not handled by this workflow.
+                    const stackError = 'This pull request is part of a stack and must be enqueued using the asynchronous merge REST API.';
+                    if (error.errors?.length && error.errors.every(item => item.message?.startsWith(stackError))) {
+                      core.warning(`PR #${number}: skipped stacked PR`);
+                      rows.push([String(number), 'Skipped: stacked PR']);
+                      continue;
+                    }
+                    throw error;
+                  }
                 }
                 enqueued++;
                 rows.push([String(number), dryRun ? 'Would enqueue' : 'Enqueued']);

@@ -13,6 +13,10 @@ GitHub may delay scheduled runs.
 The label alone controls nightly opt-in; the enqueue job does not check the PR
 body. PRs must be approved and clean, and have all
 review threads resolved. Drafts are skipped.
+If GitHub rejects enqueueing because a PR belongs to a stack, the workflow skips
+it and continues without failing the run or counting it toward the five-PR limit.
+Other API errors still fail the run. Dry runs do not call the enqueue API, so
+they cannot detect this stack rejection.
 Already queued PRs and manually enabled auto-merge requests are left alone;
 Maintainers can use **Merge when ready** to proceed earlier. Unready PRs wait for a later
 scheduled run; this workflow never enables auto-merge on their behalf.

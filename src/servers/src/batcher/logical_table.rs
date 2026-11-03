@@ -33,9 +33,11 @@ use common_batcher::flush_limiter::FlushLimiter;
 use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
+use common_error::ext::BoxedError;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_query::{Output, WriteCompletion, WriteProgress};
 use common_time::timestamp::TimeUnit;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
@@ -270,6 +272,9 @@ impl LogicalTablePendingRowsBatcher {
 
     /// Submits with request-level accounting after schema preparation and before
     /// queue admission. Acknowledgement follows the global batching policy.
+    /// In synchronous mode, waits for storage even when confirmed writes are enabled.
+    /// Use [`Self::submit_output_with`] with confirmed writes to retain partial row
+    /// counts on failure.
     pub async fn submit_with<T, F>(
         &self,
         requests: RowInsertRequests,
@@ -279,6 +284,33 @@ impl LogicalTablePendingRowsBatcher {
     where
         F: Future<Output = Result<T>> + Send,
     {
+        let (output, prepared) = self
+            .submit_output_with(requests, ctx, after_prepare)
+            .await?;
+        let rows = output.extract_rows_and_cost().0 as u64;
+        if self.pending_rows_batch_sync {
+            output
+                .write_progress()
+                .await
+                .into_result()
+                .context(error::ExecuteGrpcQuerySnafu)?;
+        }
+        Ok((rows, prepared))
+    }
+
+    /// Retains completion even when the batching policy acknowledges queue admission.
+    /// With confirmed writes, callers must await [`Output::write_progress`] to observe
+    /// storage errors and acknowledged rows, including in synchronous batching mode.
+    pub async fn submit_output_with<T, F>(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        after_prepare: impl FnOnce(RowInsertRequests) -> F,
+    ) -> Result<(Output, T)>
+    where
+        F: Future<Output = Result<T>> + Send,
+    {
+        let confirmed = ctx.confirmed_writes();
         let (table_batches, total_rows) = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["submit_build_and_align"])
@@ -287,7 +319,7 @@ impl LogicalTablePendingRowsBatcher {
         };
         let prepared = after_prepare(requests).await?;
         if total_rows == 0 {
-            return Ok((0, prepared));
+            return Ok((Output::new_with_affected_rows(0), prepared));
         }
 
         // Flushes dispatch directly to datanodes, so admit once before enqueueing.
@@ -358,24 +390,30 @@ impl LogicalTablePendingRowsBatcher {
             }
         }
 
-        if self.pending_rows_batch_sync {
-            let result = {
-                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                    .with_label_values(&["submit_wait_flush_result"])
-                    .start_timer();
-                response_rx
-                    .await
-                    .map_err(|_| error::BatcherChannelClosedSnafu.build())?
-            };
-            result
-                .context(error::SubmitBatchSnafu)
-                .map(|()| (total_rows as u64, prepared))
+        let completion = async move {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["submit_wait_flush_result"])
+                .start_timer();
+            response_rx.await.unwrap_or_else(|_| {
+                WriteProgress::failed(BoxedError::new(error::BatcherChannelClosedSnafu.build()))
+            })
+        };
+        let mut output = Output::new_with_affected_rows(total_rows);
+        if self.pending_rows_batch_sync && !confirmed {
+            completion
+                .await
+                .into_result()
+                .context(error::ExecuteGrpcQuerySnafu)?;
         } else {
             if let Some(progress) = progress {
                 progress.mark_accepted();
             }
-            Ok((total_rows as u64, prepared))
+            output
+                .meta
+                .write_completions
+                .push(WriteCompletion::with_progress(completion));
         }
+        Ok((output, prepared))
     }
 }
 
@@ -430,16 +468,229 @@ impl Drop for LogicalTablePendingRowsBatcher {
 
 #[cfg(test)]
 mod tests {
+    use std::future::ready;
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use api::v1::value::ValueData;
+    use api::v1::{
+        ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+        Value,
+    };
     use arrow::array::{StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
+    use catalog::memory::MemoryCatalogManager;
+    use common_error::ext::{BoxedError, ErrorExt};
+    use common_error::status_code::StatusCode;
+    use common_meta::test_util::MockDatanodeManager;
+    use common_query::WriteProgress;
     use common_query::prelude::greptime_timestamp;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
+    use operator::test_util::{create_partition_rule_manager, prepare_mocked_backend};
+    use operator::write_dispatcher::WriteDispatcher;
+    use session::context::{QueryContext, QueryContextRef};
+    use table::dist_table::DistTable;
+    use table::test_util::table_info::test_table_info;
 
     use crate::batcher::logical_table::batch_convert::{RecordBatchWithTsIdx, TableBatch};
     use crate::batcher::logical_table::flow_notifier::extract_timestamps;
+    use crate::batcher::logical_table::pending_worker::WorkerCommand;
     use crate::batcher::logical_table::test_util::{mock_aligned_tag_batch, mock_tag_batch};
+    use crate::batcher::logical_table::{
+        LogicalTablePendingRowsBatcher, PendingRowsSchemaAlterer, batch_key_from_ctx,
+    };
+    use crate::batcher::test_util::mock_table_flownode_cache;
+    use crate::error;
+
+    struct UnexpectedSchemaAlterer;
+
+    #[async_trait::async_trait]
+    impl PendingRowsSchemaAlterer for UnexpectedSchemaAlterer {
+        async fn create_tables_if_missing_batch(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(&str, &[ColumnSchema])],
+            _: bool,
+            _: QueryContextRef,
+        ) -> error::Result<()> {
+            unreachable!()
+        }
+
+        async fn add_missing_prom_tag_columns_batch(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(&str, &[String])],
+            _: QueryContextRef,
+        ) -> error::Result<()> {
+            unreachable!()
+        }
+    }
+
+    async fn submission_batcher(sync: bool) -> Arc<LogicalTablePendingRowsBatcher> {
+        let schema = DtSchema::try_new(vec![
+            DtColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            DtColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ])
+        .unwrap();
+        let table = test_table_info(1, "cpu", "public", "greptime", Arc::new(schema));
+        let catalog = MemoryCatalogManager::new_with_table(DistTable::table(Arc::new(table)));
+        let partitions = create_partition_rule_manager(prepare_mocked_backend().await).await;
+        let nodes = Arc::new(MockDatanodeManager::new(()));
+        let dispatcher = Arc::new(WriteDispatcher::new(nodes.clone(), partitions.clone()));
+        let mut batcher = LogicalTablePendingRowsBatcher::try_new(
+            partitions,
+            nodes,
+            dispatcher,
+            catalog,
+            mock_table_flownode_cache(1, vec![]).await,
+            true,
+            Arc::new(UnexpectedSchemaAlterer),
+            Duration::from_secs(1),
+            2,
+            1,
+            1,
+            1,
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap();
+        Arc::get_mut(&mut batcher).unwrap().pending_rows_batch_sync = sync;
+        batcher
+    }
+
+    fn submission_requests() -> RowInsertRequests {
+        RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "cpu".to_string(),
+                rows: Some(Rows {
+                    schema: vec![ColumnSchema {
+                        column_name: "ts".to_string(),
+                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        semantic_type: SemanticType::Timestamp as i32,
+                        ..Default::default()
+                    }],
+                    rows: [1000, 2000]
+                        .into_iter()
+                        .map(|ts| Row {
+                            values: vec![Value {
+                                value_data: Some(ValueData::TimestampMillisecondValue(ts)),
+                            }],
+                        })
+                        .collect(),
+                }),
+            }],
+        }
+    }
+
+    fn flush_progress(affected_rows: usize) -> WriteProgress {
+        WriteProgress {
+            affected_rows,
+            error: (affected_rows < 2).then(|| {
+                Arc::new(BoxedError::new(
+                    error::InvalidQuerySnafu {
+                        reason: "storage write failed",
+                    }
+                    .build(),
+                ))
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_with_preserves_sync_acknowledgement() {
+        for confirmed in [false, true] {
+            for sync in [false, true] {
+                for affected_rows in [0, 1, 2] {
+                    let batcher = submission_batcher(sync).await;
+                    let ctx = QueryContext::arc();
+                    let ctx = if confirmed {
+                        Arc::new(ctx.with_confirmed_writes())
+                    } else {
+                        ctx
+                    };
+                    let (_, receiver) = batcher
+                        .workers
+                        .get_or_create(batch_key_from_ctx(&ctx), 1)
+                        .await;
+                    let mut receiver = receiver.unwrap();
+                    let submit = batcher.submit_with(submission_requests(), ctx, |_| ready(Ok(7)));
+                    tokio::pin!(submit);
+                    let mut early_result = None;
+                    // Poll submission first to detect early acknowledgement without timing assumptions.
+                    let command = tokio::select! {
+                        biased;
+                        result = &mut submit => {
+                            assert!(result.is_ok(), "{result:?}");
+                            early_result = Some(result);
+                            receiver.try_recv().unwrap()
+                        }
+                        command = receiver.recv() => command.unwrap(),
+                    };
+                    assert_eq!(early_result.is_none(), sync);
+                    let WorkerCommand::Submit { response_tx, .. } = command else {
+                        panic!("expected submission")
+                    };
+                    assert_eq!(
+                        response_tx.send(flush_progress(affected_rows)).is_ok(),
+                        sync
+                    );
+                    let result = match early_result {
+                        Some(result) => result,
+                        None => submit.await,
+                    };
+                    if sync && affected_rows < 2 {
+                        assert_eq!(
+                            result.unwrap_err().status_code(),
+                            StatusCode::InvalidArguments
+                        );
+                    } else {
+                        assert_eq!(result.unwrap(), (2, 7));
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_output_with_preserves_confirmed_partial_progress() {
+        for sync in [false, true] {
+            let batcher = submission_batcher(sync).await;
+            let ctx = Arc::new(QueryContext::arc().with_confirmed_writes());
+            let (_, receiver) = batcher
+                .workers
+                .get_or_create(batch_key_from_ctx(&ctx), 1)
+                .await;
+            let mut receiver = receiver.unwrap();
+            let (output, prepared) = batcher
+                .submit_output_with(submission_requests(), ctx, |_| ready(Ok(7)))
+                .await
+                .unwrap();
+            assert_eq!(prepared, 7);
+            assert_eq!(output.meta.write_completions.len(), 1);
+            let WorkerCommand::Submit { response_tx, .. } = receiver.try_recv().unwrap() else {
+                panic!("expected submission")
+            };
+            let progress = output.write_progress();
+            tokio::pin!(progress);
+            assert!(futures::poll!(progress.as_mut()).is_pending());
+            response_tx.send(flush_progress(1)).unwrap();
+            let progress = progress.await;
+            assert_eq!(progress.affected_rows, 1);
+            assert_eq!(
+                progress.error.unwrap().status_code(),
+                StatusCode::InvalidArguments
+            );
+        }
+    }
 
     #[test]
     fn test_extract_timestamps_appends_non_null_batches_in_order() {

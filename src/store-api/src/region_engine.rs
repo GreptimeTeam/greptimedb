@@ -600,6 +600,12 @@ pub struct RegionStatistic {
     #[serde(default)]
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
+    /// Total Parquet bytes committed by flushes since the region opened.
+    ///
+    /// Includes staging flushes, but excludes index files, compaction and imported SSTs.
+    /// Resets when the region instance is recreated; manifest replay does not increment it.
+    #[serde(default)]
+    pub flushed_parquet_bytes: u64,
     /// The total query CPU time of the region since region opened.
     ///
     /// Unit: nanoseconds.
@@ -774,6 +780,48 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn region_statistic_flush_bytes_compatibility() {
+        let legacy_bytes = br#"{
+            "num_rows": 1,
+            "memtable_size": 2,
+            "wal_size": 3,
+            "manifest_size": 4,
+            "sst_size": 5,
+            "sst_num": 6,
+            "index_size": 7,
+            "manifest": {
+                "Mito": {
+                    "manifest_version": 8,
+                    "flushed_entry_id": 9,
+                    "file_removed_cnt": 10
+                }
+            },
+            "written_bytes": 11
+        }"#;
+        let mut statistic = RegionStatistic::deserialize_from_slice(legacy_bytes).unwrap();
+        assert_eq!(statistic.flushed_parquet_bytes, 0);
+        statistic.flushed_parquet_bytes = 1234;
+        let encoded = statistic.serialize_to_vec().unwrap();
+        let decoded = RegionStatistic::deserialize_from_slice(&encoded).unwrap();
+        assert_eq!(decoded.flushed_parquet_bytes, 1234);
+        let legacy: serde_json::Value = serde_json::from_slice(legacy_bytes).unwrap();
+        let mut current: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        for (key, value) in legacy.as_object().unwrap() {
+            assert_eq!(&current[key], value);
+        }
+        current
+            .as_object_mut()
+            .unwrap()
+            .remove("flushed_parquet_bytes");
+        assert_eq!(
+            serde_json::from_value::<RegionStatistic>(current)
+                .unwrap()
+                .flushed_parquet_bytes,
+            0
+        );
+    }
 
     #[test]
     fn region_statistic_deserializes_without_query_stats() {

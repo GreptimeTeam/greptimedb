@@ -869,7 +869,7 @@ pub async fn delete_files(
     access_layer: &AccessLayerRef,
     cache_manager: &Option<CacheManagerRef>,
 ) -> crate::error::Result<()> {
-    // Remove meta of the file from cache.
+    // Remove cached metadata for these immutable files.
     if let Some(cache) = &cache_manager {
         for (file_id, _) in file_ids {
             cache.invalidate_range_results(*file_id);

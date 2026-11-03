@@ -102,6 +102,11 @@ pub struct RegionStat {
     pub region_manifest: RegionManifestInfo,
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
+    /// Total Parquet bytes committed by flushes since the region opened.
+    ///
+    /// Excludes index files, compaction and imported SSTs. Resets on region reopen.
+    #[serde(default)]
+    pub flushed_parquet_bytes: u64,
     /// The total query CPU time of the region since region opened.
     ///
     /// Unit: nanoseconds.
@@ -333,6 +338,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             index_size: region_stat.index_size,
             region_manifest: region_stat.manifest.into(),
             written_bytes: region_stat.written_bytes,
+            flushed_parquet_bytes: region_stat.flushed_parquet_bytes,
             query_cpu_time: region_stat.query_cpu_time,
             query_scanned_bytes: region_stat.query_scanned_bytes,
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
@@ -576,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stat_val_deserializes_without_query_stats() {
+    fn test_stat_val_deserializes_without_optional_counters() {
         let stat = Stat {
             region_stats: vec![RegionStat {
                 id: RegionId::new(1024, 1),
@@ -597,6 +603,7 @@ mod tests {
                     file_removed_cnt: 0,
                 },
                 written_bytes: 0,
+                flushed_parquet_bytes: 4096,
                 query_cpu_time: 10,
                 query_scanned_bytes: 20,
                 data_topic_latest_entry_id: 0,
@@ -609,12 +616,14 @@ mod tests {
         let stat_val = DatanodeStatValue { stats: vec![stat] };
         let mut value = serde_json::to_value(stat_val).unwrap();
         let region_stat = value[0]["region_stats"][0].as_object_mut().unwrap();
+        region_stat.remove("flushed_parquet_bytes");
         region_stat.remove("query_cpu_time");
         region_stat.remove("query_scanned_bytes");
 
         let stat_val: DatanodeStatValue = serde_json::from_value(value).unwrap();
         let region_stat = &stat_val.stats[0].region_stats[0];
 
+        assert_eq!(region_stat.flushed_parquet_bytes, 0);
         assert_eq!(region_stat.query_cpu_time, 0);
         assert_eq!(region_stat.query_scanned_bytes, 0);
     }
@@ -701,6 +710,51 @@ mod tests {
 
         assert_eq!(stat.region_stats.len(), 1);
         assert_eq!(stat.region_stats[0].role, RegionRole::StagingLeader);
+    }
+
+    #[test]
+    fn test_flushed_parquet_bytes_from_heartbeat() {
+        for bytes in [0, 4096, u64::MAX] {
+            let statistic = RegionStatistic {
+                flushed_parquet_bytes: bytes,
+                ..Default::default()
+            };
+            let mut region = api::v1::meta::RegionStat::default();
+            region.extensions.insert(
+                REGION_STATISTIC_KEY.to_string(),
+                serde_json::to_vec(&statistic).unwrap(),
+            );
+            let request = HeartbeatRequest {
+                header: Some(RequestHeader::default()),
+                peer: Some(api::v1::meta::Peer {
+                    id: 1,
+                    addr: "127.0.0.1:3001".to_string(),
+                }),
+                region_stats: vec![region.clone()],
+                ..Default::default()
+            };
+            let stat = Stat::try_from(&request).unwrap();
+            let stat = &stat.region_stats[0];
+            assert_eq!(stat.flushed_parquet_bytes, bytes);
+            let encoded = serde_json::to_vec(stat).unwrap();
+            let decoded: RegionStat = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(&decoded, stat);
+
+            let mut legacy = serde_json::to_value(&statistic).unwrap();
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("flushed_parquet_bytes");
+            region.extensions.insert(
+                REGION_STATISTIC_KEY.to_string(),
+                serde_json::to_vec(&legacy).unwrap(),
+            );
+            assert_eq!(RegionStat::from(&region).flushed_parquet_bytes, 0);
+        }
+        assert_eq!(
+            RegionStat::from(&api::v1::meta::RegionStat::default()).flushed_parquet_bytes,
+            0
+        );
     }
 
     #[test]
