@@ -514,6 +514,75 @@ impl Instance {
 
 #[async_trait]
 impl PromStoreProtocolHandler for Instance {
+    async fn prepare_metric_write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<operator::insert::PreparedMetricInserts> {
+        let physical_table = ctx
+            .extension(PHYSICAL_TABLE_PARAM)
+            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+            .to_string();
+        self.inserter
+            .prepare_metric_row_inserts(request, ctx, &self.statement_executor, physical_table)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)
+    }
+
+    async fn write_prepared_metric(
+        &self,
+        request: operator::insert::PreparedMetricInserts,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Output> {
+        self.inserter
+            .handle_prepared_metric_inserts(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)
+    }
+
+    async fn check_exemplar_sources(
+        &self,
+        sources: &std::collections::BTreeSet<String>,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        let targets = sources
+            .iter()
+            .map(|name| {
+                PermissionTableTarget::new(ctx.current_catalog(), ctx.current_schema(), name)
+            })
+            .collect();
+        self.check_table_permission(
+            &ctx,
+            PermissionReq::Action(PROM_STORE_WRITE),
+            PermissionTableTargets::resolved(targets),
+        )
+        .context(AuthSnafu)?;
+        Ok(())
+    }
+
+    async fn write_exemplars_prepared(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Output> {
+        self.write_exemplars_with_sources(request, ctx, &[]).await
+    }
+
+    async fn write_exemplars_with_sources(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        sources: &[table::metadata::TableInfoRef],
+    ) -> ServerResult<Output> {
+        self.inserter
+            .handle_exemplar_inserts(request, ctx, &self.statement_executor, sources)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)
+    }
+
     async fn pre_write(
         &self,
         request: &RowInsertRequests,

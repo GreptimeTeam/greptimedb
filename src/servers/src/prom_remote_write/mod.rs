@@ -27,10 +27,11 @@ pub(crate) mod v2;
 pub mod validation;
 
 use bytes::Bytes;
+use common_error::ext::BoxedError;
 use common_memory_manager::MemoryGuard;
 use lazy_static::lazy_static;
 use object_pool::Pool;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 
 use crate::error;
 use crate::prom_remote_write::decode::{PromSeriesProcessor, PromWriteRequest};
@@ -136,4 +137,15 @@ pub async fn decode_remote_write_request(
         .context(error::DecodePromRemoteRequestSnafu)?;
     let tables = std::mem::take(&mut request.table_data);
     Ok((tables, guards))
+}
+
+/// Maps memory wait timeouts to 5xx responses so Remote Write senders retry.
+pub(crate) fn map_memory_acquire_timeout(error: error::Error) -> error::Error {
+    match error {
+        error::Error::MemoryLimitExceeded {
+            source: source @ common_memory_manager::Error::MemoryAcquireTimeout { .. },
+            ..
+        } => error::OtherSnafu.into_error(BoxedError::new(source)),
+        error => error,
+    }
 }
