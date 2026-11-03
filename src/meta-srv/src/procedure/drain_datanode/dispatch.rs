@@ -21,6 +21,7 @@ use common_procedure::{
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
+use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
 use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
@@ -122,6 +123,30 @@ impl Dispatch {
         }
     }
 
+    /// Rechecks ownership before recording a failed batch build.
+    async fn collect_failed_regions(
+        &self,
+        ctx: &mut Context,
+        region_ids: &[RegionId],
+    ) -> Result<Vec<RegionId>> {
+        let mut failed = Vec::new();
+        for &region_id in region_ids {
+            if ctx.region_migration_manager.tracker().contains(region_id) {
+                continue;
+            }
+            if utils::leads_region(
+                &ctx.table_metadata_manager,
+                ctx.persistent_ctx.node_id,
+                region_id,
+            )
+            .await?
+            {
+                failed.push(region_id);
+            }
+        }
+        Ok(failed)
+    }
+
     /// Builds detached children from batches already selected by the cursor.
     async fn dispatch_migrations(
         &mut self,
@@ -132,6 +157,7 @@ impl Dispatch {
         let mut children = Vec::new();
         let mut inflight = Vec::new();
         let mut targets = Vec::new();
+        let mut failures = Vec::new();
         // Keep the prepared batches until construction succeeds, so retries do not
         // consume work from the metadata cursor twice.
         for task in self.batches.clone() {
@@ -154,7 +180,10 @@ impl Dispatch {
                             failed_regions: result.peer_conflict.clone(),
                         }
                         .build();
-                        ctx.handle_migration_error(err, &result.peer_conflict)?;
+                        if ctx.persistent_ctx.strategy == DrainDatanodeStrategy::FailFast {
+                            return Err(err);
+                        }
+                        failures.push((err, result.peer_conflict));
                     }
                     if !result.table_not_found.is_empty() {
                         warn!(
@@ -171,8 +200,20 @@ impl Dispatch {
                         children.push(child);
                     }
                 }
-                Err(e) => ctx.handle_migration_error(e, &region_ids)?,
+                Err(e) => {
+                    if ctx.persistent_ctx.strategy == DrainDatanodeStrategy::FailFast {
+                        return Err(e);
+                    }
+                    let failed = self.collect_failed_regions(ctx, &region_ids).await?;
+                    if !failed.is_empty() {
+                        failures.push((e, failed));
+                    }
+                }
             }
+        }
+        // Reconciliation can fail; publish failures only after every batch is checked.
+        for (error, regions) in failures {
+            ctx.handle_migration_error(error, &regions)?;
         }
         self.batches.clear();
         self.inflight_subprocedures = inflight;
@@ -535,6 +576,226 @@ mod tests {
         drop(subprocedures);
         assert!(!tracker.contains(first));
         assert!(!tracker.contains(second));
+    }
+
+    #[tokio::test]
+    async fn test_build_failure_reconciles_each_region() {
+        use crate::procedure::region_migration::manager::RegionMigrationProcedureTask;
+
+        for strategy in [
+            DrainDatanodeStrategy::FailFast,
+            DrainDatanodeStrategy::TryAll,
+        ] {
+            for include_pending in [false, true] {
+                let env = TestEnv::new().await;
+                let pending = RegionId::new(1024, 1);
+                let moved = RegionId::new(1024, 2);
+                let running = RegionId::new(1024, 3);
+                let removed = RegionId::new(2048, 1);
+                env.create_table(vec![
+                    leader_region(pending, 1),
+                    leader_region(moved, 2),
+                    leader_region(running, 1),
+                ])
+                .await;
+                let backend = MockKvBackendBuilder::default()
+                    .batch_get_fn(Arc::new(|_| {
+                        common_meta::error::ElectionNoLeaderSnafu.fail()
+                    }))
+                    .build()
+                    .unwrap();
+                let factory =
+                    env.env
+                        .context_factory_with_metadata(Arc::new(TableMetadataManager::new(
+                            Arc::new(backend),
+                        )));
+                let manager = Arc::new(RegionMigrationManager::new(
+                    env.procedure_manager().clone(),
+                    factory,
+                ));
+                let guard = manager
+                    .tracker()
+                    .insert_running_procedure(&RegionMigrationProcedureTask::new(
+                        running,
+                        Peer::empty(1),
+                        Peer::empty(2),
+                        Duration::from_secs(10),
+                        RegionMigrationTriggerReason::Manual,
+                    ))
+                    .unwrap();
+                let mut regions = vec![moved, removed, running];
+                if include_pending {
+                    regions.push(pending);
+                }
+                let mut dispatch = Dispatch::new(vec![RegionMigrationTaskBatch {
+                    region_ids: regions,
+                    from_peer: Peer::empty(1),
+                    to_peer: Peer::empty(2),
+                    timeout: Duration::from_secs(10),
+                    trigger_reason: RegionMigrationTriggerReason::Manual,
+                }]);
+                let mut ctx = env.context(new_persistent_context(Some(2), strategy));
+                ctx.region_migration_manager = manager.clone();
+                let result = dispatch
+                    .next(&mut ctx, &TestingEnv::procedure_context())
+                    .await;
+                if strategy == DrainDatanodeStrategy::FailFast {
+                    assert!(matches!(
+                        result.unwrap_err(),
+                        error::Error::TableMetadataManager { .. }
+                    ));
+                    assert_eq!(1, dispatch.batches.len());
+                    assert!(ctx.volatile_ctx.failed_regions.is_empty());
+                } else {
+                    let (next, status) = result.unwrap();
+                    assert!(next.as_any().is::<DrainDatanodeCursor>());
+                    assert!(matches!(status, Status::Executing { .. }));
+                    assert!(dispatch.batches.is_empty());
+                    assert_eq!(
+                        if include_pending {
+                            vec![pending]
+                        } else {
+                            vec![]
+                        },
+                        ctx.volatile_ctx.failed_regions
+                    );
+                }
+                assert_eq!(0, ctx.volatile_ctx.migrated);
+                assert!(!manager.tracker().contains(pending));
+                assert!(!manager.tracker().contains(moved));
+                assert!(!manager.tracker().contains(removed));
+                assert!(manager.tracker().contains(running));
+                drop(guard);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_reconciliation_retry_preserves_batches_and_failures() {
+        use common_meta::key::table_info::TableInfoKey;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let env = TestEnv::new().await;
+        let ready = RegionId::new(1024, 1);
+        let failed = RegionId::new(2048, 1);
+        let checked = RegionId::new(4096, 1);
+        let unread = RegionId::new(4096, 2);
+        for regions in [vec![ready], vec![failed], vec![checked, unread]] {
+            env.env
+                .create_physical_table_metadata(
+                    common_meta::key::test_utils::new_test_table_info(regions[0].table_id()),
+                    regions.into_iter().map(|id| leader_region(id, 1)).collect(),
+                )
+                .await;
+        }
+        let snapshot = env
+            .table_metadata_manager
+            .kv_backend()
+            .batch_get(BatchGetRequest {
+                keys: vec![
+                    TableRouteKey::new(1024).to_bytes(),
+                    TableInfoKey::new(1024).to_bytes(),
+                ],
+            })
+            .await
+            .unwrap();
+        assert_eq!(2, snapshot.kvs.len());
+        let backend = MockKvBackendBuilder::default()
+            .batch_get_fn(Arc::new(move |request| {
+                if [2048, 4096]
+                    .iter()
+                    .any(|id| request.keys.contains(&TableRouteKey::new(*id).to_bytes()))
+                {
+                    return common_meta::error::ElectionNoLeaderSnafu.fail();
+                }
+                Ok(BatchGetResponse {
+                    kvs: snapshot
+                        .kvs
+                        .iter()
+                        .filter(|kv| request.keys.contains(&kv.key))
+                        .cloned()
+                        .collect(),
+                })
+            }))
+            .build()
+            .unwrap();
+        let factory = env
+            .env
+            .context_factory_with_metadata(Arc::new(TableMetadataManager::new(Arc::new(backend))));
+        let manager = Arc::new(RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            factory,
+        ));
+        let mut ctx = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::TryAll,
+        ));
+        ctx.region_migration_manager = manager.clone();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reads_moved = reads.clone();
+        let backend = env.table_metadata_manager.kv_backend().clone();
+        let route_key = TableRouteKey::new(4096).to_bytes();
+        ctx.table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(
+            MockKvBackendBuilder::default()
+                .batch_get_fn(Arc::new(|_| Ok(BatchGetResponse { kvs: vec![] })))
+                .range_async_fn(Arc::new(move |request| {
+                    let fail = request.key == route_key
+                        && reads_moved.fetch_add(1, Ordering::Relaxed) == 1;
+                    let backend = backend.clone();
+                    Box::pin(async move {
+                        if fail {
+                            return common_meta::error::ElectionNoLeaderSnafu.fail();
+                        }
+                        backend.range(request).await
+                    })
+                }))
+                .build()
+                .unwrap(),
+        )));
+        let mut dispatch = Dispatch::new(
+            [vec![ready], vec![failed], vec![checked, unread]]
+                .into_iter()
+                .map(|region_ids| RegionMigrationTaskBatch {
+                    region_ids,
+                    from_peer: Peer::empty(1),
+                    to_peer: Peer::empty(2),
+                    timeout: Duration::from_secs(10),
+                    trigger_reason: RegionMigrationTriggerReason::Manual,
+                })
+                .collect(),
+        );
+        let procedure_ctx = TestingEnv::procedure_context();
+        let error = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap_err();
+        assert!(error.is_retryable());
+        assert_eq!(2, reads.load(Ordering::Relaxed));
+        assert_eq!(3, dispatch.batches.len());
+        assert!(dispatch.inflight_subprocedures.is_empty());
+        assert!(ctx.volatile_ctx.failed_regions.is_empty());
+        assert_eq!(0, ctx.volatile_ctx.migrated);
+        for region in [ready, failed, checked, unread] {
+            assert!(!manager.tracker().contains(region));
+        }
+
+        ctx.table_metadata_manager = env.table_metadata_manager.clone();
+        let (_, status) = dispatch.next(&mut ctx, &procedure_ctx).await.unwrap();
+        let Status::Suspended {
+            subprocedures,
+            recovery,
+            ..
+        } = status
+        else {
+            panic!("expected the ready batch to be submitted");
+        };
+        assert_eq!(SubprocedureRecovery::Detach, recovery);
+        assert_eq!(1, subprocedures.len());
+        assert!(dispatch.batches.is_empty());
+        assert_eq!(
+            vec![failed, checked, unread],
+            ctx.volatile_ctx.failed_regions
+        );
+        assert!(manager.tracker().contains(ready));
+        drop(subprocedures);
+        assert!(!manager.tracker().contains(ready));
     }
 
     #[tokio::test]

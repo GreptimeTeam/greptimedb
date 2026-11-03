@@ -83,8 +83,6 @@ impl DrainDatanodeCursor {
         };
         let mut next = scan
             .next_group(
-                &ctx.table_metadata_manager,
-                ctx.persistent_ctx.node_id,
                 |region_id| {
                     ctx.volatile_ctx.failed_regions.contains(&region_id)
                         || ctx.region_migration_manager.tracker().contains(region_id)
@@ -101,7 +99,7 @@ impl DrainDatanodeCursor {
                     .any(|batch| batch.region_ids.contains(region))
             });
         }
-        ctx.volatile_ctx.follower_count = scan.follower_count;
+        ctx.volatile_ctx.follower_count = scan.follower_count();
         ctx.volatile_ctx.scan = Some(scan);
         Ok(next)
     }
@@ -165,6 +163,8 @@ impl DrainDatanodeCursor {
                     region_ids: tasks.iter().map(|task| task.region_id).collect(),
                     from_peer: first.from_peer.clone(),
                     to_peer: first.to_peer.clone(),
+                    // Downgrade and catchup share this batch budget; downgrade requests run
+                    // concurrently rather than receiving a separate budget per region.
                     timeout: first.timeout,
                     trigger_reason: first.trigger_reason,
                 }
@@ -240,7 +240,7 @@ impl State for DrainDatanodeCursor {
                 .volatile_ctx
                 .scan
                 .take()
-                .is_some_and(|scan| scan.produced_group);
+                .is_some_and(|scan| scan.has_produced_group());
             if produced_group {
                 // Confirm completion after all work from this scan has settled.
                 continue;
@@ -287,6 +287,7 @@ mod tests {
         TestEnv, create_kafka_table, leader_region, new_persistent_context,
     };
     use crate::procedure::drain_datanode::{DrainDatanodeStrategy, MAX_RESCAN_ROUNDS, State};
+    use crate::procedure::region_migration::DEFAULT_REGION_MIGRATION_TIMEOUT;
     use crate::procedure::region_migration::manager::{
         RegionMigrationProcedureTask, RegionMigrationTriggerReason,
     };
@@ -488,7 +489,7 @@ mod tests {
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
 
-        // The plan of the procedure is stale: a region still on the datanode is not listed.
+        // A fresh scan discovers regions still led by the source.
         let mut ctx = env.context(new_persistent_context(
             None,
             DrainDatanodeStrategy::FailFast,
@@ -771,6 +772,11 @@ mod tests {
                     .sum::<usize>()
             );
             assert_eq!(if kafka { 1 } else { 3 }, batches.len());
+            assert!(
+                batches
+                    .iter()
+                    .all(|batch| batch.timeout == DEFAULT_REGION_MIGRATION_TIMEOUT)
+            );
             for region in batches.iter().flat_map(|batch| &batch.region_ids) {
                 assert!(!env.region_migration_manager.tracker().contains(*region));
             }

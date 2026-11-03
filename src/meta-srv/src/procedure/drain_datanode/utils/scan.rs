@@ -29,16 +29,26 @@ use crate::error::{self, Result};
 use crate::procedure::drain_datanode::utils::batch_aggregator::BatchAggregator;
 
 /// A paused scan owns at most a metadata page, one table's routes/WAL options,
-/// and the bounded topic accumulator. It never materializes the node's full plan.
+/// and the bounded topic accumulator. It never collects all of the node's regions.
 pub(crate) struct RegionScan {
+    /// Metadata source used for both table enumeration and authoritative route reads.
+    metadata: TableMetadataManagerRef,
+    /// Datanode whose leaders and followers are being scanned.
+    node_id: DatanodeId,
+    /// Remaining datanode table entries, fetched page by page.
     tables: BoxStream<'static, common_meta::error::Result<DatanodeTableValue>>,
+    /// WAL options and unconsumed routes of the current table.
     current_table: Option<(DatanodeTableValue, std::vec::IntoIter<RegionRoute>)>,
+    /// Partial groups waiting for more regions sharing their WAL topic.
     batches: BatchAggregator<String, RegionId>,
+    /// Emitted group remainder retained across calls with smaller region budgets.
     remaining_group: Vec<RegionId>,
+    /// Whether all table entries have been consumed; buffered groups may remain.
     exhausted: bool,
-    /// Whether this scan has emitted any region group.
-    pub(crate) produced_group: bool,
-    pub(crate) follower_count: usize,
+    /// Whether this scan has returned any region group.
+    produced_group: bool,
+    /// Number of source-node followers encountered in this scan.
+    follower_count: usize,
 }
 
 impl fmt::Debug for RegionScan {
@@ -59,6 +69,8 @@ impl RegionScan {
         buffer_limit: usize,
     ) -> Self {
         Self {
+            metadata: metadata.clone(),
+            node_id,
             tables: metadata.datanode_table_manager().tables(node_id),
             current_table: None,
             batches: BatchAggregator::new(batch_size, buffer_limit),
@@ -69,14 +81,22 @@ impl RegionScan {
         }
     }
 
+    /// Returns whether this scan has emitted any group, including previous calls.
+    pub(crate) fn has_produced_group(&self) -> bool {
+        self.produced_group
+    }
+
+    /// Returns the number of source-node followers encountered so far.
+    pub(crate) fn follower_count(&self) -> usize {
+        self.follower_count
+    }
+
     /// Returns at most `max_regions` regions that can share a migration procedure.
     /// Applies `should_skip` to source leaders before buffering them.
     /// Retains the rest of the group for the next call. A zero limit behaves as one.
     /// Returns `None` only after the metadata stream and buffered groups are exhausted.
     pub(crate) async fn next_group(
         &mut self,
-        metadata: &TableMetadataManagerRef,
-        node_id: DatanodeId,
         mut should_skip: impl FnMut(RegionId) -> bool,
         max_regions: usize,
     ) -> Result<Option<Vec<RegionId>>> {
@@ -86,7 +106,7 @@ impl RegionScan {
                 self.produced_group = true;
                 return Ok(Some(self.remaining_group.drain(..count).collect()));
             }
-            if let Some(regions) = self.scan_current_table(node_id, &mut should_skip) {
+            if let Some(regions) = self.scan_current_table(&mut should_skip) {
                 self.remaining_group = regions;
                 continue;
             }
@@ -100,22 +120,25 @@ impl RegionScan {
                 self.remaining_group = regions;
                 continue;
             }
-            self.read_next_table(metadata).await?;
+            self.read_next_table().await?;
         }
     }
 
     /// Scans the current table until a group is ready or all its routes are consumed.
     fn scan_current_table(
         &mut self,
-        node_id: DatanodeId,
         should_skip: &mut impl FnMut(RegionId) -> bool,
     ) -> Option<Vec<RegionId>> {
         let (value, routes) = self.current_table.as_mut()?;
         for route in routes.by_ref() {
-            if route.follower_peers.iter().any(|peer| peer.id == node_id) {
+            if route
+                .follower_peers
+                .iter()
+                .any(|peer| peer.id == self.node_id)
+            {
                 self.follower_count += 1;
             }
-            if route.leader_peer.as_ref().map(|peer| peer.id) != Some(node_id)
+            if route.leader_peer.as_ref().map(|peer| peer.id) != Some(self.node_id)
                 || should_skip(route.region.id)
             {
                 continue;
@@ -138,7 +161,7 @@ impl RegionScan {
     }
 
     /// Loads the next table's authoritative routes, skipping dropped and logical tables.
-    async fn read_next_table(&mut self, metadata: &TableMetadataManagerRef) -> Result<()> {
+    async fn read_next_table(&mut self) -> Result<()> {
         let Some(value) = self
             .tables
             .try_next()
@@ -148,7 +171,8 @@ impl RegionScan {
             self.exhausted = true;
             return Ok(());
         };
-        let route = metadata
+        let route = self
+            .metadata
             .table_route_manager()
             .table_route_storage()
             .get(value.table_id)
@@ -176,21 +200,13 @@ mod tests {
         create_kafka_table(&env, 1024, 9, 2).await;
         create_kafka_table(&env, 1025, 3, 2).await;
         let mut scan = RegionScan::new(&env.table_metadata_manager, 1, 2, 8);
-        let first = scan
-            .next_group(&env.table_metadata_manager, 1, |_| false, 2)
-            .await
-            .unwrap()
-            .unwrap();
+        let first = scan.next_group(|_| false, 2).await.unwrap().unwrap();
         assert_eq!(vec![RegionId::new(1024, 0), RegionId::new(1024, 2)], first);
         // The first child can be dispatched before even the first table is exhausted.
         assert_eq!(6, scan.current_table.as_ref().unwrap().1.len());
         assert!(!scan.exhausted);
         let mut seen = first;
-        while let Some(group) = scan
-            .next_group(&env.table_metadata_manager, 1, |_| false, 2)
-            .await
-            .unwrap()
-        {
+        while let Some(group) = scan.next_group(|_| false, 2).await.unwrap() {
             assert!(group.len() <= 2);
             let first = group[0];
             assert!(
@@ -218,15 +234,11 @@ mod tests {
 
         let mut scan = RegionScan::new(&env.table_metadata_manager, 1, 4, 16);
         let mut leaders = vec![];
-        while let Some(group) = scan
-            .next_group(&env.table_metadata_manager, 1, |_| false, 4)
-            .await
-            .unwrap()
-        {
+        while let Some(group) = scan.next_group(|_| false, 4).await.unwrap() {
             leaders.extend(group);
         }
         assert_eq!(vec![first], leaders);
-        assert_eq!(1, scan.follower_count);
+        assert_eq!(1, scan.follower_count());
     }
 
     #[tokio::test]
@@ -235,15 +247,11 @@ mod tests {
 
         let mut scan = RegionScan::new(&env.table_metadata_manager, 1, 4, 16);
         let mut leaders = vec![];
-        while let Some(group) = scan
-            .next_group(&env.table_metadata_manager, 1, |_| false, 4)
-            .await
-            .unwrap()
-        {
+        while let Some(group) = scan.next_group(|_| false, 4).await.unwrap() {
             leaders.extend(group);
         }
         assert!(leaders.is_empty());
-        assert_eq!(0, scan.follower_count);
+        assert_eq!(0, scan.follower_count());
     }
 
     #[tokio::test]
@@ -257,15 +265,11 @@ mod tests {
 
         let mut scan = RegionScan::new(&env.table_metadata_manager, 1, 4, 16);
         let mut leaders = vec![];
-        while let Some(group) = scan
-            .next_group(&env.table_metadata_manager, 1, |_| false, 4)
-            .await
-            .unwrap()
-        {
+        while let Some(group) = scan.next_group(|_| false, 4).await.unwrap() {
             leaders.extend(group);
         }
         assert!(leaders.is_empty());
-        assert_eq!(1, scan.follower_count);
+        assert_eq!(1, scan.follower_count());
     }
     #[tokio::test]
     async fn test_scan_retains_group_remainder_across_budgets() {
@@ -273,11 +277,7 @@ mod tests {
         create_kafka_table(&env, 1024, 4, 1).await;
         let mut scan = RegionScan::new(&env.table_metadata_manager, 1, 4, 16);
         for (limit, expected) in [(1, vec![0]), (2, vec![1, 2]), (1, vec![3])] {
-            let group = scan
-                .next_group(&env.table_metadata_manager, 1, |_| false, limit)
-                .await
-                .unwrap()
-                .unwrap();
+            let group = scan.next_group(|_| false, limit).await.unwrap().unwrap();
             assert_eq!(
                 expected
                     .into_iter()
@@ -286,12 +286,7 @@ mod tests {
                 group
             );
         }
-        assert!(
-            scan.next_group(&env.table_metadata_manager, 1, |_| false, 4)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(scan.next_group(|_| false, 4).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -318,8 +313,6 @@ mod tests {
             let mut regions = Vec::new();
             while let Some(group) = scan
                 .next_group(
-                    &env.table_metadata_manager,
-                    1,
                     |region| {
                         checked.push(region);
                         skipped.contains(&region)
@@ -359,16 +352,9 @@ mod tests {
         for i in 0..3 {
             assert_eq!(
                 Some(vec![RegionId::new(1024, i)]),
-                scan.next_group(&env.table_metadata_manager, 1, |_| false, 4)
-                    .await
-                    .unwrap()
+                scan.next_group(|_| false, 4).await.unwrap()
             );
         }
-        assert!(
-            scan.next_group(&env.table_metadata_manager, 1, |_| false, 4)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(scan.next_group(|_| false, 4).await.unwrap().is_none());
     }
 }

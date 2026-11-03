@@ -45,8 +45,8 @@ impl State for DrainDatanodeStart {
         }
 
         // The only persisted status of the procedure: persisting it registers the procedure,
-        // so that a metasrv restart resumes it. The plan and the progress of a run stay in
-        // the volatile context, and a resumed procedure rebuilds the plan by rescanning the
+        // so that a metasrv restart resumes it. Scan state and progress stay in
+        // memory, and a resumed procedure starts a fresh scan of the
         // datanode.
         Ok((
             Box::new(DrainDatanodeCursor::default()),

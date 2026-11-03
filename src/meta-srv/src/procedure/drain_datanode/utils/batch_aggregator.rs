@@ -72,15 +72,11 @@ impl<K: Ord + Clone, V> BatchAggregator<K, V> {
 
     /// Groups a finite input without splitting groups or imposing a streaming buffer limit.
     pub(crate) fn group(items: impl IntoIterator<Item = (K, V)>) -> Vec<(K, Vec<V>)> {
-        let mut groups = Self::new(usize::MAX, usize::MAX);
-        let mut batches = Vec::new();
+        let mut groups: BTreeMap<K, Vec<V>> = BTreeMap::new();
         for (key, item) in items {
-            if let Some(batch) = groups.push(key, item) {
-                batches.push(batch);
-            }
+            groups.entry(key).or_default().push(item);
         }
-        batches.extend(std::iter::from_fn(|| groups.flush()));
-        batches
+        groups.into_iter().collect()
     }
 }
 

@@ -54,7 +54,8 @@ pub const DEFAULT_PARALLELISM: usize = 4;
 pub const MAX_PARALLELISM: usize = 32;
 /// The default budget of the whole drain.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-/// The maximum number of plan build attempts, including the first scan and failed reads.
+/// The maximum number of scan starts per run. The initial scan, each completion
+/// confirmation scan, and each restart after a read failure consume one attempt.
 pub const MAX_RESCAN_ROUNDS: u32 = 3;
 
 /// The strategy of a drain run when a region cannot be migrated.
@@ -70,8 +71,8 @@ pub enum DrainDatanodeStrategy {
 
 /// The persistent data of [`DrainDatanodeProcedure`].
 ///
-/// Only what cannot be derived from the cluster metadata is persisted: the plan and the
-/// progress of a run are rebuilt from the authoritative table routes after a restart.
+/// Only inputs that cannot be derived from cluster metadata are persisted. After a
+/// restart, a fresh scan discovers remaining migrations and progress counters restart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentContext {
     /// The datanode to drain.
@@ -97,8 +98,8 @@ pub struct SubprocedureMeta {
 
 /// The in-memory data of [`DrainDatanodeProcedure`].
 ///
-/// It is not persisted: a restart rebuilds the plan by rescanning the datanode, which is
-/// bounded by [`MAX_RESCAN_ROUNDS`], and re-dispatches the regions that are still led by
+/// It is not persisted: a restart begins a fresh scan. Scans are bounded by
+/// [`MAX_RESCAN_ROUNDS`] per run and rediscover regions that are still led by
 /// the drained datanode and have no running migration. Recovered migrations own their
 /// lifecycle and may finish after this drain procedure ends.
 #[derive(Debug, Default)]
@@ -149,8 +150,8 @@ pub struct Context {
 impl Context {
     /// Builds the context of a run.
     ///
-    /// The per-run state starts empty: the plan and the progress are rebuilt from the
-    /// table routes when the procedure needs them.
+    /// The per-run state starts empty. Scanning authoritative table routes discovers
+    /// the remaining work; progress is counted as migrations settle.
     pub(crate) fn new(
         table_metadata_manager: TableMetadataManagerRef,
         node_scheduling_manager: NodeSchedulingManagerRef,
@@ -339,6 +340,8 @@ impl Procedure for DrainDatanodeProcedure {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use crate::procedure::drain_datanode::cursor::DrainDatanodeCursor;
@@ -357,8 +360,6 @@ mod tests {
     use common_procedure::store::state_store::StateStore;
     use common_procedure::{Procedure, ProcedureId, ProcedureState, Status};
     use futures::TryStreamExt;
-    use std::collections::HashMap;
-    use std::sync::Arc;
     use store_api::storage::RegionId;
 
     use crate::error;
@@ -423,7 +424,7 @@ mod tests {
         assert_eq!(Some(2), ctx.target_node_id);
         assert_eq!(DEFAULT_PARALLELISM, ctx.parallelism);
         assert_eq!(DrainDatanodeStrategy::TryAll, ctx.strategy);
-        // The plan and the progress of a run are volatile, so they are not dumped.
+        // Scan state and progress are volatile, so they are not dumped.
         assert!(!json.contains("scan"));
         assert!(!json.contains("rescan_round"));
     }
@@ -1054,7 +1055,7 @@ mod tests {
         else {
             panic!("expected the dispatch state to suspend the procedure");
         };
-        // Recovery resumes children independently and rebuilds the parent's plan.
+        // Recovery resumes children independently and restarts the parent's scan.
         assert!(!persist);
         assert_eq!(common_procedure::SubprocedureRecovery::Detach, recovery);
         assert_eq!(1, subprocedures.len());
