@@ -4866,15 +4866,40 @@ async fn duplicate_evidence_allows_presence_at_disjoint_steps_across_partitions(
         vec![
             vec![
                 match_series("k", "right-a", GRID_START - 1, 1.0),
-                match_series("k", "right-b", GRID_START - 1, 2.0),
+                match_series("k", "right-b", GRID_START + GRID_STEP - 1, 2.0),
             ],
-            vec![match_series("k", "left", GRID_START + GRID_STEP, 3.0)],
+            vec![
+                match_series("k", "left-a", GRID_START, 3.0),
+                match_series("k", "left-b", GRID_START + GRID_STEP, 4.0),
+            ],
         ],
         0,
         GRID_STEP,
     );
-    let errors = partitioned_duplicate_verdict(exec).await;
+    let errors = partitioned_duplicate_verdict(Arc::clone(&exec)).await;
     assert!(errors.is_empty(), "{errors:?}");
+    let rows_exec = duplicate_evidence_partitioned_exec(
+        vec![
+            vec![
+                match_series("k", "right-a", GRID_START - 1, 1.0),
+                match_series("k", "right-b", GRID_START + GRID_STEP - 1, 2.0),
+            ],
+            vec![
+                match_series("k", "left-a", GRID_START, 3.0),
+                match_series("k", "left-b", GRID_START + GRID_STEP, 4.0),
+            ],
+        ],
+        0,
+        GRID_STEP,
+    );
+    let rows = collect(rows_exec, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        2,
+        binary_values(&rows).len(),
+        "both disjoint steps produce rows"
+    );
 }
 
 #[tokio::test]

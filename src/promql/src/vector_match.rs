@@ -817,7 +817,6 @@ fn binary_field(
                         evidence.node,
                         evidence.field,
                         point,
-                        0,
                         Arc::clone(group_key.get_or_insert_with(|| Arc::new(key.clone()))),
                         side,
                         timestamp_at(point),
@@ -1611,7 +1610,6 @@ struct DuplicateSlot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DuplicateCandidate {
     pub point: usize,
-    pub rank: u8,
     pub group: Arc<GroupKey>,
     /// `"left"` or `"right"`: the side that carried the duplicate.
     pub side: &'static str,
@@ -1802,14 +1800,12 @@ impl DuplicateEvidence {
         Ok(())
     }
 
-    /// Retains the lowest-ranked candidate for this point, independent of current presence.
-    #[allow(clippy::too_many_arguments)]
+    /// Retains the first candidate for this point; presence decides whether it is reportable.
     pub fn record_candidate(
         &self,
         node_index: usize,
         field: usize,
         point: usize,
-        rank: u8,
         group: Arc<GroupKey>,
         side: &'static str,
         timestamp: i64,
@@ -1821,42 +1817,25 @@ impl DuplicateEvidence {
                 "duplicate candidate is outside its binary grid".into(),
             ));
         }
-        let Some(existing) = slot.candidates.get(&point) else {
-            let entry_bytes = candidate_owned_bytes(&group)
-                .saturating_add(std::mem::size_of::<(usize, DuplicateCandidate)>());
-            self.reservation.lock().unwrap().try_grow(entry_bytes)?;
-            if let Err(error) = slot.candidates.try_reserve(1) {
-                self.reservation.lock().unwrap().shrink(entry_bytes);
-                return Err(DataFusionError::Execution(error.to_string()));
-            }
-            slot.candidates.insert(
-                point,
-                DuplicateCandidate {
-                    point,
-                    rank,
-                    group,
-                    side,
-                    timestamp,
-                },
-            );
+        if slot.candidates.contains_key(&point) {
             return Ok(());
-        };
-        if rank < existing.rank {
-            let old_bytes = candidate_owned_bytes(&existing.group);
-            let new_bytes = candidate_owned_bytes(&group);
-            self.reservation.lock().unwrap().try_grow(new_bytes)?;
-            self.reservation.lock().unwrap().shrink(old_bytes);
-            slot.candidates.insert(
-                point,
-                DuplicateCandidate {
-                    point,
-                    rank,
-                    group,
-                    side,
-                    timestamp,
-                },
-            );
         }
+        let entry_bytes = candidate_owned_bytes(&group)
+            .saturating_add(std::mem::size_of::<(usize, DuplicateCandidate)>());
+        self.reservation.lock().unwrap().try_grow(entry_bytes)?;
+        if let Err(error) = slot.candidates.try_reserve(1) {
+            self.reservation.lock().unwrap().shrink(entry_bytes);
+            return Err(DataFusionError::Execution(error.to_string()));
+        }
+        slot.candidates.insert(
+            point,
+            DuplicateCandidate {
+                point,
+                group,
+                side,
+                timestamp,
+            },
+        );
         Ok(())
     }
 }

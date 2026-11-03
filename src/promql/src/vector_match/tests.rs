@@ -3604,7 +3604,7 @@ fn duplicate_evidence_or_merges_presence_and_flips_gate() {
         .publish(0, 0, &[false, false], &[true, false], false)
         .unwrap();
     evidence
-        .record_candidate(0, 0, 0, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 0, Arc::new(vec![]), "left", 0)
         .unwrap();
     assert!(evidence.verdict().is_some());
 }
@@ -3624,7 +3624,7 @@ fn duplicate_evidence_slot_grows_to_its_binary_grid_and_rejects_disagreement() {
         )
         .unwrap();
     evidence
-        .record_candidate(0, 0, 4, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 4, Arc::new(vec![]), "left", 0)
         .unwrap();
     assert!(
         evidence
@@ -3654,7 +3654,7 @@ fn duplicate_evidence_last_exit_clears_slots_and_abort_releases_claims() {
         .publish(0, 0, &[true; 3], &[true; 3], false)
         .unwrap();
     evidence
-        .record_candidate(0, 0, 2, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 2, Arc::new(vec![]), "left", 0)
         .unwrap();
     assert!(pool.reserved() > 0);
     assert!(!evidence.complete());
@@ -3678,7 +3678,7 @@ fn duplicate_evidence_candidate_survives_false_gate_until_late_presence() {
     let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
     let evidence = super::DuplicateEvidence::new(&pool, 1);
     evidence
-        .record_candidate(0, 0, 0, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 0, Arc::new(vec![]), "left", 0)
         .unwrap();
     assert!(evidence.verdict().is_none());
     evidence.publish(0, 0, &[true], &[true], false).unwrap();
@@ -3694,10 +3694,10 @@ fn duplicate_evidence_skips_ineligible_earlier_point() {
         .publish(0, 0, &[false, true], &[false, true], false)
         .unwrap();
     evidence
-        .record_candidate(0, 0, 0, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 0, Arc::new(vec![]), "left", 0)
         .unwrap();
     evidence
-        .record_candidate(0, 0, 1, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 1, Arc::new(vec![]), "left", 0)
         .unwrap();
     assert_eq!(evidence.verdict().unwrap().point, 1);
     assert_eq!(evidence.verdict().unwrap().point, 1);
@@ -3710,11 +3710,11 @@ fn duplicate_evidence_separates_node_field_pairs() {
     let evidence = super::DuplicateEvidence::new(&pool, 1);
     evidence.publish(0, 0, &[true], &[true], false).unwrap();
     evidence
-        .record_candidate(0, 0, 0, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 0, Arc::new(vec![]), "left", 0)
         .unwrap();
     evidence.publish(0, 1, &[false], &[false], false).unwrap();
     evidence
-        .record_candidate(0, 1, 0, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 1, 0, Arc::new(vec![]), "left", 0)
         .unwrap();
     assert_eq!(evidence.verdict().unwrap().point, 0);
     assert!(evidence.verdict().unwrap().group.is_empty());
@@ -3731,7 +3731,6 @@ fn duplicate_evidence_charges_memory_and_reports_refusal() {
     assert_eq!(unlimited.reserved(), 2 * 2 * std::mem::size_of::<bool>());
     evidence
         .record_candidate(
-            0,
             0,
             0,
             0,
@@ -3758,7 +3757,7 @@ fn duplicate_evidence_completion_is_order_independent_and_aborts_failed_partitio
         let evidence = super::DuplicateEvidence::new(&pool, 2);
         let duplicate = || {
             evidence
-                .record_candidate(0, 0, 0, 0, Arc::new(vec![]), "left", 0)
+                .record_candidate(0, 0, 0, Arc::new(vec![]), "left", 0)
                 .unwrap()
         };
         let presence = || evidence.publish(0, 0, &[true], &[true], false).unwrap();
@@ -3789,10 +3788,10 @@ fn duplicate_evidence_filling_uses_published_gate_and_rejects_disagreement() {
         .publish(0, 0, &[true, false], &[false, true], true)
         .unwrap();
     filling
-        .record_candidate(0, 0, 0, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 0, Arc::new(vec![]), "left", 0)
         .unwrap();
     filling
-        .record_candidate(0, 0, 1, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 1, Arc::new(vec![]), "left", 0)
         .unwrap();
     assert_eq!(filling.verdict().unwrap().point, 0);
 
@@ -3801,10 +3800,10 @@ fn duplicate_evidence_filling_uses_published_gate_and_rejects_disagreement() {
         .publish(0, 0, &[true, false], &[false, true], false)
         .unwrap();
     non_filling
-        .record_candidate(0, 0, 0, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 0, Arc::new(vec![]), "left", 0)
         .unwrap();
     non_filling
-        .record_candidate(0, 0, 1, 0, Arc::new(vec![]), "left", 0)
+        .record_candidate(0, 0, 1, Arc::new(vec![]), "left", 0)
         .unwrap();
     assert_eq!(non_filling.verdict(), None);
 
