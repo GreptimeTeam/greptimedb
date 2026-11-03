@@ -526,7 +526,44 @@ async fn series_index_store_from_config(
     }
 
     let root = Path::new(data_home).join("series_index");
-    new_fs_cache_store(&root.to_string_lossy()).await.map(Some)
+    let store = new_fs_cache_store(&root.to_string_lossy()).await?;
+    initialize_series_index_cache(&store).await?;
+    Ok(Some(store))
+}
+
+/// Bump when the rebuildable local index layout becomes incompatible.
+const SERIES_INDEX_CACHE_VERSION: &str = "1";
+
+/// Resets incompatible caches before any worker or reader can use their catalogs.
+async fn initialize_series_index_cache(store: &ObjectStore) -> Result<()> {
+    let version = match store.read("version").await {
+        Ok(bytes) => Some(bytes.to_bytes()),
+        Err(error) if error.kind() == object_store::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context(crate::error::OpenDalSnafu),
+    };
+    if version.as_deref() == Some(SERIES_INDEX_CACHE_VERSION.as_bytes()) {
+        return Ok(());
+    }
+    common_telemetry::info!("Resetting series-index cache: missing or incompatible layout version");
+    // Preserve the cache root, which may be a mount point.
+    let entries = store.list("/").await.context(crate::error::OpenDalSnafu)?;
+    for entry in entries {
+        // Listings can include the directory itself.
+        if entry.path() == "/" {
+            continue;
+        }
+        store
+            .delete_with(entry.path())
+            .recursive(true)
+            .await
+            .context(crate::error::OpenDalSnafu)?;
+    }
+    store
+        .write("version", SERIES_INDEX_CACHE_VERSION)
+        .await
+        .context(crate::error::OpenDalSnafu)?;
+    common_telemetry::info!("Series-index cache reset complete");
+    Ok(())
 }
 
 pub async fn write_cache_from_config(
@@ -1698,6 +1735,70 @@ impl WorkerListener {
 mod tests {
     use super::*;
     use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_series_index_cache_layout_reset() {
+        let parent = common_test_util::temp_dir::create_temp_dir("series-cache-version");
+        let root = parent.path().join("series_index");
+        let sentinel = parent.path().join("sst");
+        tokio::fs::write(&sentinel, b"source data").await.unwrap();
+        let store = crate::access_layer::new_fs_cache_store(&root.to_string_lossy())
+            .await
+            .unwrap();
+        // Keep the original directory alive so its inode cannot be reused after deletion.
+        #[cfg(unix)]
+        let root_handle = tokio::fs::File::open(&root).await.unwrap();
+        for version in [None, Some("0"), Some("invalid")] {
+            if let Some(version) = version {
+                store.write("version", version).await.unwrap();
+            }
+            store.write("stale", "old").await.unwrap();
+            store
+                .write("42/samples/old/source/part-0.samples", "old")
+                .await
+                .unwrap();
+            store
+                .write("42/samples.json", "stale references")
+                .await
+                .unwrap();
+            super::initialize_series_index_cache(&store).await.unwrap();
+            assert!(!store.exists("stale").await.unwrap());
+            assert_eq!(
+                store.read("version").await.unwrap().to_bytes().as_ref(),
+                SERIES_INDEX_CACHE_VERSION.as_bytes()
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+
+                let original = root_handle.metadata().await.unwrap();
+                let current = tokio::fs::metadata(&root).await.unwrap();
+                assert_eq!(
+                    (original.dev(), original.ino()),
+                    (current.dev(), current.ino())
+                );
+            }
+            assert!(!store.exists("42/samples.json").await.unwrap());
+            assert!(
+                !store
+                    .exists("42/samples/old/source/part-0.samples")
+                    .await
+                    .unwrap()
+            );
+            store
+                .write("42/series/current/manifest.json", "current")
+                .await
+                .unwrap();
+            super::initialize_series_index_cache(&store).await.unwrap();
+            assert!(
+                store
+                    .exists("42/series/current/manifest.json")
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(tokio::fs::read(&sentinel).await.unwrap(), b"source data");
+        }
+    }
 
     #[test]
     fn test_region_id_to_index() {
