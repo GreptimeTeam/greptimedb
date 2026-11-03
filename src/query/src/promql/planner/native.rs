@@ -771,6 +771,7 @@ impl PromPlanner {
                 &time,
                 &tags,
                 &segment_metric,
+                !required_placement,
             ))
             .await?;
             if let Some(plan) = plan {
@@ -1360,6 +1361,7 @@ async fn segment_tree(
     time_index: &str,
     tags: &[String],
     metric: &Option<Arc<str>>,
+    must_improve_locality: bool,
 ) -> Result<Option<LogicalPlan>> {
     if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
         return Ok(None);
@@ -1445,6 +1447,14 @@ async fn segment_tree(
         return Ok(None);
     }
     let parent = current_tree;
+    if must_improve_locality
+        && matches!(
+            input_locality(parent.root()),
+            InputLocality::SinglePartition
+        )
+    {
+        return Ok(None);
+    }
     let inputs = current_children;
     let child_tags = current_tags;
     // Nothing below can fall back once physical planning starts, so every tree this route commits
@@ -1692,9 +1702,6 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
             (NativeType::Scalar(_), _) => fused_output_tags(right, source_tags),
             (_, NativeType::Scalar(_)) => fused_output_tags(left, source_tags),
             _ => {
-                if matching.cardinality != Cardinality::OneToOne {
-                    return None;
-                }
                 let kept = |tags: Vec<String>| -> Vec<String> {
                     match &matching.labels {
                         MatchingLabels::On(names) if !names.is_empty() => tags
@@ -1708,7 +1715,29 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
                         MatchingLabels::On(_) => tags,
                     }
                 };
-                let mut tags = kept(fused_output_tags(left, source_tags)?);
+                let left_tags = fused_output_tags(left, source_tags)?;
+                let right_tags = fused_output_tags(right, source_tags)?;
+                let mut tags = match &matching.cardinality {
+                    Cardinality::OneToOne => kept(left_tags.clone()),
+                    Cardinality::ManyToOne(_) => left_tags.clone(),
+                    Cardinality::OneToMany(_) => right_tags.clone(),
+                };
+                let includes = match &matching.cardinality {
+                    Cardinality::OneToOne => &[][..],
+                    Cardinality::ManyToOne(labels) | Cardinality::OneToMany(labels) => labels,
+                };
+                let include_tags = match &matching.cardinality {
+                    Cardinality::ManyToOne(_) => &right_tags,
+                    Cardinality::OneToMany(_) => &left_tags,
+                    Cardinality::OneToOne => &[][..],
+                };
+                for tag in include_tags {
+                    if includes.iter().any(|label| label.as_ref() == tag.as_str())
+                        && !tags.contains(tag)
+                    {
+                        tags.push(tag.clone());
+                    }
+                }
                 // A filled left side takes an unmatched right series' matching labels, so those
                 // results carry the right side's tags.
                 if matching.fill.lhs.is_some() {
@@ -2281,6 +2310,59 @@ mod tests {
             Some(vec!["host".to_string()]),
             fused_output_tags(fill_on.root(), &sources)
         );
+        // Group modifiers retain the many-side labels and copy declared labels from the one side.
+        let group_sources = [
+            vec![
+                "cluster".into(),
+                "namespace".into(),
+                "pod".into(),
+                "container".into(),
+            ],
+            vec![
+                "cluster".into(),
+                "namespace".into(),
+                "pod".into(),
+                "workload".into(),
+                "workload_type".into(),
+            ],
+        ];
+        let group_left = compiled_test_tree(
+            "x * on(cluster, namespace, pod) group_left(workload, workload_type) y",
+        );
+        assert_eq!(
+            Some(
+                vec![
+                    "cluster",
+                    "namespace",
+                    "pod",
+                    "container",
+                    "workload",
+                    "workload_type"
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect()
+            ),
+            fused_output_tags(group_left.root(), &group_sources)
+        );
+        let group_right =
+            compiled_test_tree("x * on(cluster, namespace, pod) group_right(container) y");
+        assert_eq!(
+            Some(
+                vec![
+                    "cluster",
+                    "namespace",
+                    "pod",
+                    "workload",
+                    "workload_type",
+                    "container"
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect()
+            ),
+            fused_output_tags(group_right.root(), &group_sources)
+        );
         // An outer match narrows the labels the inner one already narrowed.
         let sources = [
             vec!["host".to_string(), "kind".to_string(), "zone".to_string()],
@@ -2338,6 +2420,32 @@ mod tests {
         assert!(!segment.cut.is_empty());
         assert_eq!(segment.cut.len(), 1);
         assert_eq!(vec![0], input_sources(&segment.cut[0]));
+    }
+
+    #[test]
+    fn group_left_copies_included_labels_into_output_tags() {
+        let sources = [
+            vec!["pod".into(), "workload".into()],
+            vec!["pod".into(), "container".into()],
+        ];
+        let tree = compiled_test_tree("x * on(pod) group_left(container) y");
+        assert_eq!(
+            Some(vec!["pod".into(), "workload".into(), "container".into()]),
+            fused_output_tags(tree.root(), &sources)
+        );
+    }
+
+    #[test]
+    fn group_right_copies_included_labels_into_output_tags() {
+        let sources = [
+            vec!["pod".into(), "container".into()],
+            vec!["pod".into(), "workload".into()],
+        ];
+        let tree = compiled_test_tree("x * on(pod) group_right(container) y");
+        assert_eq!(
+            Some(vec!["pod".into(), "workload".into(), "container".into()]),
+            fused_output_tags(tree.root(), &sources)
+        );
     }
 
     #[test]
