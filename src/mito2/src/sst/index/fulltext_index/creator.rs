@@ -38,8 +38,8 @@ use store_api::storage::{ConcreteDataType, FileId, RegionId};
 
 use crate::error::{
     CastVectorSnafu, ComputeArrowSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu,
-    FulltextFinishSnafu, FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu,
-    Result,
+    FulltextFinishSnafu, FulltextPushTextSnafu, IndexOptionsSnafu, InvalidRecordBatchSnafu,
+    OperateAbortedIndexSnafu, Result,
 };
 use crate::read::Batch;
 use crate::sst::index::column::extract_json_type_hint_values;
@@ -341,7 +341,7 @@ impl SingleCreator {
             IndexTarget::JsonPath(path) => {
                 let root = batch
                     .field_col_value(path.column_id())
-                    .with_context(|| crate::error::InvalidRecordBatchSnafu {
+                    .with_context(|| InvalidRecordBatchSnafu {
                         reason: format!("Missing JSON fulltext column {}", path.column_id()),
                     })?
                     .data
@@ -386,7 +386,7 @@ impl SingleCreator {
     async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
         if let IndexTarget::JsonPath(path) = &self.target {
             let root = batch.column_by_name(&self.column_name).with_context(|| {
-                crate::error::InvalidRecordBatchSnafu {
+                InvalidRecordBatchSnafu {
                     reason: format!("Missing JSON fulltext column {}", self.column_name),
                 }
             })?;
@@ -535,9 +535,15 @@ mod tests {
 
     use api::v1::SemanticType;
     use common_base::BitVec;
+    use datatypes::arrow::array::{ArrayRef, StructArray};
+    use datatypes::arrow::buffer::NullBuffer;
+    use datatypes::arrow::datatypes::{Field, Schema};
     use datatypes::data_type::DataType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
-    use datatypes::vectors::{UInt8Vector, UInt64Vector};
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+    use datatypes::vectors::{Helper, UInt8Vector, UInt64Vector};
     use futures::FutureExt;
     use futures::future::BoxFuture;
     use index::fulltext_index::search::RowId;
@@ -560,14 +566,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_fulltext_build_and_prune_both_formats() {
-        use datatypes::arrow::array::{ArrayRef, StructArray};
-        use datatypes::arrow::buffer::NullBuffer;
-        use datatypes::arrow::datatypes::{Field, Schema};
-        use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
-        use datatypes::json::{JsonSettings, JsonTypeHint};
-        use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
-        use datatypes::vectors::{Helper, UInt8Vector, UInt64Vector};
-
         for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
             for (flat, build_type) in [
                 (false, IndexBuildType::Flush),

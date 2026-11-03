@@ -20,6 +20,7 @@ use datatypes::arrow::array::{Array, ArrayRef, StructArray};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::extension::json::Json2ExtensionType;
+use datatypes::json::JsonTypeHint;
 use datatypes::schema::FulltextOptions;
 use datatypes::vectors::{Helper, VectorRef};
 use index::target::IndexTarget;
@@ -95,7 +96,7 @@ pub(crate) fn column_index_rows(
 pub(crate) fn json_index_target(
     metadata: &RegionMetadata,
     expr: &Expr,
-    enabled: impl Fn(&datatypes::json::JsonTypeHint) -> bool,
+    enabled: impl Fn(&JsonTypeHint) -> bool,
 ) -> Result<Option<(IndexTarget, ConcreteDataType)>> {
     let Expr::ScalarFunction(func) = expr else {
         return Ok(None);

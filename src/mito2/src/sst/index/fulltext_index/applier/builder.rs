@@ -207,7 +207,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return Ok(None);
         }
 
-        let Some(target) = Self::expr_target(metadata, &f.args[0])? else {
+        let Some(target) = Self::index_target_from_expr(metadata, &f.args[0])? else {
             return Ok(None);
         };
 
@@ -236,7 +236,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         }
 
         let (expr, lowered) = Self::unwrap_lower(&f.args[0]);
-        let Some(target) = Self::expr_target(metadata, expr)? else {
+        let Some(target) = Self::index_target_from_expr(metadata, expr)? else {
             return Ok(None);
         };
 
@@ -274,7 +274,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         }
 
         let (expr, col_lowered) = Self::unwrap_lower(&like.expr);
-        let Some(target) = Self::expr_target(metadata, expr)? else {
+        let Some(target) = Self::index_target_from_expr(metadata, expr)? else {
             return Ok(None);
         };
         let Some(options) = fulltext_target_options(metadata, &target)? else {
@@ -306,15 +306,20 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         )))
     }
 
-    fn expr_target(metadata: &RegionMetadata, expr: &Expr) -> Result<Option<IndexTarget>> {
-        if let Expr::Column(column) = expr {
-            let Some(column) = metadata.column_by_name(&column.name) else {
+    /// Resolves a column reference or JSON path expression to a single index target.
+    /// Returns `None` for unsupported expressions without traversing their children.
+    fn index_target_from_expr(
+        metadata: &RegionMetadata,
+        expr: &Expr,
+    ) -> Result<Option<IndexTarget>> {
+        if let Expr::Column(col) = expr {
+            let Some(col) = metadata.column_by_name(&col.name) else {
                 return Ok(None);
             };
-            if !column.column_schema.data_type.is_string() {
+            if !col.column_schema.data_type.is_string() {
                 return Ok(None);
             }
-            let target = IndexTarget::ColumnId(column.column_id);
+            let target = IndexTarget::ColumnId(col.column_id);
             return Ok(fulltext_target_options(metadata, &target)?.map(|_| target));
         }
         let Some((target, ty)) = json_index_target(metadata, expr, |hint| {
@@ -328,6 +333,8 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         Ok(ty.is_string().then_some(target))
     }
 
+    /// Returns the inner expression and `true` for `lower(expr)`, or the original
+    /// expression and `false` otherwise.
     fn unwrap_lower(expr: &Expr) -> (&Expr, bool) {
         if let Expr::ScalarFunction(func) = expr
             && let Some(inner) = Self::extract_lower_arg(func)
@@ -440,7 +447,7 @@ mod tests {
             json_expr("$.message", Some(ScalarValue::Int64(None))),
         ] {
             assert!(
-                FulltextIndexApplierBuilder::expr_target(&metadata, &expr)
+                FulltextIndexApplierBuilder::index_target_from_expr(&metadata, &expr)
                     .unwrap()
                     .is_none()
             );

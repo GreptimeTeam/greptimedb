@@ -345,9 +345,15 @@ pub fn json_skipping_options_from_proto(
 
 #[cfg(test)]
 mod tests {
+    use common_base::readable_size::ReadableSize;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{CompressionOptions, FulltextAnalyzer, FulltextBackend};
+
+    use super::*;
+    use crate::v1::ColumnDataType;
+
     #[test]
     fn json_fulltext_options_roundtrip() {
-        use super::*;
         for backend in [FulltextBackend::Bloom, FulltextBackend::Tantivy] {
             let options =
                 FulltextOptions::new(true, FulltextAnalyzer::Chinese, true, backend, 8, 0.05)
@@ -365,13 +371,6 @@ mod tests {
             assert!(json_fulltext_options_from_proto(invalid).is_err());
         }
     }
-
-    use common_base::readable_size::ReadableSize;
-    use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{CompressionOptions, FulltextAnalyzer, FulltextBackend};
-
-    use super::*;
-    use crate::v1::ColumnDataType;
 
     #[test]
     fn test_try_as_column_schema() {
