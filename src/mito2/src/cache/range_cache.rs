@@ -117,9 +117,10 @@ impl RangeScanCacheValue {
 pub(crate) struct RangeResultCache {
     cache: SyncCache<RangeScanCacheKey, Arc<Entry>>,
     state: Mutex<State>,
-    /// Moka can call listeners during a cache operation. Queue only cleanup
-    /// metadata instead of reentering `state` from its eviction listener.
-    evictions: Mutex<mpsc::Receiver<(Arc<RangeScanCacheKey>, u64)>>,
+    /// Eviction callbacks and the last scan owner can run while `state` is locked.
+    /// Queue their cleanup instead of reentering the coordinator lock.
+    cleanup_tx: mpsc::Sender<RangeCacheCleanup>,
+    cleanup_rx: Mutex<mpsc::Receiver<RangeCacheCleanup>>,
     /// Covers loads and completed deliveries, separately from cache residency
     /// and the temporary concat-memory limiter. Never wait for this budget.
     retention_memory: Arc<RangeResultMemoryLimiter>,
@@ -229,6 +230,7 @@ impl RangeResultCache {
     /// Creates independent retention and compaction budgets with the cache capacity.
     pub(crate) fn new(capacity: u64) -> Arc<Self> {
         let (tx, rx) = mpsc::channel();
+        let eviction_tx = tx.clone();
         let cache = SyncCache::new(
             RANGE_RESULT_TYPE,
             capacity,
@@ -240,13 +242,17 @@ impl RangeResultCache {
                 CACHE_EVICTION
                     .with_label_values(&[RANGE_RESULT_TYPE, cause.as_str()])
                     .inc();
-                let _ = tx.send((key, entry.generation));
+                let _ = eviction_tx.send(RangeCacheCleanup::Evicted {
+                    key,
+                    generation: entry.generation,
+                });
             },
         );
         Arc::new(Self {
             cache,
             state: Mutex::new(State::default()),
-            evictions: Mutex::new(rx),
+            cleanup_tx: tx,
+            cleanup_rx: Mutex::new(rx),
             retention_memory: Arc::new(RangeResultMemoryLimiter::new(capacity as usize, 1024)),
             concat_memory: Arc::new(RangeResultMemoryLimiter::new(
                 capacity as usize,
@@ -282,9 +288,20 @@ impl RangeResultCache {
         }
     }
 
-    fn drain_evictions(&self, state: &mut State) {
-        for (key, generation) in self.evictions.lock().unwrap().try_iter() {
-            state.forget(&key, generation);
+    fn drain_cleanup(&self, state: &mut State) {
+        for cleanup in self.cleanup_rx.lock().unwrap().try_iter() {
+            match cleanup {
+                RangeCacheCleanup::Evicted { key, generation } => state.forget(&key, generation),
+                RangeCacheCleanup::Released { key, generation } => {
+                    if state
+                        .flights
+                        .get(&key)
+                        .is_some_and(|entry| entry.generation == generation)
+                    {
+                        state.flights.remove(&key);
+                    }
+                }
+            }
         }
     }
 
@@ -311,7 +328,7 @@ impl RangeResultCache {
     #[cfg(test)]
     pub(crate) fn insert(&self, key: RangeScanCacheKey, value: Arc<RangeScanCacheValue>) {
         let mut state = self.state.lock().unwrap();
-        self.drain_evictions(&mut state);
+        self.drain_cleanup(&mut state);
         self.publish(&mut state, key, value);
     }
 
@@ -336,7 +353,7 @@ impl RangeResultCache {
                 delivery: Mutex::new(Weak::new()),
             }),
         );
-        self.drain_evictions(state);
+        self.drain_cleanup(state);
     }
 
     /// Called at logical retirement, before the last snapshot releases the SST.
@@ -346,7 +363,7 @@ impl RangeResultCache {
             .with_label_values(&["invalidate"])
             .inc();
         let mut state = self.state.lock().unwrap();
-        self.drain_evictions(&mut state);
+        self.drain_cleanup(&mut state);
         if let Some(keys) = state.files.remove(&file) {
             for (key, generation) in keys {
                 self.cache.invalidate(key.as_ref());
@@ -354,7 +371,7 @@ impl RangeResultCache {
             }
         }
         state.flights.retain(|(key, _), flight| {
-            let Some(flight) = flight.upgrade() else {
+            let Some(flight) = flight.load.upgrade() else {
                 return false;
             };
             if key.row_groups.iter().any(|(id, _)| *id == file) {
@@ -362,7 +379,7 @@ impl RangeResultCache {
             }
             true
         });
-        self.drain_evictions(&mut state);
+        self.drain_cleanup(&mut state);
     }
 
     /// Looks up a retained result or registers one reader-owned streaming scan.
@@ -373,7 +390,7 @@ impl RangeResultCache {
         scope: RangeCacheScope,
     ) -> RangeCacheLookup {
         let mut state = self.state.lock().unwrap();
-        self.drain_evictions(&mut state);
+        self.drain_cleanup(&mut state);
         if files.iter().any(FileHandle::is_deleted) {
             RANGE_CACHE_WORKER_EVENTS
                 .with_label_values(&["bypass_retired"])
@@ -385,10 +402,12 @@ impl RangeResultCache {
         {
             return lookup;
         }
-        // Weak entries never keep readers alive. Prune abandoned registrations.
-        state.flights.retain(|_, load| load.strong_count() != 0);
         let scoped_key = (key, scope);
-        if let Some(load) = state.flights.get(&scoped_key).and_then(Weak::upgrade) {
+        if let Some(load) = state
+            .flights
+            .get(&scoped_key)
+            .and_then(|entry| entry.load.upgrade())
+        {
             RANGE_CACHE_WORKER_EVENTS
                 .with_label_values(&["coalesced"])
                 .inc();
@@ -400,8 +419,15 @@ impl RangeResultCache {
             generation: state.next_generation(),
             files,
             invalidated: AtomicBool::new(false),
+            cleanup_tx: self.cleanup_tx.clone(),
         });
-        state.flights.insert(scoped_key, Arc::downgrade(&load));
+        state.flights.insert(
+            scoped_key,
+            RangeRegistration {
+                generation: load.generation,
+                load: Arc::downgrade(&load),
+            },
+        );
         RANGE_CACHE_WORKER_EVENTS
             .with_label_values(&["started"])
             .inc();
@@ -414,8 +440,11 @@ impl RangeResultCache {
         // Streaming readers already own their buffer reservations. Cache-only
         // residency needs no delivery reservation; cache hits acquire one later.
         let mut state = self.state.lock().unwrap();
-        self.drain_evictions(&mut state);
-        let current = state.flights.get(&load.key).and_then(Weak::upgrade);
+        self.drain_cleanup(&mut state);
+        let current = state
+            .flights
+            .get(&load.key)
+            .and_then(|entry| entry.load.upgrade());
         if !current.is_some_and(|current| current.generation == load.generation) {
             return false;
         }
@@ -510,12 +539,38 @@ struct RangeLoad {
     generation: u64,
     files: Vec<FileHandle>,
     invalidated: AtomicBool,
+    cleanup_tx: mpsc::Sender<RangeCacheCleanup>,
+}
+
+impl Drop for RangeLoad {
+    fn drop(&mut self) {
+        let _ = self.cleanup_tx.send(RangeCacheCleanup::Released {
+            key: self.key.clone(),
+            generation: self.generation,
+        });
+    }
+}
+
+struct RangeRegistration {
+    generation: u64,
+    load: Weak<RangeLoad>,
+}
+
+enum RangeCacheCleanup {
+    Evicted {
+        key: Arc<RangeScanCacheKey>,
+        generation: u64,
+    },
+    Released {
+        key: FlightKey,
+        generation: u64,
+    },
 }
 
 #[derive(Default)]
 struct State {
     generation: u64,
-    flights: HashMap<FlightKey, Weak<RangeLoad>>,
+    flights: HashMap<FlightKey, RangeRegistration>,
     /// File IDs are globally unique. Index by physical file, not query region:
     /// a copied region can read an SST whose original region differs from its own.
     files: HashMap<FileId, HashMap<Arc<RangeScanCacheKey>, u64>>,
@@ -790,10 +845,49 @@ mod tests {
     }
 
     #[test]
-    fn test_distinct_active_scans_share_loads_and_prune_abandoned_registrations() {
+    fn test_scan_release_cleans_only_the_last_owner_under_the_state_lock() {
+        let cache = RangeResultCache::new(1024 * 1024);
+        let key = range_cache_key(&[FileId::random()]);
+        let first = loading(cache.get_or_register(key.clone(), vec![], RangeCacheScope(0)));
+        let second = loading(cache.get_or_register(key.clone(), vec![], RangeCacheScope(0)));
+        let weak = Arc::downgrade(&first);
+        let mut state = cache.state.lock().unwrap();
+        drop(first);
+        cache.drain_cleanup(&mut state);
+        assert_eq!(state.flights.len(), 1);
+        // Last-owner release can happen while invalidation holds this lock.
+        drop(second);
+        assert!(weak.upgrade().is_none());
+        cache.drain_cleanup(&mut state);
+        assert!(state.flights.is_empty());
+    }
+
+    #[test]
+    fn test_delayed_scan_release_keeps_a_replacement_registration() {
+        let cache = RangeResultCache::new(1024 * 1024);
+        let key = range_cache_key(&[FileId::random()]);
+        let old = loading(cache.get_or_register(key.clone(), vec![], RangeCacheScope(0)));
+        drop(old);
+        let delayed = cache.cleanup_rx.lock().unwrap().try_recv().unwrap();
+        // Reproduce release arriving after another caller has replaced the dead Weak.
+        let new = loading(cache.get_or_register(key.clone(), vec![], RangeCacheScope(0)));
+        cache.cleanup_tx.send(delayed).unwrap();
+        let shared = loading(cache.get_or_register(key, vec![], RangeCacheScope(0)));
+        assert!(Arc::ptr_eq(&new, &shared));
+        drop(new);
+        drop(shared);
+        let mut state = cache.state.lock().unwrap();
+        cache.drain_cleanup(&mut state);
+        assert!(state.flights.is_empty());
+    }
+
+    #[rstest::rstest]
+    fn test_distinct_active_scans_share_loads_and_prune_abandoned_registrations(
+        #[values(512, 2048, 8192)] count: usize,
+    ) {
         let worker = RangeResultCache::new(1024 * 1024);
-        let keys: Vec<_> = (0..64)
-            .map(|_| range_cache_key(&[FileId::random()]))
+        let keys: Vec<_> = (0..count)
+            .map(|i| range_cache_key(&[FileId::from_bytes((i as u128).to_le_bytes())]))
             .collect();
         let loads: Vec<_> = keys
             .iter()
