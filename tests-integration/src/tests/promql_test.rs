@@ -2356,8 +2356,52 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         }
     };
 
+    // `without(host)` keys the cut state by the prefix's `dst` labels. The statement's
+    // declared output schema provides `dst`, which the native label walker cannot infer.
+    let without_expr =
+        r#"sum without (host) (label_replace(probe{host=~"a|b"}, "dst", "$1", "host", "(.*)"))"#;
+    observer.clear();
+    let without_native = run(without_expr, "(0, 0, '1s')").await.unwrap();
+    let native_plan = observer.root_plan();
+    let mut plan_nodes = vec![native_plan];
+    let mut has_aggregate_finalize = false;
+    while let Some(node) = plan_nodes.pop() {
+        has_aggregate_finalize |= node.name() == "AggregateFinalizeExec";
+        plan_nodes.extend(node.children().into_iter().cloned());
+    }
+    assert!(
+        has_aggregate_finalize,
+        "native plan must execute AggregateFinalizeExec"
+    );
+    let (_, native_rows) = native_labelled_rows(without_native).await;
+    let legacy = instance
+        .do_query(
+            &format!("TQL EVAL (0, 0, '1s') {without_expr}"),
+            native_query_context(false, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let (_, legacy_rows) = native_labelled_rows(legacy).await;
+    assert_eq!(
+        native_rows, legacy_rows,
+        "native rows must match legacy exactly"
+    );
+    assert_eq!(native_rows.len(), 2);
+    assert!(
+        native_rows
+            .iter()
+            .any(|row| row.1.get("dst") == Some(&"a".to_string()))
+    );
+    assert!(
+        native_rows
+            .iter()
+            .any(|row| row.1.get("dst") == Some(&"b".to_string()))
+    );
+
     // A fresh destination cannot make two series equal, so the rewrite is safe to spread and the
     // scan keeps all four partitions.
+
     observer.clear();
     let fresh = run(
         r#"label_replace(probe, "dst", "$1", "host", "(.*)")"#,
@@ -2588,6 +2632,37 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
                 "{shape}: a deletion that may collapse series must not run natively"
             );
         }
+    }
+
+    // `label_join`'s source list is variadic and may be empty, which deletes the destination label.
+    // That is legal PromQL, and admission must not turn a legal query into an error just because
+    // the shape cannot run natively: the answer has to equal the existing plan's either way.
+    {
+        let three_arg = r#"label_join(probe_two, "dc", "-")"#;
+        let sql = format!("TQL EVAL (0, 0, '1s') {three_arg}");
+        observer.clear();
+        let native = instance
+            .do_query(&sql, native_query_context(true, 4))
+            .await
+            .remove(0)
+            .unwrap();
+        let (_, native_rows) = native_labelled_rows(native).await;
+        let legacy = instance
+            .do_query(&sql, native_query_context(false, 4))
+            .await
+            .remove(0)
+            .unwrap();
+        let (_, legacy_rows) = native_labelled_rows(legacy).await;
+        assert_eq!(
+            native_rows, legacy_rows,
+            "a three-argument `label_join` deletes its destination and must answer as the existing              plan does"
+        );
+        assert!(
+            native_rows
+                .iter()
+                .all(|(_, labels, _)| !labels.contains_key("dc")),
+            "the destination label is deleted, not published: {native_rows:?}"
+        );
     }
 
     // A `__name__` destination is not covered here on purpose: the existing planner refuses that

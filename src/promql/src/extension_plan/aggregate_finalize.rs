@@ -147,8 +147,8 @@ impl AggregateFinalize {
             )));
         }
         // State is keyed by the cut aggregate's output labels, not the final statement's
-        // projection. Derive the prefix's labels with the same tree walker the planner uses, so
-        // rewrites in the prefix are reflected in `Without` keys.
+        // projection: an outer aggregate that drops its input's labels must not empty the inner
+        // groups' keys.
         let grouping_tags: Vec<String> = match &split.op.group {
             Grouping::By(names) => names
                 .iter()
@@ -156,16 +156,24 @@ impl AggregateFinalize {
                 .map(|name| name.to_string())
                 .collect(),
             Grouping::Without(names) => {
-                let prefix = NativeTree::try_new(split.prefix.clone())?;
-                let Some(prefix_tags) =
-                    crate::native::plan::fused_output_tags(prefix.root(), &[binding.tags.clone()])
-                else {
+                // `by(names)` above is fully determined by the grouping itself. `without` is not:
+                // its keys are the prefix's labels minus `names`, and the prefix may create a label
+                // (`label_replace`) that the tree walker refuses to name. The declared output
+                // columns do name it - the planner builds them from the existing plan, which
+                // handles every rewrite - but only when the cut aggregate is the statement root.
+                // Beneath a suffix the statement's labels may be narrower than the cut's, so that
+                // shape keeps the existing plan rather than exporting state under keys that would
+                // merge groups the statement still separates.
+                if !matches!(split.suffix.expr, NativeExpr::Input(_)) {
                     return Err(declined(
-                        "cannot derive prefix output labels for without grouping",
+                        "cannot derive cut labels for without grouping beneath a suffix",
                     ));
-                };
-                prefix_tags
-                    .into_iter()
+                }
+                output_schema
+                    .fields()
+                    .iter()
+                    .filter(|field| field.data_type() == &DataType::Utf8)
+                    .map(|field| field.name().to_string())
                     .filter(|tag| !names.iter().any(|name| name.as_ref() == tag))
                     .collect()
             }
