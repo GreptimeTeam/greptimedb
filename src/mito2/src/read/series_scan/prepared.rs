@@ -299,6 +299,9 @@ impl ColumnarPreparedSource {
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
     ) -> Result<Self> {
+        let _prepare_timer = crate::metrics::READ_STAGE_ELAPSED
+            .with_label_values(&["columnar_prepare_wall"])
+            .start_timer();
         let input = &context.input;
         let metadata = input.region_metadata();
         let index = input
@@ -537,6 +540,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     let selection_bytes = range.len() * (std::mem::size_of::<MetricSeriesId>() + 64);
                     reservation.try_grow(selection_bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
                     let ids = candidates[range.clone()].iter().map(|c| c.id).collect::<BTreeSet<_>>();
+                    let mut stage_metrics = crate::metrics::ColumnarReadMetrics::default();
                     let mut batches = reader.read(SamplesReadRequest {
                         projection: sample_projection(&reader.schema(), &context),
                         memory_pool: Some(context.input.scan_memory_pool.clone()),
@@ -562,8 +566,10 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                             while end < batch.num_rows() && tables.value(end) == id.table_id && tsids.value(end) == id.tsid {
                                 end += 1;
                             }
+                            let started = std::time::Instant::now();
                             let flat = sample_to_flat(batch.slice(offset, end - offset), &candidates[ordinal], &context, sample_schema.as_ref())?;
                             let flat = filter_visibility(flat, &context)?;
+                            stage_metrics.add_elapsed("columnar_sample_adapt", started.elapsed());
                             offset = end;
                             if flat.num_rows() == 0 { continue; }
                             let bytes = flat.get_array_memory_size();
