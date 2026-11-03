@@ -66,8 +66,8 @@ jobs:
     - uses: astral-sh/setup-uv@v6
     - name: Check S3 access before allocating EC2
       env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       run: uv run greptimedb/.github/scripts/metric-snapshot-s3-ops.py probe
     - name: Resolve the fixed benchmark runner
       id: runner
@@ -148,20 +148,20 @@ jobs:
         findmnt -no SOURCE,FSTYPE -T "$DISK_ROOT"
     - name: Probe the real same-region S3 bucket
       env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       run: uv run greptimedb/.github/scripts/metric-snapshot-s3-ops.py probe
     - name: Run the 500-table smoke, then one full packed export and restore
       env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       run: python3 greptimedb/.github/scripts/metric-snapshot-s3-bench.py run
     - name: Check results for credentials
       id: scrub
       if: always()
       env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       run: python3 greptimedb/.github/scripts/metric-snapshot-s3-ops.py scrub
     - name: Publish the readable result
       if: ${{ always() && steps.scrub.outcome == 'success' }}
@@ -220,8 +220,8 @@ jobs:
     - name: Remove and verify only this run's S3 prefix
       if: always()
       env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       run: uv run greptimedb/.github/scripts/metric-snapshot-s3-ops.py cleanup
     - name: Estimate the cumulative cloud cost
       if: ${{ always() && needs.provision.outputs.started_at != '' }}
