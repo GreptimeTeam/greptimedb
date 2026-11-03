@@ -866,7 +866,7 @@ mod tests {
             assert!(Arc::ptr_eq(&unchanged, &applier.requests));
             for name in [
                 "granularity",
-                "FPR",
+                "false_positive_rate",
                 "analyzer",
                 "case_sensitive",
                 "backend",
@@ -876,7 +876,7 @@ mod tests {
                 let mut changed = options.clone();
                 match name {
                     "granularity" => changed.granularity += 1,
-                    "FPR" => changed.false_positive_rate_in_10000 += 1,
+                    "false_positive_rate" => changed.false_positive_rate_in_10000 += 1,
                     "analyzer" => changed.analyzer = FulltextAnalyzer::Chinese,
                     "case_sensitive" => changed.case_sensitive = true,
                     "backend" => {
@@ -890,7 +890,7 @@ mod tests {
                     "missing" => {}
                     _ => unreachable!(),
                 }
-                let compatible = matches!(name, "granularity" | "FPR")
+                let compatible = matches!(name, "granularity" | "false_positive_rate")
                     || (name == "analyzer" && backend == FulltextBackend::Bloom);
                 let sst = json_metadata((name != "missing").then_some(changed));
                 let requests = applier.compatible_requests_for_sst(&sst).unwrap();
