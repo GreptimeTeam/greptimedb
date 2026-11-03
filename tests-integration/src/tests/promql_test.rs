@@ -2332,7 +2332,15 @@ fn canonical_router(
 ) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
     std::iter::once(observer.root_plan())
         .chain(observer.region_plans())
-        .find_map(|plan| find_plan_node_over(&plan, "SeriesRepartitionExec", "FusedSeriesExec"))
+        .find_map(|plan| {
+            find_plan_node_over(&plan, "SeriesRepartitionExec", "FusedSeriesExec").filter(
+                |router| {
+                    router.children().iter().any(|child| {
+                        promql::extension_plan::is_canonical_producer_exec(child.as_ref())
+                    })
+                },
+            )
+        })
 }
 
 fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
@@ -6054,7 +6062,7 @@ async fn native_promql_rewrites_the_label_count_values_writes() {
     // `by (host)` keeps one of the scan's tags and the node writes `sample`; `zone` is not part of
     // the grouping, so the columns the node declares must not claim it. The destination is fresh,
     // so there is nothing for a canonical merge to collect.
-    let fresh = r#"label_replace(count_values by (host) ("sample", native_cv_rewrite), "dst", "same", "sample", ".*")"#;
+    let fresh = r#"label_replace(count_values by (host) ("sample", native_cv_rewrite), "dst", "same", "host", ".*")"#;
     let sql = format!("TQL EVAL (0, 0, '1s') {fresh}");
     observer.clear();
     let (columns, native_rows) =

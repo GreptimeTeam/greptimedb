@@ -58,6 +58,7 @@ use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::utils::AsAny;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{MemoryPool, MemoryReservation, UnboundedMemoryPool};
@@ -622,6 +623,11 @@ impl FusedSeries {
 
     /// Whether this node is the partition-local producer of a canonical boundary.
     pub fn is_canonical_producer(&self) -> bool {
+        self.canonical_producer
+    }
+
+    #[cfg(test)]
+    pub fn debug_canonical_producer(&self) -> bool {
         self.canonical_producer
     }
 
@@ -1908,6 +1914,9 @@ pub struct FusedSeriesExec {
     matching_parallelism: Option<usize>,
     /// Whether this node is a partition-local canonical producer.
     canonical_producer: bool,
+    /// Test-only inspection of the physical routing contract; no execution behavior depends on it.
+    #[cfg(feature = "test-utils")]
+    canonical_producer_for_test: bool,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -2260,6 +2269,8 @@ impl FusedSeriesExec {
             format,
             matching_parallelism,
             canonical_producer,
+            #[cfg(feature = "test-utils")]
+            canonical_producer_for_test: canonical_producer,
         })
     }
 
@@ -2267,6 +2278,13 @@ impl FusedSeriesExec {
     pub const fn name() -> &'static str {
         "FusedSeriesExec"
     }
+}
+
+#[cfg(feature = "test-utils")]
+pub fn is_canonical_producer_exec(plan: &dyn ExecutionPlan) -> bool {
+    plan.as_any()
+        .downcast_ref::<FusedSeriesExec>()
+        .is_some_and(|fused| fused.canonical_producer_for_test)
 }
 
 impl std::fmt::Debug for FusedSeriesExec {

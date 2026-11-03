@@ -7,6 +7,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Lets the integration suite distinguish canonical routing from ordinary repartitioning.
+test-utils = []
+
 [dependencies]
 ahash.workspace = true
 async-trait.workspace = true
