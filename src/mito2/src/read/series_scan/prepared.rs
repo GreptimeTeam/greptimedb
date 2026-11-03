@@ -326,7 +326,8 @@ impl ColumnarPreparedSource {
                 handle.clone(),
                 cache.clone(),
             )
-            .await?;
+            .await?
+            .with_payload_cache(input.cache_strategy.columnar_payload(index.cache_namespace));
             format::validate_sample_schema(&reader.schema(), metadata)?;
             samples.push(Arc::new(reader));
         }

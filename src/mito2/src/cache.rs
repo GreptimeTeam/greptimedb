@@ -1746,18 +1746,24 @@ impl SstMetaKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PageFragmentGroupKey {
-    file_id: FileId,
-    row_group_idx: usize,
+enum PageFragmentGroupKey {
+    Parquet {
+        file_id: FileId,
+        row_group_idx: usize,
+    },
+    Columnar {
+        namespace: FileId,
+        generation: FileId,
+        part: u32,
+        file_size: u64,
+    },
 }
 
 /// Cache key for one byte fragment in an SST row group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageFragmentKey {
-    /// Id of the SST file.
-    file_id: FileId,
-    /// Index of the row group.
-    row_group_idx: usize,
+    /// Immutable object identity, separate for Parquet and native artifacts.
+    group: PageFragmentGroupKey,
     /// Start offset of the cached byte fragment.
     start: u64,
     /// End offset of the cached byte fragment.
@@ -1767,18 +1773,17 @@ pub struct PageFragmentKey {
 impl PageFragmentKey {
     fn new(file_id: FileId, row_group_idx: usize, range: &Range<u64>) -> PageFragmentKey {
         PageFragmentKey {
-            file_id,
-            row_group_idx,
+            group: PageFragmentGroupKey::Parquet {
+                file_id,
+                row_group_idx,
+            },
             start: range.start,
             end: range.end,
         }
     }
 
     fn group_key(&self) -> PageFragmentGroupKey {
-        PageFragmentGroupKey {
-            file_id: self.file_id,
-            row_group_idx: self.row_group_idx,
-        }
+        self.group
     }
 
     /// Returns memory used by the key (estimated).
@@ -1817,7 +1822,7 @@ impl PageRangeLookup {
 type PageFragmentRangeIndex = BTreeMap<(u64, u64), PageFragmentKey>;
 type PageFragmentIndex = HashMap<PageFragmentGroupKey, PageFragmentRangeIndex>;
 
-/// Byte-fragment cache for Parquet row-group reads.
+/// Shared byte cache for Parquet row-group fragments and aligned native payload blocks.
 pub struct PageRangeCache {
     cache: Cache<PageFragmentKey, Bytes>,
     index: RwLock<PageFragmentIndex>,
@@ -1968,7 +1973,7 @@ impl PageRangeCache {
         row_group_idx: usize,
         range: &Range<u64>,
     ) -> Vec<PageFragmentKey> {
-        let group_key = PageFragmentGroupKey {
+        let group_key = PageFragmentGroupKey::Parquet {
             file_id,
             row_group_idx,
         };
