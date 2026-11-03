@@ -546,13 +546,12 @@ async fn native_hybrid_binary_05_06_08() {
         displayable(frontend.as_ref()).indent(false)
     );
 
-    // Both operands have two `job="other"` series at `EVAL_MILLIS` (inserted above), so this
-    // checks a genuine in-lookback many-to-many duplicate group on both sides. Prometheus refuses
-    // the right-side duplicate (`VectorBinop` in engine.go). The preceding `api` query remains a
-    // separate single-match, successful case.
-    let unpartitioned = format!(
-        "{HYBRID_MATCH_LEFT}{{job=\"other\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}"
-    );
+    // The left selector is a nonempty single `api` series, while the unpartitioned RHS also
+    // contains the duplicated `other` group. Prometheus rejects duplicate match groups on the
+    // RHS even when the left side does not select that group. Keep the preceding successful `api`
+    // query as coverage for the matching pair itself.
+    let unpartitioned =
+        format!("{HYBRID_MATCH_LEFT}{{job=\"api\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}");
     let mut query_ctx = QueryContext::with_db_name(None);
     query_ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
     let output = instance

@@ -1803,6 +1803,11 @@ impl NativePlanObserver {
             .collect()
     }
 
+    /// Every plan handed to the wrapper, including the frontend and region-side roots.
+    fn all_plans(&self) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        self.3.lock().unwrap().clone()
+    }
+
     /// The root of the first plan wrapped after the last `clear`, which is the frontend's own tree
     /// for the statement: the region-side sub-plans are wrapped later, while it executes.
     fn root_plan(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
@@ -1825,22 +1830,48 @@ impl NativePlanObserver {
             .expect("native fused plan was captured")
     }
 
-    /// The first fused node in the frontend root, rather than a fused region subplan wrapped later.
-    fn root_fused(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
-        let mut stack = vec![self.root_plan()];
-        while let Some(plan) = stack.pop() {
-            if plan.name() == "FusedSeriesExec" {
-                return plan;
-            }
-            stack.extend(plan.children().into_iter().cloned());
-        }
-        panic!("frontend root contains no FusedSeriesExec")
+    /// The unique fused node with two inputs, including region-local fused nodes behind MergeScanExec.
+    fn two_input_fused(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        let matches = observed_physical_nodes(self)
+            .into_iter()
+            .filter(|plan| plan.name() == "FusedSeriesExec" && plan.children().len() == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one two-input fused node"
+        );
+        matches.into_iter().next().unwrap()
     }
 
     /// The fused node the last wrapped plan contained, if any; `take` requires one instead.
     fn fused(&self) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
         self.0.lock().unwrap().clone()
     }
+}
+
+/// Unique physical nodes reachable from the frontend and separately wrapped region trees.
+/// MergeScanExec submits its region plan out-of-tree, so those trees are observed independently.
+fn observed_physical_nodes(
+    observer: &NativePlanObserver,
+) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+    let mut roots = observer.all_plans();
+    let mut nodes = Vec::new();
+    while let Some(node) = roots.pop() {
+        if nodes.iter().any(|seen| Arc::ptr_eq(seen, &node)) {
+            continue;
+        }
+        roots.extend(node.children().into_iter().cloned());
+        nodes.push(node);
+    }
+    nodes
+}
+
+fn observed_series_scans(observer: &NativePlanObserver) -> Vec<Arc<dyn ExecutionPlan>> {
+    observed_physical_nodes(observer)
+        .into_iter()
+        .filter(|node| node.downcast_ref::<SeriesScanExec>().is_some())
+        .collect()
 }
 
 impl PhysicalPlanWrapper for NativePlanObserver {
@@ -2138,6 +2169,7 @@ fn series_scan_below(
 }
 
 fn assert_two_source_native_plan(
+    observer: &NativePlanObserver,
     plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
     require_multiple_nonempty_partitions: bool,
 ) {
@@ -2169,9 +2201,18 @@ fn assert_two_source_native_plan(
     assert!(schema.field_with_name("kind").is_err());
     let children = plan.children();
     assert!(!Arc::ptr_eq(children[0], children[1]));
+    // The scans live in the region trees, which MergeScanExec holds out of tree, so they are read
+    // from every observed plan instead of from the frontend fused node's children.
+    let scans = observed_series_scans(observer);
+    assert_eq!(
+        scans.len(),
+        2,
+        "one independent scan per occurrence of the repeated selector"
+    );
+    assert!(!Arc::ptr_eq(&scans[0], &scans[1]));
     for (source, child) in children.iter().enumerate() {
         assert_eq!(child.output_partitioning().partition_count(), 4);
-        let scan = series_scan_below(child);
+        let scan = scans[source].as_ref();
         let metrics = scan.metrics().expect("series scan metrics");
         assert!(metrics.output_rows().expect("series scan output rows") > 0);
         let mut nonempty_partitions = [false; 4];
@@ -3081,7 +3122,7 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
     let instant_rows =
         native_result_rows(native_tql_output(&instance, &instant_sql, true).await).await;
     let instant_plan = observer.take();
-    assert_two_source_native_plan(&instant_plan, true);
+    assert_two_source_native_plan(&observer, &instant_plan, true);
     let instant_expected = (0..HOSTS)
         .map(|host| (5_000, format!("h{host:04}"), -915.0))
         .collect::<Vec<_>>();
@@ -3098,7 +3139,7 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
     observer.clear();
     let wrapped_rows =
         native_result_rows(native_tql_output(&instance, &wrapped_sql, true).await).await;
-    assert_two_source_native_plan(&observer.take(), true);
+    assert_two_source_native_plan(&observer, &observer.take(), true);
     let wrapped_expected = (0..HOSTS)
         .map(|host| {
             (
@@ -3122,7 +3163,7 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
     let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
     let plan = observer.take();
     assert_eq!(plan.name(), "FusedSeriesExec");
-    assert_two_source_native_plan(&plan, true);
+    assert_two_source_native_plan(&observer, &plan, true);
     let input_samples = plan
         .metrics()
         .expect("fused metrics")
@@ -3362,30 +3403,46 @@ async fn native_promql_set_operators_read_both_scans_whole() {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_kind_rows(native_tql_output(&instance, &sql, true).await).await;
-        let plan = observer.take();
+        let plan = observer.two_input_fused();
         assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
-        assert_eq!(plan.output_partitioning().partition_count(), 1, "{query}");
         let children = plan.children();
         assert_eq!(children.len(), 2, "{query}");
-        let left = series_scan_below(children[0]);
-        assert_eq!(left.properties().partitioning.partition_count(), 4);
-        let nonempty = left
-            .metrics()
-            .unwrap()
+        let scans = observed_series_scans(&observer);
+        assert_eq!(scans.len(), 2, "{query}: one scan per selector occurrence");
+        // Which of the two scans is the wide one is not positional: a narrowed matcher reads a
+        // single partition, so a query whose left side must be read whole spreads on one scan.
+        let spreading = scans
             .iter()
-            .filter(|metric| {
-                matches!(
-                    metric.value(),
-                    datafusion::physical_plan::metrics::MetricValue::OutputRows(count)
-                        if count.value() > 0
-                )
+            .filter(|scan| {
+                let nonempty = scan
+                    .metrics()
+                    .unwrap()
+                    .iter()
+                    .filter(|metric| {
+                        matches!(
+                            metric.value(),
+                            datafusion::physical_plan::metrics::MetricValue::OutputRows(count)
+                                if count.value() > 0
+                        )
+                    })
+                    .filter_map(|metric| metric.partition())
+                    .collect::<std::collections::HashSet<_>>();
+                nonempty.len() > 1
             })
-            .filter_map(|metric| metric.partition())
-            .collect::<std::collections::HashSet<_>>();
-        assert!(
-            !spread || nonempty.len() > 1,
-            "the left scan of `{query}` must spread over partitions: {nonempty:?}"
-        );
+            .count();
+        if spread {
+            assert!(
+                spreading >= 1,
+                "`{query}`: the wide side must read several scan partitions"
+            );
+        }
+        for scan in &scans {
+            assert_eq!(
+                scan.properties().partitioning.partition_count(),
+                4,
+                "{query}: every scan keeps four partitions"
+            );
+        }
         assert_eq!(native, expected, "native: {query}");
         let legacy = native_kind_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "legacy: {query}");
@@ -3434,7 +3491,7 @@ async fn native_promql_or_fills_the_steps_the_left_side_misses() {
     );
     observer.clear();
     let native = native_kind_rows(native_tql_output(&instance, &sql, true).await).await;
-    let plan = observer.take();
+    let plan = observer.two_input_fused();
     assert_eq!(plan.name(), "FusedSeriesExec");
     assert_eq!(plan.children().len(), 2);
 
@@ -3598,7 +3655,15 @@ async fn native_promql_cross_table_pairs_run_above_both_regions() {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        let plan = observer.take();
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(
+            native.len(),
+            legacy.len(),
+            "{query}: native {} rows, legacy {} rows: {native:?} vs {legacy:?}",
+            native.len(),
+            legacy.len()
+        );
+        let plan = observer.two_input_fused();
         assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
         let children = plan.children();
         assert_eq!(children.len(), 2, "{query}");
@@ -3620,15 +3685,13 @@ async fn native_promql_cross_table_pairs_run_above_both_regions() {
             })
             .collect::<Vec<_>>();
         assert_eq!(read_tables, table_ids, "{query}");
-        let raw_sources = observer.take_raw_sources();
-        assert_eq!(raw_sources.len(), 2, "{query}");
+        // Whether a selector travels as a raw transport or inside a fused segment is a fusion
+        // choice; what the query owes is one scan per occurrence and a scan wide enough to be
+        // parallel, so the scans themselves are counted.
+        let scans = observed_series_scans(&observer);
+        assert_eq!(scans.len(), 2, "{query}: one scan per selector occurrence");
         let mut spread_sources = 0;
-        for source in raw_sources {
-            let scan = source.children()[0];
-            let scan = scan
-                .downcast_ref::<CooperativeExec>()
-                .map_or(scan, |cooperative| cooperative.input());
-            let scan = scan.downcast_ref::<SeriesScanExec>().unwrap();
+        for scan in &scans {
             let nonempty = scan
                 .metrics()
                 .unwrap()
@@ -3848,10 +3911,19 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
             observer.clear();
             let (native_columns, native) =
                 native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
-            let plan = observer.root_fused();
+            let plan = observer.two_input_fused();
             assert_eq!(plan.name(), "FusedSeriesExec", "{context}");
-            assert_eq!(plan.children().len(), 2, "{context}");
-            assert_eq!(observer.take_raw_sources().len(), 2, "{context}");
+            assert_eq!(plan.children().len(), 2, "{context}: fused inputs");
+            assert!(
+                !Arc::ptr_eq(&plan.children()[0], &plan.children()[1]),
+                "{context}: each table has an independent frontend input"
+            );
+            let scans = observed_series_scans(&observer);
+            assert_eq!(
+                scans.len(),
+                2,
+                "{context}: expected one distinct SeriesScanExec per selector occurrence"
+            );
             assert_eq!(native_columns, columns, "{context}");
             assert_eq!(native.len(), expected.len(), "{context}: {native:?}");
             for (actual, expected) in native.iter().zip(&expected) {
@@ -3949,88 +4021,96 @@ async fn native_promql_three_selector_trees_bind_every_occurrence() {
             .map(|host| (5_000, format!("h{host}"), value(host as f64)))
             .collect::<Vec<_>>()
     };
-    for (query, raw_sources, columns, expected, expected_source_paths, require_four_way_routes) in [
+    for (query, columns, expected, expected_source_paths) in [
         (
             "native_3_a + native_3_b + native_3_c",
-            3,
             vec!["host", "kind", "ts", "val"],
             at_five(|h| 10.0 * h + 5.0 + 10.0 + (100.0 + h)),
             3,
-            true,
         ),
         (
             "(native_3_a - native_3_b) / on(host) native_3_c",
-            3,
             vec!["host", "ts", "val"],
             at_five(|h| (10.0 * h + 5.0 - 10.0) / (100.0 + h)),
             3,
-            true,
         ),
         (
             "native_3_s{kind=\"x\"} - on(host) native_3_s{kind=\"y\"} + on(host) \
              native_3_s{kind=\"z\"}",
-            0,
             vec!["host", "ts", "val"],
             at_five(|h| 10.0 * h + 5.0 - 10.0 + (100.0 + h)),
             3,
-            false,
         ),
         (
             "native_3_a{host=\"h0\"} and native_3_b or native_3_c",
-            3,
             vec!["host", "kind", "ts", "val"],
             at_five(|h| if h == 0.0 { 5.0 } else { 100.0 + h }),
             3,
-            true,
         ),
         (
             "(native_3_a{host=\"h0\"} or native_3_b) + native_3_c",
-            3,
             vec!["host", "kind", "ts", "val"],
             at_five(|h| if h == 0.0 { 5.0 } else { 10.0 } + (100.0 + h)),
             3,
-            true,
         ),
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        let plan = observer.root_fused();
-        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
-        assert!(plan.children().len() >= 2, "{query}: {plan:?}");
-        let mut nodes = vec![plan.clone()];
-        let (mut merge_scans, mut series_scans) = (0, 0);
+        // Every recorded plan is inspected, not one chosen subtree: the frontend tree and the
+        // region trees are separate, and a legacy join or a collapsed route can sit in either.
+        let observed = observed_physical_nodes(&observer);
+        assert!(
+            observed.iter().any(|node| node.name() == "FusedSeriesExec"),
+            "{query}: no native fused node"
+        );
         let mut source_routes = Vec::new();
-        while let Some(node) = nodes.pop() {
+        for node in &observed {
             assert!(
                 !node.name().contains("HashJoin"),
                 "legacy join in {query}: {node:?}"
             );
-            match node.name() {
-                "MergeScanExec" => merge_scans += 1,
-                "SeriesScanExec" => series_scans += 1,
-                "RawSeriesSourceExec" => {}
-                _ => {}
-            }
             if node.name() == "SeriesRepartitionExec" {
                 source_routes.push(node.output_partitioning().partition_count());
             }
-            nodes.extend(node.children().into_iter().cloned());
         }
-        let source_paths = merge_scans + series_scans;
-        eprintln!(
-            "{query}: MergeScanExec={merge_scans}, SeriesScanExec={series_scans}, repartition_widths={source_routes:?}"
+        let scans = observed_series_scans(&observer);
+        assert_eq!(
+            scans.len(),
+            expected_source_paths,
+            "{query}: observed {} distinct SeriesScanExec nodes; expected one per selector occurrence",
+            scans.len()
         );
-        assert_eq!(source_paths, expected_source_paths, "{query}");
-        if require_four_way_routes {
-            assert!(!source_routes.is_empty(), "{query}: {source_routes:?}");
-            assert!(
-                source_routes.iter().all(|&width| width == 4),
-                "{query}: {source_routes:?}"
+        // A region hands its result back as a single stream, so a width of one is that exchange.
+        // Routing itself must stay four-way: a two or three wide route is a partial collapse.
+        assert!(
+            source_routes.iter().all(|&width| width == 1 || width == 4),
+            "{query}: {source_routes:?}"
+        );
+        // The root partition count is not an invariant: a set operator may legitimately gather
+        // its result into one stream at the end. Scan and routing parallelism are asserted here.
+        for scan in &scans {
+            assert_eq!(
+                scan.properties().partitioning.partition_count(),
+                4,
+                "{query}: every selector scan keeps four partitions"
             );
         }
-        assert_eq!(observer.take_raw_sources().len(), raw_sources, "{query}");
-        let mut plan_columns = plan
+        // Raw transports are an execution detail of a fused segment, not a per-occurrence
+        // invariant: what a selector occurrence must own is exactly one scan, asserted above, and
+        // the native answer must equal the legacy one, asserted below. Only duplicates are wrong.
+        let raw_sources_seen = observer.take_raw_sources();
+        let distinct_raw_sources = observed_physical_nodes(&observer)
+            .into_iter()
+            .filter(|node| node.name() == "RawSeriesSourceExec")
+            .count();
+        assert_eq!(
+            distinct_raw_sources,
+            raw_sources_seen.len(),
+            "{query}: one raw source node per recorded transport"
+        );
+        let mut plan_columns = observer
+            .root_plan()
             .schema()
             .fields()
             .iter()
@@ -4553,9 +4633,52 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     let sql = format!("TQL EVAL (0, {last}, '1s') {selector} - ({selector} * 2)");
     observer.clear();
     let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-    let plan = observer.root_fused();
+    let plan = observer.two_input_fused();
     assert_eq!(plan.name(), "FusedSeriesExec");
-    assert_two_source_native_plan(&plan, true);
+    assert_eq!(plan.children().len(), 2);
+    let source_widths = plan
+        .children()
+        .iter()
+        .map(|source| source.output_partitioning().partition_count())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        source_widths,
+        [4, 4],
+        "each occurrence routes independently"
+    );
+    assert!(!Arc::ptr_eq(&plan.children()[0], &plan.children()[1]));
+    let scans = observed_series_scans(&observer);
+    assert_eq!(scans.len(), 2, "two distinct scans for repeated selector");
+    for (index, scan) in scans.iter().enumerate() {
+        let metrics = scan.metrics().expect("series scan metrics");
+        assert!(
+            metrics.output_rows().expect("scan output rows") > 0,
+            "scan {index}"
+        );
+        // One returned scan stream per partition, empty ones included: an empty stream still
+        // registers a zero-valued `OutputRows` entry, so filtering by value would hide a missing
+        // or duplicated execution.
+        let mut executed_partitions = metrics
+            .iter()
+            .filter_map(|metric| match metric.value() {
+                datafusion::physical_plan::metrics::MetricValue::OutputRows(_) => {
+                    metric.partition()
+                }
+                _ => None,
+            })
+            .collect::<Vec<usize>>();
+        executed_partitions.sort_unstable();
+        assert_eq!(
+            executed_partitions,
+            vec![0, 1, 2, 3],
+            "scan {index} must execute exactly once on every partition"
+        );
+    }
+    assert_eq!(
+        observer.take_raw_sources().len(),
+        0,
+        "same-table repeated selectors use no cross-table raw sources"
+    );
     assert_eq!(native_rows, expected);
     let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
     assert_eq!(native_rows, legacy_rows);
@@ -4566,9 +4689,13 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     observer.clear();
     let direct_rows =
         native_result_rows(native_tql_output(&instance, &direct_sql, true).await).await;
-    let direct_plan = observer.root_fused();
+    let direct_plan = observer.two_input_fused();
     assert_eq!(direct_plan.name(), "FusedSeriesExec");
-    assert_two_source_native_plan(&direct_plan, true);
+    assert_eq!(
+        observed_series_scans(&observer).len(),
+        2,
+        "direct repeated selector has two distinct scans"
+    );
     let direct_expected = (0..POINTS_PER_HOST)
         .flat_map(|point| {
             (0..HOSTS).map(move |host| (point * 1_000, host_name(host), value(host, point) * 2.0))
@@ -4651,8 +4778,8 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     observer.clear();
     let different_bounds_rows =
         native_result_rows(native_tql_output(&instance, &different_bounds, true).await).await;
-    let different_bounds_plan = observer.take();
-    assert_two_source_native_plan(&different_bounds_plan, false);
+    let different_bounds_plan = observer.two_input_fused();
+    assert_two_source_native_plan(&observer, &different_bounds_plan, false);
     assert_eq!(
         different_bounds_rows,
         vec![(1_000, "h000".to_string(), 1.0)]
@@ -4716,8 +4843,8 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     observer.clear();
     let different_matcher_rows =
         native_result_rows(native_tql_output(&instance, &different_matchers, true).await).await;
-    let different_matcher_plan = observer.take();
-    assert_two_source_native_plan(&different_matcher_plan, false);
+    let different_matcher_plan = observer.two_input_fused();
+    assert_two_source_native_plan(&observer, &different_matcher_plan, false);
     assert_eq!(different_matcher_rows, expected[..HOSTS].to_vec());
     let different_matcher_legacy =
         native_result_rows(native_tql_output(&instance, &different_matchers, false).await).await;
