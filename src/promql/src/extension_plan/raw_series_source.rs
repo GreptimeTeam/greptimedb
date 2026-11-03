@@ -52,6 +52,8 @@ use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::Stream;
+use greptime_proto::substrait_extension::RawSeriesSource as RawSeriesSourceProto;
+use prost::Message;
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 use table::table::scan::SeriesScanExec;
 
@@ -64,6 +66,7 @@ use crate::source::materialize_raw_labels;
 /// output always keeps: one scan partition emits one series after another, so each series stays
 /// contiguous, while the finer key-then-time order of the scan is not repeated here.
 const ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
+const WIRE_VERSION: u32 = 1;
 
 /// The logical node: one table scan bound to one metric's raw series.
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -108,6 +111,40 @@ impl RawSeriesSource {
 
     pub fn fields(&self) -> &[String] {
         &self.fields
+    }
+
+    /// Encodes only the binding; Substrait carries the input plan separately.
+    pub fn serialize(&self) -> Vec<u8> {
+        RawSeriesSourceProto {
+            version: WIRE_VERSION,
+            metric_name: self.metric_name.to_string(),
+            tags: self.tags.clone(),
+            fields: self.fields.clone(),
+        }
+        .encode_to_vec()
+    }
+
+    /// Decodes a binding with a placeholder, replaced when Substrait restores the child.
+    pub fn deserialize(bytes: &[u8]) -> DataFusionResult<Self> {
+        let binding = RawSeriesSourceProto::decode(bytes).map_err(|error| {
+            DataFusionError::Substrait(format!("Failed to deserialize RawSeriesSource: {error}"))
+        })?;
+        if binding.version != WIRE_VERSION {
+            return Err(DataFusionError::Substrait(format!(
+                "Unsupported RawSeriesSource version: {}",
+                binding.version
+            )));
+        }
+        let input = LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        });
+        Self::try_new(
+            Arc::from(binding.metric_name),
+            binding.tags,
+            binding.fields,
+            input,
+        )
     }
 
     /// The physical node over `series_scan`, the region's raw-series leaf for this binding.
@@ -380,5 +417,96 @@ impl ExecutionPlan for RawSeriesSourceExec {
         // the published frame carries the schema the plan was built with, which is what the region
         // and the frontend both compare.
         pack_raw_series(Box::pin(DeclaredOrdering(relabelled)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::logical_expr::EmptyRelation;
+
+    use super::*;
+
+    const FIXTURE: &str =
+        include_str!("../../../../tests/compatibility/wire/raw_series_source/v1_payload.hex");
+
+    fn fixture_bytes() -> Vec<u8> {
+        let hex = FIXTURE.trim().as_bytes();
+        assert_eq!(hex.len() % 2, 0);
+        hex.chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn raw_series_source_wire_fixture() {
+        let bytes = fixture_bytes();
+        let source = RawSeriesSource::deserialize(&bytes).unwrap();
+        assert_eq!(source.metric_name(), "http_requests_total");
+        assert_eq!(source.tags(), ["z", "a"]);
+        assert_eq!(source.fields(), ["value_b", "value_a"]);
+        assert_eq!(source.serialize(), bytes);
+        assert!(matches!(
+            source.inputs()[0],
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                ..
+            })
+        ));
+
+        let field = source.schema().field_with_name(None, "fields").unwrap();
+        let DataType::Struct(fields) = field.data_type() else {
+            panic!("expected struct field in frame schema");
+        };
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            ["value_b", "value_a"]
+        );
+
+        let child = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: true,
+            schema: Arc::new(DFSchema::empty()),
+        });
+        let rebound = source
+            .with_exprs_and_inputs(vec![], vec![child.clone()])
+            .unwrap();
+        assert_eq!(rebound.inputs(), vec![&child]);
+        assert_eq!(rebound.schema(), source.schema());
+        assert_eq!(rebound.serialize(), bytes);
+        assert!(source.with_exprs_and_inputs(vec![], vec![]).is_err());
+        assert!(
+            source
+                .with_exprs_and_inputs(vec![], vec![child.clone(), child])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_series_source_wire_rejects_unsupported_and_truncated_payloads() {
+        let fixture = fixture_bytes();
+        for version in [0, 2] {
+            let mut bytes = fixture.clone();
+            bytes[1] = version;
+            let error = RawSeriesSource::deserialize(&bytes).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Unsupported RawSeriesSource version")
+            );
+        }
+        let error = RawSeriesSource::deserialize(&fixture[..fixture.len() - 1]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to deserialize RawSeriesSource")
+        );
+
+        // Unknown protobuf fields do not invalidate a known binding version.
+        let mut bytes = fixture;
+        bytes.extend([0x28, 0x01]);
+        assert!(RawSeriesSource::deserialize(&bytes).is_ok());
     }
 }
