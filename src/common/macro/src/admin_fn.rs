@@ -311,6 +311,11 @@ fn build_struct(
                 // Safety check: Ensure under the `greptime` catalog for security
                 #user_path::ensure_greptime!(self.func_ctx);
 
+                #user_path::permission::ensure_admin_privilege(
+                    &self.func_ctx,
+                    #display_name,
+                )?;
+
                 // Zero-argument functions also execute once per input row.
                 let rows_num = columns.first().map_or(args.number_rows, |column| column.len());
                 #validate_rows

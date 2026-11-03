@@ -15,6 +15,7 @@
 mod admin;
 mod flush_flow;
 mod macros;
+mod permission;
 mod system;
 mod uddsketch_compat;
 
