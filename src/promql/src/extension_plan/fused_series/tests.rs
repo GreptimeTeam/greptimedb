@@ -4709,63 +4709,36 @@ async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
 }
 
 #[test]
-fn duplicate_evidence_claims_share_generation_and_reset_finished_or_reissued_partitions() {
+fn duplicate_evidence_claims_share_evidence_and_never_reissue_partitions() {
     use std::sync::{Arc, Mutex};
 
-    use super::{EvidenceGenerations, claim_evidence};
+    use super::{EvidenceClaims, claim_evidence};
     use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
     let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let slot = Mutex::new(EvidenceGenerations {
+    let claims = Mutex::new(EvidenceClaims {
         evidence: None,
-        issued: Vec::new(),
+        claimed: Vec::new(),
     });
-    let first = claim_evidence(&slot, 0, 2, &pool).unwrap();
-    let second = claim_evidence(&slot, 1, 2, &pool).unwrap();
+    let first = claim_evidence(&claims, 0, 2, &pool).unwrap();
+    let second = claim_evidence(&claims, 1, 2, &pool).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
     first.complete();
     second.complete();
 
-    let after_finished = claim_evidence(&slot, 0, 2, &pool).unwrap();
-    assert!(!Arc::ptr_eq(&first, &after_finished));
-    after_finished.abort();
-    let after_aborted = claim_evidence(&slot, 0, 2, &pool).unwrap();
-    assert!(!Arc::ptr_eq(&after_finished, &after_aborted));
-}
+    for partition in [0, 1] {
+        let error = match claim_evidence(&claims, partition, 2, &pool) {
+            Ok(_) => panic!("reissued partition was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("executed more than once"));
+    }
 
-#[tokio::test]
-async fn duplicate_evidence_reclaims_partition_after_an_abandoned_execution() {
-    let exec = duplicate_evidence_partitioned_exec(
-        vec![
-            vec![
-                match_series("k", "right-a", GRID_START - 1, 1.0),
-                match_series("k", "right-b", GRID_START - 1, 2.0),
-            ],
-            vec![match_series("k", "left", GRID_START, 3.0)],
-        ],
-        0,
-        GRID_STEP,
-    );
-    let context = SessionContext::default().task_ctx();
-    drop(exec.execute(0, Arc::clone(&context)).unwrap());
-
-    let partition_one = exec.execute(1, Arc::clone(&context)).unwrap();
-    let partition_zero = exec.execute(0, context).unwrap();
-
-    let (one, zero) = tokio::join!(
-        partition_one.try_collect::<Vec<_>>(),
-        partition_zero.try_collect::<Vec<_>>()
-    );
-    let errors = [one.err(), zero.err()]
-        .into_iter()
-        .flatten()
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
-    assert!(
-        errors
-            .iter()
-            .any(|error| error.contains("found duplicate series for the match group")),
-        "{errors:?}"
-    );
+    first.abort();
+    let error = match claim_evidence(&claims, 0, 2, &pool) {
+        Ok(_) => panic!("aborted execution partition was reclaimed"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("executed more than once"));
 }
 
 #[tokio::test]
@@ -4883,19 +4856,19 @@ async fn duplicate_evidence_merges_presence_across_partitions() {
         partitioned_duplicate_verdict(only_duplicate_partition)
             .await
             .is_empty(),
-        "the duplicate partition has no left presence, so cannot self-report"
+        "the duplicate partition has no left presence, so it cannot self-report"
     );
 }
 
 #[tokio::test]
-async fn duplicate_evidence_allows_missing_opposite_side_across_partitions() {
+async fn duplicate_evidence_allows_presence_at_disjoint_steps_across_partitions() {
     let exec = duplicate_evidence_partitioned_exec(
         vec![
             vec![
-                match_series("k", "right-a", GRID_START - GRID_STEP, 1.0),
-                match_series("k", "right-b", GRID_START - GRID_STEP, 2.0),
+                match_series("k", "right-a", GRID_START - 1, 1.0),
+                match_series("k", "right-b", GRID_START - 1, 2.0),
             ],
-            vec![],
+            vec![match_series("k", "left", GRID_START + GRID_STEP, 3.0)],
         ],
         0,
         GRID_STEP,

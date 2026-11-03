@@ -1122,40 +1122,30 @@ fn native_tree_has_vector_binary(node: &NativeNode) -> bool {
     }
 }
 
-/// Which execution the plan instance is handing evidence to.
-///
-/// `execute` runs once per output partition per execution and the partitions of one execution
-/// share evidence. A generation is identified by the claims it has issued. Abandoned generations
-/// retain storage only for what they stored, charged to the pool meanwhile.
-struct EvidenceGenerations {
+/// Evidence shared by the output partitions of this plan's single execution.
+struct EvidenceClaims {
     evidence: Option<Arc<DuplicateEvidence>>,
-    issued: Vec<bool>,
+    claimed: Vec<bool>,
 }
 
 fn claim_evidence(
-    slot: &Mutex<EvidenceGenerations>,
+    claims: &Mutex<EvidenceClaims>,
     partition: usize,
     partitions: usize,
     pool: &Arc<dyn MemoryPool>,
 ) -> DataFusionResult<Arc<DuplicateEvidence>> {
-    let mut generations = slot.lock().unwrap_or_else(|e| e.into_inner());
-    let evidence = generations.evidence.as_ref();
-    // An aborted generation is dead even while claims remain: otherwise a dropped execution
-    // would strand later partitions in its incomplete generation.
-    if evidence.is_none()
-        || evidence.is_some_and(|evidence| evidence.finished() || evidence.aborted())
-    {
-        generations.evidence = Some(Arc::new(DuplicateEvidence::new(pool, partitions)));
-        generations.issued = vec![false; partitions];
-    } else if generations.issued.get(partition).copied().unwrap_or(false) {
-        // Repeated claims cannot safely infer an execution boundary from call order: cancellation
-        // followed by reuse can interleave partitions from two executions into one generation.
+    let mut claims = claims.lock().unwrap_or_else(|e| e.into_inner());
+    if claims.evidence.is_none() {
+        claims.evidence = Some(Arc::new(DuplicateEvidence::new(pool, partitions)));
+        claims.claimed = vec![false; partitions];
+    }
+    if claims.claimed.get(partition).copied().unwrap_or(false) {
         return Err(DataFusionError::Execution(
             "FusedSeries plan instance was executed more than once for the same partition".into(),
         ));
     }
-    generations.issued[partition] = true;
-    Ok(Arc::clone(generations.evidence.as_ref().unwrap()))
+    claims.claimed[partition] = true;
+    Ok(Arc::clone(claims.evidence.as_ref().unwrap()))
 }
 
 /// The physical node that runs a compiled native tree over its input's raw series.
@@ -1177,8 +1167,8 @@ pub struct FusedSeriesExec {
     tags: Arc<[String]>,
     /// The columns this node produces.
     output_schema: SchemaRef,
-    /// The evidence generation claimed by this plan's output partitions.
-    duplicate_evidence: Mutex<EvidenceGenerations>,
+    /// The evidence claimed by this plan's output partitions.
+    duplicate_evidence: Mutex<EvidenceClaims>,
     /// Per-node metrics, registered by each execution of the tree.
     metric: ExecutionPlanMetricsSet,
     /// Aggregate state exported by each partition, when this is the partial mode.
@@ -1349,9 +1339,9 @@ impl FusedSeriesExec {
             time_column,
             tags: tags.into(),
             output_schema,
-            duplicate_evidence: Mutex::new(EvidenceGenerations {
+            duplicate_evidence: Mutex::new(EvidenceClaims {
                 evidence: None,
-                issued: Vec::new(),
+                claimed: Vec::new(),
             }),
             metric: ExecutionPlanMetricsSet::new(),
             properties,
