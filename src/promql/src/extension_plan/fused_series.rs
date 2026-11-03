@@ -2642,7 +2642,7 @@ impl FusedSeriesStream {
                             && let Some(candidate) = self
                                 .duplicate_evidence
                                 .as_ref()
-                                .and_then(|evidence| evidence.verdict())
+                                .and_then(|evidence| evidence.take_verdict())
                         {
                             self.fail();
                             return Poll::Ready(Some(Err(DataFusionError::Execution(

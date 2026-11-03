@@ -1676,8 +1676,10 @@ impl DuplicateEvidence {
     }
 
     fn clear_slots(&self) {
-        self.slots.lock().unwrap().clear();
-        self.final_verdict.lock().unwrap().take();
+        let mut final_verdict = self.final_verdict.lock().unwrap();
+        let mut slots = self.slots.lock().unwrap();
+        final_verdict.take();
+        slots.clear();
         let reservation = self.reservation.lock().unwrap();
         let size = reservation.size();
         reservation.shrink(size);
@@ -1708,13 +1710,18 @@ impl DuplicateEvidence {
             }
         };
         if last {
+            let mut final_verdict = self.final_verdict.lock().unwrap();
             if !self.aborted.load(std::sync::atomic::Ordering::Acquire) {
-                *self.final_verdict.lock().unwrap() = self.current_verdict();
+                *final_verdict = self.current_verdict();
             }
+            let retained_bytes = final_verdict
+                .as_ref()
+                .map(|candidate| candidate_owned_bytes(&candidate.group))
+                .unwrap_or(0);
             self.slots.lock().unwrap().clear();
             let reservation = self.reservation.lock().unwrap();
-            let size = reservation.size();
-            reservation.shrink(size);
+            let release = reservation.size().saturating_sub(retained_bytes);
+            reservation.shrink(release);
         }
         last && !self.aborted.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -1724,6 +1731,19 @@ impl DuplicateEvidence {
             return self.final_verdict.lock().unwrap().clone();
         }
         self.current_verdict()
+    }
+
+    /// Takes the completed verdict and releases the memory retained for its candidate.
+    pub fn take_verdict(&self) -> Option<DuplicateCandidate> {
+        if self.remaining.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            return None;
+        }
+        let mut final_verdict = self.final_verdict.lock().unwrap();
+        let candidate = final_verdict.take()?;
+        let reservation = self.reservation.lock().unwrap();
+        let size = reservation.size();
+        reservation.shrink(size);
+        Some(candidate)
     }
 
     fn current_verdict(&self) -> Option<DuplicateCandidate> {

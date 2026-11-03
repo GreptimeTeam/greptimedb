@@ -3660,6 +3660,11 @@ fn duplicate_evidence_last_exit_clears_slots_and_abort_releases_claims() {
     assert!(!evidence.complete());
     assert!(evidence.complete());
     assert_eq!(evidence.slot_count(), 0);
+    let retained = pool.reserved();
+    assert!(retained > 0);
+    assert_eq!(evidence.verdict().unwrap().point, 2);
+    assert_eq!(evidence.take_verdict().unwrap().point, 2);
+    assert!(evidence.take_verdict().is_none());
     assert_eq!(pool.reserved(), 0);
 
     let aborted = super::DuplicateEvidence::new(&pool, 2);
