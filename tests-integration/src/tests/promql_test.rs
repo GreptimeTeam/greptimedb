@@ -6031,9 +6031,9 @@ async fn native_promql_rewrites_the_label_count_values_writes() {
     let instance = standalone.fe_instance().clone();
     execute_all(
         &instance,
-        "CREATE TABLE native_cv_rewrite (host STRING, "zone" STRING, ts TIMESTAMP TIME INDEX, \
-         val DOUBLE, PRIMARY KEY (host, "zone")) ENGINE=mito; \
-         INSERT INTO native_cv_rewrite (host, "zone", ts, val) VALUES \
+        "CREATE TABLE native_cv_rewrite (host STRING, \"zone\" STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY (host, \"zone\")) ENGINE=mito; \
+         INSERT INTO native_cv_rewrite (host, \"zone\", ts, val) VALUES \
          ('a', 'left', 0, 1), ('b', 'left', 0, 1), ('c', 'right', 0, 2)",
         QueryContext::arc(),
     )
