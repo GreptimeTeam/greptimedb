@@ -43,7 +43,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
 use promql::extension_plan::{
-    FusedSeries, HistogramFold, InputLocality, RawSeriesSource, SeriesRouting, input_locality,
+    FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
 use promql::native::plan::{AggregateStage, BoundVectorOp, NativeExpr, NativeNode, NativeType};
 use promql::vector_match::MatchingLabels;
@@ -4197,16 +4197,7 @@ async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
     let display = plan.display_indent().to_string();
     let final_node = find_final_split(&plan)
         .unwrap_or_else(|| panic!("`{query}` must split into Partial and Final: {display}"));
-    assert_eq!(
-        Some(SeriesRouting::CanonicalLabelsExcept(Arc::from([
-            Arc::from("le"),
-            Arc::from("__name__"),
-            Arc::from("__type__"),
-            Arc::from("__unit__"),
-        ]))),
-        final_node.state_routing_policy(),
-        "`{query}`: {display}"
-    );
+    // Only the Final node over state publishes this suffix, so the plan's own text pins it.
     assert!(
         display.contains(
             " (state routing: canonical labels except [\"le\", \"__name__\", \"__type__\", \"__unit__\"])"

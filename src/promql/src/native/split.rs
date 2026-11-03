@@ -64,8 +64,9 @@ pub(crate) fn histogram_group_is_single(group: &Grouping) -> bool {
 /// `Ok(None)` is a subtree holding no aggregate. Point-wise operations can run where their groups
 /// are owned. Histogram functions can also run there when the state router co-locates every bucket
 /// and every histogram whose output labels collide. A label rewrite may change that key, so it is
-/// only admitted alongside a histogram when it cannot change a label in the cut's routing key.
-/// `topk`, a second aggregate and vector-vector matching still need a whole-vector boundary.
+/// only admitted alongside a partitioned histogram when it cannot change a label in the cut's
+/// routing key. A single-owner histogram needs no such restriction. `topk`, a second aggregate and
+/// vector-vector matching still need a whole-vector boundary.
 ///
 /// An instant selection or window above the cut cannot be applied to the merged values under the
 /// tree's current binding: the cut output is evaluated, whereas these nodes consume raw samples.
@@ -95,7 +96,7 @@ pub(crate) fn split(
                         }
                     }
             });
-            if changes_key && inner.histogram {
+            if changes_key && inner.histogram && !histogram_group_is_single(&inner.op.group) {
                 return Err(declined(
                     "a routing-label rewrite around a partitioned histogram",
                 ));
@@ -160,7 +161,7 @@ pub(crate) fn split(
             if inner.histogram {
                 return Err(declined("nested histograms above a split aggregate"));
             }
-            if inner.label_rewrite {
+            if inner.label_rewrite && !histogram_group_is_single(&inner.op.group) {
                 return Err(declined(
                     "a routing-label rewrite around a partitioned histogram",
                 ));

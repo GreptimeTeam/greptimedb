@@ -667,11 +667,6 @@ impl FusedSeries {
             .any(|input| matches!(input.output, NativeType::AggregateState(_)))
     }
 
-    /// The routing policy required by this node's Final aggregate, if it reads state.
-    pub fn state_routing_policy(&self) -> Option<SeriesRouting> {
-        state_routing(self.tree.root()).map(|(_, policy)| policy)
-    }
-
     /// The compiled tree this node runs.
     pub fn tree(&self) -> &NativeTree {
         &self.tree
@@ -796,15 +791,21 @@ impl FusedSeries {
                         StateGroup::Single => 1,
                         StateGroup::Grouped => target_partitions.unwrap_or(count).max(1),
                     };
-                    let has_router =
-                        input
-                            .downcast_ref::<SeriesRepartitionExec>()
-                            .is_some_and(|router| {
-                                router.outputs() == required && router.routing_policy() == policy
-                            });
-                    if count == required && (has_router || required == 1) {
+                    let input = if let Some(router) = input.downcast_ref::<SeriesRepartitionExec>()
+                    {
+                        if router.outputs() == required
+                            && (required == 1 || router.routing_policy() == policy)
+                        {
+                            return Ok((input, label_source, ordering));
+                        }
+                        // Rebuild over the producer, not the old router's row slices, which retain
+                        // their parent payload and would otherwise be charged once per row again.
+                        Arc::clone(router.children()[0])
+                    } else if count == required && required == 1 {
                         return Ok((input, label_source, ordering));
-                    }
+                    } else {
+                        input
+                    };
                     let routed = Arc::new(SeriesRepartitionExec::try_new_with_routing(
                         input,
                         required,

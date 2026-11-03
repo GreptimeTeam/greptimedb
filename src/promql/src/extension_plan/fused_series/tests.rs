@@ -6064,13 +6064,14 @@ fn histogram_over_sum_splits_and_declares_complete_bucket_routing() {
                 FusedOutputFormat::SeriesFrame,
             )
             .unwrap();
-            assert_eq!(node.state_routing_policy(), Some(histogram_routing()));
             let logical = LogicalPlan::Extension(datafusion::logical_expr::Extension {
                 node: Arc::new(node),
             });
             let display = logical.display_indent().to_string();
             assert!(
-                display.contains("state routing: canonical labels except"),
+                display.lines().next().unwrap().ends_with(
+                    " (state routing: canonical labels except [\"le\", \"__name__\", \"__type__\", \"__unit__\"])"
+                ),
                 "{display}"
             );
         }
@@ -6114,6 +6115,173 @@ fn histogram_split_declines_only_rewrites_that_change_the_routing_key() {
             FusedSeries::split_aggregate(&tree, TIME).unwrap().is_some(),
             accepted,
             "{dst}"
+        );
+    }
+}
+
+#[test]
+fn histogram_split_allows_single_owner_routing_label_rewrites() {
+    for (group, accepted) in [
+        (Grouping::By(Arc::from([Arc::from("le")])), true),
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from("__type__")])),
+            true,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            false,
+        ),
+        (Grouping::Without(Arc::from([Arc::from(HOST)])), false),
+    ] {
+        let base = histogram_over_sum_tree(group.clone(), HistogramFunction::Quantile(0.99));
+        let NativeExpr::Vector { input, op } = &base.root().expr else {
+            unreachable!()
+        };
+        for before_histogram in [true, false] {
+            // Rewriting the routing label from `le` can assign different keys to sibling buckets.
+            let map = |input: NativeNode| NativeNode {
+                output: input.output.clone(),
+                expr: NativeExpr::Map {
+                    input: Box::new(input),
+                    op: BoundMap {
+                        ops: vec![MapOp::Label(Arc::new(
+                            LabelRewrite::join(JOB, "", &["le"]).unwrap(),
+                        ))]
+                        .into(),
+                    },
+                },
+            };
+            let root = if before_histogram {
+                NativeNode {
+                    expr: NativeExpr::Vector {
+                        input: Box::new(map((**input).clone())),
+                        op: op.clone(),
+                    },
+                    output: base.root().output.clone(),
+                }
+            } else {
+                map(base.root().clone())
+            };
+            let tree = NativeTree::try_new(root).unwrap();
+            assert_eq!(
+                FusedSeries::split_aggregate(&tree, TIME).unwrap().is_some(),
+                accepted,
+                "group {group:?}, before histogram: {before_histogram}"
+            );
+        }
+    }
+}
+
+#[test]
+fn histogram_final_replaces_incompatible_state_router() {
+    for (group, old_width, target_width, required_width, old_policy, reuse) in [
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            4,
+            4,
+            4,
+            SeriesRouting::CanonicalLabels,
+            false,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            4,
+            8,
+            8,
+            SeriesRouting::CanonicalLabels,
+            false,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            4,
+            8,
+            8,
+            histogram_routing(),
+            false,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le")])),
+            1,
+            8,
+            1,
+            SeriesRouting::CanonicalLabels,
+            true,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le")])),
+            4,
+            8,
+            1,
+            SeriesRouting::CanonicalLabels,
+            false,
+        ),
+    ] {
+        let tree = histogram_over_sum_tree(group, HistogramFunction::Quantile(0.5));
+        let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
+        let partial_node = FusedSeries::try_new_state_export(
+            Arc::from("partial"),
+            partial.clone(),
+            binding(&partial),
+            vec![input_plan(frame_schema())],
+        )
+        .unwrap();
+        let producer = partial_node
+            .to_execution_plan(vec![(
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            )])
+            .unwrap();
+        let old_router = Arc::new(
+            SeriesRepartitionExec::try_new_with_routing(
+                Arc::clone(&producer),
+                old_width,
+                old_policy.clone(),
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+        let final_node = FusedSeries::try_new_with_format(
+            Arc::from("final"),
+            final_tree.clone(),
+            binding(&final_tree),
+            vec![input_plan(
+                canonical_state_frame_schema(&partial).inner().clone(),
+            )],
+            canonical_frame_schema(&final_tree),
+            FusedOutputFormat::SeriesFrame,
+        )
+        .unwrap();
+        let build = |input| {
+            final_node
+                .to_execution_plan_with_parallelism(
+                    vec![(input, RawLabelSource::Explicit, SeriesOrdering::Contiguous)],
+                    target_width,
+                )
+                .unwrap()
+        };
+        let plan = build(Arc::clone(&old_router));
+        let child = plan.children()[0];
+        let router = child.downcast_ref::<SeriesRepartitionExec>().unwrap();
+        assert_eq!(router.outputs(), required_width);
+        if reuse {
+            assert_eq!(router.routing_policy(), &old_policy);
+            assert!(
+                Arc::ptr_eq(child, &old_router),
+                "a single-owner router is reused regardless of policy"
+            );
+        } else {
+            assert_eq!(router.routing_policy(), &histogram_routing());
+            assert!(!Arc::ptr_eq(child, &old_router), "old router is replaced");
+        }
+        assert!(
+            Arc::ptr_eq(router.children()[0], &producer),
+            "the only router reads the original state producer directly"
+        );
+        let correct_router = Arc::clone(child);
+        let reused = build(Arc::clone(&correct_router));
+        assert!(
+            Arc::ptr_eq(reused.children()[0], &correct_router),
+            "a router with the required width and policy is reused"
         );
     }
 }
