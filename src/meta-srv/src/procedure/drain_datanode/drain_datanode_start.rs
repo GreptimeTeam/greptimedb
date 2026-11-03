@@ -97,7 +97,6 @@ mod tests {
         );
         // Registering the procedure is the only persisted step of the run.
         assert!(matches!(status, Status::Executing { persist: true, .. }));
-        assert!(ctx.volatile_ctx.leader_regions.is_empty());
         assert!(
             !env.node_scheduling_manager
                 .is_schedulable(NodeSchedulingRole::Datanode, 1)

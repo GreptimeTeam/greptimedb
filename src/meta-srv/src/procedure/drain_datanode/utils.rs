@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod batch_aggregator;
+pub(crate) mod scan;
+
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
@@ -63,11 +66,10 @@ pub(crate) fn ensure_drain_deadline(ctx: &Context) -> Result<()> {
         return Ok(());
     }
 
-    let remaining_leader_regions = ctx.volatile_ctx.leader_regions.len();
     error::ExceededDeadlineSnafu {
         operation: format!(
-            "Drain datanode {}, migrated: {}, remaining leader regions: {}",
-            ctx.persistent_ctx.node_id, ctx.volatile_ctx.migrated, remaining_leader_regions
+            "Drain datanode {}, migrated: {}",
+            ctx.persistent_ctx.node_id, ctx.volatile_ctx.migrated
         ),
     }
     .fail()

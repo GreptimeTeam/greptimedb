@@ -23,10 +23,10 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
-use crate::procedure::drain_datanode::batch_aggregator::BatchAggregator;
 use crate::procedure::drain_datanode::dispatch::Dispatch;
 use crate::procedure::drain_datanode::drain_datanode_end::DrainDatanodeEnd;
-use crate::procedure::drain_datanode::{Context, MAX_RESCAN_ROUNDS, State, scan, utils};
+use crate::procedure::drain_datanode::utils::batch_aggregator::BatchAggregator;
+use crate::procedure::drain_datanode::{Context, MAX_RESCAN_ROUNDS, State, utils};
 use crate::procedure::region_migration::DEFAULT_REGION_MIGRATION_TIMEOUT;
 use crate::procedure::region_migration::manager::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
@@ -60,10 +60,11 @@ impl DrainDatanodeCursor {
         }
 
         ctx.volatile_ctx.rescan_round += 1;
-        ctx.volatile_ctx.scan = Some(scan::RegionScan::new(
+        ctx.volatile_ctx.scan = Some(utils::scan::RegionScan::new(
             &ctx.table_metadata_manager,
             node_id,
             ctx.persistent_ctx.parallelism,
+            ctx.persistent_ctx.parallelism * 4,
         ));
         ctx.volatile_ctx.follower_count = 0;
 
@@ -84,8 +85,10 @@ impl DrainDatanodeCursor {
             .next_group(
                 &ctx.table_metadata_manager,
                 ctx.persistent_ctx.node_id,
-                &ctx.volatile_ctx.failed_regions,
-                ctx.region_migration_manager.tracker(),
+                |region_id| {
+                    ctx.volatile_ctx.failed_regions.contains(&region_id)
+                        || ctx.region_migration_manager.tracker().contains(region_id)
+                },
                 max_regions,
             )
             .await?;
@@ -103,6 +106,37 @@ impl DrainDatanodeCursor {
         Ok(next)
     }
 
+    /// Fills this round's region budget, retaining partial work on retryable errors.
+    async fn prepare_batches(&mut self, ctx: &mut Context) -> Result<()> {
+        loop {
+            utils::ensure_drain_deadline(ctx)?;
+            if !self.region_group.is_empty() {
+                let batches = self.prepare_migrations(ctx).await?;
+                self.batches.extend(batches);
+                self.region_group.clear();
+            }
+            let prepared_regions = self
+                .batches
+                .iter()
+                .map(|batch| batch.region_ids.len())
+                .sum::<usize>();
+            if prepared_regions >= ctx.persistent_ctx.parallelism {
+                break;
+            }
+            if ctx.volatile_ctx.scan.is_none() {
+                self.start_scan(ctx)?;
+            }
+            let Some(group) = self
+                .read_next_group(ctx, ctx.persistent_ctx.parallelism - prepared_regions)
+                .await?
+            else {
+                break;
+            };
+            self.region_group = group;
+        }
+        utils::ensure_drain_deadline(ctx)
+    }
+
     /// Selects destinations within the current group and prepares complete migration batches.
     async fn prepare_migrations(
         &mut self,
@@ -114,12 +148,11 @@ impl DrainDatanodeCursor {
             if ctx.volatile_ctx.failed_regions.contains(&region_id)
                 || ctx.region_migration_manager.tracker().contains(region_id)
             {
-                ctx.forget_leader_region(region_id);
                 continue;
             }
             match self.prepare_migration_task(ctx, region_id).await {
                 Ok(Some(task)) => tasks.push(task),
-                Ok(None) => ctx.forget_leader_region(region_id),
+                Ok(None) => {}
                 Err(e) => ctx.handle_migration_error(e, &[region_id])?,
             }
         }
@@ -197,43 +230,10 @@ impl State for DrainDatanodeCursor {
         ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        utils::ensure_drain_deadline(ctx)?;
-
         loop {
-            if !self.region_group.is_empty() {
-                ctx.volatile_ctx.leader_regions = self
-                    .batches
-                    .iter()
-                    .flat_map(|batch| batch.region_ids.iter().copied())
-                    .chain(self.region_group.iter().copied())
-                    .collect();
-                let batches = self.prepare_migrations(ctx).await?;
-                self.batches.extend(batches);
-                self.region_group.clear();
-            }
-            let prepared_regions = self
-                .batches
-                .iter()
-                .map(|batch| batch.region_ids.len())
-                .sum::<usize>();
-            if prepared_regions < ctx.persistent_ctx.parallelism {
-                if ctx.volatile_ctx.scan.is_none() {
-                    self.start_scan(ctx)?;
-                }
-                if let Some(group) = self
-                    .read_next_group(ctx, ctx.persistent_ctx.parallelism - prepared_regions)
-                    .await?
-                {
-                    self.region_group = group;
-                    continue;
-                }
-            }
+            self.prepare_batches(ctx).await?;
             if !self.batches.is_empty() {
                 let batches = std::mem::take(&mut self.batches);
-                ctx.volatile_ctx.leader_regions = batches
-                    .iter()
-                    .flat_map(|batch| batch.region_ids.iter().copied())
-                    .collect();
                 return Ok((Box::new(Dispatch::new(batches)), Status::executing(false)));
             }
             let produced_group = ctx
@@ -264,12 +264,17 @@ impl State for DrainDatanodeCursor {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use api::v1::meta::heartbeat_request::NodeWorkloads;
+    use common_meta::cluster::NodeInfo;
+    use common_meta::error::Result as MetaResult;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
-    use common_meta::peer::Peer;
+    use common_meta::peer::{Peer, PeerDiscovery};
     use common_procedure::Status;
+    use common_time::util::current_time_millis;
     use common_wal::options::{KafkaWalOptions, WalOptions};
     use store_api::storage::RegionId;
 
@@ -279,7 +284,7 @@ mod tests {
     use crate::procedure::drain_datanode::dispatch::Dispatch;
     use crate::procedure::drain_datanode::drain_datanode_end::DrainDatanodeEnd;
     use crate::procedure::drain_datanode::test_util::{
-        TestEnv, create_kafka_table, leader_region, leader_regions, new_persistent_context,
+        TestEnv, create_kafka_table, leader_region, new_persistent_context,
     };
     use crate::procedure::drain_datanode::{DrainDatanodeStrategy, MAX_RESCAN_ROUNDS, State};
     use crate::procedure::region_migration::manager::{
@@ -287,6 +292,114 @@ mod tests {
     };
     use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
+
+    fn dispatch_regions(state: &dyn State) -> Vec<RegionId> {
+        state
+            .as_any()
+            .downcast_ref::<Dispatch>()
+            .unwrap()
+            .batches
+            .iter()
+            .flat_map(|batch| batch.region_ids.iter().copied())
+            .collect()
+    }
+
+    async fn wait_until_deadline(deadline_ms: i64) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while current_time_millis() < deadline_ms {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the deadline should elapse");
+    }
+
+    struct EmptyDiscovery {
+        deadline_ms: i64,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerDiscovery for EmptyDiscovery {
+        async fn active_frontends(&self) -> MetaResult<Vec<NodeInfo>> {
+            unreachable!()
+        }
+
+        async fn active_datanodes(
+            &self,
+            _filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+        ) -> MetaResult<Vec<NodeInfo>> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            if call == 1 {
+                wait_until_deadline(self.deadline_ms).await;
+            }
+            Ok(vec![])
+        }
+
+        async fn active_flownodes(
+            &self,
+            _filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+        ) -> MetaResult<Vec<NodeInfo>> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cursor_checks_deadline_after_preparation_failures() {
+        let env = TestEnv::new().await;
+        let regions = (0..4).map(|i| RegionId::new(1024, i)).collect::<Vec<_>>();
+        env.create_table(regions.iter().map(|id| leader_region(*id, 1)).collect())
+            .await;
+        let mut persistent = new_persistent_context(None, DrainDatanodeStrategy::TryAll);
+        persistent.parallelism = 1;
+        persistent.deadline_ms = current_time_millis() + 1000;
+        let discovery = Arc::new(EmptyDiscovery {
+            deadline_ms: persistent.deadline_ms,
+            calls: AtomicUsize::new(0),
+        });
+        let mut ctx = env.context(persistent);
+        ctx.selector_ctx.peer_discovery = discovery.clone();
+        let error = DrainDatanodeCursor::default()
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, error::Error::ExceededDeadline { .. }));
+        assert_eq!(2, discovery.calls.load(Ordering::Relaxed));
+        assert_eq!(&regions[..2], ctx.volatile_ctx.failed_regions);
+        assert_eq!(0, ctx.volatile_ctx.migrated);
+    }
+
+    #[tokio::test]
+    async fn test_cursor_checks_deadline_after_empty_scan() {
+        use common_meta::key::TableMetadataManager;
+        use common_meta::kv_backend::test_util::MockKvBackendBuilder;
+
+        let env = TestEnv::new().await;
+        let mut ctx = env.context(new_persistent_context(None, DrainDatanodeStrategy::TryAll));
+        let deadline_ms = current_time_millis() + 1000;
+        ctx.persistent_ctx.deadline_ms = deadline_ms;
+        ctx.table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(
+            MockKvBackendBuilder::default()
+                .range_async_fn(Arc::new(move |_| {
+                    Box::pin(async move {
+                        wait_until_deadline(deadline_ms).await;
+                        Ok(common_meta::rpc::store::RangeResponse {
+                            kvs: vec![],
+                            more: false,
+                        })
+                    })
+                }))
+                .build()
+                .unwrap(),
+        )));
+        let error = DrainDatanodeCursor::default()
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, error::Error::ExceededDeadline { .. }));
+        assert_eq!(1, ctx.volatile_ctx.rescan_round);
+        assert!(ctx.volatile_ctx.failed_regions.is_empty());
+    }
 
     #[tokio::test]
     async fn test_drain_datanode_cursor_excludes_running_migrations() {
@@ -327,10 +440,9 @@ mod tests {
             assert_eq!(0, ctx.volatile_ctx.migrated);
             if has_pending_region {
                 assert!(next.as_any().is::<Dispatch>());
-                assert_eq!(vec![pending], leader_regions(&ctx));
+                assert_eq!(vec![pending], dispatch_regions(next.as_ref()));
             } else {
                 assert!(next.as_any().is::<DrainDatanodeEnd>());
-                assert!(leader_regions(&ctx).is_empty());
             }
 
             // Once the migration releases its guard, an unchanged route needs a new child.
@@ -347,7 +459,7 @@ mod tests {
             } else {
                 vec![running]
             };
-            assert_eq!(expected, leader_regions(&ctx));
+            assert_eq!(expected, dispatch_regions(next.as_ref()));
         }
     }
 
@@ -390,7 +502,7 @@ mod tests {
 
         assert!(matches!(status, Status::Executing { .. }));
         assert!(next.as_any().downcast_ref::<Dispatch>().is_some());
-        assert_eq!(vec![region_id], leader_regions(&ctx));
+        assert_eq!(vec![region_id], dispatch_regions(next.as_ref()));
         assert_eq!(1, ctx.volatile_ctx.rescan_round);
     }
 
@@ -459,7 +571,6 @@ mod tests {
 
         assert!(matches!(status, Status::Executing { .. }));
         assert!(next.as_any().is::<DrainDatanodeEnd>());
-        assert!(leader_regions(&ctx).is_empty());
     }
 
     #[tokio::test]
@@ -503,7 +614,7 @@ mod tests {
             // Both scanning and preparation skip regions owned by another migration.
             assert!(matches!(status, Status::Executing { .. }));
             assert!(next.as_any().is::<DrainDatanodeEnd>());
-            assert!(leader_regions(&ctx).is_empty());
+
             assert!(ctx.volatile_ctx.failed_regions.is_empty());
             assert_eq!(0, ctx.volatile_ctx.migrated);
             assert!(env.region_migration_manager.tracker().contains(region_id));
@@ -526,14 +637,12 @@ mod tests {
         ));
         let procedure_ctx = TestingEnv::procedure_context();
 
-        let error = DrainDatanodeCursor::default()
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap_err();
+        let mut cursor = DrainDatanodeCursor::default();
+        let error = cursor.next(&mut ctx, &procedure_ctx).await.unwrap_err();
 
         assert!(matches!(error, error::Error::DrainDatanodeAbort { .. }));
         assert!(!error.is_retryable());
-        assert_eq!(vec![region_id], leader_regions(&ctx));
+        assert_eq!(vec![region_id], cursor.region_group);
     }
 
     #[tokio::test]

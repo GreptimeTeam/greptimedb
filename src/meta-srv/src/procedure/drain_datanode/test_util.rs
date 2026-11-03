@@ -304,16 +304,6 @@ pub(super) async fn run_until_done(
     panic!("the drain procedure did not finish in 50 steps");
 }
 
-/// Sets the pending leader regions for a state test.
-pub(super) fn set_leader_regions(ctx: &mut Context, leader_regions: Vec<RegionId>) {
-    ctx.volatile_ctx.leader_regions = leader_regions;
-}
-
-/// Returns the leader regions the procedure still has to migrate.
-pub(super) fn leader_regions(ctx: &Context) -> Vec<RegionId> {
-    ctx.volatile_ctx.leader_regions.clone()
-}
-
 /// Creates interleaved Kafka topic assignments for drain cursor tests.
 pub(crate) async fn create_kafka_table(
     env: &TestEnv,

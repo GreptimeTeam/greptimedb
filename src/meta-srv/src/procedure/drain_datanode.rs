@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod batch_aggregator;
 pub(crate) mod cursor;
 pub(crate) mod dispatch;
 pub(crate) mod drain_datanode_end;
 pub(crate) mod drain_datanode_start;
 pub(crate) mod manager;
-mod scan;
 pub(crate) mod utils;
 
 #[cfg(test)]
@@ -105,10 +103,8 @@ pub struct SubprocedureMeta {
 /// lifecycle and may finish after this drain procedure ends.
 #[derive(Debug, Default)]
 pub struct VolatileContext {
-    /// Regions being prepared or awaiting migration results in the current round.
-    pub(crate) leader_regions: Vec<RegionId>,
     /// Paused metadata scan; dropped and rebuilt after a metadata read error.
-    pub(crate) scan: Option<scan::RegionScan>,
+    pub(crate) scan: Option<utils::scan::RegionScan>,
     /// Number of followers seen in the current scan.
     pub follower_count: usize,
     /// The number of regions confirmed to have left the source while collecting batch results.
@@ -175,13 +171,6 @@ impl Context {
 }
 
 impl Context {
-    /// Removes `region_id` from the current round. A later scan may add it back.
-    pub(crate) fn forget_leader_region(&mut self, region_id: RegionId) {
-        self.volatile_ctx
-            .leader_regions
-            .retain(|region| *region != region_id);
-    }
-
     /// Applies the failure strategy to regions that could not be prepared or dispatched.
     pub(crate) fn handle_migration_error(
         &mut self,
@@ -193,10 +182,7 @@ impl Context {
         }
         error!(e; "Gave up draining regions {:?}", regions);
         METRIC_META_REGION_MIGRATION_FAIL.inc_by(regions.len() as u64);
-        for &region_id in regions {
-            self.forget_leader_region(region_id);
-            self.volatile_ctx.failed_regions.push(region_id);
-        }
+        self.volatile_ctx.failed_regions.extend_from_slice(regions);
         Ok(())
     }
 }
@@ -357,9 +343,7 @@ mod tests {
 
     use crate::procedure::drain_datanode::cursor::DrainDatanodeCursor;
     use crate::procedure::drain_datanode::dispatch::Dispatch;
-    use crate::procedure::drain_datanode::test_util::{
-        create_kafka_table, leader_regions, set_leader_regions,
-    };
+    use crate::procedure::drain_datanode::test_util::create_kafka_table;
     use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
     use api::v1::meta::heartbeat_request::NodeWorkloads;
     use common_error::ext::ErrorExt;
@@ -440,7 +424,7 @@ mod tests {
         assert_eq!(DEFAULT_PARALLELISM, ctx.parallelism);
         assert_eq!(DrainDatanodeStrategy::TryAll, ctx.strategy);
         // The plan and the progress of a run are volatile, so they are not dumped.
-        assert!(!json.contains("leader_regions"));
+        assert!(!json.contains("scan"));
         assert!(!json.contains("rescan_round"));
     }
 
@@ -526,7 +510,7 @@ mod tests {
                 |persistent_ctx| env.context(persistent_ctx),
             )
             .unwrap();
-            assert!(recovered.context.volatile_ctx.leader_regions.is_empty());
+            assert!(recovered.context.volatile_ctx.scan.is_none());
             drop(recovered);
             let id = ProcedureId::random();
             let message = common_procedure::store::ProcedureMessage {
@@ -893,7 +877,6 @@ mod tests {
                     region_id,
                     leader_id,
                 });
-                set_leader_regions(&mut ctx, vec![region_id]);
 
                 let (mut dispatch, _) = DrainDatanodeCursor::default()
                     .next(&mut ctx, &TestingEnv::procedure_context())
@@ -906,7 +889,6 @@ mod tests {
                     .unwrap();
                 assert!(next.as_any().is::<DrainDatanodeCursor>());
                 assert!(matches!(status, Status::Executing { persist: false, .. }));
-                assert!(leader_regions(&ctx).is_empty());
                 assert!(ctx.volatile_ctx.failed_regions.is_empty());
                 assert_eq!(0, ctx.volatile_ctx.migrated);
                 assert!(!env.region_migration_manager.tracker().contains(region_id));
@@ -1076,8 +1058,13 @@ mod tests {
         assert!(!persist);
         assert_eq!(common_procedure::SubprocedureRecovery::Detach, recovery);
         assert_eq!(1, subprocedures.len());
-        // The region is only removed after its migration is settled.
-        assert_eq!(vec![region_id], leader_regions(&ctx));
+        assert!(env.region_migration_manager.tracker().contains(region_id));
+        let data: serde_json::Value =
+            serde_json::from_str(&subprocedures[0].procedure.dump().unwrap()).unwrap();
+        assert_eq!(
+            serde_json::json!([region_id]),
+            data["persistent_ctx"]["region_ids"]
+        );
         assert!(next.as_any().downcast_ref::<Dispatch>().is_some());
     }
 }
