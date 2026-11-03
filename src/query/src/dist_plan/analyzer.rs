@@ -968,19 +968,18 @@ impl PlanRewriter {
         }
         self.set_expanded();
 
-        // Extra columns introduced for distributed operations may need to be removed. Avoid an
-        // identity projection when the entire schema already matches, and never project a series
-        // frame: its declaration is schema metadata, not columns, and a projection would either
-        // drop it or attach it to a different set of columns.
-        if node.schema() == &schema {
-            return Ok(node);
-        }
+        // Extra columns introduced for distributed operations may need to be removed. A complete
+        // frame that already has the required schema must not go through column projection: its
+        // declaration is schema metadata. Ordinary SQL keeps its existing identity projection.
         let has_frame_metadata = |schema: &DFSchema| {
             schema
                 .metadata()
                 .keys()
                 .any(|key| key.starts_with("greptime.series."))
         };
+        if node.schema() == &schema && has_frame_metadata(schema.as_ref()) {
+            return Ok(node);
+        }
         if has_frame_metadata(schema.as_ref()) || has_frame_metadata(node.schema().as_ref()) {
             return Err(datafusion_common::DataFusionError::Plan(
                 "distributed schema recovery cannot project a series frame".into(),
