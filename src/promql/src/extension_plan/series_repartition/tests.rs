@@ -1322,6 +1322,102 @@ async fn aggregate_state_router_holds_charge_for_batch_handoff_until_eof() {
     assert_eq!(1, returned.num_rows());
 }
 
+#[tokio::test]
+async fn aggregate_state_router_drop_handoff_releases_charge() {
+    let series = schema();
+    let wire =
+        Arc::new(AggregateStateSchema::try_new(AggregateStateKind::Group, Vec::new()).unwrap());
+    let state = StateSeries {
+        metric: labels("drop-handoff"),
+        time: TimeAxis::from_grid_spans(
+            series.eval_grid.clone().unwrap(),
+            vec![GridSpan::new(0, 1)],
+        )
+        .unwrap(),
+        states: vec![vec![None]],
+    };
+    let batch = futures::executor::block_on(
+        common_query::series_frame::pack_aggregate_state(
+            Box::pin(futures::stream::iter(vec![Ok((state, true))])),
+            Arc::clone(&wire),
+            Arc::clone(&series),
+        )
+        .unwrap()
+        .try_collect::<Vec<_>>(),
+    )
+    .unwrap()
+    .remove(0);
+    let child_schema = batch.schema();
+    let child = MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema, None).unwrap();
+    let plan = Arc::new(SeriesRepartitionExec::try_new(child, 1).unwrap());
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let mut output = plan.execute(0, context).unwrap();
+    let returned = output.next().await.expect("state batch").unwrap();
+    assert!(
+        pool.reserved() > 0,
+        "handoff remains charged before downstream admission"
+    );
+    drop(returned);
+    assert!(output.next().await.is_none(), "router reaches EOF");
+    drop(output);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "dropping an unadmitted slice releases all charges"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_state_router_cancelled_consumer_releases_queued_charge() {
+    let series = schema();
+    let wire =
+        Arc::new(AggregateStateSchema::try_new(AggregateStateKind::Group, Vec::new()).unwrap());
+    let rows = (0..8)
+        .map(|position| {
+            Ok((
+                StateSeries {
+                    metric: labels("cancel"),
+                    time: TimeAxis::from_grid_spans(
+                        series.eval_grid.clone().unwrap(),
+                        vec![GridSpan::new(position, 1)],
+                    )
+                    .unwrap(),
+                    states: vec![vec![None]],
+                },
+                true,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let batch = futures::executor::block_on(
+        common_query::series_frame::pack_aggregate_state(
+            Box::pin(futures::stream::iter(rows)),
+            Arc::clone(&wire),
+            Arc::clone(&series),
+        )
+        .unwrap()
+        .try_collect::<Vec<_>>(),
+    )
+    .unwrap()
+    .remove(0);
+    let child_schema = batch.schema();
+    let child = MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema, None).unwrap();
+    let plan = Arc::new(SeriesRepartitionExec::try_new(child, 1).unwrap());
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let output = plan.execute(0, context).unwrap();
+    wait_until("state producer queues its state", || pool.reserved() > 0).await;
+    drop(output);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while pool.reserved() != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("cancellation releases all queued charges");
+    assert_eq!(0, pool.reserved(), "cancelled consumer holds nothing");
+}
+
 /// The raw owner over `child` routing by an explicit policy.
 fn raw_node_with_routing(
     child: Arc<dyn ExecutionPlan>,

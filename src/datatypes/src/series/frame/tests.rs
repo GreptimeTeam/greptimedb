@@ -4883,6 +4883,200 @@ mod aggregate_state_acceptance {
     }
 
     #[test]
+    fn aggregate_state_all_kinds_keep_values_and_presence_through_ipc_slicing_and_concat() {
+        let kinds = [
+            Kind::Sum,
+            Kind::Count,
+            Kind::Avg,
+            Kind::Min,
+            Kind::Max,
+            Kind::Group,
+            Kind::Stddev,
+            Kind::Stdvar,
+        ];
+        let components = [
+            Component::Value,
+            Component::Mean,
+            Component::Compensation,
+            Component::Count,
+            Component::IncrementalMean,
+        ];
+
+        for kind in kinds {
+            let schema = state_schema(&["x", "y"], 5);
+            let source_values = values(4, 3.0);
+            let states = || {
+                vec![
+                    source_values.clone(),
+                    vec![
+                        None,
+                        source_values[1],
+                        Some(values(4, 30.0)[2].unwrap()),
+                        None,
+                    ],
+                ]
+            };
+            // Two rows, so slicing and re-concatenating at an offset has something to shift: with
+            // one row, a decoder that ignored the offset would still agree with the baseline.
+            let (first, decoder) = state_frame(
+                kind,
+                &schema,
+                vec![GridSpan::new(0, 3), GridSpan::new(4, 1)],
+                states(),
+                false,
+            );
+            let (second, _) = state_frame(
+                kind,
+                &schema,
+                vec![GridSpan::new(0, 3), GridSpan::new(4, 1)],
+                states(),
+                true,
+            );
+            let batch = concat_batches(&first.schema(), &[first, second]).unwrap();
+            let baseline = decoder.decode_aggregate_state(&batch).unwrap();
+            assert_eq!(baseline.len(), 2);
+
+            // This migrates #10080's property: IPC bytes plus batch concatenation must not change
+            // field-local presence, accumulator values, labels, axis, or finality.
+            let mut ipc = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut ipc, &batch.schema()).unwrap();
+                writer.write(&batch).unwrap();
+                writer.finish().unwrap();
+            }
+            let read_back = StreamReader::try_new(std::io::Cursor::new(ipc), None)
+                .unwrap()
+                .map(|batch| batch.unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(read_back.len(), 1);
+            let ipc_batch = &read_back[0];
+            assert_eq!(ipc_batch.num_rows(), baseline.len());
+            // Both halves carry a non-zero offset after concatenation, so the decoder has to honour
+            // the child arrays' offsets rather than reading from their first element.
+            let sliced = vec![ipc_batch.slice(1, 1), ipc_batch.slice(0, 1)];
+            let joined = concat_batches(&batch.schema(), &sliced).unwrap();
+            assert_eq!(
+                joined.num_rows(),
+                baseline.len(),
+                "{kind:?}: every row survives slicing and concatenation"
+            );
+
+            let check = |rows: &[StateFrameRow], expected: &[&StateFrameRow], context: &str| {
+                assert_eq!(rows.len(), expected.len(), "{context}: row count");
+                for (row, expected) in rows.iter().zip(expected) {
+                    let expected: &StateFrameRow = expected;
+                    assert_eq!(row.metric(), expected.metric(), "{context}: labels");
+                    assert_eq!(row.is_last(), expected.is_last(), "{context}: finality");
+                    assert_eq!(
+                        row.time().positions().collect::<Vec<_>>(),
+                        expected.time().positions().collect::<Vec<_>>(),
+                        "{context}: positions"
+                    );
+                    let actual_fields = row.fields().unwrap();
+                    let expected_fields = expected.fields().unwrap();
+                    assert_eq!(
+                        actual_fields.kind(),
+                        expected_fields.kind(),
+                        "{context}: kind"
+                    );
+                    assert_eq!(
+                        actual_fields.components(),
+                        expected_fields.components(),
+                        "{context}: components"
+                    );
+                    if kind == Kind::Avg {
+                        // Pin the full set once, so iterating a candidate list cannot silently
+                        // skip every component a kind does not have.
+                        assert_eq!(
+                            actual_fields.components(),
+                            &components,
+                            "{context}: av components"
+                        );
+                    }
+                    for field in 0..expected_fields.len() {
+                        let positions = expected_fields
+                            .field(field)
+                            .expect("a declared field has an item array")
+                            .len();
+                        for position in 0..positions {
+                            assert_eq!(
+                                actual_fields.is_present(field, position).unwrap(),
+                                expected_fields.is_present(field, position).unwrap(),
+                                "{context}: presence {kind:?} field {field} position {position}"
+                            );
+                        }
+                        for component in components {
+                            // Only the incremental mean is boolean; the rest are float64. Asking
+                            // for the wrong one is itself an error, so the branch is by component.
+                            if component == Component::IncrementalMean {
+                                let expected_values =
+                                    expected_fields.field_bool_values(field, component).unwrap();
+                                let actual_values =
+                                    actual_fields.field_bool_values(field, component).unwrap();
+                                match (expected_values, actual_values) {
+                                    (Some(expected_values), Some(actual_values)) => {
+                                        for position in 0..expected_values.len() {
+                                            if expected_fields.is_present(field, position).unwrap()
+                                            {
+                                                assert_eq!(
+                                                    actual_values.value(position),
+                                                    expected_values.value(position),
+                                                    "{context}: {kind:?} {component:?} \
+                                                     field {field} position {position}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    (None, None) => {}
+                                    _ => panic!(
+                                        "{context}: {kind:?} {component:?} component changed"
+                                    ),
+                                }
+                                continue;
+                            }
+                            let expected_values =
+                                expected_fields.field_values(field, component).unwrap();
+                            let actual_values =
+                                actual_fields.field_values(field, component).unwrap();
+                            match (expected_values, actual_values) {
+                                (Some(expected_values), Some(actual_values)) => {
+                                    for position in 0..expected_values.len() {
+                                        if expected_fields.is_present(field, position).unwrap() {
+                                            assert_eq!(
+                                                actual_values.value(position),
+                                                expected_values.value(position),
+                                                "{context}: {kind:?} {component:?} field {field} \
+                                                 position {position}"
+                                            );
+                                        }
+                                    }
+                                }
+                                (None, None) => {}
+                                _ => panic!("{context}: {kind:?} {component:?} component changed"),
+                            }
+                        }
+                    }
+                }
+            };
+            // The slices are concatenated in reverse row order on purpose: the decoded order must
+            // follow the concatenation, not the batch the rows came from.
+            check(
+                &decoder.decode_aggregate_state(&joined).unwrap(),
+                &[&baseline[1], &baseline[0]],
+                "ipc+concat",
+            );
+            // A slice of the joined batch: the decoder must honour the offset rather than reading
+            // the first rows of the underlying arrays.
+            let tail = joined.slice(1, joined.num_rows() - 1);
+            check(
+                &decoder.decode_aggregate_state(&tail).unwrap(),
+                &[&baseline[0]],
+                "sliced",
+            );
+        }
+    }
+
+    #[test]
     fn sparse_state_runs_and_empty_batch_decode() {
         let schema = state_schema(&["x"], 10);
         let (batch, decoder) = state_frame(
