@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Routes evaluated series chains by canonical label set across DataFusion input partitions.
+//! Routes evaluated and raw series across DataFusion input partitions.
 //!
-//! This node routes chains by canonical label-set hash, then merges exact metric-name/tag
-//! identities at each owner after their close/EOF barriers. This is owner-local grouping, not a claim
-//! of global canonical completeness. It operates on DataFusion partitions only; arbitrary `MatchKey`
-//! and `GroupKey` routing is unsupported.
+//! Canonical routing hashes complete labels; matching routing hashes the evaluator's own PromQL
+//! matching key. Routing groups are not merge identities: evaluated series merge only by exact name
+//! and tags. Raw ownership is the complete primary key plus exact label agreement; each input's
+//! complete chain or EOF establishes its contribution to a raw identity.
 //!
 //! Chains are transported intact to owners with their input-partition ID, followed by one charged
 //! normal-EOF message per live output from each completed input. Owners group exact identities and
@@ -121,7 +121,8 @@ use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
-    SendableEvaluatedSeriesStream, pack_evaluated_series, unpack_evaluated_series,
+    SendableEvaluatedSeriesStream, pack_evaluated_series, pack_raw_series, unpack_evaluated_series,
+    unpack_raw_series,
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -135,17 +136,63 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
-use datatypes::series::SeriesLabels;
-use datatypes::series::frame::{FrameContent, SeriesFrameDeclaration};
+use datatypes::series::frame::{
+    FrameContent, FrameLabelMode, LabelDecodeSpec, SeriesFrameDeclaration,
+};
+use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{Series, SeriesSchema};
+use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt};
+use store_api::region_engine::{NO_BOUND_LABEL_SOURCE, RawSeriesStream, SendableRawSeriesStream};
 use tokio::sync::mpsc;
 use twox_hash::XxHash64;
 
 use crate::grid_series::{label_set, merge_same_labelset};
-use crate::native::execute::merge_workspace_bytes;
-use crate::native::execute::operand_chunk_bytes;
+use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
+use crate::source::merge_raw_identity_charging;
 use datatypes::series::samples::DenseSamplesRef;
+
+/// Selects the key used to route a series to an output partition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SeriesRouting {
+    /// Hash the canonical label set.
+    CanonicalLabels,
+    /// Hash the exact PromQL matching key, so both sides of a vector operation meet.
+    Matching(crate::vector_match::MatchingLabels),
+    /// Route raw frames by their complete stored primary key.
+    RawPrimaryKey,
+}
+
+struct EmptyRawStream {
+    schema: Arc<SeriesSchema>,
+    ordering: SeriesOrdering,
+}
+
+impl Stream for EmptyRawStream {
+    type Item = Result<RawSeriesChunk, BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(None)
+    }
+}
+
+impl RawSeriesStream for EmptyRawStream {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        &self.schema
+    }
+
+    fn label_source(&self) -> &store_api::region_engine::RawLabelSource {
+        &NO_BOUND_LABEL_SOURCE
+    }
+
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        None
+    }
+
+    fn ordering(&self) -> SeriesOrdering {
+        self.ordering
+    }
+}
 
 /// The seed behind every routing decision.
 ///
@@ -165,6 +212,9 @@ pub struct SeriesRepartitionExec {
     series_schema: Arc<SeriesSchema>,
     /// The one hash configuration of this node's execution.
     routing: Routing,
+    routing_policy: SeriesRouting,
+    content: FrameContent,
+    ordering: SeriesOrdering,
     /// Started by the first `execute` call, since the output partitions share one read of the child.
     shared: Mutex<Option<Arc<SharedExecution>>>,
     properties: Arc<PlanProperties>,
@@ -184,6 +234,25 @@ impl SeriesRepartitionExec {
     /// and a frame whose declaration does not survive the round trip would be published under a
     /// schema its batches do not match.
     pub fn try_new(input: Arc<dyn ExecutionPlan>, outputs: usize) -> DataFusionResult<Self> {
+        let declaration =
+            SeriesFrameDeclaration::parse(input.schema().as_ref()).map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "SeriesRepartition input is not a series frame: {error}"
+                ))
+            })?;
+        let policy = match declaration.content() {
+            FrameContent::Evaluated => SeriesRouting::CanonicalLabels,
+            FrameContent::Raw => SeriesRouting::RawPrimaryKey,
+        };
+        Self::try_new_with_routing(input, outputs, policy)
+    }
+
+    /// Creates the node with an explicit content-compatible routing policy.
+    pub fn try_new_with_routing(
+        input: Arc<dyn ExecutionPlan>,
+        outputs: usize,
+        routing_policy: SeriesRouting,
+    ) -> DataFusionResult<Self> {
         if outputs == 0 {
             return Err(DataFusionError::Plan(
                 "SeriesRepartition requires at least one output partition".to_string(),
@@ -200,17 +269,45 @@ impl SeriesRepartitionExec {
                     "SeriesRepartition input is not a series frame: {error}"
                 ))
             })?;
-        if declaration.content() != FrameContent::Evaluated {
+        let content = declaration.content();
+        match (content, &routing_policy) {
+            (FrameContent::Evaluated, SeriesRouting::RawPrimaryKey) => {
+                return Err(DataFusionError::Plan(
+                    "SeriesRepartition evaluated frames cannot use RawPrimaryKey routing".into(),
+                ));
+            }
+            (FrameContent::Raw, SeriesRouting::CanonicalLabels) => {
+                return Err(DataFusionError::Plan(
+                    "SeriesRepartition raw frames cannot use CanonicalLabels routing".into(),
+                ));
+            }
+            _ => {}
+        }
+        if content == FrameContent::Raw && declaration.labels() != FrameLabelMode::Explicit {
             return Err(DataFusionError::Plan(
-                "SeriesRepartition routes evaluated series fragments, not raw samples".to_string(),
+                "SeriesRepartition raw frames require explicit labels".into(),
             ));
         }
         let series_schema = Arc::new(declaration.series().clone());
-        let declared = pack_evaluated_series(
-            Box::pin(futures::stream::empty()),
-            Arc::clone(&series_schema),
-        )?
-        .schema();
+        let ordering = if content == FrameContent::Raw {
+            common_query::series_frame::series_frame_ordering(input.schema().as_ref())?
+        } else {
+            SeriesOrdering::Contiguous
+        };
+        let declared = match content {
+            FrameContent::Evaluated => pack_evaluated_series(
+                Box::pin(futures::stream::empty()),
+                Arc::clone(&series_schema),
+            )?
+            .schema(),
+            FrameContent::Raw => {
+                let source = EmptyRawStream {
+                    schema: Arc::clone(&series_schema),
+                    ordering,
+                };
+                pack_raw_series(Box::pin(source))?.schema()
+            }
+        };
         if declared != input.schema() {
             return Err(DataFusionError::Plan(
                 "SeriesRepartition input frame carries a schema this node cannot re-declare"
@@ -231,14 +328,22 @@ impl SeriesRepartitionExec {
         Ok(Self {
             input,
             series_schema,
-            routing: Routing::new(outputs),
+            routing: Routing::with_policy(outputs, routing_policy.clone()),
+            routing_policy,
+            content,
+            ordering,
             shared: Mutex::new(None),
             properties,
         })
     }
 
+    /// The routing policy used by this node.
+    pub fn routing_policy(&self) -> &SeriesRouting {
+        &self.routing_policy
+    }
+
     /// How many output partitions this node has.
-    fn outputs(&self) -> usize {
+    pub fn outputs(&self) -> usize {
         self.properties.partitioning.partition_count()
     }
 }
@@ -313,9 +418,10 @@ impl ExecutionPlan for SeriesRepartitionExec {
         }
         // Rebuilt rather than patched, so a child whose schema changed is refused here instead of
         // routed under a frame declaration the new child does not make.
-        Ok(Arc::new(Self::try_new(
+        Ok(Arc::new(Self::try_new_with_routing(
             children.swap_remove(0),
             self.outputs(),
+            self.routing_policy.clone(),
         )?))
     }
 
@@ -340,7 +446,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
                 // emitted twice or read by a scan that was never meant to run twice.
                 *state = Some(SharedExecution::start(
                     &self.input,
-                    self.routing,
+                    self.routing.clone(),
                     Arc::clone(&self.series_schema),
                     &context,
                 )?);
@@ -359,9 +465,25 @@ impl ExecutionPlan for SeriesRepartitionExec {
             Arc::clone(&self.series_schema),
             &context.runtime_env().memory_pool,
             self.input.properties().partitioning.partition_count(),
+            self.ordering,
         );
         let handoff = Arc::clone(&inner.handoff);
-        let output = pack_evaluated_series(Box::pin(inner), Arc::clone(&self.series_schema))?;
+        let output: SendableRecordBatchStream = match self.content {
+            FrameContent::Evaluated => pack_evaluated_series(
+                Box::pin(EvaluatedOutputStream {
+                    inner: Some(Box::pin(inner)),
+                }),
+                Arc::clone(&self.series_schema),
+            )?,
+            FrameContent::Raw => {
+                let raw = RawOutputStream {
+                    inner: Some(Box::pin(inner)),
+                    schema: Arc::clone(&self.series_schema),
+                    ordering: self.ordering,
+                };
+                pack_raw_series(Box::pin(raw))?
+            }
+        };
         let schema = output.schema();
         let output = Box::pin(PackedHandoffStream {
             inner: Some(output),
@@ -433,6 +555,11 @@ impl SharedExecution {
         series_schema: Arc<SeriesSchema>,
         context: &Arc<TaskContext>,
     ) -> DataFusionResult<Arc<Self>> {
+        // What the child carries is what it declares, not what the policy suggests: a raw frame
+        // can be routed by a match key too, so the policy no longer names the content.
+        let content = SeriesFrameDeclaration::parse(input.schema().as_ref())
+            .map_err(|error| DataFusionError::Plan(error.to_string()))?
+            .content();
         let partitions = input.properties().partitioning.partition_count();
         let mut streams = Vec::with_capacity(partitions);
         for child_partition in 0..partitions {
@@ -440,10 +567,15 @@ impl SharedExecution {
             // The expected schema is a check and never an input: the decoder reads the frame's own
             // declaration, and a partition declaring another frame is refused here rather than
             // routed under labels it does not carry.
-            streams.push(unpack_evaluated_series(
-                frames,
-                Some(Arc::clone(&series_schema)),
-            )?);
+            streams.push(match content {
+                FrameContent::Evaluated => RoutedInput::Evaluated(unpack_evaluated_series(
+                    frames,
+                    Some(Arc::clone(&series_schema)),
+                )?),
+                FrameContent::Raw => {
+                    RoutedInput::Raw(unpack_raw_series(frames, Some(Arc::clone(&series_schema)))?)
+                }
+            });
         }
         let mut senders = Vec::with_capacity(routing.outputs);
         let mut receivers = Vec::with_capacity(routing.outputs);
@@ -487,7 +619,7 @@ impl SharedExecution {
             let task = common_runtime::spawn_query(route_partition(
                 stream,
                 partition,
-                routing,
+                routing.clone(),
                 senders.clone(),
                 // What this partition reads ahead is charged to its own consumer, so the read-ahead
                 // of one partition is attributable to the task that did it.
@@ -839,7 +971,7 @@ impl Inputs {
 /// queued chains remain charged to the pool until consumed or dropped. Each task records its outcome
 /// before returning and dropping its senders, so output streams observe the final read outcome.
 async fn route_partition(
-    mut stream: SendableEvaluatedSeriesStream,
+    mut stream: RoutedInput,
     partition: usize,
     routing: Routing,
     senders: Vec<mpsc::UnboundedSender<Queued>>,
@@ -847,7 +979,15 @@ async fn route_partition(
     inputs: Arc<Inputs>,
     mut report: ReportIfUnreported,
 ) {
-    let stop = read_chains(&mut stream, partition, &routing, &senders, &read_ahead).await;
+    // The variant is the content: decoding the input's declared frame is what produced it.
+    let stop = match &mut stream {
+        RoutedInput::Evaluated(stream) => {
+            read_evaluated_chains(stream, partition, &routing, &senders, &read_ahead).await
+        }
+        RoutedInput::Raw(stream) => {
+            read_raw_chains(stream, partition, &routing, &senders, &read_ahead).await
+        }
+    };
     if matches!(&stop, Stop::Ended) {
         for sender in &senders {
             if sender.is_closed() {
@@ -963,7 +1103,7 @@ pub(crate) fn histogram_table_slice_bytes(
 /// to the pool. Output queues are unbounded, so routing does not wait for output polling. Each queued
 /// chain retains its pool charge until the owner consumes it or the queue is dropped. This function
 /// otherwise waits only on its own child.
-async fn read_chains(
+async fn read_evaluated_chains(
     stream: &mut SendableEvaluatedSeriesStream,
     partition: usize,
     routing: &Routing,
@@ -973,7 +1113,7 @@ async fn read_chains(
     loop {
         // One whole chain, assembled here: the chunk that closes the series ends it, and so does a
         // stream that ends between two chains.
-        let mut chain: Chain = Vec::new();
+        let mut chain: Vec<(Series, bool, MemoryReservation)> = Vec::new();
         let mut chain_output: Option<usize> = None;
         let mut discarding = false;
         let mut ended = false;
@@ -1000,7 +1140,7 @@ async fn read_chains(
                     let output = match chain_output {
                         Some(output) => output,
                         None => {
-                            let output = routing.output(&series.metric);
+                            let output = routing.output_labels(&series.metric);
                             chain_output = Some(output);
                             output
                         }
@@ -1095,13 +1235,119 @@ async fn read_chains(
             senders[output]
                 .send(Queued::Chain {
                     input: partition,
-                    chain,
+                    chain: RoutedChain::Evaluated(chain),
                     _metadata: metadata,
                 })
                 .is_err()
         } {
             // A closed output is no longer a destination. Drop this chain and keep consuming.
             continue;
+        }
+    }
+}
+
+async fn read_raw_chains(
+    stream: &mut SendableRawSeriesStream,
+    partition: usize,
+    routing: &Routing,
+    senders: &[mpsc::UnboundedSender<Queued>],
+    read_ahead: &MemoryReservation,
+) -> Stop {
+    loop {
+        let mut chain: Vec<(RawSeriesChunk, MemoryReservation)> = Vec::new();
+        let mut destination: Option<usize> = None;
+        let mut discarding = false;
+        loop {
+            tokio::task::coop::consume_budget().await;
+            let next = match (destination, discarding) {
+                (Some(output), false) if !chain.is_empty() => tokio::select! {
+                    biased;
+                    _ = senders[output].closed() => { chain.clear(); discarding = true; continue; }
+                    item = stream.next() => item,
+                },
+                _ => stream.next().await,
+            };
+            match next {
+                Some(Ok(chunk)) => {
+                    let output = match destination {
+                        Some(output) => output,
+                        None => {
+                            let output = match &routing.policy {
+                                SeriesRouting::Matching(_) => {
+                                    let Some(labels) = chunk.metric.as_ref() else {
+                                        return Stop::Failed(Arc::new(DataFusionError::Execution(
+                                            "a matching-routed raw chain carries no labels".into(),
+                                        )));
+                                    };
+                                    routing.output_labels(labels)
+                                }
+                                _ => routing.output_key(chunk.primary_key.as_slice()),
+                            };
+                            *destination.insert(output)
+                        }
+                    };
+                    let final_chunk = chunk.is_last;
+                    if senders[output].is_closed() {
+                        chain.clear();
+                        discarding = true;
+                        if final_chunk {
+                            break;
+                        }
+                        continue;
+                    }
+                    if discarding {
+                        if final_chunk {
+                            break;
+                        }
+                        continue;
+                    }
+                    let charge = read_ahead.new_empty();
+                    let bytes = match raw_chunk_slice_bytes(&chunk) {
+                        Ok(bytes) => bytes,
+                        Err(error) => return Stop::Failed(Arc::new(error)),
+                    };
+                    if let Err(error) = charge.try_grow(bytes) {
+                        return Stop::Failed(Arc::new(error));
+                    }
+                    chain.push((chunk, charge));
+                    if final_chunk {
+                        break;
+                    }
+                }
+                Some(Err(error)) => {
+                    return Stop::Failed(Arc::new(DataFusionError::External(Box::new(error))));
+                }
+                None => {
+                    return if destination.is_none() {
+                        Stop::Ended
+                    } else {
+                        Stop::Failed(Arc::new(DataFusionError::Execution(
+                            "raw series ended without is_last".into(),
+                        )))
+                    };
+                }
+            }
+        }
+        let Some(output) = destination else {
+            return Stop::Failed(Arc::new(DataFusionError::Internal(
+                "raw chain has no destination".into(),
+            )));
+        };
+        if !discarding {
+            let metadata = read_ahead.new_empty();
+            if let Err(error) = metadata.try_grow(std::mem::size_of::<Queued>()) {
+                return Stop::Failed(Arc::new(error));
+            }
+            if senders[output]
+                .send(Queued::Chain {
+                    input: partition,
+                    chain: RoutedChain::Raw(chain),
+                    _metadata: metadata,
+                })
+                .is_err()
+            {
+                continue;
+            }
         }
     }
 }
@@ -1225,13 +1471,21 @@ enum Ending {
 ///
 /// The transport unit is a chain so queued source contributions remain intact. Owners collect all
 /// chains before locally merging exact identities and producing their final output.
-type Chain = Vec<(Series, bool, MemoryReservation)>;
+enum RoutedInput {
+    Evaluated(SendableEvaluatedSeriesStream),
+    Raw(SendableRawSeriesStream),
+}
+
+enum RoutedChain {
+    Evaluated(Vec<(Series, bool, MemoryReservation)>),
+    Raw(Vec<(RawSeriesChunk, MemoryReservation)>),
+}
 
 /// What one output queue carries: a whole chain and its memory charge.
 enum Queued {
     Chain {
         input: usize,
-        chain: Chain,
+        chain: RoutedChain,
         _metadata: MemoryReservation,
     },
     Eof {
@@ -1242,14 +1496,199 @@ enum Queued {
 
 type ExactIdentity = (Option<Arc<str>>, Vec<(Arc<str>, Arc<str>)>);
 
+/// Turns an owner's evaluated publications into the evaluated stream the packer consumes.
+struct EvaluatedOutputStream {
+    inner: Option<Pin<Box<RepartitionStream>>>,
+}
+
+impl Stream for EvaluatedOutputStream {
+    type Item = Result<(Series, bool), BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let Some(inner) = this.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match inner.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => {
+                this.inner = None;
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(error))) => {
+                this.inner = None;
+                Poll::Ready(Some(Err(error)))
+            }
+            // A merged identity is final: the owner publishes it once, already closed.
+            Poll::Ready(Some(Ok(ReadyOutput::Evaluated(series)))) => {
+                Poll::Ready(Some(Ok((series, true))))
+            }
+            Poll::Ready(Some(Ok(ReadyOutput::Raw(_)))) => {
+                this.inner = None;
+                Poll::Ready(Some(Err(boxed(DataFusionError::Internal(
+                    "an evaluated repartition output carried a raw series".into(),
+                )))))
+            }
+        }
+    }
+}
+
+/// Turns an owner's raw publications into the raw frame stream the packer consumes.
+struct RawOutputStream {
+    inner: Option<Pin<Box<RepartitionStream>>>,
+    schema: Arc<SeriesSchema>,
+    ordering: SeriesOrdering,
+}
+
+impl Stream for RawOutputStream {
+    type Item = Result<RawSeriesChunk, BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let Some(inner) = this.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match inner.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => {
+                this.inner = None;
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(error))) => {
+                this.inner = None;
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(Some(Ok(ReadyOutput::Raw(chunk)))) => Poll::Ready(Some(Ok(chunk))),
+            Poll::Ready(Some(Ok(ReadyOutput::Evaluated(_)))) => {
+                this.inner = None;
+                Poll::Ready(Some(Err(boxed(DataFusionError::Internal(
+                    "a raw repartition output carried an evaluated series".into(),
+                )))))
+            }
+        }
+    }
+}
+
+impl RawSeriesStream for RawOutputStream {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        &self.schema
+    }
+
+    fn label_source(&self) -> &store_api::region_engine::RawLabelSource {
+        &store_api::region_engine::NO_BOUND_LABEL_SOURCE
+    }
+
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        None
+    }
+
+    fn ordering(&self) -> SeriesOrdering {
+        self.ordering
+    }
+}
+
+/// What one owner groups by: an evaluated exact identity, or a complete raw primary key.
+///
+/// The two are separate variants rather than one tuple, so a raw key can never be confused with an
+/// evaluated identity that happens to look similar.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum OwnerKey {
+    Evaluated(ExactIdentity),
+    Raw(Vec<u8>),
+}
+
+/// The raw identity of one chunk: its complete stored primary key and nothing else.
+///
+/// Labels are deliberately not part of the key. Two pieces of one physical key must always meet in
+/// the same owner so a label disagreement can be rejected there, instead of being split across
+/// owners that would each look consistent on its own.
+fn raw_chunk_slice_bytes(chunk: &RawSeriesChunk) -> DataFusionResult<usize> {
+    use datafusion::arrow::array::Array;
+
+    let metric_bytes = chunk.metric.as_ref().map_or(0, |metric| {
+        metric
+            .name()
+            .map_or(0, |name| name.len())
+            .saturating_add(metric.tags().iter().fold(0usize, |bytes, tag| {
+                bytes
+                    .saturating_add(tag.name.len())
+                    .saturating_add(tag.value.len())
+            }))
+    });
+    // A histogram field is an index array naming rows of a shared table; both are held per sample.
+    let mut fields_bytes = 0usize;
+    for samples in chunk.fields.iter() {
+        let field_bytes = match samples.dense() {
+            Some(DenseSamplesRef::Float(values)) => values.to_data().get_slice_memory_size()?,
+            Some(DenseSamplesRef::Histogram(histograms)) => histograms
+                .indices()
+                .to_data()
+                .get_slice_memory_size()?
+                .saturating_add(histogram_table_slice_bytes(histograms.batch())?),
+            Some(DenseSamplesRef::Mixed(mixed)) => mixed
+                .floats()
+                .to_data()
+                .get_slice_memory_size()?
+                .saturating_add(
+                    mixed
+                        .histograms()
+                        .indices()
+                        .to_data()
+                        .get_slice_memory_size()?,
+                )
+                .saturating_add(histogram_table_slice_bytes(mixed.histograms().batch())?),
+            None => 0,
+        };
+        fields_bytes = fields_bytes.saturating_add(field_bytes);
+    }
+    Ok(std::mem::size_of::<RawSeriesChunk>()
+        .saturating_add(chunk.primary_key.len())
+        .saturating_add(metric_bytes)
+        .saturating_add(
+            chunk
+                .time
+                .as_buffer()
+                .len()
+                .saturating_mul(std::mem::size_of::<i64>()),
+        )
+        .saturating_add(fields_bytes))
+}
+
+fn raw_identity(chunk: &RawSeriesChunk) -> OwnerKey {
+    OwnerKey::Raw(chunk.primary_key.as_slice().to_vec())
+}
+
 struct PendingGroup {
     fragments: Vec<Series>,
+    raw_chunks: Vec<RawSeriesChunk>,
     charges: Vec<MemoryReservation>,
     received: Vec<bool>,
     metadata: MemoryReservation,
 }
 
-fn group_ready(group: &PendingGroup, eof: &[bool]) -> bool {
+/// Whether this owner may publish `group` now.
+///
+/// A key-then-time raw frame promises its keys arrive in order, and this owner publishes in key
+/// order only when it publishes them together: an identity that is complete while a smaller one is
+/// still waiting would go out first and break that promise. Watermarks let it publish once every
+/// input has advanced past the identity, without waiting for every input to end.
+fn group_ready(
+    group: &PendingGroup,
+    eof: &[bool],
+    last_key_from: &[Option<Vec<u8>>],
+    ordering: SeriesOrdering,
+    key: &OwnerKey,
+) -> bool {
+    if ordering == SeriesOrdering::KeyThenTime {
+        let OwnerKey::Raw(key) = key else {
+            return false;
+        };
+        return group.received.iter().zip(eof).zip(last_key_from).all(
+            |((received, eof), last_key)| {
+                *received || *eof || last_key.as_ref().is_some_and(|last| last > key)
+            },
+        );
+    }
     group
         .received
         .iter()
@@ -1257,8 +1696,13 @@ fn group_ready(group: &PendingGroup, eof: &[bool]) -> bool {
         .all(|(received, eof)| *received || *eof)
 }
 
+enum ReadyOutput {
+    Evaluated(Series),
+    Raw(RawSeriesChunk),
+}
+
 struct ReadySeries {
-    series: Series,
+    series: ReadyOutput,
     charges: ReadyCharges,
 }
 
@@ -1274,8 +1718,11 @@ struct RepartitionStream {
     lease: OutputLease,
     schema: Arc<SeriesSchema>,
     pool: Arc<dyn MemoryPool>,
-    groups: BTreeMap<ExactIdentity, PendingGroup>,
+    /// What the frame this stream emits declares about the order of its keys.
+    ordering: SeriesOrdering,
+    groups: BTreeMap<OwnerKey, PendingGroup>,
     eof: Vec<bool>,
+    last_key_from: Vec<Option<Vec<u8>>>,
     eof_metadata: Option<MemoryReservation>,
     inputs: usize,
     output: VecDeque<ReadySeries>,
@@ -1288,7 +1735,7 @@ struct RepartitionStream {
     /// every identity it releases.
     rescan: bool,
     /// The last identity a pass examined, exclusive. Retains at most one identity descriptor.
-    resume_after: Option<ExactIdentity>,
+    resume_after: Option<OwnerKey>,
     reported: bool,
 }
 
@@ -1346,14 +1793,17 @@ impl RepartitionStream {
         schema: Arc<SeriesSchema>,
         pool: &Arc<dyn MemoryPool>,
         inputs: usize,
+        ordering: SeriesOrdering,
     ) -> Self {
         Self {
             receiver,
             lease,
             schema,
+            ordering,
             pool: Arc::clone(pool),
             groups: BTreeMap::new(),
             eof: Vec::new(),
+            last_key_from: vec![None; inputs],
             eof_metadata: None,
             inputs,
             output: VecDeque::new(),
@@ -1364,10 +1814,13 @@ impl RepartitionStream {
         }
     }
 
-    fn finish_group(&mut self, key: &ExactIdentity) -> DataFusionResult<()> {
+    fn finish_group(&mut self, key: &OwnerKey) -> DataFusionResult<()> {
         let Some(group) = self.groups.remove(key) else {
             return Ok(());
         };
+        if matches!(key, OwnerKey::Raw(_)) {
+            return self.finish_raw_group(group);
+        }
         let workspace = if group.fragments.len() > 1 {
             let rows = group.fragments.iter().fold(0usize, |rows, series| {
                 rows.saturating_add(series.time.len())
@@ -1395,7 +1848,7 @@ impl RepartitionStream {
             ));
         };
         self.output.push_back(ReadySeries {
-            series,
+            series: ReadyOutput::Evaluated(series),
             charges: ReadyCharges {
                 _charges: group.charges,
                 _metadata: group.metadata,
@@ -1406,8 +1859,78 @@ impl RepartitionStream {
     }
 }
 
+impl RepartitionStream {
+    /// Publishes one complete raw identity.
+    ///
+    /// Raw pieces are only published once every input reached its normal EOF, because a piece's
+    /// `is_last` closes that producer's stream, not the series. The workspace this reconstruction
+    /// needs is charged before it runs and rides with the output until the packer hands the batch
+    /// off, like any other owner output.
+    fn finish_raw_group(&mut self, group: PendingGroup) -> DataFusionResult<()> {
+        let labels = group
+            .raw_chunks
+            .first()
+            .and_then(|chunk| chunk.metric.clone())
+            .ok_or_else(|| {
+                DataFusionError::Execution("raw identity has no explicit labels".to_string())
+            })?;
+        if group
+            .raw_chunks
+            .iter()
+            .any(|chunk| chunk.metric.as_ref() != Some(&labels))
+        {
+            return Err(DataFusionError::Execution(
+                "raw identity pieces disagree on their explicit labels".to_string(),
+            ));
+        }
+        if group.raw_chunks.len() == 1 {
+            let mut chunk = group.raw_chunks.into_iter().next().expect("one raw chunk");
+            chunk.is_last = true;
+            self.output.push_back(ReadySeries {
+                series: ReadyOutput::Raw(chunk),
+                charges: ReadyCharges {
+                    _charges: group.charges,
+                    _metadata: group.metadata,
+                    _workspace: None,
+                },
+            });
+            return Ok(());
+        }
+        // Reconstruction's working set depends on how the pieces interleave, which is only known
+        // while it runs: charge each allocation as it is made rather than reserving a worst case
+        // that a well-ordered identity never approaches.
+        let workspace = MemoryConsumer::new("SeriesRepartitionRawOwner").register(&self.pool);
+        let mut reserve = |bytes: usize| workspace.try_grow(bytes);
+        let mut shrink = |bytes: usize| {
+            let result = workspace.try_shrink(bytes);
+            debug_assert!(
+                result.is_ok(),
+                "raw merge workspace shrink failed: {result:?}"
+            );
+            // The merged data is already correct; tolerate accounting inconsistency rather than
+            // turning a valid query result into an error.
+            let _ = result;
+        };
+        let chunk = merge_raw_identity_charging(
+            &self.schema,
+            &group.raw_chunks,
+            &mut reserve,
+            &mut shrink,
+        )?;
+        self.output.push_back(ReadySeries {
+            series: ReadyOutput::Raw(chunk),
+            charges: ReadyCharges {
+                _charges: group.charges,
+                _metadata: group.metadata,
+                _workspace: Some(workspace),
+            },
+        });
+        Ok(())
+    }
+}
+
 impl Stream for RepartitionStream {
-    type Item = Result<(Series, bool), BoxedError>;
+    type Item = Result<ReadyOutput, BoxedError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -1456,19 +1979,34 @@ impl Stream for RepartitionStream {
                 return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
             }
             if this.rescan {
-                let next = match &this.resume_after {
-                    Some(after) => this
-                        .groups
-                        .range((
-                            std::ops::Bound::Excluded(after.clone()),
-                            std::ops::Bound::Unbounded,
-                        ))
-                        .find_map(|(key, group)| {
-                            group_ready(group, &this.eof).then(|| key.clone())
+                let next = if this.ordering == SeriesOrdering::KeyThenTime {
+                    this.groups.first_key_value().and_then(|(key, group)| {
+                        group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
+                            .then(|| key.clone())
+                    })
+                } else {
+                    match &this.resume_after {
+                        Some(after) => this
+                            .groups
+                            .range((
+                                std::ops::Bound::Excluded(after.clone()),
+                                std::ops::Bound::Unbounded,
+                            ))
+                            .find_map(|(key, group)| {
+                                group_ready(
+                                    group,
+                                    &this.eof,
+                                    &this.last_key_from,
+                                    this.ordering,
+                                    key,
+                                )
+                                .then(|| key.clone())
+                            }),
+                        None => this.groups.iter().find_map(|(key, group)| {
+                            group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
+                                .then(|| key.clone())
                         }),
-                    None => this.groups.iter().find_map(|(key, group)| {
-                        group_ready(group, &this.eof).then(|| key.clone())
-                    }),
+                    }
                 };
                 match next {
                     Some(key) => {
@@ -1493,7 +2031,7 @@ impl Stream for RepartitionStream {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .current = Some(ready.charges);
-                return Poll::Ready(Some(Ok((ready.series, true))));
+                return Poll::Ready(Some(Ok(ready.series)));
             }
             if this.reported {
                 return Poll::Ready(None);
@@ -1509,36 +2047,67 @@ impl Stream for RepartitionStream {
                     _metadata,
                 })) => {
                     drained += 1;
-                    let Some(first) = chain.first() else {
-                        continue;
+                    let (key, pieces) = match chain {
+                        RoutedChain::Evaluated(chain) => {
+                            let Some(first) = chain.first() else {
+                                continue;
+                            };
+                            let key = exact_identity(&first.0);
+                            if chain
+                                .iter()
+                                .any(|(series, _, _)| exact_identity(series) != key)
+                            {
+                                this.lease.fail(Arc::new(DataFusionError::Execution(
+                                    "one series chain contains multiple exact identities".into(),
+                                )));
+                                continue;
+                            }
+                            (OwnerKey::Evaluated(key), RoutedChain::Evaluated(chain))
+                        }
+                        RoutedChain::Raw(chain) => {
+                            let Some(first) = chain.first() else {
+                                continue;
+                            };
+                            let key = raw_identity(&first.0);
+                            if chain.iter().any(|(chunk, _)| raw_identity(chunk) != key) {
+                                this.lease.fail(Arc::new(DataFusionError::Execution(
+                                    "one raw chain contains multiple primary keys".into(),
+                                )));
+                                continue;
+                            }
+                            if let OwnerKey::Raw(raw_key) = &key
+                                && this.ordering == SeriesOrdering::KeyThenTime
+                            {
+                                let last = &mut this.last_key_from[input];
+                                if last.as_ref().is_none_or(|last| raw_key > last) {
+                                    *last = Some(raw_key.clone());
+                                }
+                            }
+                            (key, RoutedChain::Raw(chain))
+                        }
                     };
-                    let key = exact_identity(&first.0);
-                    if chain
-                        .iter()
-                        .any(|(series, _, _)| exact_identity(series) != key)
-                    {
-                        this.lease.fail(Arc::new(DataFusionError::Execution(
-                            "one series chain contains multiple exact identities".into(),
-                        )));
-                        continue;
-                    }
                     if !this.groups.contains_key(&key) {
                         let metadata =
                             MemoryConsumer::new("SeriesRepartitionIdentity").register(&this.pool);
+                        let key_bytes =
+                            match &key {
+                                OwnerKey::Evaluated((name, tags)) => {
+                                    std::mem::size_of::<ExactIdentity>()
+                                        .saturating_add(name.as_ref().map_or(0, |name| name.len()))
+                                        .saturating_add(tags.capacity().saturating_mul(
+                                            std::mem::size_of::<(Arc<str>, Arc<str>)>(),
+                                        ))
+                                        .saturating_add(
+                                            tags.iter()
+                                                .map(|(n, v)| n.len().saturating_add(v.len()))
+                                                .sum::<usize>(),
+                                        )
+                                }
+                                OwnerKey::Raw(key) => key.capacity(),
+                            };
                         let bytes = std::mem::size_of::<PendingGroup>()
-                            .saturating_add(std::mem::size_of::<ExactIdentity>())
-                            .saturating_add(key.0.as_ref().map_or(0, |name| name.len()))
-                            .saturating_add(key.1.capacity().saturating_mul(std::mem::size_of::<(
-                                Arc<str>,
-                                Arc<str>,
-                            )>(
-                            )))
-                            .saturating_add(
-                                key.1
-                                    .iter()
-                                    .map(|(n, v)| n.len().saturating_add(v.len()))
-                                    .sum::<usize>(),
-                            )
+                            .saturating_add(std::mem::size_of::<OwnerKey>())
+                            .saturating_add(key_bytes)
                             .saturating_add(this.eof.len().saturating_mul(2));
                         if let Err(error) = metadata.try_grow(bytes) {
                             this.lease.fail(Arc::new(error));
@@ -1548,6 +2117,7 @@ impl Stream for RepartitionStream {
                             key.clone(),
                             PendingGroup {
                                 fragments: Vec::new(),
+                                raw_chunks: Vec::new(),
                                 charges: Vec::new(),
                                 received: vec![false; this.eof.len()],
                                 metadata,
@@ -1567,12 +2137,30 @@ impl Stream for RepartitionStream {
                         continue;
                     }
                     group.received[input] = true;
-                    for (series, _, charge) in chain {
-                        group.fragments.push(series);
-                        group.charges.push(charge);
+                    match pieces {
+                        RoutedChain::Evaluated(chain) => {
+                            for (series, _, charge) in chain {
+                                group.fragments.push(series);
+                                group.charges.push(charge);
+                            }
+                        }
+                        RoutedChain::Raw(chain) => {
+                            for (chunk, charge) in chain {
+                                group.raw_chunks.push(chunk);
+                                group.charges.push(charge);
+                            }
+                        }
                     }
-                    if group_ready(group, &this.eof)
-                        && let Err(error) = this.finish_group(&key)
+                    if this.ordering == SeriesOrdering::KeyThenTime {
+                        this.rescan = true;
+                        this.resume_after = None;
+                    } else if group_ready(
+                        group,
+                        &this.eof,
+                        &this.last_key_from,
+                        this.ordering,
+                        &key,
+                    ) && let Err(error) = this.finish_group(&key)
                     {
                         this.lease.fail(Arc::new(error));
                     }
@@ -1612,7 +2200,7 @@ impl Stream for RepartitionStream {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .current = Some(ready.charges);
-                        return Poll::Ready(Some(Ok((ready.series, true))));
+                        return Poll::Ready(Some(Ok(ready.series)));
                     }
                     return Poll::Ready(None);
                 }
@@ -1631,33 +2219,57 @@ fn boxed(error: DataFusionError) -> BoxedError {
 ///
 /// The seed is what an execution builds once; a [`XxHash64`] accumulates, so a fresh hasher starts
 /// from this configuration for each chunk, and that is the only thing each chunk builds.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Routing {
-    /// The number of output partitions a hash is reduced modulo.
     outputs: usize,
-    /// The seed every chunk of this execution is hashed with.
     seed: u64,
+    policy: SeriesRouting,
 }
 
 impl Routing {
-    /// The routing of an execution with `outputs` output partitions.
+    /// The canonical routing of an execution with `outputs` output partitions.
+    #[cfg(test)]
     fn new(outputs: usize) -> Self {
+        Self::with_policy(outputs, SeriesRouting::CanonicalLabels)
+    }
+
+    /// The routing of an execution with `outputs` output partitions and an explicit policy.
+    fn with_policy(outputs: usize, policy: SeriesRouting) -> Self {
         Self {
             outputs,
             seed: ROUTING_SEED,
+            policy,
         }
     }
 
-    /// The output partition `metric`'s canonical label set belongs on.
-    ///
-    /// The whole label set is hashed, since that is what a merge groups by: pieces of two series
-    /// whose label sets differ have to be able to land apart, or the split this node exists to make
-    /// would not happen. [`label_set`] is what canonicalizes the labels - dropping empty values and
-    /// keeping the metric name - so two pieces that merge hash the same.
+    /// The output a label-carrying chunk belongs on.
+    #[cfg(test)]
     fn output(&self, metric: &SeriesLabels) -> usize {
+        self.output_labels(metric)
+    }
+
+    fn output_labels(&self, metric: &SeriesLabels) -> usize {
         let mut hasher = XxHash64::with_seed(self.seed);
-        label_set(metric).hash(&mut hasher);
-        // `outputs` is at least one, which [`SeriesRepartitionExec::try_new`] is what guarantees.
+        match &self.policy {
+            SeriesRouting::CanonicalLabels => label_set(metric).hash(&mut hasher),
+            SeriesRouting::Matching(policy) => {
+                crate::vector_match::group_key(metric, policy).hash(&mut hasher)
+            }
+            // A raw frame routed by its stored key never reaches here: its destination is the
+            // stored key itself, not a label hash. Evaluated frames never use this policy.
+            SeriesRouting::RawPrimaryKey => {
+                debug_assert!(
+                    false,
+                    "RawPrimaryKey routing hashes stored keys, not labels"
+                );
+            }
+        }
+        (hasher.finish() % self.outputs as u64) as usize
+    }
+
+    fn output_key(&self, key: &[u8]) -> usize {
+        let mut hasher = XxHash64::with_seed(self.seed);
+        key.hash(&mut hasher);
         (hasher.finish() % self.outputs as u64) as usize
     }
 }

@@ -274,8 +274,8 @@ impl FusedSeries {
         Ok(out)
     }
 
-    /// Rebuilds a serialized FusedSeries node, validating its carried schema against the tree,
-    /// output format, and optional partial fold. Substrait attaches children separately.
+    /// Rebuilds a serialized FusedSeries node, validating its carried output schema against the
+    /// execution contract. Substrait attaches children separately.
     pub fn deserialize(bytes: &[u8]) -> DataFusionResult<Self> {
         if bytes.len() < 8 {
             return Err(DataFusionError::Plan(
@@ -336,46 +336,39 @@ impl FusedSeries {
             time_index,
             tags,
         };
-        let declared_schema = Arc::new(datafusion::common::DFSchema::try_from(output_schema)?);
         if binding.tags.iter().any(|tag| tag == &binding.time_index) {
             return Err(DataFusionError::Plan(
                 "tag column cannot be the time column".into(),
             ));
         }
+        let output_schema = Arc::new(datafusion::common::DFSchema::try_from(output_schema)?);
         if let Some(op) = partial_fold {
             if format != FusedOutputFormat::PlainRows {
                 return Err(DataFusionError::Plan(
                     "partial FusedSeries must use PlainRows".into(),
                 ));
             }
-            let expected = Arc::new(datafusion::common::DFSchema::try_from(state_schema(
-                &binding.tags,
-            ))?);
-            if declared_schema.as_arrow() != expected.as_arrow() {
-                return Err(DataFusionError::Plan(
-                    "partial FusedSeries output schema does not match state_schema(binding.tags)"
-                        .into(),
-                ));
+            let partial = Self::try_new_partial(promql, tree, binding, children, op)?;
+            if partial.schema() != &output_schema {
+                return Err(DataFusionError::Plan(format!(
+                    "partial FusedSeries schema does not match state schema {:?}",
+                    state_schema(&partial.binding.tags)
+                )));
             }
-            return Self::try_new_partial(promql, tree, binding, children, op);
+            return Ok(partial);
         }
-        let output_schema = if format == FusedOutputFormat::SeriesFrame {
-            let expected = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
-            if declared_schema.as_arrow() != expected.as_ref() {
-                return Err(DataFusionError::Plan(
-                    "FusedSeries SeriesFrame schema mismatch".into(),
-                ));
-            }
-            declared_schema
-        } else {
+        let node =
+            Self::try_new_with_format(promql, tree, binding, children, output_schema, format)?;
+        if format == FusedOutputFormat::PlainRows {
+            let schema = Arc::new(node.output_schema.as_arrow().clone());
             validate_plain_output_schema(
-                &Arc::new(declared_schema.as_arrow().clone()),
-                &tree,
-                &binding.time_index,
+                &schema,
+                &node.tree,
+                &node.output_tags(),
+                &node.binding.time_index,
             )?;
-            declared_schema
-        };
-        Self::try_new_with_format(promql, tree, binding, children, output_schema, format)
+        }
+        Ok(node)
     }
 
     /// The name this node is shown under.
@@ -534,20 +527,31 @@ impl FusedSeries {
         )?))
     }
 
-    /// The label columns of the output: every column that is neither the time index nor a field of
-    /// the root. A scalar root has no labels; its one other column is the value.
-    ///
-    /// The planner decides them from the whole tree - a match narrows them, `or` joins both sides'
-    /// and a wrapper around either keeps them - and the output schema is where it records that.
+    /// The label columns of the output, independent of the raw-input binding.
     fn output_tags(&self) -> Vec<String> {
-        let Some(root) = self.tree.root().output.samples() else {
-            return Vec::new();
-        };
-        output_tags_from_schema(
-            &Arc::new(self.output_schema.as_arrow().clone()),
-            &root.fields,
-            &self.binding.time_index,
-        )
+        let field_names = self
+            .tree
+            .root()
+            .output
+            .samples()
+            .map(|schema| {
+                schema
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_ref())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        self.output_schema
+            .fields()
+            .iter()
+            .filter(|field| {
+                field.name() != &self.binding.time_index
+                    && !field_names.contains(field.name().as_str())
+                    && !matches!(self.tree.root().output, NativeType::Scalar(_))
+            })
+            .map(|field| field.name().clone())
+            .collect()
     }
 }
 
@@ -719,8 +723,6 @@ fn validate_binding(
     binding: &FusedSeriesBinding,
     child_count: usize,
 ) -> DataFusionResult<()> {
-    tree.validate_depth()
-        .map_err(|error| DataFusionError::Plan(format!("invalid FusedSeries tree: {error}")))?;
     if binding.tags.iter().any(|tag| tag == METRIC_NAME) && binding.metric_name.is_none() {
         return Err(DataFusionError::Plan(format!(
             "FusedSeries declares {METRIC_NAME:?} but binds no metric name"
@@ -819,20 +821,10 @@ pub(crate) fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<
         .collect())
 }
 
-fn output_tags_from_schema(schema: &SchemaRef, fields: &[FieldSpec], time: &str) -> Vec<String> {
-    schema
-        .fields()
-        .iter()
-        .filter(|field| {
-            field.name().as_str() != time && !fields.iter().any(|f| f.name.as_ref() == field.name())
-        })
-        .map(|field| field.name().clone())
-        .collect()
-}
-
 fn validate_plain_output_schema(
     schema: &SchemaRef,
     tree: &NativeTree,
+    tags: &[String],
     time: &str,
 ) -> DataFusionResult<()> {
     let fields = match &tree.root().output {
@@ -857,8 +849,7 @@ fn validate_plain_output_schema(
             ));
         }
     };
-    let tags = output_tags_from_schema(schema, &fields, time);
-    classify_output(schema, &fields, &tags, time)?;
+    classify_output(schema, &fields, tags, time)?;
     Ok(())
 }
 
@@ -1051,6 +1042,11 @@ pub(crate) fn classify_output(
                 tags[index]
             )));
         }
+    }
+    if output_schema.fields().len() != 1 + series_fields.len() + tags.len() {
+        return Err(DataFusionError::Plan(
+            "FusedSeriesExec output schema has an unexpected number of columns".into(),
+        ));
     }
     Ok(classification)
 }

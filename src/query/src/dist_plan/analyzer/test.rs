@@ -98,11 +98,11 @@ fn ordinary_encodable_plan_keeps_in_process_encodability_gate() {
 
     let in_process_rewriter = PlanRewriter::new(&plan, true);
     assert!(in_process_rewriter.whole_plan_encodable);
-    assert!(!in_process_rewriter.skip_encodability_gate);
+    assert!(!in_process_rewriter.skip_in_process_encodability);
 
     let wire_rewriter = PlanRewriter::new(&plan, false);
     assert!(wire_rewriter.whole_plan_encodable);
-    assert!(!wire_rewriter.skip_encodability_gate);
+    assert!(!wire_rewriter.skip_in_process_encodability);
 }
 
 struct MergeScanRemoteDynFilterProducerIdCollector<'a> {

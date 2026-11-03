@@ -289,6 +289,12 @@ struct ResultRow {
 struct QueryResult {
     /// Every column name, in schema order.
     columns: Vec<String>,
+    /// Label column names, in schema order.
+    label_columns: Vec<String>,
+    /// Time column name.
+    time_column: String,
+    /// Value column name.
+    value_column: String,
     /// The rows, in a canonical order.
     rows: Vec<ResultRow>,
 }
@@ -324,6 +330,11 @@ impl QueryResult {
                 )
             })
             .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let time_column = columns[time_index].clone();
+        let label_columns = label_indices
+            .iter()
+            .map(|index| columns[*index].clone())
             .collect::<Vec<_>>();
         let value_indices = fields
             .iter()
@@ -371,7 +382,14 @@ impl QueryResult {
             (left.ts_millis, &left.labels).cmp(&(right.ts_millis, &right.labels))
         });
 
-        Self { columns, rows }
+        let value_column = columns[value_indices[0]].clone();
+        Self {
+            columns,
+            label_columns,
+            time_column,
+            value_column,
+            rows,
+        }
     }
 }
 
@@ -1119,21 +1137,39 @@ fn assert_rows(actual: &[ResultRow], expected: &[ResultRow], context: &str) {
     }
 }
 
-/// Asserts both routes report the answer with the same columns.
-///
-/// The value column is named after the expression the frontend computes, which is the legacy naming:
-/// a native run that renamed it, or dropped, added or reordered a column, fails here rather than
-/// passing on values alone. Column order is not compared, only the answer's shape.
-fn assert_same_columns(native: &QueryResult, legacy: &QueryResult, query: &str) {
-    let sorted = |result: &QueryResult| {
-        let mut columns = result.columns.clone();
+/// Asserts the native route preserves legacy label/time columns and names its value field explicitly.
+fn assert_native_columns(
+    native: &QueryResult,
+    legacy: &QueryResult,
+    query: &str,
+    expected_value_column: &str,
+) {
+    let sorted = |columns: &[String]| {
+        let mut columns = columns.to_vec();
         columns.sort();
         columns
     };
     assert_eq!(
-        sorted(legacy),
-        sorted(native),
-        "`{query}`: the native route must report the columns the legacy plan reports"
+        legacy.time_column, native.time_column,
+        "`{query}`: native time column must match legacy"
+    );
+    assert_eq!(
+        sorted(&legacy.label_columns),
+        sorted(&native.label_columns),
+        "`{query}`: native label columns must match legacy, order-insensitively"
+    );
+    assert_eq!(
+        expected_value_column, native.value_column,
+        "`{query}`: native value column must use the compiled root field name"
+    );
+    assert_eq!(
+        1,
+        native
+            .columns
+            .iter()
+            .filter(|column| *column == expected_value_column)
+            .count(),
+        "`{query}`: native result must have exactly one value column"
     );
 }
 
@@ -1403,7 +1439,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, promql, true, observer).await;
-    assert_same_columns(&native, &legacy, &query);
+    assert_native_columns(&native, &legacy, &query, "v");
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
 
     assert_eq!(
@@ -1566,7 +1602,7 @@ async fn native_aggregate_topk_over_global_partitions() {
     let (legacy, legacy_capture) = run(false).await;
     assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
     let (native, capture) = run(true).await;
-    assert_same_columns(&native, &legacy, &sql);
+    assert_native_columns(&native, &legacy, &sql, "v");
     assert_rows(
         &native.rows,
         &legacy.rows,
@@ -1638,6 +1674,68 @@ async fn native_aggregate_topk_over_global_partitions() {
     // Which producer holds which series follows from the storage scheduler and a legal schedule can
     // hand one partition every series but two, so asserting it here would pin a scheduling accident
     // rather than the merge.
+}
+
+/// The native route executes `sum(clamp(...))` to 10 in `field_0`; the full standalone's legacy
+/// route also answers 10. The planner unit harness is the one where legacy rejects `clamp`, because
+/// its bare `MemoryCatalogManager` does not resolve the function; that divergence is pinned by
+/// `native_fused_clamp_aggregate_is_admitted`, not by this standalone integration test.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_aggregate_clamp_executes_on_both_routes() {
+    common_telemetry::init_default_ut_logging();
+
+    let observer = Arc::new(NativePlanObserver::default());
+    let plugins = Plugins::new();
+    plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_aggregate_clamp")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = Arc::clone(standalone.fe_instance());
+    setup_fixture(&instance).await;
+    let promql = format!("sum(clamp({GAUGE_TABLE}, 1, 2))");
+    let query = tql_eval(&promql);
+
+    let (native, capture) = run_query(&instance, &promql, true, &observer).await;
+    assert_eq!(1, native.rows.len(), "native `{query}`");
+    assert_eq!(EVAL_MILLIS, native.rows[0].ts_millis, "native `{query}`");
+    assert!(native.rows[0].labels.is_empty(), "native `{query}` labels");
+    assert!(
+        close_enough(native.rows[0].value.unwrap(), 10.0),
+        "native `{query}` value"
+    );
+    assert_eq!("v", native.value_column, "native `{query}` value column");
+    assert_eq!(2, native.columns.len(), "native `{query}` columns");
+    assert_eq!(1, capture.fused.len(), "native `{query}` fused producers");
+    for fused in &capture.fused {
+        assert_fused_reads_scan_directly(fused, &format!("native `{query}`"));
+        let plan = displayable(fused.as_ref()).indent(false).to_string();
+        assert!(
+            plan.contains("partial state: sum by () Complete"),
+            "native `{query}` must export the aggregate partial state:\n{plan}"
+        );
+    }
+    assert!(
+        !capture.finalize.is_empty(),
+        "native `{query}` must execute the frontend aggregate finalize"
+    );
+
+    // The planner unit harness uses a bare MemoryCatalogManager and rejects clamp in legacy
+    // planning. The standalone query context registers clamp for legacy, so this test deliberately
+    // pins the separately observed standalone behavior instead of routing through check_case.
+    let (legacy, legacy_capture) = run_query(&instance, &promql, false, &observer).await;
+    assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
+    assert_eq!(1, legacy.rows.len(), "legacy `{query}`");
+    assert_eq!(EVAL_MILLIS, legacy.rows[0].ts_millis, "legacy `{query}`");
+    assert!(legacy.rows[0].labels.is_empty(), "legacy `{query}` labels");
+    assert!(
+        close_enough(legacy.rows[0].value.unwrap(), 10.0),
+        "legacy `{query}` value"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1980,7 +2078,7 @@ async fn native_histogram_quantile_over_the_cut_answers_what_the_complete_input_
             native.rows.len(),
             legacy.rows.len()
         );
-        assert_same_columns(&native, &legacy, &query);
+        assert_native_columns(&native, &legacy, &query, "v");
         // The equivalence the admission rests on: the rows the same statement reports over the
         // complete input, labels included.
         assert_rows(

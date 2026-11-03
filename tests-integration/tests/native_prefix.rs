@@ -55,8 +55,15 @@ fn evaluated_frame_schema(tree: &NativeTree) -> datafusion::common::DFSchemaRef 
     )
 }
 
-// This deliberately uses a one-position grid: every host has one data chunk plus one empty close
-// chunk. It checks decoded content but does NOT exercise interleaving of multi-chunk chains.
+// Sends `rate[10s]` on a one-point evaluation grid for 16 hosts over 16 region-scan
+// partitions to the datanode's remote-read entry point, then checks that the evaluated frames
+// decode and each host reports the rate its samples produce. The former decode failure no longer
+// reproduces because #10023 makes region package completion close its pending final raw chunk,
+// so a chain's value and close are no longer latched apart in separate batches by the
+// batch-interleaving `CoalescePartitionsExec`. That coalescing is still not chain-atomic: a chain
+// spanning batches can still be cut. This one-point grid gives each host one evaluated value plus
+// a possible empty closing chunk, so it does not exercise a chain spanning many batches. The
+// parallelism-one path is exercised by `native_prefix_executes_over_real_mito_region`.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_prefix_multi_partition_single_position_chains() {
     let instance = GreptimeDbStandaloneBuilder::new("native_prefix_partitioned_chains")
@@ -200,60 +207,52 @@ async fn native_prefix_multi_partition_single_position_chains() {
     }
     let schema = batches.first().expect("evaluated frames").schema.clone();
     let batches = RecordBatches::try_new(schema, batches).unwrap();
-    let series = common_query::series_frame::unpack_evaluated_series(
+    // Package completion closes each region's pending final raw chunk, so the evaluated frames
+    // decode; ordinary partition coalescing still does not keep chains atomic. Check that every
+    // host's chain closes exactly once and carries the rate its own samples produce.
+    let decoded = common_query::series_frame::unpack_evaluated_series(
         Box::pin(DfRecordBatchStreamAdapter::new(batches.as_stream())),
         None,
     )
     .unwrap()
     .try_collect::<Vec<_>>()
     .await
-    .unwrap();
-    assert_eq!(
-        series.len(),
-        32,
-        "one data chunk and one close chunk per host"
-    );
-    for host in 0..16 {
-        let expected_label = format!("host{host}");
-        let matching = series
-            .iter()
-            .filter(|(series, _)| {
-                series
-                    .metric
-                    .get("host")
-                    .map(ToString::to_string)
-                    .as_deref()
-                    == Some(expected_label.as_str())
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(matching.len(), 2, "two chunks for {expected_label}");
-        let (data, data_closed) = matching
-            .iter()
-            .find(|(series, _)| !series.time.is_empty())
-            .unwrap();
-        assert!(!data_closed, "data chunk must not close {expected_label}");
-        assert_eq!(data.time.len(), 1, "one sample for {expected_label}");
-        let timestamps = data.time.timestamps().unwrap();
-        assert_eq!(timestamps.as_ref(), &[20_000]);
-        assert!(timestamps.windows(2).all(|pair| pair[0] < pair[1]));
-        let SampleRef::Float(value) = data.fields.get(0).unwrap().sample(0) else {
-            panic!("the rate field is float for {expected_label}");
-        };
-        assert!(
-            (value - 1.0).abs() < 1e-12,
-            "unexpected value for {expected_label}: {value}"
+    .expect("a chain-atomic merge decodes every chain");
+
+    let mut closed = std::collections::BTreeMap::<String, (usize, Vec<f64>)>::new();
+    for (series, is_last) in decoded {
+        let host = series
+            .metric
+            .get("host")
+            .unwrap_or_else(|| panic!("a decoded series keeps its host label: {:?}", series.metric))
+            .to_string();
+        let entry = closed.entry(host).or_default();
+        if is_last {
+            entry.0 += 1;
+        }
+        for field in series.fields.iter() {
+            entry
+                .1
+                .extend(field.iter().filter_map(|sample| match sample {
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Histogram(_) | SampleRef::Missing => None,
+                }));
+        }
+    }
+    assert_eq!(16, closed.len(), "one chain per host: {closed:?}");
+    for (host, (closes, values)) in &closed {
+        assert_eq!(1, *closes, "`{host}` closes its chain exactly once");
+        assert_eq!(
+            vec![1.0],
+            *values,
+            "`{host}` reports the rate of its own samples, which a cut chain would lose"
         );
-        let (close, is_closed) = matching
-            .iter()
-            .find(|(series, _)| series.time.is_empty())
-            .unwrap();
-        assert!(*is_closed, "close chunk must close {expected_label}");
-        assert_eq!(close.time.len(), 0);
     }
 }
 
-// Unlike the one-position case, this 8,192-position grid should produce multiple evaluated data
-// chunks per host. It tests whether multi-chunk chains survive the 16-partition region exit.
+// The one-position case above cannot exercise a chain that spans chunks. This 8,192-position grid
+// across 16 region-scan partitions does: whatever chunk boundaries the merge produces, each host's
+// chain must arrive complete, in time order, and close exactly once.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_prefix_multi_partition_multi_chunk_chains() {
     let instance = GreptimeDbStandaloneBuilder::new("native_prefix_partitioned_multi_chunk_chains")
@@ -398,7 +397,7 @@ async fn native_prefix_multi_partition_multi_chunk_chains() {
     }
     let schema = batches.first().expect("evaluated frames").schema.clone();
     let batches = RecordBatches::try_new(schema, batches).unwrap();
-    let series = common_query::series_frame::unpack_evaluated_series(
+    let decoded = common_query::series_frame::unpack_evaluated_series(
         Box::pin(DfRecordBatchStreamAdapter::new(batches.as_stream())),
         None,
     )
@@ -406,61 +405,51 @@ async fn native_prefix_multi_partition_multi_chunk_chains() {
     .try_collect::<Vec<_>>()
     .await
     .unwrap();
-    for host in 0..16 {
-        let expected_label = format!("host{host}");
-        let matching = series
-            .iter()
-            .filter(|(series, _)| {
-                series
-                    .metric
-                    .get("host")
-                    .map(ToString::to_string)
-                    .as_deref()
-                    == Some(expected_label.as_str())
-            })
-            .collect::<Vec<_>>();
-        let data_chunks = matching
-            .iter()
-            .filter(|(series, _)| !series.time.is_empty())
-            .collect::<Vec<_>>();
-        assert!(
-            data_chunks.len() >= 2,
-            "multiple data chunks for {expected_label}"
-        );
-        let mut timestamps = Vec::new();
-        let mut samples = 0;
-        for (data, is_closed) in &data_chunks {
-            assert!(!is_closed, "data chunk must not close {expected_label}");
-            let chunk_timestamps = data.time.timestamps().unwrap();
-            assert!(chunk_timestamps.windows(2).all(|pair| pair[0] < pair[1]));
-            timestamps.extend_from_slice(chunk_timestamps.as_ref());
-            samples += data.time.len();
-            for index in 0..data.time.len() {
-                let SampleRef::Float(value) = data.fields.get(0).unwrap().sample(index) else {
-                    panic!("the rate field is float for {expected_label}");
-                };
-                assert!(
-                    (value - 1.0).abs() < 1e-12,
-                    "unexpected value for {expected_label}: {value}"
-                );
-            }
+    let mut per_host = std::collections::BTreeMap::<String, (usize, Vec<i64>, Vec<f64>)>::new();
+    for (series, is_last) in decoded {
+        let host = series
+            .metric
+            .get("host")
+            .unwrap_or_else(|| panic!("a decoded series keeps its host label: {:?}", series.metric))
+            .to_string();
+        let entry = per_host.entry(host).or_default();
+        if is_last {
+            entry.0 += 1;
         }
-        assert_eq!(samples, 8_192, "sample count for {expected_label}");
-        let expected_timestamps = (0..8_192).map(|i| 10_000 + i * 1_000).collect::<Vec<_>>();
+        if !series.time.is_empty() {
+            entry
+                .1
+                .extend_from_slice(series.time.timestamps().unwrap().as_ref());
+        }
+        for field in series.fields.iter() {
+            entry
+                .2
+                .extend(field.iter().filter_map(|sample| match sample {
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Histogram(_) | SampleRef::Missing => None,
+                }));
+        }
+    }
+    assert_eq!(16, per_host.len(), "one chain per host: {per_host:?}");
+    let expected_timestamps = (0..8_192).map(|i| 10_000 + i * 1_000).collect::<Vec<_>>();
+    for (host, (closes, timestamps, values)) in &per_host {
+        assert_eq!(1, *closes, "`{host}` closes its chain exactly once");
         assert_eq!(
-            timestamps, expected_timestamps,
-            "contiguous grid for {expected_label}"
+            8_192,
+            timestamps.len(),
+            "`{host}` keeps every grid position across chunk boundaries"
         );
-        let close_chunks = matching
-            .iter()
-            .filter(|(series, _)| series.time.is_empty())
-            .collect::<Vec<_>>();
         assert_eq!(
-            close_chunks.len(),
-            1,
-            "one close chunk for {expected_label}"
+            &expected_timestamps, timestamps,
+            "`{host}` arrives in order over its whole contiguous grid"
         );
-        assert!(close_chunks[0].1, "close chunk must close {expected_label}");
+        assert_eq!(8_192, values.len(), "`{host}` keeps every value");
+        for value in values {
+            assert!(
+                (value - 1.0).abs() < 1e-12,
+                "`{host}` reports the rate of its own samples, which a cut chain would lose: {value}"
+            );
+        }
     }
 }
 

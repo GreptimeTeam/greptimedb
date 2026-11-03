@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use datafusion::common::DFSchema;
+use datafusion::common::{DFSchema, DataFusionError};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
@@ -1493,25 +1493,21 @@ fn a_vector_operation_cannot_consume_raw_samples() {
     assert!(error.to_string().contains("an evaluated vector"), "{error}");
 }
 
-/// FusedSeries must reject a tree constructed outside the checked NativeTree constructor.
+/// A root that reports samples while its expression is a constant breaks its own contract.
+///
+/// The tree is constructed directly here — a child module of `native::plan` may — because the node
+/// is one the public constructors decline: a constant does not produce samples, and a zero-input
+/// tree has no scan that would refuse it later. Every public constructor therefore stays a checked
+/// one.
 #[test]
-fn fused_series_rejects_a_tree_over_the_depth_limit() {
-    use super::MAX_NATIVE_NODE_DEPTH;
-
+fn a_scalar_root_claiming_samples_is_refused() {
     let statement_grid = grid(0, 60_000, 4);
-    let mut root = input_on(Arc::clone(&statement_grid));
-    for _ in 0..MAX_NATIVE_NODE_DEPTH {
-        root = NativeNode {
-            expr: NativeExpr::Map {
-                input: Box::new(root),
-                op: BoundMap {
-                    ops: Arc::new([MapOp::Math(MathOp::Abs)]),
-                },
-            },
+    let tree = NativeTree {
+        root: NativeNode {
+            expr: NativeExpr::Scalar(BoundScalar { value: 1.0 }),
             output: evaluated(Arc::new([]), Arc::clone(&statement_grid)),
-        };
-    }
-    let tree = NativeTree { root };
+        },
+    };
     let binding = FusedSeriesBinding {
         grid: statement_grid,
         time_index: "time".to_string(),
@@ -1528,7 +1524,31 @@ fn fused_series_rejects_a_tree_over_the_depth_limit() {
     )
     .expect_err("a samples root reads no source while reporting samples");
 
-    assert!(error.to_string().contains("exceeds 64"), "{error}");
+    assert!(
+        error.to_string().contains("does not produce a scalar"),
+        "the refusal must name the contract the root breaks: {error}"
+    );
+}
+
+/// A samples root without an input is refused by FusedSeries.
+#[test]
+fn a_samples_root_without_an_input_is_refused() {
+    let tree = NativeTree::try_new(input()).unwrap();
+    let binding = FusedSeriesBinding {
+        grid: grid(0, 60_000, 4),
+        time_index: "time".to_string(),
+        tags: vec![],
+        metric_name: None,
+    };
+    let error = FusedSeries::try_new(
+        Arc::from("some_metric"),
+        tree,
+        binding,
+        Vec::new(),
+        Arc::new(DFSchema::empty()),
+    )
+    .expect_err("a samples root without an input is refused");
+    assert!(error.to_string().contains("source indexes"), "{error}");
 }
 
 /// `info` reads its info side's values as sample times, so it accepts only the instant selection
@@ -1611,7 +1631,10 @@ fn native_tree_depth_limit_holds_across_lifecycle_on_named_worker_stack() {
                 postcard::from_bytes::<NativeTree>(&bytes).unwrap_err(),
                 postcard::Error::SerdeDeCustom
             );
-            assert!(NativeTree::try_new(over_limit.root.clone()).is_err());
+            assert!(matches!(
+                NativeTree::try_new(over_limit.root.clone()),
+                Err(DataFusionError::NotImplemented(_))
+            ));
             drop(over_limit);
         })
         .unwrap()

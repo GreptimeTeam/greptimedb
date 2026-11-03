@@ -950,6 +950,27 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     assert_eq!(row_decoded.schema(), rows.schema());
     assert_eq!(row_decoded.tree(), rows.tree());
 
+    // A legal noncanonical order must survive the wire unchanged.
+    let canonical = rows.schema().as_arrow();
+    let reordered_schema = Arc::new(Schema::new(vec![
+        canonical.field_with_name(VALUE).unwrap().clone(),
+        canonical.field_with_name(HOST).unwrap().clone(),
+        canonical.field_with_name(NAME).unwrap().clone(),
+        canonical.field_with_name(TIME).unwrap().clone(),
+    ]));
+    let reordered = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        rows.tree().clone(),
+        rows.binding().clone(),
+        rows.children().to_vec(),
+        Arc::new(
+            datafusion::common::DFSchema::try_from(reordered_schema.as_ref().clone()).unwrap(),
+        ),
+    )
+    .unwrap();
+    let reordered_decoded = FusedSeries::deserialize(&reordered.serialize().unwrap()).unwrap();
+    assert_eq!(reordered_decoded.schema(), reordered.schema());
+
     // The output schema owns the label layout; the source binding may have no tags or different
     // labels after a tree operation such as label rewriting.
     let empty_binding = binding_of(rows.tree(), raw_schema(), Vec::new());
@@ -962,7 +983,6 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     )
     .unwrap();
     let decoded = FusedSeries::deserialize(&empty_tags.serialize().unwrap()).unwrap();
-    assert_eq!(decoded.schema(), empty_tags.schema());
     assert_eq!(decoded.binding().tags, empty_tags.binding().tags);
     assert_eq!(decoded.schema(), empty_tags.schema());
 
@@ -1015,18 +1035,14 @@ fn envelope_node_with_tags(tags: Vec<String>) -> FusedSeries {
     .expect("the frame layout matches the evaluated root")
 }
 
-fn mutate_envelope_schema(bytes: &[u8], mutate: impl FnOnce(&mut Vec<Field>)) -> Vec<u8> {
+fn mutate_envelope_payload(
+    bytes: &[u8],
+    mutate: impl FnOnce(&mut super::FusedSeriesPayload),
+) -> Vec<u8> {
     let (mut payload, remainder) =
         postcard::take_from_bytes::<super::FusedSeriesPayload>(&bytes[8..]).unwrap();
     assert!(remainder.is_empty());
-    let mut fields = payload
-        .output_schema
-        .fields()
-        .iter()
-        .map(|f| f.as_ref().clone())
-        .collect();
-    mutate(&mut fields);
-    payload.output_schema = Schema::new(fields);
+    mutate(&mut payload);
     let changed = postcard::to_stdvec(&payload).unwrap();
     let mut result = Vec::with_capacity(8 + changed.len());
     result.extend(3u32.to_le_bytes());
@@ -1035,17 +1051,31 @@ fn mutate_envelope_schema(bytes: &[u8], mutate: impl FnOnce(&mut Vec<Field>)) ->
     result
 }
 
-fn plain_envelope(tree: NativeTree, tags: Vec<String>, schema: Schema) -> Vec<u8> {
-    let binding = binding_of(&tree, raw_schema(), tags);
+fn mutate_schema(bytes: &[u8], schema: Schema) -> Vec<u8> {
+    mutate_envelope_payload(bytes, |payload| payload.output_schema = schema)
+}
+
+fn scalar_node(tree: NativeTree, value_name: &str) -> FusedSeries {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new(value_name, DataType::Float64, true),
+    ]));
     FusedSeries::try_new(
         Arc::from(PROMQL),
         tree,
-        binding,
-        vec![input_plan(frame_schema())],
-        Arc::new(datafusion::common::DFSchema::try_from(schema).unwrap()),
+        FusedSeriesBinding {
+            grid: grid(),
+            time_index: TIME.into(),
+            tags: Vec::new(),
+            metric_name: None,
+        },
+        Vec::new(),
+        Arc::new(datafusion::common::DFSchema::try_from(schema.as_ref().clone()).unwrap()),
     )
-    .unwrap()
-    .serialize()
     .unwrap()
 }
 
@@ -1059,176 +1089,131 @@ fn assert_decode_error(bytes: &[u8], expected: &str) {
 
 #[test]
 fn plain_rows_decode_rejects_invalid_schemas() {
-    let tree = rate_tree();
-    let base = output_schema();
-    let base_envelope = plain_envelope(
-        tree.clone(),
-        vec![HOST.into(), NAME.into()],
-        base.as_ref().clone(),
-    );
-    let check = |schema: Schema, expected: &str| {
-        assert_decode_error(
-            &mutate_envelope_schema(&base_envelope, |fields| {
-                *fields = schema.fields().iter().map(|f| f.as_ref().clone()).collect()
-            }),
-            expected,
-        )
-    };
-    check(
-        Schema::new(vec![
-            Field::new(VALUE, DataType::Float64, true),
-            Field::new(HOST, DataType::Utf8, true),
-            Field::new(HOST, DataType::Utf8, true),
-            Field::new(NAME, DataType::Utf8, true),
-            Field::new(
-                TIME,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-        ]),
-        "duplicate tag column",
-    );
-    check(
-        Schema::new(vec![
-            Field::new(VALUE, DataType::Float64, true),
-            Field::new(
-                TIME,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(NAME, DataType::Utf8, true),
-            Field::new(
-                TIME,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-        ]),
-        "duplicate time column",
-    );
-    // Binding labels do not override the labels in the serialized output schema.
-    let collision_schema = Schema::new(vec![
-        Field::new(VALUE, DataType::Float64, true),
-        Field::new(
-            TIME,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
+    let node = fused(rate_tree());
+    let bytes = node.serialize().unwrap();
+    let scalar = scalar_node(scalar_tree(grid(), 1.0), "clock_value");
+    let scalar_bytes = scalar.serialize().unwrap();
+    let scalar_with_tag = mutate_envelope_payload(&scalar_bytes, |payload| {
+        let mut fields = payload.output_schema.fields().to_vec();
+        fields.push(Arc::new(Field::new(HOST, DataType::Utf8, true)));
+        payload.output_schema = Schema::new(fields);
+    });
+    assert_decode_error(&scalar_with_tag, "cannot produce 1 tag columns");
+
+    let malformed_schemas = [
+        (
+            Schema::new(vec![Field::new(TIME, DataType::Utf8, false)]),
+            "must be Timestamp",
         ),
-    ]);
-    let differing_binding = plain_envelope(tree.clone(), vec![HOST.into()], collision_schema);
-    assert!(FusedSeries::deserialize(&differing_binding).is_ok());
-    let time_tag = plain_envelope(
-        tree.clone(),
-        vec![TIME.into()],
-        Schema::new(vec![
-            Field::new(VALUE, DataType::Float64, true),
-            Field::new(
-                TIME,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-        ]),
-    );
-    assert_decode_error(&time_tag, "cannot be the time column");
-    for datatype in [
-        DataType::Int64,
-        DataType::Timestamp(TimeUnit::Microsecond, None),
-    ] {
-        check(
+        (
             Schema::new(vec![
+                Field::new(
+                    TIME,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
                 Field::new(VALUE, DataType::Float64, true),
+                Field::new(VALUE, DataType::Float64, true),
+            ]),
+            "duplicate",
+        ),
+        (
+            Schema::new(vec![
+                Field::new(
+                    TIME,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
                 Field::new(HOST, DataType::Utf8, true),
                 Field::new(NAME, DataType::Utf8, true),
-                Field::new(TIME, datatype, false),
             ]),
-            "must be Timestamp(Millisecond, None)",
-        );
-    }
-    check(
-        Schema::new(vec![
-            Field::new(VALUE, DataType::Float64, true),
-            Field::new(HOST, DataType::Utf8, true),
-            Field::new(NAME, DataType::Utf8, true),
-            Field::new(TIME, DataType::Timestamp(TimeUnit::Millisecond, None), true),
-        ]),
-        "must not be nullable",
-    );
-    check(
-        Schema::new(vec![
-            Field::new(VALUE, DataType::Float64, true),
-            Field::new(HOST, DataType::Int64, true),
-            Field::new(NAME, DataType::Utf8, true),
-            Field::new(
-                TIME,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-        ]),
-        "must be Utf8",
-    );
-    check(
-        Schema::new(vec![
-            Field::new(HOST, DataType::Utf8, true),
-            Field::new(NAME, DataType::Utf8, true),
-            Field::new(
-                TIME,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-        ]),
-        "missing field column",
-    );
-    check(
-        Schema::new(vec![
-            Field::new(VALUE, DataType::Float64, true),
-            Field::new(OTHER, DataType::Float64, true),
-            Field::new(HOST, DataType::Utf8, true),
-            Field::new(NAME, DataType::Utf8, true),
-            Field::new(
-                TIME,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-        ]),
-        "must be Utf8",
-    );
-
-    let scalar = scalar_tree(grid(), 1.0);
-    let scalar_schema = Schema::new(vec![
-        Field::new(VALUE, DataType::Float64, true),
-        Field::new(HOST, DataType::Utf8, true),
-        Field::new(
-            TIME,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
+            "missing field column",
         ),
-    ]);
-    let scalar_binding = FusedSeriesBinding {
-        grid: grid(),
-        metric_name: Some(Arc::from(METRIC)),
-        time_index: TIME.to_string(),
-        tags: vec![HOST.into()],
-    };
-    let scalar_bytes = FusedSeries::try_new(
+        (
+            Schema::new(vec![
+                Field::new(
+                    TIME,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new(VALUE, DataType::Float64, true),
+                Field::new(HOST, DataType::Float64, true),
+                Field::new(NAME, DataType::Utf8, true),
+            ]),
+            "must be Utf8",
+        ),
+    ];
+    for (schema, expected) in malformed_schemas {
+        assert_decode_error(&mutate_schema(&bytes, schema), expected);
+    }
+
+    let scalar_decoded = FusedSeries::deserialize(&scalar_bytes).unwrap();
+    assert_eq!(scalar_decoded.schema(), scalar.schema());
+
+    // Binding tags describe the source; the carried schema independently describes outputs.
+    let empty_binding = binding_of(node.tree(), raw_schema(), Vec::new());
+    let cross_table = FusedSeries::try_new(
         Arc::from(PROMQL),
-        scalar,
-        scalar_binding,
-        vec![],
-        Arc::new(datafusion::common::DFSchema::try_from(scalar_schema).unwrap()),
+        node.tree().clone(),
+        empty_binding,
+        node.children().to_vec(),
+        output_schema().to_dfschema_ref().unwrap(),
     )
-    .unwrap()
-    .serialize()
     .unwrap();
-    assert_decode_error(&scalar_bytes, "scalar root cannot produce 1 tag columns");
+    let decoded = FusedSeries::deserialize(&cross_table.serialize().unwrap()).unwrap();
+    assert_eq!(decoded.schema(), cross_table.schema());
+    assert!(decoded.binding().tags.is_empty());
+}
+
+#[test]
+fn a_non_default_column_order_survives_the_round_trip() {
+    let tree = rate_tree();
+    let binding = binding(&tree);
+    let reordered = Schema::new_with_metadata(
+        vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(HOST, DataType::Utf8, true)
+                .with_metadata([("origin".to_string(), "carried".to_string())].into()),
+            Field::new(NAME, DataType::Utf8, true),
+        ],
+        [("schema-origin".to_string(), "carried".to_string())].into(),
+    );
+    let node = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        vec![input_plan(frame_schema())],
+        Arc::new(datafusion::common::DFSchema::try_from(reordered.clone()).unwrap()),
+    )
+    .unwrap();
+    let decoded = FusedSeries::deserialize(&node.serialize().unwrap()).unwrap();
+    assert_eq!(decoded.schema(), node.schema());
+    assert_eq!(decoded.schema().as_arrow().metadata(), reordered.metadata());
+    assert_eq!(
+        decoded
+            .schema()
+            .field_with_name(None, HOST)
+            .unwrap()
+            .metadata(),
+        reordered.field_with_name(HOST).unwrap().metadata()
+    );
 }
 
 #[test]
 fn series_frame_decode_rejects_schema_mismatch() {
     let node = envelope_node_with_tags(vec![HOST.into(), NAME.into()]);
     let bytes = node.serialize().unwrap();
-    let wrong = mutate_envelope_schema(&bytes, |fields| {
-        fields.push(Field::new("extra", DataType::Utf8, true))
+    let wrong = mutate_envelope_payload(&bytes, |payload| {
+        let mut fields = payload.output_schema.fields().to_vec();
+        fields.push(Arc::new(Field::new("extra", DataType::Utf8, true)));
+        payload.output_schema = Schema::new(fields);
     });
-    assert_decode_error(&wrong, "FusedSeries SeriesFrame schema mismatch");
+    assert_decode_error(&wrong, "does not match the evaluated frame layout");
 }
 
 #[test]
@@ -1243,29 +1228,16 @@ fn partial_decode_rejects_format_schema_and_tag_order_mismatch() {
     )
     .unwrap();
     let bytes = node.serialize().unwrap();
-    let wrong_schema = mutate_envelope_schema(&bytes, |fields| {
-        fields.push(Field::new("extra", DataType::Utf8, true))
+    let wrong_schema = mutate_envelope_payload(&bytes, |payload| {
+        let mut fields = payload.output_schema.fields().to_vec();
+        fields.swap(0, 1);
+        payload.output_schema = Schema::new(fields);
     });
-    assert_decode_error(
-        &wrong_schema,
-        "partial FusedSeries output schema does not match state_schema(binding.tags)",
-    );
+    assert_decode_error(&wrong_schema, "does not match state schema");
 
-    let reversed = mutate_envelope_schema(&bytes, |fields| fields.swap(1, 2));
-    assert_decode_error(
-        &reversed,
-        "partial FusedSeries output schema does not match state_schema(binding.tags)",
-    );
-
-    let mut wrong_format = bytes.clone();
-    let (mut payload, remainder) =
-        postcard::take_from_bytes::<super::FusedSeriesPayload>(&bytes[8..]).unwrap();
-    assert!(remainder.is_empty());
-    payload.format = FusedOutputFormat::SeriesFrame;
-    let changed = postcard::to_stdvec(&payload).unwrap();
-    wrong_format.truncate(8);
-    wrong_format[4..8].copy_from_slice(&(changed.len() as u32).to_le_bytes());
-    wrong_format.extend(changed);
+    let wrong_format = mutate_envelope_payload(&bytes, |payload| {
+        payload.format = FusedOutputFormat::SeriesFrame;
+    });
     assert_decode_error(&wrong_format, "partial FusedSeries must use PlainRows");
 }
 

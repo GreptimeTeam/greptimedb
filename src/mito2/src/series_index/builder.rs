@@ -277,11 +277,8 @@ pub(crate) async fn build_samples(
     )?;
     let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
     let generation = store_api::storage::FileId::random();
-    let prefix = format!(
-        "{}/samples/{}/{generation}/",
-        region.region_id.as_u64(),
-        file_id.file_id()
-    );
+    let prefix =
+        crate::series_index::samples::samples_prefix(region.region_id.as_u64(), generation);
     let mut writer = backend
         .writer(
             version.metadata.clone(),
