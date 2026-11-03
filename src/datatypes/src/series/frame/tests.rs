@@ -28,6 +28,7 @@ use crate::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchB
 use crate::series::samples::{
     DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema,
 };
+use crate::series::time::GridRange;
 use crate::series::{Label, SeriesLabels};
 
 fn test_schema(names: &[&str]) -> SeriesSchema {
@@ -5092,11 +5093,10 @@ mod aggregate_state_acceptance {
         .unwrap();
         let states = vec![values(4, 1.0), values(4, 5.0)];
         let allocation = states[0].as_ptr();
-        let time = TimeAxis::from_grid_spans(
-            schema.eval_grid.clone().unwrap(),
-            vec![GridSpan::new(0, 2), GridSpan::new(2, 2)],
-        )
-        .unwrap();
+        // A grid axis rather than a span axis, so the test can tell the chunk's own axis from a
+        // rebuilt one.
+        let time =
+            TimeAxis::Grid(GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 4).unwrap());
         let cursor = SeriesFrameCursor::try_new_aggregate_state(
             &state,
             &schema,
@@ -5122,6 +5122,100 @@ mod aggregate_state_acceptance {
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
         );
+        // And it keeps the axis it was handed. A rebuilt axis always states spans, so a grid axis
+        // surviving here is what says the dense case did not rebuild one.
+        assert!(
+            matches!(walk.series.time, TimeAxis::Grid(_)),
+            "a dense chunk kept its own axis: {:?}",
+            walk.series.time
+        );
+    }
+
+    /// Every component of one field is absent exactly where that field is, so they share one mask.
+    ///
+    /// A position is carried when any field has a state there, so a hole needs a second field: the
+    /// two fields below cover each other's positions and each is absent where the other is present.
+    #[test]
+    fn state_components_share_their_fields_presence_mask() {
+        let schema = state_schema(&["x", "y"], 4);
+        let values = values(3, 1.0);
+        let (batch, decoder) = state_frame(
+            Kind::Avg,
+            &schema,
+            vec![GridSpan::new(0, 3)],
+            vec![
+                vec![Some(values[0].unwrap()), None, Some(values[2].unwrap())],
+                vec![None, Some(values[1].unwrap()), None],
+            ],
+            true,
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_eq!(rows.len(), 1);
+        let fields = rows[0].fields().unwrap();
+        assert_eq!(fields.len(), 2);
+        let mut masks = Vec::new();
+        // Field 0 is present at {0,2} and field 1 at {1}, so their masks differ in both content and
+        // hole count.
+        for (field, holes) in [1usize, 2].into_iter().enumerate() {
+            for component in [
+                Component::Value,
+                Component::Mean,
+                Component::Compensation,
+                Component::Count,
+            ] {
+                let array = fields.field_values(field, component).unwrap().unwrap();
+                let nulls = array.nulls().expect("a hole in this field");
+                assert_eq!(nulls.null_count(), holes, "field {field} {component:?}");
+                masks.push(nulls.inner().inner().as_ptr());
+            }
+            let boolean = fields
+                .field_bool_values(field, Component::IncrementalMean)
+                .unwrap()
+                .expect("avg declares the incremental mean");
+            masks.push(
+                boolean
+                    .nulls()
+                    .expect("the same hole")
+                    .inner()
+                    .inner()
+                    .as_ptr(),
+            );
+        }
+        // One mask per field, shared by that field's components: five components of field 0 agree,
+        // then five of field 1.
+        assert!(
+            masks[..5].windows(2).all(|pair| pair[0] == pair[1])
+                && masks[5..].windows(2).all(|pair| pair[0] == pair[1]),
+            "one mask per field, shared by its components: {masks:?}"
+        );
+        assert_ne!(
+            masks[0], masks[5],
+            "two fields with different holes are two masks"
+        );
+    }
+
+    /// A field with no hole states no mask at all, which is what a null buffer builder produces.
+    #[test]
+    fn a_field_without_holes_carries_no_null_buffer() {
+        let schema = state_schema(&["x"], 3);
+        let (batch, decoder) = state_frame(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 3)],
+            vec![values(3, 1.0)],
+            true,
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        let fields = rows[0].fields().unwrap();
+        let array = fields
+            .field_values(0, Component::Value)
+            .unwrap()
+            .expect("sum declares the value");
+        assert!(array.nulls().is_none());
+        let mean = fields
+            .field_bool_values(0, Component::IncrementalMean)
+            .unwrap();
+        assert!(mean.is_none(), "sum declares no incremental mean");
     }
 
     #[test]

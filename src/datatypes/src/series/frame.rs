@@ -80,7 +80,7 @@ use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, ListArray, StringArray,
     StructArray, UInt32Array, UInt64Array,
 };
-use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
+use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::compute::{concat, take};
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -1180,22 +1180,27 @@ impl SeriesFrameCursor {
         {
             return invalid_series("aggregate state chunk grid does not match schema");
         }
-        let contributing = (0..series.time.len())
-            .map(|row| {
-                state.kind == crate::series::aggregate_state::AggregateStateKind::Group
-                    || series.states.iter().any(|field| field[row].is_some())
-            })
-            .collect::<Vec<_>>();
-        let carried = series
-            .time
-            .positions()
-            .filter_map(|(position, row)| contributing[row].then_some(position))
-            .collect::<Vec<_>>();
-        let spans = positions_to_spans(&carried);
-        let time =
-            TimeAxis::from_grid_spans(series.time.grid().expect("validated grid").clone(), spans)?;
         let mut states = series.states;
-        if contributing.iter().any(|contributes| !contributes) {
+        // A position is carried when some field of it was folded, which is what the axis says. When
+        // every position is carried - the shape a fold produces whenever each group has a sample at
+        // each of its points - the axis and the states are already the ones this walk reads, so
+        // nothing is rebuilt. Deciding that first keeps the common case free of a mask, a position
+        // list and a second axis.
+        let every_position_carried = state.kind
+            == crate::series::aggregate_state::AggregateStateKind::Group
+            || (0..series.time.len()).all(|row| states.iter().any(|field| field[row].is_some()));
+        let time = if every_position_carried {
+            series.time
+        } else {
+            let contributing = (0..series.time.len())
+                .map(|row| states.iter().any(|field| field[row].is_some()))
+                .collect::<Vec<_>>();
+            let carried = series
+                .time
+                .positions()
+                .filter_map(|(position, row)| contributing[row].then_some(position))
+                .collect::<Vec<_>>();
+            let spans = positions_to_spans(&carried);
             for field in &mut states {
                 let mut row = 0;
                 field.retain(|_| {
@@ -1204,7 +1209,8 @@ impl SeriesFrameCursor {
                     keep
                 });
             }
-        }
+            TimeAxis::from_grid_spans(series.time.grid().expect("validated grid").clone(), spans)?
+        };
         let runs: Vec<GridRun> = time.runs().collect();
         let series = StateSeries {
             metric: series.metric,
@@ -1890,6 +1896,12 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
             }
             debug_assert_eq!(present.len(), positions);
 
+            // Every component of a field is absent at exactly the same positions - the field's own -
+            // so they share the one mask, which the child struct already needs.
+            let nulls = present
+                .iter()
+                .any(|present| !present)
+                .then(|| NullBuffer::from(present.clone()));
             let arrays: Vec<ArrayRef> = components
                 .iter()
                 .map(|component| {
@@ -1904,16 +1916,20 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
                                     );
                                 };
                                 for value in &fields[index] {
-                                    floats.push(value.map(|state| match component_name.as_str() {
-                                        "value" => state.value,
-                                        "mean" => state.mean,
-                                        "compensation" => state.compensation,
-                                        "count" => state.count,
-                                        _ => unreachable!(),
+                                    // A missing position's value is unreadable, so it holds the same
+                                    // zero a null slot has always held here.
+                                    floats.push(value.map_or(0.0, |state| {
+                                        match component_name.as_str() {
+                                            "value" => state.value,
+                                            "mean" => state.mean,
+                                            "compensation" => state.compensation,
+                                            "count" => state.count,
+                                            _ => unreachable!(),
+                                        }
                                     }));
                                 }
                             }
-                            Arc::new(Float64Array::from(floats))
+                            Arc::new(Float64Array::new(ScalarBuffer::from(floats), nulls.clone()))
                         }
                         "incremental_mean" => {
                             let mut booleans = Vec::with_capacity(positions);
@@ -1923,13 +1939,14 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
                                         "state frame row carries sample payload",
                                     );
                                 };
-                                booleans.extend(
-                                    fields[index]
-                                        .iter()
-                                        .map(|value| value.map(|state| state.incremental_mean)),
-                                );
+                                booleans.extend(fields[index].iter().map(|value| {
+                                    value.is_some_and(|state| state.incremental_mean)
+                                }));
                             }
-                            Arc::new(BooleanArray::from(booleans))
+                            Arc::new(BooleanArray::new(
+                                BooleanBuffer::from(booleans),
+                                nulls.clone(),
+                            ))
                         }
                         _ => return invalid_series("unknown state component"),
                     };
