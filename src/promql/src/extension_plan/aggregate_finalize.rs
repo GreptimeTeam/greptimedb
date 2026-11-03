@@ -131,13 +131,7 @@ impl AggregateFinalize {
         output_schema: DFSchemaRef,
     ) -> DfResult<Self> {
         let fields = prefix_fields(&full_tree)?;
-        let Some(split) = split(
-            full_tree.root(),
-            &fields,
-            &binding.time_index,
-            PrefixForm::Raw,
-        )?
-        else {
+        let Some(split) = split(full_tree.root(), &fields, &binding.time_index)? else {
             return Err(declined("the tree holds no splittable aggregate"));
         };
         let grouping_tags = derive_grouping_tags(&split.op, &split.suffix, &output_schema)?;
@@ -164,73 +158,6 @@ impl AggregateFinalize {
         })
     }
 
-    /// Splits `full_tree` around its innermost aggregate whose prefix ends in a canonical merge.
-    ///
-    /// The compiled shape is `Aggregate(Merge(P))`, which a collapsing label rewrite produces:
-    /// `P` can hand over two series under one label set, so the fold must not see them as two
-    /// groups, and two series sharing a position is the error Prometheus reports rather than a
-    /// doubled value. A partition-local producer cannot answer that on its own, so the caller
-    /// lowers the merge into a canonical boundary - a per-partition producer, a canonical router and
-    /// a receiver - and passes the receiver's plan here as `assembled`.
-    ///
-    /// What this node adds is the same split as ever: the boundary's frames are folded per owner
-    /// partition, this node merges the exported state and runs the suffix.
-    ///
-    /// `assembled` produces evaluated series frames, one whole label set per owned identity, and
-    /// `series_schema` is the layout those frames carry - the cut aggregate's input.
-    pub fn try_new_prepared(
-        promql: Arc<str>,
-        op: BoundAggregate,
-        suffix: NativeTree,
-        series_schema: Arc<SeriesSchema>,
-        assembled: LogicalPlan,
-        assembled_tags: Vec<String>,
-        assembled_metric: Option<Arc<str>>,
-        binding: FusedSeriesBinding,
-        output_schema: DFSchemaRef,
-    ) -> DfResult<Self> {
-        check_value_columns(&promql, series_schema.fields.len(), &output_schema)?;
-        let grouping_tags = derive_grouping_tags(&op, suffix.root(), &output_schema)?;
-        // The partial producer's tree is its input and nothing else: the folding the aggregate does
-        // is the producer's `partial_fold`, and the merge that assembled each label set has already
-        // run below it.
-        let assembled_output = NativeType::Samples(Arc::clone(&series_schema));
-        let tree = NativeTree::try_new(NativeNode {
-            expr: NativeExpr::Input(BoundInput {
-                source_index: 0,
-                output: assembled_output.clone(),
-                ordering: SeriesOrdering::Contiguous,
-            }),
-            output: assembled_output,
-        })?;
-        let partial_binding = FusedSeriesBinding {
-            grid: Arc::clone(&binding.grid),
-            time_index: binding.time_index.clone(),
-            tags: assembled_tags,
-            metric_name: assembled_metric,
-        };
-        let partial = FusedSeries::try_new_partial(
-            Arc::clone(&promql),
-            tree,
-            partial_binding,
-            vec![assembled],
-            op.clone(),
-            &grouping_tags,
-        )?;
-        Ok(Self {
-            promql,
-            op,
-            binding,
-            suffix: Arc::new(suffix),
-            input: LogicalPlan::Extension(Extension {
-                node: Arc::new(partial),
-            }),
-            output_schema,
-            series_schema,
-            grouping_tags,
-        })
-    }
-
     /// Whether `tree` holds an aggregate this node can merge.
     ///
     /// The walk is the one [`Self::try_new`] does, without building either half. A caller uses it to
@@ -240,32 +167,8 @@ impl AggregateFinalize {
     /// `fields` is the raw field layout of the scan the tree was compiled against, which the caller
     /// that resolved that scan already holds: the same names the tree's own raw input carries, and
     /// the ones a `by(...)` may not name.
-    /// The prepared form of [`Self::can_split`]: the split this node can merge when the caller
-    /// lowers the cut aggregate's prefix into a canonical boundary itself.
-    ///
-    /// The shape is `Aggregate(Merge(P))` - an aggregate that folds a label set a rewrite can make
-    /// several stored series share. `P` is what the boundary's producer runs per partition and the
-    /// frames it merges are what this split's partial fold reads, so this returns `None` for a tree
-    /// whose cut aggregate reads a raw prefix: that shape is [`Self::try_new`]'s.
-    pub fn split_canonical(
-        tree: &NativeTree,
-        fields: &[FieldSpec],
-        time_index: &str,
-    ) -> Option<PreparedSplit> {
-        let split = split(tree.root(), fields, time_index, PrefixForm::Canonical).ok()??;
-        Some(PreparedSplit {
-            canonical: split.canonical?,
-            op: split.op,
-            suffix: split.suffix,
-            schema: split.schema,
-        })
-    }
-
     pub fn can_split(tree: &NativeTree, fields: &[FieldSpec], time_index: &str) -> bool {
-        matches!(
-            split(tree.root(), fields, time_index, PrefixForm::Raw),
-            Ok(Some(_))
-        )
+        matches!(split(tree.root(), fields, time_index), Ok(Some(_)))
     }
 
     /// The physical node that merges the state `input` produces and runs the tree above the cut.
@@ -483,44 +386,10 @@ fn derive_grouping_tags(
     })
 }
 
-/// What the prepared form of a split hands back to the caller.
-///
-/// The caller builds the boundary around [`Self::canonical`] - a per-partition producer, a canonical
-/// router and a receiver - and then asks [`AggregateFinalize::try_new_prepared`] for the node that
-/// merges the exported state.
-pub struct PreparedSplit {
-    /// The merge the cut aggregate reads, whose input is the per-series prefix.
-    pub canonical: NativeNode,
-    /// The aggregate that was cut out.
-    pub op: BoundAggregate,
-    /// The tree above it, starting at the input the merged values enter at.
-    pub suffix: NativeNode,
-    /// What the cut aggregate produces: the layout the exported state is indexed by.
-    pub schema: Arc<SeriesSchema>,
-}
-
-/// Which form the cut aggregate's prefix takes.
-///
-/// The two are the same walk and differ in one place: what the innermost aggregate reads. A raw
-/// prefix is what a partition-local producer can run; a canonical prefix ends in a merge that a
-/// partition cannot answer alone and that the caller therefore lowers into a boundary first.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PrefixForm {
-    /// The prefix reads the scan, one series at a time.
-    Raw,
-    /// The prefix ends in a `Merge`, whose input is the per-series part.
-    Canonical,
-}
-
 /// One split: the two halves the tree was cut into, and what the cut aggregate folds.
 struct Split {
     /// The per-series tree below the cut aggregate, which the producer runs.
-    ///
-    /// For [`PrefixForm::Canonical`] this is the merge's *input*: the part the boundary's producer
-    /// runs per partition.
     prefix: NativeNode,
-    /// The canonical merge the cut aggregate reads through, for [`PrefixForm::Canonical`].
-    canonical: Option<NativeNode>,
     /// The tree above it, starting at the input the merged values enter at.
     suffix: NativeNode,
     /// The aggregate that was cut out.
@@ -552,16 +421,11 @@ struct Split {
 /// tree's current binding: the cut output is evaluated, whereas these nodes consume raw samples.
 /// A binary operation between two vectors would require matching the cut's merged output against a
 /// vector sibling, but this merge only gathers the cut's state.
-fn split(
-    node: &NativeNode,
-    fields: &[FieldSpec],
-    time_index: &str,
-    form: PrefixForm,
-) -> DfResult<Option<Split>> {
+fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<Option<Split>> {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => Ok(None),
         NativeExpr::Map { input, op } => {
-            let Some(mut inner) = split(input, fields, time_index, form)? else {
+            let Some(mut inner) = split(input, fields, time_index)? else {
                 return Ok(None);
             };
             inner.suffix = NativeNode {
@@ -575,7 +439,7 @@ fn split(
         }
         NativeExpr::Aggregate { input, op } => {
             check_cut(op, fields, time_index)?;
-            match split(input, fields, time_index, form)? {
+            match split(input, fields, time_index)? {
                 // An aggregate above the cut runs in the suffix, over the merged values: correct
                 // once every contribution is in, which is what the merge delivers.
                 Some(mut inner) => {
@@ -589,26 +453,7 @@ fn split(
                     Ok(Some(inner))
                 }
                 None => {
-                    // What the fold reads is the one thing the two forms disagree about. A raw
-                    // prefix is one series at a time and a partition can run it; a canonical prefix
-                    // ends in a merge, which a partition cannot answer alone and whose caller has
-                    // therefore lowered it into a boundary that hands these frames over.
-                    let (prefix, canonical) = match form {
-                        PrefixForm::Raw => {
-                            if matches!(input.expr, NativeExpr::Merge { .. }) {
-                                return Err(declined("an aggregate over a canonical merge"));
-                            }
-                            admit_prefix(input)?;
-                            ((**input).clone(), None)
-                        }
-                        PrefixForm::Canonical => {
-                            let NativeExpr::Merge { input: inner } = &input.expr else {
-                                return Err(declined("an aggregate that reads a raw prefix"));
-                            };
-                            admit_prefix(inner)?;
-                            ((**inner).clone(), Some((**input).clone()))
-                        }
-                    };
+                    admit_prefix(input)?;
                     let NativeType::Samples(schema) = &node.output else {
                         return Err(declined("an aggregate that produces no values"));
                     };
@@ -616,8 +461,7 @@ fn split(
                         return Err(declined("an aggregate that produces no values"));
                     }
                     Ok(Some(Split {
-                        prefix,
-                        canonical,
+                        prefix: (**input).clone(),
                         // The merged values enter the suffix as the aggregate's own output: the same
                         // binding and the same value, which is what the tree validates, at source
                         // `0` of the suffix's own execution - a source index is local to one
@@ -641,7 +485,7 @@ fn split(
             input,
             op: op @ (BoundVectorOp::TopK { .. } | BoundVectorOp::Histogram(_)),
         } => {
-            let Some(mut inner) = split(input, fields, time_index, form)? else {
+            let Some(mut inner) = split(input, fields, time_index)? else {
                 return Ok(None);
             };
             inner.suffix = NativeNode {
@@ -653,35 +497,18 @@ fn split(
             };
             Ok(Some(inner))
         }
-        // A merge above the cut aggregate belongs to the suffix: this node assembles one stream
-        // before it runs the suffix, so a merge there collects the fragments of the one stream and
-        // not the pieces of several partitions. A merge *below* the cut is the other direction and
-        // is decided at the aggregate, where the prefix form says which constructor carries it.
-        NativeExpr::Merge { input } => match split(input, fields, time_index, form)? {
-            Some(mut inner) => {
-                inner.suffix = NativeNode {
-                    expr: NativeExpr::Merge {
-                        input: Box::new(inner.suffix),
-                    },
-                    output: node.output.clone(),
-                };
-                Ok(Some(inner))
-            }
-            None => Ok(None),
-        },
+        NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Vector { input, .. }
         | NativeExpr::VectorOf { input }
-        | NativeExpr::ParameterizedMap { input, .. } => {
-            match split(input, fields, time_index, form)? {
-                Some(_) => Err(declined(
-                    "an aggregate under an operation that reads evaluated values",
-                )),
-                None => Ok(None),
-            }
-        }
+        | NativeExpr::ParameterizedMap { input, .. } => match split(input, fields, time_index)? {
+            Some(_) => Err(declined(
+                "an aggregate under an operation that reads evaluated values",
+            )),
+            None => Ok(None),
+        },
         NativeExpr::Binary {
             left,
             right,
@@ -690,8 +517,8 @@ fn split(
             // Each side is split once, and at most one of them may hold the innermost aggregate: two
             // would be two cuts, which this node cannot merge.
             let (left_split, right_split) = (
-                split(left, fields, time_index, form)?,
-                split(right, fields, time_index, form)?,
+                split(left, fields, time_index)?,
+                split(right, fields, time_index)?,
             );
             // A constant operand is broadcast over whatever the other side answers, so applying the
             // same operation to the merged values is the operation the query wrote. Any other sibling
@@ -731,8 +558,8 @@ fn split(
         // which the merged values of one side cannot answer.
         NativeExpr::Set { left, right, .. } => {
             match (
-                split(left, fields, time_index, form)?,
-                split(right, fields, time_index, form)?,
+                split(left, fields, time_index)?,
+                split(right, fields, time_index)?,
             ) {
                 (None, None) => Ok(None),
                 _ => Err(declined("an aggregate under a set operation")),
@@ -742,8 +569,8 @@ fn split(
         // the info series.
         NativeExpr::Info { base, info, .. } => {
             match (
-                split(base, fields, time_index, form)?,
-                split(info, fields, time_index, form)?,
+                split(base, fields, time_index)?,
+                split(info, fields, time_index)?,
             ) {
                 (None, None) => Ok(None),
                 _ => Err(declined("an aggregate under info")),

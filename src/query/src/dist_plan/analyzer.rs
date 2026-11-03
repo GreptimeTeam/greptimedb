@@ -21,7 +21,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
-use datafusion_common::{Column, ScalarValue};
+use datafusion_common::{Column, DFSchema, ScalarValue};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
@@ -604,36 +604,11 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
     let Some(fused) = partial.node.as_any().downcast_ref::<FusedSeries>() else {
         return false;
     };
-    if fused.partial_fold().is_some()
+    fused.partial_fold().is_some()
         && matches!(
             partial.node.inputs().as_slice(),
             [LogicalPlan::TableScan(_)]
         )
-    {
-        return true;
-    }
-    fused.partial_fold().is_some()
-        && matches!(
-            partial.node.inputs().as_slice(),
-            [LogicalPlan::Extension(boundary)]
-                if boundary.node.as_any().downcast_ref::<FusedSeries>()
-                    .is_some_and(validated_canonical_receiver)
-        )
-}
-
-fn validated_canonical_receiver(receiver: &FusedSeries) -> bool {
-    if receiver.canonical_boundary() != Some(promql::extension_plan::CanonicalBoundary::Receiver) {
-        return false;
-    }
-    let [LogicalPlan::Extension(producer)] = receiver.children() else {
-        return false;
-    };
-    let Some(producer) = producer.node.as_any().downcast_ref::<FusedSeries>() else {
-        return false;
-    };
-    producer.canonical_boundary() == Some(promql::extension_plan::CanonicalBoundary::Producer)
-        && producer.format() == promql::extension_plan::FusedOutputFormat::SeriesFrame
-        && matches!(producer.children(), [LogicalPlan::TableScan(_)])
 }
 
 impl PlanRewriter {
@@ -992,6 +967,25 @@ impl PlanRewriter {
                 .with_new_exprs(new_stage.expressions_consider_join(), vec![node.clone()])?;
         }
         self.set_expanded();
+
+        // Extra columns introduced for distributed operations may need to be removed. Avoid an
+        // identity projection when the entire schema already matches, and never project a series
+        // frame: its declaration is schema metadata, not columns, and a projection would either
+        // drop it or attach it to a different set of columns.
+        if node.schema() == &schema {
+            return Ok(node);
+        }
+        let has_frame_metadata = |schema: &DFSchema| {
+            schema
+                .metadata()
+                .keys()
+                .any(|key| key.starts_with("greptime.series."))
+        };
+        if has_frame_metadata(schema.as_ref()) || has_frame_metadata(node.schema().as_ref()) {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "distributed schema recovery cannot project a series frame".into(),
+            ));
+        }
 
         // recover the schema, this make sure after expand the schema is the same as old node
         // because after expand the raw top node might have extra columns i.e. sorting columns for `Sort` node

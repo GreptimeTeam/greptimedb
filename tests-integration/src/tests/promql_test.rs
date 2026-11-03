@@ -2309,8 +2309,8 @@ fn nonempty_partitions(
 /// The fused node a region ran, which is the canonical boundary's producer.
 ///
 /// `NativePlanObserver::fused` answers with the node the frontend's own plan holds, and for a
-/// canonical boundary that is the receiver. The producer is planned inside the region, so a test
-/// that asks where a series was scanned has to read that plan instead.
+/// canonical boundary that is the consumer reading the routed frames. The producer is planned
+/// inside the region, so a test that asks where a series was scanned has to read that plan instead.
 fn region_producer(
     observer: &Arc<NativePlanObserver>,
 ) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
@@ -2322,11 +2322,11 @@ fn region_producer(
 
 /// The canonical router over a fused producer, wherever the statement planned it.
 ///
-/// A canonical boundary's middle stage runs where its producer does. For a statement root the
-/// producer is regional, so the router is part of the region plan; when the root is a fold, the
-/// boundary is that fold's prefix and still regional; a rewrite above a whole-vector consumer is
-/// assembled in the frontend, so its router is there. The claim these tests make is that such a
-/// router exists instead of a gather, not which plan holds it.
+/// A canonical boundary's router runs where its producer does. For a statement root the producer is
+/// regional, so the router is part of the region plan; under an aggregate the boundary is a segment
+/// of its own and is still regional; a rewrite above a whole-vector consumer is assembled in the
+/// frontend, so its router is there. The claim these tests make is that such a router exists
+/// instead of a gather, not which plan holds it.
 fn canonical_router(
     observer: &Arc<NativePlanObserver>,
 ) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
@@ -8949,7 +8949,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     assert_eq!(
         1,
         count_plan_nodes(&plan, "FusedSeriesExec"),
-        "the frontend has only the receiver: {}",
+        "the frontend has only the consumer: {}",
         display_plan_tree(&plan)
     );
     // Every stored series carries a value at the one evaluation point, so rewriting them to one
@@ -8964,7 +8964,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     assert_eq!(
         1,
         count_plan_nodes(&plan, "FusedSeriesExec"),
-        "the frontend keeps only the receiver: {}",
+        "the frontend keeps only the consumer: {}",
         display_plan_tree(&plan)
     );
     let region_plan = observer
@@ -9149,7 +9149,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     assert_eq!(
         1,
         count_plan_nodes(&pair_plan, "FusedSeriesExec"),
-        "the pair receiver stays in the frontend plan: {}",
+        "the pair consumer stays in the frontend plan: {}",
         display_plan_tree(&pair_plan)
     );
     // The pair answers, and answering is what runs the region half of the boundary.
@@ -9216,6 +9216,58 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         "the existing plan answers the complementary pair the same way"
     );
 
+    // A fold over the same complementary pair reads the one assembled series rather than a piece
+    // per partition: it answers the complete aggregate over that boundary, once, and the answer is
+    // the same as the existing plan's.
+    let pair_sum_expr = r#"sum(label_replace(root_pair, "host", "same", "host", ".*"))"#;
+    observer.clear();
+    let pair_sum = instance
+        .do_query(
+            &format!("TQL EVAL (0, 600, '1m') {pair_sum_expr}"),
+            native_query_context(true, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let pair_sum_plan = observer.root_plan();
+    let pair_sum_display = datafusion::physical_plan::displayable(pair_sum_plan.as_ref())
+        .indent(true)
+        .to_string();
+    assert!(
+        pair_sum_display.contains("Aggregate sum by [] complete"),
+        "the fold is a complete aggregate over the assembled series: {pair_sum_display}"
+    );
+    assert!(
+        !pair_sum_display.contains("AggregateFinalizeExec"),
+        "the fold is not planned as partition-local partial state: {pair_sum_display}"
+    );
+    let (_, pair_sum_rows) = native_labelled_rows(pair_sum).await;
+    assert_eq!(
+        pair_sum_rows,
+        vec![
+            (0, std::collections::BTreeMap::new(), 1.0),
+            (60_000, std::collections::BTreeMap::new(), 1.0),
+            (120_000, std::collections::BTreeMap::new(), 1.0),
+            (180_000, std::collections::BTreeMap::new(), 1.0),
+            (240_000, std::collections::BTreeMap::new(), 1.0),
+            (600_000, std::collections::BTreeMap::new(), 2.0),
+        ],
+        "one folded series over the assembled boundary, with no labels of its own"
+    );
+    let pair_sum_legacy = instance
+        .do_query(
+            &format!("TQL EVAL (0, 600, '1m') {pair_sum_expr}"),
+            native_query_context(false, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let (_, pair_sum_legacy_rows) = native_labelled_rows(pair_sum_legacy).await;
+    assert_eq!(
+        pair_sum_legacy_rows, pair_sum_rows,
+        "the existing plan folds the same assembled series"
+    );
+
     // A consumer of the whole label set must see the overlap as an error *before* it hides the
     // duplicate: a fold sums the pieces it is handed, and `topk` counts them against `k`, so either
     // would answer a number instead of reporting what Prometheus reports. Both are checked here so
@@ -9245,11 +9297,26 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
             "{shape}: the consumer must not hide the overlap, got: {error}"
         );
         let plan = observer.root_plan();
-        // The boundary sits below the consumer either way, but which half is where follows the
-        // consumer: a ranking above the rewrite assembles its input in the frontend, so the router
-        // is part of that plan, while a fold is a split aggregate whose prefix is the boundary, so
-        // its router runs in the region below the finalizer. What both shapes have in common - and
-        // what this asserts - is a canonical router over a fused producer instead of a gather.
+        let display = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(true)
+            .to_string();
+        // The boundary sits below the consumer either way, but what reads it follows the consumer:
+        // a ranking above the rewrite assembles its input in the frontend, so the router is part of
+        // that plan, while a fold is planned as the existing complete aggregate over the assembled
+        // frames - it gathers them into one execution and folds every label set there, which is
+        // where the overlap is refused. What both shapes have in common - and what this asserts -
+        // is a canonical router over a fused producer instead of a gather, and no split partial
+        // state standing in for the collection.
+        if shape == "a fold" {
+            assert!(
+                display.contains("Aggregate sum by [] complete"),
+                "{shape}: the fold is a complete aggregate over the assembled frames: {display}"
+            );
+            assert!(
+                !display.contains("AggregateFinalizeExec"),
+                "{shape}: the aggregate runs over the boundary itself, not as partial state: {display}"
+            );
+        }
         assert!(
             canonical_router(&observer).is_some(),
             "{shape}: the boundary is still the canonical router, not a gather: {} regions {:?}",
@@ -9314,7 +9381,9 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     );
 
     // An aggregate after a colliding rewrite cannot hide the same-point conflict: the merge must
-    // validate its canonical input before the aggregate consumes it.
+    // validate its canonical input before the aggregate consumes it. The fold is the existing
+    // complete aggregate, placed above the boundary because it reads every assembled label set;
+    // there is no partition-local partial state to fall back to.
     let rewritten_sum = r#"sum(label_replace(root_fold, "host", "same", "host", ".*"))"#;
     observer.clear();
     let sum_output = instance
@@ -9330,9 +9399,21 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         sum_error.contains("cannot contain metrics with the same labelset"),
         "the aggregate must not hide the overlap, got: {sum_error}"
     );
+    let sum_plan = observer.root_plan();
+    let sum_display = datafusion::physical_plan::displayable(sum_plan.as_ref())
+        .indent(true)
+        .to_string();
+    assert!(
+        sum_display.contains("Aggregate sum by [] complete"),
+        "the fold runs natively as a complete aggregate over the boundary: {sum_display}"
+    );
+    assert!(
+        !sum_display.contains("AggregateFinalizeExec"),
+        "the fold's state is not the substitute for the canonical merge: {sum_display}"
+    );
     assert!(
         canonical_router(&observer).is_some(),
-        "the fold's prefix keeps the canonical router"
+        "the fold's prefix keeps the canonical router: {sum_display}"
     );
 
     // A rewrite above the aggregate is pointwise on its single globally computed output, and must
@@ -9360,12 +9441,10 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     // An inner rewrite aliases every input at the sole evaluation point. That overlap must fail
     // before topk sees the vector; an outer rewrite must not hide or move the error.
     //
-    // This shape keeps the plan the existing path builds: its inner merge sits under a ranking and
-    // then under another rewrite, so the collection belongs to a region-local stage whose frame the
-    // statement's frontend does not reassemble - which the native route declines rather than plan
-    // something it cannot build. What the route must not do is answer it: `topk` over pieces it
-    // should have collected would publish one winner per partition and the outer rewrite would
-    // rename a number no label set ever stood for.
+    // The inner merge is its own boundary and the ranking above it gathers the assembled frames
+    // into one execution, so the route answers this shape natively. What it must not do is answer
+    // it per partition: `topk` over pieces it should have collected would publish one winner per
+    // partition and the outer rewrite would rename a number no label set ever stood for.
     let rewrite_topk_rewrite = r#"label_replace(topk(1, label_replace(root_fold, "host", "inner", "host", ".*")), "host", "outer", "host", ".*")"#;
     observer.clear();
     let nested_output = instance
@@ -9380,6 +9459,15 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     assert!(
         nested_error.contains("cannot contain metrics with the same labelset"),
         "the inner rewrite overlaps before topk, got: {nested_error}"
+    );
+    assert_eq!(
+        observer.fused().as_ref().map(|plan| plan.name()),
+        Some("FusedSeriesExec"),
+        "the nested rewrite stays on the native path"
+    );
+    assert!(
+        canonical_router(&observer).is_some(),
+        "the ranking reads the assembled boundary rather than per-partition pieces"
     );
     let nested_legacy = instance
         .do_query(

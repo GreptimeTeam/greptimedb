@@ -21,8 +21,8 @@ use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
-    AggregateFinalize, CanonicalBoundary, EmptyMetric, FusedOutputFormat, FusedSeries,
-    InstantManipulate, RangeManipulate, RawSeriesSource, SeriesDivide, SeriesNormalize,
+    AggregateFinalize, EmptyMetric, FusedOutputFormat, FusedSeries, InstantManipulate,
+    RangeManipulate, RawSeriesSource, SeriesDivide, SeriesNormalize,
 };
 use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -32,16 +32,11 @@ use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
 
-/// Whether `fused` is the half of a canonical boundary that one region answers: the producer, which
-/// merges what its own scan partitions hold and exports one series per label set per partition.
-///
-/// The receiver is not. It reads what the canonical router collected from *every* producer, so its
-/// input is not in any one region: it stays above them, the way the split aggregate's merge does,
-/// and classifying it as a region node would put the boundary's two halves into the same region and
-/// take the router - which is what runs at the region's output - with them. What tells the two apart
-/// is the node's own contract, not the shape below it: only a producer answers a partition's share.
+/// Whether `fused` is a canonical producer whose prefix and sources can run in one region.
+/// Its physical canonical router assembles the complete label sets; ordinary consumers above it
+/// do not carry the producer marker and retain their normal placement requirements.
 fn canonical_boundary_region_node(fused: &FusedSeries) -> bool {
-    if fused.canonical_boundary() != Some(CanonicalBoundary::Producer) {
+    if !fused.is_canonical_producer() {
         return false;
     }
     fused.format() == FusedOutputFormat::SeriesFrame

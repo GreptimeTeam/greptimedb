@@ -704,9 +704,9 @@ impl PromPlanner {
         // A tree that ends in a canonical merge answers one series per label set, and the pieces of
         // one set were spread over the scan's partitions by the rewrite that created them. Lowering
         // that boundary keeps the scan width: each partition merges the pieces it holds and exports
-        // series frames, a canonical router collects the pieces of one label set from every
-        // partition, and the receiver runs the merge over the routed frames. Declining here would
-        // hand the statement back to a path that answers it per partition.
+        // series frames, and a canonical router collects the pieces of one label set from every
+        // partition. Declining here would hand the statement back to a path that answers it per
+        // partition.
         if !multi_input
             && selectors.len() == 1
             && matches!(&tree.root().expr, NativeExpr::Merge { input } if pointwise_operand(input) && canonical_local_prefix(input) && !contains_global_consumer(input))
@@ -779,26 +779,6 @@ impl PromPlanner {
                     single_input_context,
                 )));
             }
-            // A fold whose prefix a rewrite made collapse is the same split with one more stage in
-            // front of it: the prefix ends in a canonical merge, which a partition cannot answer
-            // alone, so it is lowered into a boundary and the partial fold reads the frames the
-            // boundary assembles. The state, the suffix and the merge above them are unchanged.
-            if !multi_input
-                && selectors.len() == 1
-                && let Some(plan) = prepared_canonical_split(
-                    prom_expr,
-                    &tree,
-                    &children,
-                    &source_tags,
-                    &grid,
-                    &time,
-                    &tags,
-                    &metric,
-                )
-                .await?
-            {
-                return Ok(Some((plan, single_input_context)));
-            }
             // Preserve the established refusal for repeated same-table operands unless
             // segmentation is needed to preserve a computed matching key.
             if selectors.len() != 1 && !cross_table && !computed_key_case {
@@ -818,6 +798,8 @@ impl PromPlanner {
                 &time,
                 &tags,
                 &segment_metric,
+                FusedOutputFormat::PlainRows,
+                contains_canonical_merge(root),
             ))
             .await?;
             if let Some(plan) = plan {
@@ -1058,22 +1040,20 @@ fn exportable(node: &NativeNode) -> bool {
 
 /// Whether `node` becomes a segment of its own under a parent that must gather.
 ///
-/// The parent reads across series, so it answers one partition and gathers whatever it reads. A
-/// subtree that answers each series on its own partitions does not need that gather, and keeping it
-/// inside the parent would apply the gather to it too. Cutting it out leaves its work on however
-/// many partitions its own input has.
-///
-/// Both ends of the comparison come from the classification the physical planner applies to the
-/// tree it builds, so a cut here is a tree the physical planner would also have had to gather.
-fn cut_as_segment(node: &NativeNode) -> bool {
+/// Cut local prefixes, global consumers and canonical merges separately so the prefix keeps its
+/// scan width, and every global consumer sees the canonical boundary below it. A pointwise wrapper
+/// of a global consumer is cut as well, so it cannot hide that consumer from recursive lowering.
+fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
     if !exportable(node)
         || matches!(node.expr, NativeExpr::Input(_))
-        || (!matches!(node.expr, NativeExpr::Merge { .. })
+        || (!canonical_segmentation
             && matches!(input_locality(node), InputLocality::SinglePartition))
     {
         return false;
     }
-
+    if canonical_segmentation && (contains_global_consumer(node) || is_canonical_cut(node)) {
+        return true;
+    }
     // A segment builder needs an input, so data-free subtrees stay with their parent.
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
@@ -1084,15 +1064,28 @@ fn cut_as_segment(node: &NativeNode) -> bool {
 fn canonical_local_prefix(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) => true,
-        NativeExpr::Merge { input } => canonical_local_prefix(input),
-        NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::Instant { input, .. } => canonical_local_prefix(input),
+        NativeExpr::Instant { input, .. } | NativeExpr::Window { input, .. } => {
+            matches!(input.expr, NativeExpr::Input(_))
+        }
+        NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } => {
+            canonical_local_prefix(input)
+        }
         NativeExpr::ParameterizedMap {
             input, parameters, ..
-        } => canonical_local_prefix(input) && parameters.iter().all(canonical_local_prefix),
+        } => canonical_local_prefix(input) && parameters.iter().all(data_free),
+        NativeExpr::Binary { left, right, .. } => {
+            (data_free(left) && canonical_local_prefix(right))
+                || (data_free(right) && canonical_local_prefix(left))
+        }
         _ => false,
     }
+}
+
+fn contains_canonical_merge(node: &NativeNode) -> bool {
+    matches!(node.expr, NativeExpr::Merge { .. })
+        || node_children(&node.expr)
+            .into_iter()
+            .any(contains_canonical_merge)
 }
 
 fn contains_global_consumer(node: &NativeNode) -> bool {
@@ -1113,29 +1106,14 @@ fn is_global_consumer(node: &NativeNode) -> bool {
     ) && matches!(input_locality(node), InputLocality::SinglePartition)
 }
 
-/// Whether a subtree becomes its own segment for a reason of its own.
+/// Whether a subtree can be cut without inheriting its parent's global gather.
 ///
-/// Two things make a subtree worth cutting out. The first is locality: the parent reads across
-/// series, so it gathers whatever it reads, and a per-series prefix does not need that gather. The
-/// second is a canonical merge: it collects the pieces of one label set, which only a canonical
-/// router can do across partitions - so it is built as a boundary of its own and the parent reads
-/// one frame per owner instead of gathering the scan. Leaving it inside the parent would work and
-/// would take the caller's parallelism away, which is the trade this route does not make.
+/// A local prefix stays on its source partitions. A canonical merge becomes its own routed
+/// boundary, and a parent reads the assembled frames rather than gathering the scan.
 fn is_canonical_cut(node: &NativeNode) -> bool {
     matches!(node.expr, NativeExpr::Merge { .. })
         || !matches!(input_locality(node), InputLocality::SinglePartition)
-}
-
-/// Whether `node` holds a canonical merge anywhere in its subtree.
-///
-/// A merge collects every fragment of one canonical label set. A segment that keeps its scan's
-/// partitions cannot promise it sees them all, so a subtree holding one cannot be planned as a
-/// single segment: the merge has to be lowered into a boundary, which is this same planner's job.
-fn contains_canonical_merge(node: &NativeNode) -> bool {
-    matches!(node.expr, NativeExpr::Merge { .. })
-        || node_children(&node.expr)
-            .into_iter()
-            .any(contains_canonical_merge)
+        || canonical_local_prefix(node)
 }
 
 /// One segment: its tree rewritten to read only its own inputs, the scans it reads, and the
@@ -1153,7 +1131,12 @@ struct Segment {
 }
 
 /// Collects a segment's scans and cut subtrees, without descending into a cut.
-fn collect_segment(node: &NativeNode, sources: &mut Vec<usize>, cut: &mut Vec<NativeNode>) {
+fn collect_segment(
+    node: &NativeNode,
+    sources: &mut Vec<usize>,
+    cut: &mut Vec<NativeNode>,
+    canonical_segmentation: bool,
+) {
     match &node.expr {
         NativeExpr::Input(input) => {
             if !sources.contains(&input.source_index) {
@@ -1162,10 +1145,10 @@ fn collect_segment(node: &NativeNode, sources: &mut Vec<usize>, cut: &mut Vec<Na
         }
         expr => {
             for child in node_children(expr) {
-                if cut_as_segment(child) {
+                if cut_as_segment(child, canonical_segmentation) {
                     cut.push(child.clone());
                 } else {
-                    collect_segment(child, sources, cut);
+                    collect_segment(child, sources, cut, canonical_segmentation);
                 }
             }
         }
@@ -1220,6 +1203,7 @@ fn rewrite_segment(
     sources: &[usize],
     cut_base: usize,
     next_cut: &mut usize,
+    canonical_segmentation: bool,
 ) -> NativeNode {
     let expr = match &node.expr {
         NativeExpr::Input(input) => NativeExpr::Input(BoundInput {
@@ -1234,7 +1218,7 @@ fn rewrite_segment(
             let children = node_children(expr)
                 .into_iter()
                 .map(|child| {
-                    if cut_as_segment(child) {
+                    if cut_as_segment(child, canonical_segmentation) {
                         let index = cut_base + *next_cut;
                         *next_cut += 1;
                         NativeNode {
@@ -1246,7 +1230,7 @@ fn rewrite_segment(
                             output: child.output.clone(),
                         }
                     } else {
-                        rewrite_segment(child, sources, cut_base, next_cut)
+                        rewrite_segment(child, sources, cut_base, next_cut, canonical_segmentation)
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1260,13 +1244,19 @@ fn rewrite_segment(
 }
 
 /// Splits `node` into one segment and the subtrees cut out of it.
-fn cut_segments(node: &NativeNode) -> Segment {
+fn cut_segments(node: &NativeNode, canonical_segmentation: bool) -> Segment {
     let mut sources = Vec::new();
     let mut cut = Vec::new();
-    collect_segment(node, &mut sources, &mut cut);
+    collect_segment(node, &mut sources, &mut cut, canonical_segmentation);
     let cut_base = sources.len();
     let mut next_cut = 0;
-    let rewritten = rewrite_segment(node, &sources, cut_base, &mut next_cut);
+    let rewritten = rewrite_segment(
+        node,
+        &sources,
+        cut_base,
+        &mut next_cut,
+        canonical_segmentation,
+    );
     Segment {
         node: rewritten,
         sources,
@@ -1274,106 +1264,7 @@ fn cut_segments(node: &NativeNode) -> Segment {
     }
 }
 
-/// Plans a fold whose prefix a collapsing rewrite made several stored series share.
-///
-/// The compiled shape is `Aggregate(Merge(Map(...)))`: the merge is there because the rewrite can
-/// give two stored series one label set, and a fold that summed those pieces separately would answer
-/// a group twice. Running that per partition is wrong and gathering every partition is the
-/// workaround the route does not take, so the merge is lowered into the same canonical boundary a
-/// root merge gets - per-partition producer, canonical router, receiver - and the aggregate split
-/// stays exactly what it was: the prefix folds per partition, `AggregateFinalize` merges the
-/// exported state and runs the suffix.
-///
-/// The prefix is the whole subtree below the cut aggregate, boundary included, so the state that
-/// reaches the finalizer is the state of *assembled* series. `None` for a tree without such a shape.
-#[allow(clippy::too_many_arguments)]
-async fn prepared_canonical_split(
-    prom_expr: &PromExpr,
-    tree: &NativeTree,
-    children: &[LogicalPlan],
-    source_tags: &[Vec<String>],
-    grid: &Arc<EvalGrid>,
-    time_index: &str,
-    tags: &[String],
-    metric: &Option<Arc<str>>,
-) -> Result<Option<LogicalPlan>> {
-    let Ok(source_fields) = tree_source_fields(tree) else {
-        return Ok(None);
-    };
-    let fields = source_fields
-        .iter()
-        .flatten()
-        .map(|name| FieldSpec {
-            name: name.as_str().into(),
-        })
-        .collect::<Vec<_>>();
-    let Some(prepared) = AggregateFinalize::split_canonical(tree, &fields, time_index) else {
-        return Ok(None);
-    };
-    // The producer runs the boundary's own merge - `Merge(P)` - on every scan partition, and the
-    // receiver assembles what the router collected. Frames leave the receiver because the split's
-    // producer folds them, so this is the same boundary the statement root gets with a different
-    // output representation.
-    let boundary_tree = match NativeTree::try_new(prepared.canonical.clone()) {
-        Ok(tree) => tree,
-        Err(_) => return Ok(None),
-    };
-    let Some((assembled, assembled_tags)) = canonical_boundary_stages(
-        prom_expr,
-        &boundary_tree,
-        children,
-        source_tags,
-        grid,
-        time_index,
-        tags,
-        metric,
-        FusedOutputFormat::SeriesFrame,
-    ) else {
-        return Ok(None);
-    };
-    let output_fields = match &tree.root().output {
-        NativeType::Samples(schema) => schema
-            .fields
-            .iter()
-            .map(|field| field.name.to_string())
-            .collect::<Vec<_>>(),
-        NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-        NativeType::AggregateState(_) => return Ok(None),
-    };
-    let Some(output_tags) = fused_output_tags(tree.root(), source_tags) else {
-        return Ok(None);
-    };
-    let output_schema = fused_output_schema(&output_fields, &output_tags, time_index)?;
-    let suffix = match NativeTree::try_new(prepared.suffix) {
-        Ok(tree) => tree,
-        Err(_) => return Ok(None),
-    };
-    let node = match AggregateFinalize::try_new_prepared(
-        Arc::from(prom_expr.to_string()),
-        prepared.op,
-        suffix,
-        prepared.schema,
-        assembled,
-        assembled_tags,
-        metric.clone(),
-        FusedSeriesBinding {
-            grid: Arc::clone(grid),
-            time_index: time_index.to_string(),
-            tags: tags.to_vec(),
-            metric_name: metric.clone(),
-        },
-        output_schema,
-    ) {
-        Ok(node) => node,
-        Err(DataFusionError::NotImplemented(_)) => return Ok(None),
-        Err(error) => return Err(error).context(DataFusionPlanningSnafu),
-    };
-    Ok(Some(LogicalPlan::Extension(Extension {
-        node: Arc::new(node),
-    })))
-}
-
-/// Lowers a tree whose root is a canonical merge into a producer, a router and a receiver.
+/// Lowers a tree whose root is a canonical merge into a producer and a canonical router.
 ///
 /// The tree says the statement answers one series per canonical label set; what it cannot say is
 /// where the pieces of one set are, because a rewrite created them after the scan split the rows.
@@ -1381,7 +1272,7 @@ async fn prepared_canonical_split(
 /// make them meet: read every partition in one execution, or route each label set to one owner. The
 /// first takes the caller's parallelism away for the whole query; this is the second.
 ///
-/// Three nodes come out of it, and each has one job:
+/// Two stages come out of it, and each has one job:
 ///
 /// - the **producer** runs the tree's root merge on every scan partition. Its merge collects the
 ///   pieces that partition holds - which is what makes a same-partition collision an error here,
@@ -1392,13 +1283,9 @@ async fn prepared_canonical_split(
 ///   label set from *every* input partition. It is the conservative router - a label set is
 ///   published only once every producer contributed it or ended - because a producer promises one
 ///   series per set *per partition*, not that each set lives in one partition. A second piece of one
-///   set that holds a position another piece already holds is the same error, raised before the
-///   receiver sees anything.
-/// - the **receiver** runs the same merge over the routed frames, which is where the answer is
-///   assembled: one series per label set, complementary points joined, two values at one point
-///   refused. It runs one execution per router output, and that is correct rather than lucky: the
-///   router sends each canonical label set to exactly one of its outputs, so each of them holds
-///   whole label sets and needs no piece from the others.
+///   set that holds a position another piece already holds is the same error, reported while that
+///   label set is assembled, and each output of the router then holds whole label sets: one series
+///   per set, complementary points joined.
 ///
 /// `None` when the boundary cannot be built, so the caller keeps the plan it would have chosen.
 #[allow(clippy::too_many_arguments)]
@@ -1426,7 +1313,10 @@ fn canonical_boundary_plan(
     Some(plan)
 }
 
-/// The two stages of a canonical boundary over `tree`, and the columns its frames carry.
+/// The stages of a canonical boundary over `tree`, and the columns its frames carry.
+///
+/// `format` says what the caller above reads: a statement root reads the boundary's rows, and
+/// anything else reads the assembled frames as an ordinary evaluated input.
 #[allow(clippy::too_many_arguments)]
 fn canonical_boundary_stages(
     prom_expr: &PromExpr,
@@ -1439,9 +1329,12 @@ fn canonical_boundary_stages(
     metric: &Option<Arc<str>>,
     format: FusedOutputFormat,
 ) -> Option<(LogicalPlan, Vec<String>)> {
-    let NativeExpr::Merge { .. } = &tree.root().expr else {
+    let NativeExpr::Merge { input } = &tree.root().expr else {
         return None;
     };
+    if !canonical_local_prefix(input) {
+        return None;
+    }
     let NativeType::Samples(schema) = &tree.root().output else {
         return None;
     };
@@ -1473,56 +1366,46 @@ fn canonical_boundary_stages(
         node: Arc::new(producer),
     });
 
-    // The receiver: the same merge over the routed frames, assembled into the statement's rows.
+    // What reads the router depends on where this boundary sits. A consumer still above it reads
+    // whole label sets, and the router already merged the pieces of one label set into one series,
+    // so that consumer is an ordinary evaluated input of its own and needs no merge. The statement's
+    // root instead publishes rows, which is this boundary's own frame converted as usual.
+    if format == FusedOutputFormat::SeriesFrame {
+        return Some((producer, output_tags));
+    }
     let evaluated = NativeType::Samples(Arc::clone(schema));
-    let source = NativeNode {
+    let consumer_tree = NativeTree::try_new(NativeNode {
         expr: NativeExpr::Input(BoundInput {
             source_index: 0,
             output: evaluated.clone(),
             ordering: SeriesOrdering::Contiguous,
         }),
-        output: evaluated.clone(),
-    };
-    let receiver_tree = NativeTree::try_new(NativeNode {
-        expr: NativeExpr::Merge {
-            input: Box::new(source),
-        },
         output: evaluated,
     })
     .ok()?;
     // A frame names each series' own metric, so the binding names one only when a tag column does.
-    let receiver_metric = if output_tags.iter().any(|tag| tag == METRIC_NAME) {
+    let consumer_metric = if output_tags.iter().any(|tag| tag == METRIC_NAME) {
         metric.clone()
     } else {
         None
     };
-    // What the receiver produces is fixed by its format: the statement's rows when it is the root,
-    // and a series frame when something above it still has to run. The frame layout is the one the
-    // evaluated root declares, which is what the consumer of this stage decodes.
-    let receiver_schema = match format {
-        FusedOutputFormat::PlainRows => output_schema,
-        FusedOutputFormat::SeriesFrame => {
-            let frame = FusedSeries::series_frame_schema(&receiver_tree).ok()?;
-            Arc::new(DFSchema::try_from(frame.as_ref().clone()).ok()?)
-        }
-    };
-    let receiver = FusedSeries::try_new_canonical_receiver(
+    let consumer = FusedSeries::try_new_with_format(
         Arc::from(prom_expr.to_string()),
-        receiver_tree,
+        consumer_tree,
         FusedSeriesBinding {
             grid: Arc::clone(grid),
             time_index: time_index.to_string(),
             tags: output_tags.clone(),
-            metric_name: receiver_metric,
+            metric_name: consumer_metric,
         },
-        producer,
-        receiver_schema,
-        format,
+        vec![producer],
+        output_schema,
+        FusedOutputFormat::PlainRows,
     )
     .ok()?;
     Some((
         LogicalPlan::Extension(Extension {
-            node: Arc::new(receiver),
+            node: Arc::new(consumer),
         }),
         output_tags,
     ))
@@ -1734,11 +1617,9 @@ fn build_inner_segment(
 ///
 /// A tree that reads across series answers one partition and gathers whatever it reads. Its
 /// per-series prefixes do not need that gather, so each becomes a segment of its own and keeps the
-/// partitions it was scanned with. Nothing else is cut: a tree that already runs on every partition
-/// has nothing to gain, and a tree that matches two vectors routes rather than gathers.
-///
-/// The cut is the physical planner's own classification of the same subtrees, so a plan this
-/// produces is one the physical planner would otherwise have had to gather as a whole.
+/// partitions it was scanned with. Global consumers and canonical merges are cut in their original
+/// order, and recursive segments publish frames for their parents to consume. Only the statement
+/// root publishes rows.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 async fn segment_tree(
     prom_expr: &PromExpr,
@@ -1751,6 +1632,8 @@ async fn segment_tree(
     time_index: &str,
     tags: &[String],
     metric: &Option<Arc<str>>,
+    format: FusedOutputFormat,
+    canonical_segmentation: bool,
 ) -> Result<Option<LogicalPlan>> {
     if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
         return Ok(None);
@@ -1780,7 +1663,7 @@ async fn segment_tree(
         ) {
             break;
         }
-        let segment = cut_segments(current_tree.root());
+        let segment = cut_segments(current_tree.root(), canonical_segmentation);
         if segment.cut.is_empty() {
             break;
         }
@@ -1799,45 +1682,47 @@ async fn segment_tree(
             .map(|&index| current_source_ids.get(index).copied().flatten())
             .collect::<Vec<_>>();
         for cut in &segment.cut {
-            // A canonical merge is never a plain inner segment: one built directly under this node
-            // would gather the scan to answer the merge, which is the shape the boundary exists to
-            // avoid. It goes straight to the boundary builder instead.
+            // A cut may wrap a global consumer in a pointwise rewrite or a later merge. Segment
+            // that subtree first so its inner canonical boundary stays below the consumer. A local
+            // canonical merge instead goes directly to the boundary builder.
             let canonical = matches!(cut.expr, NativeExpr::Merge { .. });
-            let built = if first_iteration && !canonical {
-                if is_global_consumer(cut) {
-                    let Some(cut_tree) = NativeTree::try_new(cut.clone()).ok() else {
-                        return Ok(None);
-                    };
-                    let plan = Box::pin(segment_tree(
-                        prom_expr,
-                        &cut_tree,
-                        &current_children,
-                        &current_tags,
-                        bare_scans,
-                        per_source,
-                        grid,
-                        time_index,
-                        tags,
-                        metric,
-                        false,
-                    ))
-                    .await?;
-                    match plan {
-                        Some(plan) => {
-                            let Some(cut_tags) = fused_output_tags(cut, &current_tags) else {
-                                return Ok(None);
-                            };
-                            Some((plan, cut_tags))
-                        }
-                        None => None,
+            let built = if first_iteration && contains_global_consumer(cut) {
+                let Some(cut_tree) = NativeTree::try_new(cut.clone()).ok() else {
+                    return Ok(None);
+                };
+                let plan = Box::pin(segment_tree(
+                    prom_expr,
+                    &cut_tree,
+                    &current_children,
+                    &current_tags,
+                    bare_scans,
+                    per_source,
+                    grid,
+                    time_index,
+                    tags,
+                    metric,
+                    FusedOutputFormat::SeriesFrame,
+                    canonical_segmentation,
+                ))
+                .await?;
+                match plan {
+                    Some(plan) => {
+                        let Some(cut_tags) = fused_output_tags(cut, &current_tags) else {
+                            return Ok(None);
+                        };
+                        Some((plan, cut_tags))
                     }
-                } else {
-                    build_inner_segment(cut, bare_scans, per_source, grid)
+                    None => None,
                 }
+            } else if first_iteration && !canonical {
+                build_inner_segment(cut, bare_scans, per_source, grid)
             } else {
                 None
+            };
+            if built.is_none() && contains_global_consumer(cut) {
+                return Ok(None);
             }
-            .or_else(|| {
+            let built = built.or_else(|| {
                 build_evaluated_segment(
                     prom_expr,
                     cut,
@@ -1871,12 +1756,59 @@ async fn segment_tree(
     }
     let parent = current_tree;
     // Segmentation is useful even when the resulting parent is still single-partition: each
-    // exported per-series subtree remains a separate input and is bound to its own source. The
-    // locality may not improve at the root (for example, a three-way pointwise tree), but
-    // rejecting that plan makes the caller fuse all sources into one gathered child. `changed`
-    // above already guarantees that segmentation created at least one real boundary.
-    let inputs = current_children;
-    let child_tags = current_tags;
+    // exported per-series subtree remains a separate input and is bound to its own source.
+    let mut inputs = current_children;
+    let mut child_tags = current_tags;
+    // A merge at this segment's root still needs its own boundary. An outer rewrite above a
+    // recursively cut ranking runs after the ranking, then is canonicalized before its caller.
+    if let NativeExpr::Merge { input } = &parent.root().expr {
+        let source_fields = tree_source_fields(&parent).ok();
+        for index in 0..inputs.len() {
+            let Some(bound) = find_input_node(input, index) else {
+                return Ok(None);
+            };
+            if bound
+                .output
+                .samples()
+                .is_some_and(|schema| schema.eval_grid.is_none())
+                && !is_raw_series_source(&inputs[index])
+            {
+                let Some(source_index) = current_source_ids.get(index).copied().flatten() else {
+                    return Ok(None);
+                };
+                let (Some((Some(source_metric), _, source_tags)), Some(fields)) = (
+                    per_source.get(source_index),
+                    source_fields.as_ref().and_then(|fields| fields.get(index)),
+                ) else {
+                    return Ok(None);
+                };
+                let Ok(source) = RawSeriesSource::try_new(
+                    Arc::clone(source_metric),
+                    source_tags.clone(),
+                    fields.clone(),
+                    inputs[index].clone(),
+                ) else {
+                    return Ok(None);
+                };
+                inputs[index] = LogicalPlan::Extension(Extension {
+                    node: Arc::new(source),
+                });
+                child_tags[index] = source_tags.clone();
+            }
+        }
+        return Ok(canonical_boundary_stages(
+            prom_expr,
+            &parent,
+            &inputs,
+            &child_tags,
+            grid,
+            time_index,
+            tags,
+            metric,
+            format,
+        )
+        .map(|(plan, _)| plan));
+    }
     // Nothing below can fall back once physical planning starts, so every tree this route commits
     // to has to be one the runtime executes. A shape the runtime refuses - a grouping by a value
     // field, an operation with no kernel - therefore keeps the plan it had.
@@ -1885,11 +1817,25 @@ async fn segment_tree(
     {
         return Ok(None);
     }
-    let Some(output_schema) = PromPlanner::fused_root_schema(&parent, &child_tags, time_index)
-    else {
-        return Ok(None);
+    let output_schema = match format {
+        FusedOutputFormat::PlainRows => {
+            let Some(schema) = PromPlanner::fused_root_schema(&parent, &child_tags, time_index)
+            else {
+                return Ok(None);
+            };
+            schema
+        }
+        FusedOutputFormat::SeriesFrame => {
+            let Ok(frame) = FusedSeries::series_frame_schema(&parent) else {
+                return Ok(None);
+            };
+            let Ok(schema) = DFSchema::try_from(frame.as_ref().clone()) else {
+                return Ok(None);
+            };
+            Arc::new(schema)
+        }
     };
-    let Ok(plan) = FusedSeries::try_new(
+    let Ok(plan) = FusedSeries::try_new_with_format(
         Arc::from(prom_expr.to_string()),
         parent,
         FusedSeriesBinding {
@@ -1900,6 +1846,7 @@ async fn segment_tree(
         },
         inputs,
         output_schema,
+        format,
     ) else {
         return Ok(None);
     };
@@ -2660,7 +2607,7 @@ mod tests {
     #[test]
     fn recursive_segmentation_rewrites_nested_cuts_with_dense_inputs() {
         let tree = compiled_test_tree("sum(abs(rate(x[1m])))");
-        let segment = cut_segments(tree.root());
+        let segment = cut_segments(tree.root(), false);
         assert!(!segment.cut.is_empty());
         assert_eq!(segment.cut.len(), 1);
         assert_eq!(vec![0], input_sources(&segment.cut[0]));
@@ -2670,7 +2617,7 @@ mod tests {
     fn segmentation_leaves_a_data_free_only_candidate_unchanged() {
         for query in ["sum(vector(1))", "sum(abs(vector(1)))"] {
             let tree = compiled_test_tree(query);
-            let segment = cut_segments(tree.root());
+            let segment = cut_segments(tree.root(), false);
             assert!(segment.sources.is_empty(), "{query}");
             assert!(segment.cut.is_empty(), "{query}");
             assert_eq!(

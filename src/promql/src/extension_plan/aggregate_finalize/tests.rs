@@ -484,11 +484,7 @@ fn topk_without_aggregate_is_not_split() {
     ))
     .unwrap();
     assert!(!AggregateFinalize::can_split(&tree, &raw_fields(), "ts"));
-    assert!(
-        split(tree.root(), &raw_fields(), "ts", PrefixForm::Raw)
-            .unwrap()
-            .is_none()
-    );
+    assert!(split(tree.root(), &raw_fields(), "ts").unwrap().is_none());
 }
 
 /// A binary operation above the cut is only the operation over merged values when its other side is a
@@ -625,18 +621,6 @@ fn an_aggregate_grouped_by_a_value_field_or_the_time_index_is_refused() {
 }
 
 /// A quantile's state is the group's samples, which neither half of this node can carry.
-#[test]
-fn canonical_split_refuses_grouping_by_a_raw_value_field() {
-    let merge = NativeNode {
-        expr: NativeExpr::Merge {
-            input: Box::new(window()),
-        },
-        output: evaluated(),
-    };
-    let tree = NativeTree::try_new(complete(AggregateKind::Sum, by(&["v0"]))(merge)).unwrap();
-    assert!(AggregateFinalize::split_canonical(&tree, &raw_fields(), "ts").is_none());
-}
-
 #[test]
 fn a_quantile_aggregate_is_refused() {
     let root = complete(AggregateKind::Quantile { quantile: 0.5 }, by(&["k0"]))(window());
