@@ -9848,8 +9848,12 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
         .next_chunk()
         .expect_err("the output label set and occupied positions conflict");
     let message = error.to_string();
+    // The refusal names the defect the way Prometheus does: one label set holding two series. The
+    // scalar broadcast produced no label set of its own, so the rendering is empty and the two
+    // series are told apart only by what they produced.
     assert!(
-        message.contains("that both hold a value of field"),
+        message.contains("vector cannot contain metrics with the same labelset")
+            && message.contains("two series hold a value of field 0"),
         "expected the collision the node produces, got: {message:?}"
     );
     assert_eq!(
@@ -10969,7 +10973,8 @@ fn a_label_rewrite_relabels_series_and_refuses_a_shared_point() {
         .unwrap();
     let error = execution.next_chunk().unwrap_err().to_string();
     assert!(
-        error.contains("both hold a value of field 0 at position 1"),
+        error.contains("vector cannot contain metrics with the same labelset")
+            && error.contains("two series hold a value of field 0 at position 1"),
         "{error}"
     );
 }

@@ -939,20 +939,19 @@ impl FusedSeries {
     fn with_canonical_router(
         &self,
         exec: Arc<dyn ExecutionPlan>,
-        target_partitions: Option<usize>,
+        _target_partitions: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         if self.canonical != Some(CanonicalBoundary::Producer) {
             return Ok(exec);
         }
-        // The producer's own partitions are where the pieces are, so the router neither invents
-        // more owners than there is work for nor collects everything into one: it asks for the
-        // caller's width, capped by the partitions the pieces actually come from.
-        let count = exec.properties().partitioning.partition_count();
-        let outputs = if count <= 1 {
-            1
-        } else {
-            target_partitions.unwrap_or(count).clamp(1, count)
-        };
+        // The producer's own partitions are where the pieces are, so the router runs at exactly that
+        // width: it neither invents more owners than there is work for nor collects every piece into
+        // one. The session's `target_partitions` is not consulted, because it describes the session
+        // that plans this node and not the work below it: this boundary is planned where its producer
+        // runs - in the region for a regional producer - and the producer's width is already the
+        // scan's, which the frontend assigned. Asking the region's own default instead would gather
+        // every piece into a single owner, which is the shape this boundary exists to avoid.
+        let outputs = exec.properties().partitioning.partition_count().max(1);
         Ok(Arc::new(SeriesRepartitionExec::try_new_with_routing(
             exec,
             outputs,

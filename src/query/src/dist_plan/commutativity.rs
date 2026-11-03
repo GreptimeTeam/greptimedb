@@ -24,7 +24,7 @@ use promql::extension_plan::{
     AggregateFinalize, CanonicalBoundary, EmptyMetric, FusedOutputFormat, FusedSeries,
     InstantManipulate, RangeManipulate, RawSeriesSource, SeriesDivide, SeriesNormalize,
 };
-use promql::native::plan::reads_across_series;
+use promql::native::plan::{reads_across_series, reads_only_raw_scans};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -32,38 +32,33 @@ use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
 
+/// Whether `fused` is the half of a canonical boundary that one region answers: the producer, which
+/// merges what its own scan partitions hold and exports one series per label set per partition.
+///
+/// The receiver is not. It reads what the canonical router collected from *every* producer, so its
+/// input is not in any one region: it stays above them, the way the split aggregate's merge does,
+/// and classifying it as a region node would put the boundary's two halves into the same region and
+/// take the router - which is what runs at the region's output - with them. What tells the two apart
+/// is the node's own contract, not the shape below it: only a producer answers a partition's share.
 fn canonical_boundary_region_node(fused: &FusedSeries) -> bool {
-    let Some(boundary) = fused.canonical_boundary() else {
+    if fused.canonical_boundary() != Some(CanonicalBoundary::Producer) {
         return false;
-    };
-    if boundary == CanonicalBoundary::Receiver {
-        return matches!(fused.children(), [LogicalPlan::Extension(extension)]
-        if extension.node.as_any().downcast_ref::<FusedSeries>()
-            .is_some_and(|producer| {
-                producer.canonical_boundary() == Some(CanonicalBoundary::Producer)
-                    && canonical_boundary_region_node(producer)
-            }));
     }
-    match boundary {
-        CanonicalBoundary::Producer => {
-            fused.format() == FusedOutputFormat::SeriesFrame
-                && fused.canonical_producer_prefix_is_local()
-                && !fused.children().is_empty()
-                && fused.children().iter().all(|child| match child {
-                    LogicalPlan::TableScan(_) => true,
-                    LogicalPlan::Extension(extension)
-                        if extension.node.as_any().is::<RawSeriesSource>() =>
-                    {
-                        matches!(
-                            extension.node.inputs().as_slice(),
-                            [LogicalPlan::TableScan(_)]
-                        )
-                    }
-                    _ => false,
-                })
-        }
-        CanonicalBoundary::Receiver => unreachable!("receivers returned above"),
-    }
+    fused.format() == FusedOutputFormat::SeriesFrame
+        && fused.canonical_producer_prefix_is_local()
+        && !fused.children().is_empty()
+        && fused.children().iter().all(|child| match child {
+            LogicalPlan::TableScan(_) => true,
+            LogicalPlan::Extension(extension)
+                if extension.node.as_any().is::<RawSeriesSource>() =>
+            {
+                matches!(
+                    extension.node.inputs().as_slice(),
+                    [LogicalPlan::TableScan(_)]
+                )
+            }
+            _ => false,
+        })
 }
 
 pub struct StepTransformAction {
@@ -300,7 +295,17 @@ impl Categorizer {
                 }
                 let root = fused.tree().root();
                 let per_series = pointwise_operand(root) || independent_scan_pair(root);
-                if reads_across_series(root) && !per_series {
+                // A node that reads across series gathers its input into one execution itself: the
+                // physical node routes every input partition to a single owner and answers there.
+                // Running that in a region is what the native route is: it is only planned when the
+                // region transport is in-process, so the region below this node holds the metric
+                // whole and the gather the node performs is exactly the one a single execution
+                // needs. Nothing here claims a distributed series merge - a region that held part
+                // of the metric could not answer this, which is why the route is gated.
+                let gathers_its_own_scan = children.len() == 1
+                    && matches!(children[0], LogicalPlan::TableScan(_))
+                    && reads_only_raw_scans(root);
+                if reads_across_series(root) && !per_series && !gathers_its_own_scan {
                     return Commutativity::NonCommutative;
                 }
 

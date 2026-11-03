@@ -1773,8 +1773,11 @@ fn rows(batches: &[RecordBatch]) -> Vec<Row> {
 }
 
 /// The canonical label set these tests collide on, as the runtime renders it in its refusal.
+///
+/// The wording is Prometheus' own for this defect - a vector holding two series under one label set -
+/// and the label set is rendered the way the reader writes it, without the empty value.
 const DUPLICATE_LABEL_SET: &str =
-    "the node produces two series under the label set [(\"host\", \"web-1\")]";
+    "vector cannot contain metrics with the same labelset {host=\"web-1\"}";
 
 /// Two raw series that are already one Prometheus identity are refused by the runtime that would
 /// have to answer both.

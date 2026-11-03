@@ -55,7 +55,7 @@ use promql::extension_plan::{
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
     BoundAggregate, BoundInput, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree,
-    NativeType, fused_output_tags, reads_across_series,
+    NativeType, fused_output_tags, reads_across_series, reads_only_raw_scans,
 };
 use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::{METRIC_NAME, Matchers};
@@ -804,6 +804,21 @@ impl PromPlanner {
             if selectors.len() != 1 && !cross_table && !computed_key_case {
                 return Ok(None);
             }
+            // A canonical merge below a node that cannot itself run where the merge's boundary does
+            // has no plan: the boundary answers the region in frames, and a node above it that has
+            // to gather stays in the frontend, where a frame-producing child is not something it can
+            // read. That is the shape of a rewrite over a whole-vector consumer over a collapsing
+            // rewrite - the collapse is collected in the region, then the ranking and the outer
+            // rewrite gather its answers again. Declining keeps the statement on the plan that
+            // already answers it, which raises the duplicate-label error too instead of a number
+            // that hid the overlap.
+            //
+            // A whole-vector consumer at the root is not that shape: it is the node that gathers,
+            // and it gathers its own region-local prefix, so its boundary's frames never cross the
+            // region edge.
+            if contains_canonical_merge(root) && !is_global_consumer(root) {
+                return Ok(None);
+            }
         }
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
@@ -823,7 +838,23 @@ impl PromPlanner {
             if let Some(plan) = plan {
                 return Ok(Some((plan, single_input_context)));
             }
-            if required_placement && !multi_input {
+            // A tree that reads across series and holds nothing to hand to a segment still has one
+            // way to answer natively: the node gathers its own input and runs in one execution. That
+            // is what the physical node does at `SinglePartition`, and the region it runs in holds
+            // the whole metric under the in-process transport this route is gated on, so the gather
+            // is the collection a single execution needs and not a merge of partial answers.
+            //
+            // Two shapes are not among them. A tree holding a canonical merge is not: its pieces
+            // are the statement's own scan partitions, and collecting them through a gather is the
+            // workaround its boundary exists to avoid. Neither is a tree the runtime cannot execute:
+            // the split above refuses what it has no kernel for, and this state is the same answer
+            // one step later, where a refusal can no longer hand the statement back to the plan it
+            // had.
+            let gathers_in_region = reads_only_raw_scans(root)
+                && !contains_canonical_merge(root)
+                && NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))
+                    .is_ok();
+            if required_placement && !multi_input && !gathers_in_region {
                 return Ok(None);
             }
         }
@@ -1121,6 +1152,18 @@ fn is_global_consumer(node: &NativeNode) -> bool {
 fn is_canonical_cut(node: &NativeNode) -> bool {
     matches!(node.expr, NativeExpr::Merge { .. })
         || !matches!(input_locality(node), InputLocality::SinglePartition)
+}
+
+/// Whether `node` holds a canonical merge anywhere in its subtree.
+///
+/// A merge collects every fragment of one canonical label set. A segment that keeps its scan's
+/// partitions cannot promise it sees them all, so a subtree holding one cannot be planned as a
+/// single segment: the merge has to be lowered into a boundary, which is this same planner's job.
+fn contains_canonical_merge(node: &NativeNode) -> bool {
+    matches!(node.expr, NativeExpr::Merge { .. })
+        || node_children(&node.expr)
+            .into_iter()
+            .any(contains_canonical_merge)
 }
 
 /// One segment: its tree rewritten to read only its own inputs, the scans it reads, and the
@@ -1481,6 +1524,16 @@ fn canonical_boundary_stages(
     } else {
         None
     };
+    // What the receiver produces is fixed by its format: the statement's rows when it is the root,
+    // and a series frame when something above it still has to run. The frame layout is the one the
+    // evaluated root declares, which is what the consumer of this stage decodes.
+    let receiver_schema = match format {
+        FusedOutputFormat::PlainRows => output_schema,
+        FusedOutputFormat::SeriesFrame => {
+            let frame = FusedSeries::series_frame_schema(&receiver_tree).ok()?;
+            Arc::new(DFSchema::try_from(frame.as_ref().clone()).ok()?)
+        }
+    };
     let receiver = FusedSeries::try_new_canonical_receiver(
         Arc::from(prom_expr.to_string()),
         receiver_tree,
@@ -1491,7 +1544,7 @@ fn canonical_boundary_stages(
             metric_name: receiver_metric,
         },
         producer,
-        output_schema,
+        receiver_schema,
         format,
     )
     .ok()?;
@@ -1991,11 +2044,6 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
         };
         *table.get_or_insert(&scan.table_name) == &scan.table_name
     })
-}
-
-/// Metadata labels the runtime removes from histogram result label sets.
-fn promql_metadata_labels() -> [&'static str; 3] {
-    [METRIC_NAME, "__type__", "__unit__"]
 }
 
 /// Whether `node` reads no data at all: a constant, the evaluation time, or an operation between

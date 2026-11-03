@@ -43,6 +43,13 @@ use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::select::SortOrder;
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels, SetOp};
 
+/// The bucket-bound label a classic histogram's series carry, which the histogram function folds and
+/// its result does not report.
+const LE_LABEL: &str = "le";
+
+/// Metadata labels the runtime removes from histogram result label sets.
+const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
+
 /// The label columns `node` reports, from the tags of the scan each input reads.
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
@@ -137,7 +144,17 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                         .collect(),
                 )
             }
-            BoundVectorOp::CountValues { .. } | BoundVectorOp::Histogram(_) => None,
+            BoundVectorOp::CountValues { .. } => None,
+            // A classic histogram function folds the bucket series that share the other labels into
+            // one series and drops `le`, along with the metadata labels the runtime does not put on
+            // its result. What it keeps is everything else its input carried.
+            BoundVectorOp::Histogram(_) => {
+                let mut tags = fused_output_tags(input, source_tags)?;
+                tags.retain(|tag| {
+                    tag != LE_LABEL && !PROMQL_METADATA_LABELS.contains(&tag.as_str())
+                });
+                Some(tags)
+            }
         },
         NativeExpr::Merge { input } => fused_output_tags(input, source_tags),
         NativeExpr::Binary {
@@ -672,9 +689,19 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
         // but only if that label was one of the input's, because writing a label no series carries
         // leaves every series' identity distinct. `map_writes_existing_label` is that question, and
         // an input whose labels this walk cannot derive is collected rather than trusted.
+        //
+        // A rewrite over a whole-vector consumer aliases nothing that needs collecting: the consumer
+        // below it already reads the entire vector in one execution, so the series this map renames
+        // are that execution's answers and are all in one place. Collecting them would merge four
+        // partitions' answers of one global operation - `topk` over a quarter of the vector each -
+        // which is not the series the statement asked about.
         NativeExpr::Map { input, op } => {
-            map_writes_existing_label(input, op, source_tags).unwrap_or(true)
-                || duplicates_canonical_labels(input, source_tags)
+            if reads_across_series(input) {
+                false
+            } else {
+                map_writes_existing_label(input, op, source_tags).unwrap_or(true)
+                    || duplicates_canonical_labels(input, source_tags)
+            }
         }
         // A fold answers one series per group, which is one label set per group.
         NativeExpr::Aggregate { .. } => false,
@@ -755,6 +782,57 @@ fn map_writes_existing_label(
 /// Both a region-side placement and the native route's admission ask this, and they must agree: a
 /// tree admitted here but refused there becomes a node the physical layer cannot build, and one
 /// refused here but admitted there would be pushed to a region that holds part of the metric.
+/// Whether every input `node` reads is a raw scan, which is what a region can supply.
+///
+/// A native execution reads one kind of frame per source: raw samples when the source's compiled
+/// layout has no evaluation grid, evaluated values when it does. A tree whose every input is raw is
+/// therefore a tree a region scan can feed, whatever else it computes - including the whole-vector
+/// operations that gather their own input into one execution.
+pub fn reads_only_raw_scans(node: &NativeNode) -> bool {
+    let mut inputs = Vec::new();
+    collect_raw_inputs(node, &mut inputs);
+    !inputs.is_empty()
+        && inputs.iter().all(|input| {
+            input
+                .output
+                .samples()
+                .is_some_and(|s| s.eval_grid.is_none())
+        })
+}
+
+fn collect_raw_inputs<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a BoundInput>) {
+    match &node.expr {
+        NativeExpr::Input(input) => inputs.push(input),
+        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. }
+        | NativeExpr::VectorOf { input } => collect_raw_inputs(input, inputs),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            collect_raw_inputs(input, inputs);
+            for parameter in parameters {
+                collect_raw_inputs(parameter, inputs);
+            }
+        }
+        NativeExpr::Binary { left, right, .. }
+        | NativeExpr::Set { left, right, .. }
+        | NativeExpr::Info {
+            base: left,
+            info: right,
+            ..
+        } => {
+            collect_raw_inputs(left, inputs);
+            collect_raw_inputs(right, inputs);
+        }
+    }
+}
+
 pub fn reads_across_series(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
