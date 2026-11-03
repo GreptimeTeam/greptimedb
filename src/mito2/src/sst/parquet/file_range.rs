@@ -589,7 +589,7 @@ impl FileRangeContext {
 }
 
 /// Mode to pre-filter columns in a range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreFilterMode {
     /// Filters all columns.
     All,

@@ -34,6 +34,7 @@ use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, SequenceRange, TimeSeriesRowSelector};
 
+use crate::cache::range_cache::RangeCacheMetricsReport;
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
@@ -915,6 +916,26 @@ impl DedupMetricsReport for PartitionMetricsInner {
     }
 }
 
+impl RangeCacheMetricsReport for PartitionMetricsInner {
+    /// Increments the total bytes added to the range cache.
+    fn inc_range_cache_size(&self, size: usize) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.range_cache_size += size;
+    }
+
+    /// Increments the range cache hit counter.
+    fn inc_range_cache_hit(&self) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.range_cache_hit += 1;
+    }
+
+    /// Increments the range cache miss counter.
+    fn inc_range_cache_miss(&self) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.range_cache_miss += 1;
+    }
+}
+
 impl Drop for PartitionMetricsInner {
     fn drop(&mut self) {
         self.on_finish(false);
@@ -1107,22 +1128,9 @@ impl PartitionMetrics {
         self.0.clone()
     }
 
-    /// Increments the total bytes added to the range cache.
-    pub(crate) fn inc_range_cache_size(&self, size: usize) {
-        let mut metrics = self.0.metrics.lock().unwrap();
-        metrics.range_cache_size += size;
-    }
-
-    /// Increments the range cache hit counter.
-    pub(crate) fn inc_range_cache_hit(&self) {
-        let mut metrics = self.0.metrics.lock().unwrap();
-        metrics.range_cache_hit += 1;
-    }
-
-    /// Increments the range cache miss counter.
-    pub(crate) fn inc_range_cache_miss(&self) {
-        let mut metrics = self.0.metrics.lock().unwrap();
-        metrics.range_cache_miss += 1;
+    /// Returns the range-cache reporter while preserving query metric ownership.
+    pub(crate) fn range_cache_metrics_reporter(&self) -> Arc<dyn RangeCacheMetricsReport> {
+        self.0.clone()
     }
 }
 
@@ -1811,6 +1819,34 @@ mod tests {
     use crate::sst::file_purger::NoopFilePurger;
     use crate::test_util::memtable_util::metadata_for_test;
     use crate::test_util::scheduler_util::SchedulerEnv;
+
+    #[test]
+    fn test_range_cache_reporter_preserves_metrics_and_lifetime() {
+        let metrics = PartitionMetrics::new(
+            RegionId::new(1, 1),
+            0,
+            "test_range_cache_reporter",
+            Instant::now(),
+            false,
+            &ExecutionPlanMetricsSet::new(),
+        );
+        let weak = Arc::downgrade(&metrics.0);
+        let reporter = metrics.range_cache_metrics_reporter();
+        reporter.inc_range_cache_hit();
+        reporter.inc_range_cache_miss();
+        drop(metrics);
+        // Background publication can still report after the query drops its handle.
+        reporter.inc_range_cache_size(128);
+        {
+            let inner = weak.upgrade().unwrap();
+            let metrics = inner.metrics.lock().unwrap();
+            assert_eq!(metrics.range_cache_hit, 1);
+            assert_eq!(metrics.range_cache_miss, 1);
+            assert_eq!(metrics.range_cache_size, 128);
+        }
+        drop(reporter);
+        assert!(weak.upgrade().is_none());
+    }
 
     struct EmptyIterBuilder;
 

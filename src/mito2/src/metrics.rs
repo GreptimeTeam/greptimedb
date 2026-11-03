@@ -293,6 +293,18 @@ pub(crate) fn cache_loading_metrics(
 
 // Cache metrics.
 lazy_static! {
+    pub static ref RANGE_CACHE_STAGING_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_range_cache_staging_bytes",
+        "Referenced batch bytes retained by active shared range buffers, including unread streaming batches"
+    )
+    .unwrap();
+    pub static ref RANGE_CACHE_STREAMING_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_range_cache_streaming_bytes",
+        "Referenced bytes retained for active readers after full-result cache admission stops"
+    ).unwrap();
+}
+
+lazy_static! {
     /// Native cache request and actual loader lifecycle; request is not a waiter count.
     pub static ref CACHE_NATIVE_LOAD_EVENTS: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_native_load_events_total",
