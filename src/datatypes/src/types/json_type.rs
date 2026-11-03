@@ -395,11 +395,58 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
     }
     match jsonb::from_slice(val) {
         Ok(jsonb_value) => {
-            let serialized = jsonb_value.to_string();
+            let mut serialized = String::new();
+            write_jsonb_value(&jsonb_value, &mut serialized)?;
             fix_unicode_point(&serialized)
         }
         Err(e) => InvalidJsonbSnafu { error: e }.fail(),
     }
+}
+
+/// Writes a jsonb value as compact JSON text.
+///
+/// `jsonb::Value`'s `Display` writes object keys verbatim between double quotes,
+/// so a key containing `"`, `\` or a control character yields invalid JSON.
+/// Containers are therefore walked here so that keys are escaped, while scalars
+/// still use the `Display` implementation of the value.
+fn write_jsonb_value(value: &jsonb::Value<'_>, out: &mut String) -> Result<()> {
+    use std::fmt::Write;
+
+    match value {
+        jsonb::Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_jsonb_value(item, out)?;
+            }
+            out.push(']');
+        }
+        jsonb::Value::Object(fields) => {
+            out.push('{');
+            for (i, (key, item)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let escaped = serde_json::to_string(key.as_str()).map_err(|e| {
+                    InvalidJsonSnafu {
+                        value: e.to_string(),
+                    }
+                    .build()
+                })?;
+                out.push_str(&escaped);
+                out.push(':');
+                write_jsonb_value(item, out)?;
+            }
+            out.push('}');
+        }
+        scalar => {
+            // Writing into a `String` never fails.
+            let _ = write!(out, "{scalar}");
+        }
+    }
+    Ok(())
 }
 
 /// Converts a json type value to serde_json::Value
@@ -485,6 +532,32 @@ mod tests {
         let input = expected.to_string();
         let value = jsonb::parse_value(input.as_bytes()).map_err(|e| e.to_string())?;
         assert_eq!(jsonb_to_serde_json(&value.to_vec())?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_jsonb_to_string_escapes_object_keys()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let expected = serde_json::json!({
+            "": 1,
+            "a\"b": {"c\\d": ["x", {"e\nf\tg\u{1}": true}], "h": null},
+            "plain": "v\"q",
+        });
+        let input = expected.to_string();
+        let value = jsonb::parse_value(input.as_bytes()).map_err(|e| e.to_string())?;
+        let text = jsonb_to_string(&value.to_vec())?;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text)?, expected);
+        assert!(text.contains(r#""a\"b":"#), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_jsonb_to_string_keeps_compact_format() -> Result<()> {
+        let value = jsonb::parse_value(br#"{"b": [1, 2.5, "x"], "a": {"c": false}}"#).unwrap();
+        assert_eq!(
+            jsonb_to_string(&value.to_vec())?,
+            r#"{"a":{"c":false},"b":[1,2.5,"x"]}"#
+        );
         Ok(())
     }
 
