@@ -49,7 +49,7 @@ use futures::future::join_all;
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
-use promql_parser::parser::token::TokenType;
+use promql_parser::parser::token::{self, TokenType};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinModifier, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier,
@@ -1448,8 +1448,13 @@ fn binary_metric_name_side<'a>(
 /// Recursively collect all metric names from a PromQL expression
 fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
     match expr {
-        PromqlExpr::Aggregate(AggregateExpr { modifier, expr, .. }) => {
+        PromqlExpr::Aggregate(AggregateExpr {
+            op, modifier, expr, ..
+        }) => {
             if !matches!(
+                op.id(),
+                token::T_TOPK | token::T_BOTTOMK | token::T_LIMITK | token::T_LIMIT_RATIO
+            ) && !matches!(
                 modifier,
                 Some(LabelModifier::Include(labels))
                     if labels.labels.contains(&METRIC_NAME.to_string())
@@ -3244,6 +3249,55 @@ mod tests {
                 should_error: false,
             },
             // Aggregation and function cases
+            TestCase {
+                name: "topk preserves metric name",
+                promql: "topk(1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "bottomk preserves metric name",
+                promql: "bottomk(1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk without preserves metric name",
+                promql: "topk without(host) (1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk by preserves metric name",
+                promql: "topk by(job) (1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "limitk preserves metric name",
+                promql: "limitk(1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk does not restore folded metric name",
+                promql: "topk(1, sum(cpu_usage))",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "outer aggregate drops topk metric name",
+                promql: "sum(topk(1, cpu_usage))",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
             TestCase {
                 name: "ungrouped aggregate drops metric name",
                 promql: "sum(cpu_usage)",
