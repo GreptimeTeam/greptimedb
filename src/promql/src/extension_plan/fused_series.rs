@@ -860,7 +860,7 @@ impl FusedSeries {
         self.with_canonical_router(exec)
     }
 
-    /// Routes a canonical producer's frames by label set, which is the half of the collection the
+    /// Routes a canonical producer's frames by label set, which is the canonical collection step above the producer. The
     /// producer itself cannot do.
     ///
     /// The producer answers one series per label set *per partition*: it merged what it found there.
@@ -1906,7 +1906,7 @@ pub struct FusedSeriesExec {
     grouping_tags: Option<Arc<[String]>>,
     format: FusedOutputFormat,
     matching_parallelism: Option<usize>,
-    /// Which half of a canonical boundary this node is (see the logical node's field).
+    /// Whether this node is a partition-local canonical producer.
     canonical_producer: bool,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
@@ -2008,7 +2008,7 @@ impl FusedSeriesExec {
             None,
             FusedOutputFormat::PlainRows,
             None,
-            None,
+            false,
         )
     }
 
@@ -2030,12 +2030,12 @@ impl FusedSeriesExec {
         // replaces the tree's own classification rather than being folded into it: the tree's root
         // merge reads across series in general, and only the caller knows that these partitions each
         // hold whole series.
-        let locality = if canonical.is_some() {
+        let locality = if canonical_producer {
             InputLocality::PartitionLocal
         } else {
             input_locality(tree.root())
         };
-        if let Some(boundary) = canonical {
+        if canonical_producer {
             if !matches!(tree.root().expr, NativeExpr::Merge { .. }) {
                 return Err(DataFusionError::Plan(
                     "a canonical boundary requires a merge at the tree's root".into(),
@@ -2259,7 +2259,7 @@ impl FusedSeriesExec {
             grouping_tags,
             format,
             matching_parallelism,
-            canonical,
+            canonical_producer,
         })
     }
 
