@@ -68,6 +68,7 @@ use crate::dist_plan::dyn_filter_bridge::{
     CapturedDynFilter, capture_remote_dyn_filters_for_pushdown,
     query_context_with_refreshed_initial_dyn_filter_regs,
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
+    resolve_scalar_subquery_dyn_filters,
 };
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
@@ -123,6 +124,22 @@ fn remote_plan_row_bound(plan: &LogicalPlan) -> Option<usize> {
             }
         }
         _ => None,
+    }
+}
+
+fn pushdown_phase_slot(phase: FilterPushdownPhase) -> usize {
+    match phase {
+        FilterPushdownPhase::Pre => 0,
+        FilterPushdownPhase::Post => 1,
+    }
+}
+
+/// Producer-local ordinals must be unique across phases because they are part of the
+/// remote filter id; pre-phase filters use the upper half of the `u32` ordinal space.
+fn first_producer_local_ordinal(phase: FilterPushdownPhase) -> usize {
+    match phase {
+        FilterPushdownPhase::Pre => 1 << 31,
+        FilterPushdownPhase::Post => 0,
     }
 }
 
@@ -483,7 +500,10 @@ pub struct MergeScanExec {
     query_ctx: QueryContextRef,
     /// Optional because RDF must fail open: missing ids skip RDF but keep normal query execution.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
-    captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
+    /// Filters captured by each filter pushdown phase, indexed by [`pushdown_phase_slot`].
+    /// The pre-optimization phase carries `FilterExec` predicates (e.g. scalar subquery
+    /// filters) and the post-optimization phase carries dynamic filters from joins and TopK.
+    captured_remote_dyn_filters: Arc<Mutex<[Vec<CapturedDynFilter>; 2]>>,
     target_partition: usize,
     enable_per_region_metrics: bool,
 }
@@ -616,6 +636,7 @@ impl MergeScanExec {
         } else {
             Vec::new()
         };
+        resolve_scalar_subquery_dyn_filters(&captured_remote_dyn_filters);
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
@@ -890,7 +911,7 @@ impl MergeScanExec {
     }
 
     fn captured_remote_dyn_filters(&self) -> Vec<CapturedDynFilter> {
-        self.captured_remote_dyn_filters.lock().unwrap().clone()
+        self.captured_remote_dyn_filters.lock().unwrap().concat()
     }
 
     pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
@@ -1092,7 +1113,7 @@ impl ExecutionPlan for MergeScanExec {
 
     fn handle_child_pushdown_result(
         &self,
-        _phase: FilterPushdownPhase,
+        phase: FilterPushdownPhase,
         child_pushdown_result: ChildPushdownResult,
         _config: &datafusion::config::ConfigOptions,
     ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
@@ -1106,7 +1127,7 @@ impl ExecutionPlan for MergeScanExec {
             // Reject remote pushdown instead of pretending success: this keeps
             // DataFusion/local dynamic filter semantics intact while disabling
             // only FE -> DN remote dynamic filter propagation.
-            self.captured_remote_dyn_filters.lock().unwrap().clear();
+            self.captured_remote_dyn_filters.lock().unwrap()[pushdown_phase_slot(phase)].clear();
             let new_self = Arc::new(self.clone());
 
             return Ok(FilterPushdownPropagation {
@@ -1120,7 +1141,7 @@ impl ExecutionPlan for MergeScanExec {
             common_telemetry::warn!(
                 "MergeScan remote dynamic filter producer id is not assigned; skipping remote dynamic filter pushdown"
             );
-            self.captured_remote_dyn_filters.lock().unwrap().clear();
+            self.captured_remote_dyn_filters.lock().unwrap()[pushdown_phase_slot(phase)].clear();
             let new_self = Arc::new(self.clone());
 
             return Ok(FilterPushdownPropagation {
@@ -1128,24 +1149,20 @@ impl ExecutionPlan for MergeScanExec {
                 updated_node: Some(new_self),
             });
         };
-        let remote_dyn_filter_pushdown =
-            capture_remote_dyn_filters_for_pushdown(remote_dyn_filter_producer_id, parent_filters);
-        *self.captured_remote_dyn_filters.lock().unwrap() =
-            remote_dyn_filter_pushdown.captured_dyn_filters;
+        let slot = pushdown_phase_slot(phase);
+        let mut captured_remote_dyn_filters = self.captured_remote_dyn_filters.lock().unwrap();
+        let remote_dyn_filter_pushdown = capture_remote_dyn_filters_for_pushdown(
+            remote_dyn_filter_producer_id,
+            first_producer_local_ordinal(phase),
+            &captured_remote_dyn_filters[1 - slot],
+            parent_filters,
+        );
+        captured_remote_dyn_filters[slot] = remote_dyn_filter_pushdown.captured_dyn_filters;
+        drop(captured_remote_dyn_filters);
         let new_self = Arc::new(self.clone());
 
         Ok(FilterPushdownPropagation {
-            filters: remote_dyn_filter_pushdown
-                .pushed_down
-                .into_iter()
-                .map(|pushdown_ready| {
-                    if pushdown_ready {
-                        PushedDown::Yes
-                    } else {
-                        PushedDown::No
-                    }
-                })
-                .collect(),
+            filters: remote_dyn_filter_pushdown.pushed_down,
             updated_node: Some(new_self),
         })
     }
@@ -1713,6 +1730,8 @@ mod tests {
         )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>;
         let captured = capture_remote_dyn_filters_for_pushdown(
             RemoteDynFilterProducerId::new(42),
+            0,
+            &[],
             vec![dyn_filter],
         );
         assert_eq!(captured.captured_dyn_filters.len(), 1);

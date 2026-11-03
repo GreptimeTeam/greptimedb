@@ -426,22 +426,17 @@ impl AltFulltextCreator {
         column_id: &ColumnId,
         put_options: PutOptions,
     ) -> Result<ByteCount> {
+        let target_key = IndexTarget::ColumnId(*column_id).encode();
         match self {
             Self::Tantivy(creator) => {
-                let blob_key = format!(
-                    "{INDEX_BLOB_TYPE_TANTIVY}-{}",
-                    IndexTarget::ColumnId(*column_id)
-                );
+                let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{target_key}");
                 creator
                     .finish(puffin_writer, &blob_key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }
             Self::Bloom(creator) => {
-                let blob_key = format!(
-                    "{INDEX_BLOB_TYPE_BLOOM}-{}",
-                    IndexTarget::ColumnId(*column_id)
-                );
+                let blob_key = format!("{INDEX_BLOB_TYPE_BLOOM}-{target_key}");
                 creator
                     .finish(puffin_writer, &blob_key, put_options)
                     .await

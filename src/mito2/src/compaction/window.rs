@@ -356,6 +356,7 @@ mod tests {
                 auto_flush_interval: None,
                 compaction: Default::default(),
                 compaction_override: false,
+                compaction_output_parallelism: None,
                 storage: None,
                 append_mode: false,
                 skip_wal: false,

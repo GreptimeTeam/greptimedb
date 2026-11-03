@@ -51,9 +51,21 @@ INSERT INTO monitor(ts, host, cpu, memory) VALUES
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
-TRUNCATE monitor;
+TRUNCATE monitor WITH (wait = true, timeout = '30s');
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
+
+TRUNCATE monitor WITH (wait = 'invalid');
+
+TRUNCATE monitor WITH (timeout = 'invalid');
+
+TRUNCATE monitor WITH (ttl = '1d');
+
+-- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}) PROC_ID
+TRUNCATE monitor WITH (wait = false, timeout = '30s');
+
+-- Keep a synchronous truncate in the same case to check the original result.
+TRUNCATE monitor;
 
 DROP TABLE monitor;
 

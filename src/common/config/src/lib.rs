@@ -15,6 +15,7 @@
 pub mod config;
 pub mod error;
 pub mod file_watcher;
+mod tagged_seq;
 
 use std::time::Duration;
 

@@ -24,6 +24,7 @@ use crate::read::FlatSource;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::metadata::extract_primary_key_range;
+use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub(crate) async fn write_target_group(
@@ -82,6 +83,9 @@ pub(crate) async fn write_target_group(
         max_file_size: Some(plan.max_output_file_size),
         row_group_size: target.options.row_group_size().min(1024),
         float_field_encoding: target.options.float_field_encoding,
+        // Work slots bound active writers; extra encoding tasks are not budgeted.
+        encode_parallelism: 1,
+        encode_runtime: EncodeRuntime::Compact,
     };
     let mut metrics = Metrics::new(WriteType::Compaction);
     let infos = context

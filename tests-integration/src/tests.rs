@@ -17,6 +17,7 @@ mod instance_kafka_wal_test;
 mod instance_noop_wal_test;
 mod instance_test;
 mod nested_merge_scan_capability_test;
+mod postgres_copy_in_test;
 mod promql_test;
 mod reconcile_table;
 mod remote_dyn_filter_test;

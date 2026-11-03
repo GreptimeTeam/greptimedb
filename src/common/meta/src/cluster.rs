@@ -138,6 +138,22 @@ pub struct NodeInfo {
     /// Environment variables reported by the node.
     #[serde(default)]
     pub env_vars: HashMap<String, String>,
+    /// Whether metasrv may place new regions on this node.
+    ///
+    /// `None` means the flag was not resolved (deserialized heartbeat data, tests,
+    /// standalone); callers treat `None` as schedulable. Filled by the metasrv
+    /// discovery decorator, never by the heartbeat writer.
+    #[serde(skip)]
+    pub schedulable: Option<bool>,
+}
+
+impl NodeInfo {
+    /// Returns `false` only if the node is explicitly marked unschedulable.
+    ///
+    /// `None` (unresolved) counts as schedulable.
+    pub fn is_schedulable(&self) -> bool {
+        self.schedulable != Some(false)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -324,6 +340,35 @@ mod tests {
     use crate::cluster::{DatanodeStatus, FlownodeStatus, NodeInfo, NodeInfoKey, NodeStatus};
     use crate::peer::Peer;
 
+    fn new_test_node_info() -> NodeInfo {
+        NodeInfo {
+            peer: Peer {
+                id: 1,
+                addr: "127.0.0.1".to_string(),
+            },
+            last_activity_ts: 123,
+            status: NodeStatus::Datanode(DatanodeStatus {
+                rcus: 1,
+                wcus: 2,
+                leader_regions: 3,
+                follower_regions: 4,
+                workloads: DatanodeWorkloads {
+                    types: vec![DatanodeWorkloadType::Hybrid.to_i32()],
+                },
+            }),
+            version: "".to_string(),
+            git_commit: "".to_string(),
+            start_time_ms: 1,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: "test_hostname".to_string(),
+            env_vars: Default::default(),
+            schedulable: None,
+        }
+    }
+
     #[test]
     fn test_node_info_key_round_trip() {
         let key = NodeInfoKey {
@@ -364,10 +409,16 @@ mod tests {
             memory_usage_bytes: 0,
             hostname: "test_hostname".to_string(),
             env_vars: Default::default(),
+            schedulable: None,
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
+        assert!(
+            !String::from_utf8_lossy(&node_info_bytes).contains("schedulable"),
+            "the runtime scheduling flag must not be persisted"
+        );
         let new_node_info: NodeInfo = node_info_bytes.try_into().unwrap();
+        assert!(new_node_info.schedulable.is_none());
 
         assert_matches!(
             new_node_info,
@@ -384,6 +435,31 @@ mod tests {
                 start_time_ms: 1,
                 ..
             }
+        );
+    }
+
+    #[test]
+    fn test_is_schedulable() {
+        assert!(
+            NodeInfo {
+                schedulable: None,
+                ..new_test_node_info()
+            }
+            .is_schedulable()
+        );
+        assert!(
+            NodeInfo {
+                schedulable: Some(true),
+                ..new_test_node_info()
+            }
+            .is_schedulable()
+        );
+        assert!(
+            !NodeInfo {
+                schedulable: Some(false),
+                ..new_test_node_info()
+            }
+            .is_schedulable()
         );
     }
 
@@ -461,6 +537,7 @@ mod tests {
             memory_usage_bytes: 0,
             hostname: "test_hostname".to_string(),
             env_vars: Default::default(),
+            schedulable: None,
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
@@ -523,6 +600,7 @@ mod tests {
             memory_usage_bytes: 0,
             hostname: "test".to_string(),
             env_vars,
+            schedulable: None,
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();

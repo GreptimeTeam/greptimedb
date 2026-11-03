@@ -44,4 +44,26 @@ FROM (
   LIMIT 1
 );
 
+-- The frontend orders results from all datanodes before applying the global offset.
+SELECT min_ts, max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0
+ORDER BY min_ts DESC
+LIMIT 2 OFFSET 1;
+
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+EXPLAIN SELECT min_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0
+ORDER BY min_ts DESC
+LIMIT 1;
+
+-- Timestamp filtering happens before global ordering and offset. The sort key
+-- must remain available even when it is absent from the output projection.
+SELECT max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0 AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+ORDER BY min_ts DESC
+LIMIT 1 OFFSET 1;
+
 DROP TABLE ssts_limit_case;

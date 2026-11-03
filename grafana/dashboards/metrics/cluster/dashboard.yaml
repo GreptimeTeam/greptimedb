@@ -1279,6 +1279,26 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-avg'
+        - title: Scan Max Concurrent Files per Instance
+          type: timeseries
+          description: Estimated maximum concurrent files by instance and type (query or compaction). Query samples are region scan limit evaluations, including memtable sources counted by the limit, rejected scans, and scans using memory budgeting. Compaction samples count all input files when building a compaction reader. A SQL query can produce multiple region scan evaluations. P95/P99 are histogram estimates, not exact per-query maxima or live open-file counts.
+          unit: short
+          queries:
+            - expr: histogram_quantile(0.95, sum by(instance, pod, type, le) (rate(greptime_mito_scan_max_concurrent_files_bucket{instance=~"$datanode"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-{{type}}-p95'
+            - expr: histogram_quantile(0.99, sum by(instance, pod, type, le) (rate(greptime_mito_scan_max_concurrent_files_bucket{instance=~"$datanode"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-{{type}}-p99'
+            - expr: sum by(instance, pod, type) (rate(greptime_mito_scan_max_concurrent_files_sum{instance=~"$datanode"}[$__rate_interval])) / sum by(instance, pod, type) (rate(greptime_mito_scan_max_concurrent_files_count{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-{{type}}-avg'
         - title: Write Stage P99 and Avg per Instance
           type: timeseries
           description: Write Stage P99 and average per Instance.

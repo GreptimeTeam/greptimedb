@@ -776,10 +776,16 @@ mod tests {
             }],
         };
 
+        let errors = frontend::OTLP_RESOURCE_INFO_WRITE_ERRORS.get();
         let outcome =
             OpenTelemetryProtocolHandler::metrics(&*instance, request, QueryContext::arc())
                 .await
                 .unwrap();
+        assert_eq!(
+            (outcome.accepted_data_points, outcome.rejected_data_points),
+            (1, 0)
+        );
+        assert_eq!(frontend::OTLP_RESOURCE_INFO_WRITE_ERRORS.get(), errors + 1);
         let warning = outcome
             .error_message
             .expect("denial must surface as a warning");

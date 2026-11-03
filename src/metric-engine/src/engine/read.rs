@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_telemetry::{debug, error, tracing};
-use datafusion::logical_expr::{self, Expr};
+use datafusion::common::ScalarValue;
+use datafusion::logical_expr::{self, Expr, Operator};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
@@ -60,10 +61,31 @@ impl MetricEngineInner {
             .with_label_values(&["read_physical"])
             .start_timer();
 
-        self.mito
+        // PromQL scans physical regions with a table-ID filter to access `__tsid`.
+        let logical_region = request
+            .filters
+            .iter()
+            .flat_map(logical_expr::utils::split_conjunction)
+            .any(|expr| {
+                let Expr::BinaryExpr(expr) = expr else {
+                    return false;
+                };
+                expr.op == Operator::Eq
+                    && matches!(
+                        (expr.left.as_ref(), expr.right.as_ref()),
+                        (Expr::Column(column), Expr::Literal(ScalarValue::UInt32(Some(_)), _))
+                            | (Expr::Literal(ScalarValue::UInt32(Some(_)), _), Expr::Column(column))
+                            if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+                    )
+            });
+        let mut scanner = self
+            .mito
             .handle_query(region_id, request)
             .await
-            .context(MitoReadOperationSnafu)
+            .context(MitoReadOperationSnafu)?;
+        scanner.set_logical_region(logical_region);
+
+        Ok(scanner)
     }
 
     async fn read_logical_region(
@@ -397,6 +419,99 @@ mod test {
             )),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_single_logical_region_scan_properties() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        let table_id = logical_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        let table_filter = table_id
+            .clone()
+            .eq(logical_expr::lit(logical_region_id.table_id()));
+        let job_filter = logical_expr::col("job").eq(logical_expr::lit("api"));
+        for (filters, logical_region) in [
+            (vec![], false),
+            (vec![table_filter.clone()], true),
+            (
+                vec![logical_expr::lit(logical_region_id.table_id()).eq(table_id.clone())],
+                true,
+            ),
+            (vec![job_filter.clone(), table_filter.clone()], true),
+            (vec![job_filter.clone().and(table_filter.clone())], true),
+            (
+                vec![
+                    table_filter.clone().and(
+                        job_filter
+                            .clone()
+                            .or(logical_expr::col("job").eq(logical_expr::lit("db"))),
+                    ),
+                ],
+                true,
+            ),
+            (
+                vec![
+                    table_filter
+                        .clone()
+                        .or(table_id.clone().eq(logical_expr::lit(4u32))),
+                ],
+                false,
+            ),
+            (vec![table_filter.clone().or(job_filter.clone())], false),
+            (
+                vec![table_id.clone().not_eq(logical_expr::lit(4u32))],
+                false,
+            ),
+            (vec![table_id.clone().gt(logical_expr::lit(4u32))], false),
+            (
+                vec![table_id.eq(logical_expr::lit(ScalarValue::UInt32(None)))],
+                false,
+            ),
+            (vec![job_filter], false),
+        ] {
+            let scanner = env
+                .metric()
+                .handle_query(
+                    physical_region_id,
+                    ScanRequest {
+                        filters: filters.clone(),
+                        distribution: Some(TimeSeriesDistribution::PerSeries),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                scanner.properties().is_logical_region(),
+                logical_region,
+                "{filters:?}"
+            );
+        }
+
+        let scanner = env
+            .metric()
+            .handle_query(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        assert!(scanner.properties().is_logical_region());
+
+        // A table-ID filter alone cannot grant metric guarantees to a Mito scan.
+        let scanner = env
+            .mito()
+            .handle_query(
+                utils::to_data_region_id(physical_region_id),
+                ScanRequest {
+                    filters: vec![table_filter],
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!scanner.properties().is_logical_region());
     }
 
     #[tokio::test]

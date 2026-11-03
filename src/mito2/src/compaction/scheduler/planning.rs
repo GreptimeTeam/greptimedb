@@ -32,7 +32,9 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::compaction::picker::{PickerOutput, new_picker};
-use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
+use crate::compaction::scheduler::state::{
+    CompactingFiles, CompactionExecution, CompactionPhase, CompactionTrigger,
+};
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
 use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionOutput, find_dynamic_options, format_panic_reason};
@@ -115,6 +117,7 @@ impl CompactionScheduler {
         request: CompactionRequest,
         options: compact_request::Options,
         time_range: Option<TimestampRange>,
+        trigger: CompactionTrigger,
     ) {
         let plugins = self.plugins.clone();
         let max_background_compactions = self.engine_config.max_background_compactions;
@@ -127,6 +130,7 @@ impl CompactionScheduler {
                 plugins,
                 max_background_compactions,
                 time_range,
+                trigger,
             );
             Self::notify_planning_result(region_id, plan_id, request_sender, planning).await;
         });
@@ -180,6 +184,7 @@ impl CompactionScheduler {
         plugins: Plugins,
         max_background_compactions: usize,
         time_range: Option<TimestampRange>,
+        trigger: CompactionTrigger,
     ) -> CompactionPlanningResult {
         let region_id = request.region_id();
         let (dynamic_compaction_opts, ttl) = find_dynamic_options(
@@ -208,6 +213,7 @@ impl CompactionScheduler {
             &region_options,
             Some(max_picker_outputs),
             time_range,
+            trigger == CompactionTrigger::Manual,
         );
         let region_id = request.region_id();
         let CompactionRequest {

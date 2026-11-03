@@ -77,6 +77,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+bytes.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 chrono.workspace = true
 clap.workspace = true
@@ -119,6 +120,7 @@ servers = { workspace = true, features = ["testing"] }
 similar-asserts.workspace = true
 sqlx = { workspace = true, features = [
     "mysql",
+    "mysql-rsa",
     "postgres",
     "chrono",
 ] }

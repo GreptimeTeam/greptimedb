@@ -54,6 +54,7 @@ TQL EVAL (180, 180, '1m') rate(delta_temporality[3m]);
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 
 +-+-+-+
@@ -67,7 +68,7 @@ TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["series", "otlp_aggregation_temporality"] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "projection": ["ts", "greptime_value", "series", "otlp_aggregation_temporality"], "filters": ["ts >= TimestampMillisecond(1, None)", "ts <= TimestampMillisecond(180000, None)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+

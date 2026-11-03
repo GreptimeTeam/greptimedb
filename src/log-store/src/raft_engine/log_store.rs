@@ -82,17 +82,60 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
     }
 }
 
+/// Key used by the periodic WAL sync task. Overwritten each period so the
+/// write stays non-empty on raft-engine 0.4.2 (see [`durable_sync`]).
+const PERIODIC_SYNC_MARKER_KEY: &[u8] = b"$wal_periodic_sync";
+
+/// Force an fsync of previously appended WAL data on raft-engine 0.4.2.
+///
+/// `Engine::sync()` writes an empty [`LogBatch`] with `sync = true`, but
+/// 0.4.2's `Engine::write` returns early for empty batches *before* the
+/// fsync (tikv/raft-engine#395). Upstream fixed this in tikv/raft-engine#400,
+/// which is not on crates.io yet. Issuing a minimal non-empty put with
+/// `sync = true` reaches the fsync path on 0.4.2.
+///
+/// `batch` must be empty and can be reused across calls: a successful
+/// `Engine::write` drains its items but keeps its encoding buffer. On error the
+/// batch may be left partially encoded, so callers must discard it.
+fn durable_sync(engine: &Engine, batch: &mut LogBatch) -> raft_engine::Result<usize> {
+    debug_assert!(batch.is_empty());
+    // The value is unused, but it must not decode as a `NamespaceImpl`: the
+    // marker key sorts after `NAMESPACE_PREFIX`, inside the range scanned by
+    // `list_namespaces`. Overwriting the same key keeps the marker bounded.
+    batch.put(SYSTEM_NAMESPACE, PERIODIC_SYNC_MARKER_KEY.to_vec(), vec![0])?;
+    engine.write(batch, true)
+}
+
 pub struct SyncWalTaskFunction {
     engine: Arc<Engine>,
+    /// Batch reused across ticks to avoid allocating a new one each period.
+    /// `None` after a failed sync; a fresh batch is created on the next tick.
+    batch: Option<LogBatch>,
 }
 
 #[async_trait::async_trait]
 impl TaskFunction<Error> for SyncWalTaskFunction {
     async fn call(&mut self) -> std::result::Result<(), Error> {
         let engine = self.engine.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || engine.sync()).await {
-            error!(e; "Failed to sync raft engine log files");
-        };
+        let mut batch = self
+            .batch
+            .take()
+            .unwrap_or_else(|| LogBatch::with_capacity(1));
+        match tokio::task::spawn_blocking(move || {
+            let res = durable_sync(&engine, &mut batch);
+            (res, batch)
+        })
+        .await
+        {
+            Ok((Ok(_), batch)) => self.batch = Some(batch),
+            // The batch may be partially encoded after a failed write; drop it.
+            Ok((Err(e), _)) => {
+                error!(e; "Failed to sync raft engine log files");
+            }
+            Err(e) => {
+                error!(e; "Failed to sync raft engine log files");
+            }
+        }
         Ok(())
     }
 
@@ -103,7 +146,10 @@ impl TaskFunction<Error> for SyncWalTaskFunction {
 
 impl SyncWalTaskFunction {
     pub fn new(engine: Arc<Engine>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            batch: None,
+        }
     }
 }
 
@@ -553,6 +599,74 @@ mod tests {
         .unwrap();
         let namespaces = logstore.list_namespaces().await.unwrap();
         assert_eq!(0, namespaces.len());
+    }
+
+    /// Regression for #9712: periodic sync must write a non-empty batch so
+    /// raft-engine 0.4.2 actually fsyncs (empty `Engine::sync()` is a no-op).
+    #[tokio::test]
+    async fn test_durable_sync_writes_non_empty_batch() {
+        let dir = create_temp_dir("raft-engine-durable-sync-test");
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_string(),
+            recovery_mode: RecoveryMode::TolerateTailCorruption,
+            ..Default::default()
+        };
+        let engine = Engine::open(cfg).unwrap();
+
+        // Control: empty sync leaves no marker and returns Ok without fsync
+        // on 0.4.2 (we cannot count fsyncs here, but we can show the empty
+        // path writes nothing).
+        engine.sync().unwrap();
+        assert!(
+            engine
+                .get(SYSTEM_NAMESPACE, PERIODIC_SYNC_MARKER_KEY)
+                .is_none(),
+            "Engine::sync must not create the periodic sync marker"
+        );
+
+        let mut batch = LogBatch::with_capacity(1);
+        let written = durable_sync(&engine, &mut batch).unwrap();
+        assert!(written > 0, "durable_sync must write a non-empty batch");
+        assert!(batch.is_empty(), "a successful write drains the batch");
+        assert_eq!(
+            engine
+                .get(SYSTEM_NAMESPACE, PERIODIC_SYNC_MARKER_KEY)
+                .as_deref(),
+            Some(&[0][..]),
+            "durable_sync must persist the periodic sync marker"
+        );
+
+        // Reusing the drained batch overwrites the same key and still writes.
+        let written_again = durable_sync(&engine, &mut batch).unwrap();
+        assert!(written_again > 0);
+        assert!(batch.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sync_wal_task_reuses_batch_and_keeps_namespaces() {
+        let dir = create_temp_dir("raft-engine-sync-wal-task-test");
+        let logstore = RaftEngineLogStore::try_new(
+            dir.path().to_str().unwrap().to_string(),
+            &RaftEngineConfig::default(),
+        )
+        .await
+        .unwrap();
+        logstore
+            .create_namespace(&Provider::raft_engine_provider(42))
+            .await
+            .unwrap();
+
+        let mut task = SyncWalTaskFunction::new(logstore.engine.clone());
+        for _ in 0..3 {
+            task.call().await.unwrap();
+            let batch = task.batch.as_ref().expect("batch is kept after a sync");
+            assert!(batch.is_empty());
+        }
+
+        // The marker lies in the range scanned by `list_namespaces` and must
+        // not be reported as a namespace.
+        let namespaces = logstore.list_namespaces().await.unwrap();
+        assert_eq!(vec![Provider::raft_engine_provider(42)], namespaces);
     }
 
     #[tokio::test]

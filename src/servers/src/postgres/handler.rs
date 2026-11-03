@@ -56,11 +56,14 @@ use crate::SqlPlan;
 use crate::error::{DataFusionSnafu, InferParameterTypesSnafu, Result};
 use crate::postgres::types::*;
 use crate::postgres::utils::convert_err;
-use crate::postgres::{PostgresServerHandlerInner, fixtures};
+use crate::postgres::{PostgresServerHandlerInner, copy_in, fixtures};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 impl PostgresServerHandlerInner {
-    fn new_query_context(&self) -> QueryContextRef {
+    /// Creates a query context carrying this connection's batching
+    /// selection, so write paths can route through the pending-rows
+    /// batcher when it is enabled.
+    pub(super) fn new_query_context(&self) -> QueryContextRef {
         let mut ctx = self.session.new_query_context();
         Arc::make_mut(&mut ctx).set_batching_enabled(self.batching_enabled);
         ctx
@@ -87,7 +90,24 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             return Ok(vec![Response::EmptyQuery]);
         }
 
+        // A leading COPY FROM STDIN takes over the connection for the copy
+        // sub-protocol; it is parsed textually so the WITH clause may carry
+        // options beyond sqlparser's COPY grammar. It must run alone.
+        if let Some(copy_from_stdin) = copy_in::copy_from_stdin_from_sql(query)? {
+            let response = self.begin_copy_in(copy_from_stdin).await?;
+            send_warning_opt(client, query_ctx).await?;
+            return Ok(vec![response]);
+        }
+
         let parsed_query = self.query_parser.compatibility_parser.parse(query);
+
+        // A COPY FROM STDIN trailing other statements must be rejected;
+        // the textual scanner above only sees statement-leading COPYs.
+        if let Ok(statements) = &parsed_query
+            && statements.iter().any(copy_in::is_copy_from_stdin)
+        {
+            return Err(copy_in::copy_in_must_run_alone_error());
+        }
 
         let query = if let Ok(statements) = &parsed_query {
             // Comments, whitespace and empty statements also require EmptyQueryResponse.
@@ -282,6 +302,36 @@ where
         _ => 0,
     };
 
+    // Render timestamps with an explicit session-timezone offset so the
+    // exported text carries the instant unambiguously: the timezone-aware
+    // COPY IN decoder honors embedded offsets, keeping COPY OUT -> COPY IN
+    // round trips exact in non-UTC sessions (matching SQL INSERT parity).
+    // This touches both halves of the encoder: the arrow schema drives
+    // value conversion into a tz-aware DateTime, and the pg field type
+    // selects the offset-bearing text format.
+    let arrow_schema_override = copy_out_schema_with_timezone(&schema, &query_ctx);
+    let pg_fields = if arrow_schema_override.is_some() {
+        pg_fields
+            .into_iter()
+            .map(|mut field| {
+                if field.datatype() == &Type::TIMESTAMP {
+                    field = FieldInfo::new(
+                        field.name().to_string(),
+                        None,
+                        None,
+                        Type::TIMESTAMPTZ,
+                        field.format(),
+                    )
+                    .with_type_size(field.type_size())
+                    .with_type_modifier(field.type_modifier());
+                }
+                field
+            })
+            .collect::<Vec<_>>()
+    } else {
+        pg_fields
+    };
+
     let pg_schema = Arc::new(pg_fields);
     let num_columns = pg_schema.len();
 
@@ -297,7 +347,8 @@ where
         schema.clone(),
         recordbatches_stream,
         copy_encoder,
-    );
+    )
+    .with_arrow_schema_override(arrow_schema_override);
 
     let copy_stream: RowStream<CopyData> = Box::pin(
         row_stream
@@ -336,6 +387,7 @@ impl DefaultQueryParser {
 pub struct PgSqlPlan {
     pub(crate) plan: SqlPlan,
     pub(crate) copy_to_stdout_format: Option<String>,
+    pub(crate) copy_from_stdin: Option<copy_in::CopyFromStdin>,
 }
 
 #[async_trait]
@@ -360,6 +412,19 @@ impl QueryParser for DefaultQueryParser {
             return Ok(Some(PgSqlPlan {
                 plan: SqlPlan::Shortcut(sql.to_string()),
                 copy_to_stdout_format: None,
+                copy_from_stdin: None,
+            }));
+        }
+
+        // A COPY FROM STDIN is parsed textually — not through sqlparser —
+        // so the WITH clause may carry options beyond sqlparser's COPY
+        // grammar; the extended query handler starts the copy sub-protocol
+        // when the statement is executed.
+        if let Some(copy_from_stdin) = copy_in::copy_from_stdin_from_sql(sql)? {
+            return Ok(Some(PgSqlPlan {
+                plan: SqlPlan::Shortcut(sql.to_string()),
+                copy_to_stdout_format: None,
+                copy_from_stdin: Some(copy_from_stdin),
             }));
         }
 
@@ -370,7 +435,7 @@ impl QueryParser for DefaultQueryParser {
             }
             let first_stmt = statements.remove(0);
             let format = check_copy_to_stdout(&first_stmt);
-            (statement_to_query(&first_stmt), format)
+            (first_stmt.to_string(), format)
         } else {
             // bypass the error: it can run into error because of different
             // versions of sqlparser
@@ -400,11 +465,13 @@ impl QueryParser for DefaultQueryParser {
                 Ok(Some(PgSqlPlan {
                     plan: SqlPlan::Plan(logical_plan, stmt),
                     copy_to_stdout_format,
+                    copy_from_stdin: None,
                 }))
             } else {
                 Ok(Some(PgSqlPlan {
                     plan: SqlPlan::Statement(stmt, sql),
                     copy_to_stdout_format,
+                    copy_from_stdin: None,
                 }))
             }
         }
@@ -459,6 +526,14 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
         let pg_sql_plan = &portal.statement.statement;
         let sql_plan = &pg_sql_plan.plan;
+
+        // A COPY FROM STDIN takes over the connection for the copy
+        // sub-protocol.
+        if let Some(copy_from_stdin) = &pg_sql_plan.copy_from_stdin {
+            let response = self.begin_copy_in(copy_from_stdin.clone()).await?;
+            send_warning_opt(client, query_ctx).await?;
+            return Ok(response);
+        }
 
         let output = match sql_plan {
             SqlPlan::Empty => {
@@ -780,6 +855,38 @@ impl ErrorHandler for PostgresServerHandlerInner {
             _ => info!("Postgres interface error: {}", error),
         }
     }
+}
+
+/// Rewrites timestamp fields of the table's arrow schema to carry the
+/// session timezone, so COPY OUT renders them with an explicit offset
+/// (`2024-01-01 08:00:00+08:00`). Returns `None` when there is nothing
+/// to rewrite (no naive timestamps or a UTC session leaving output as-is
+/// is fine either way — offsets are always unambiguous on re-import).
+fn copy_out_schema_with_timezone(
+    schema: &SchemaRef,
+    query_ctx: &QueryContextRef,
+) -> Option<Arc<arrow::datatypes::Schema>> {
+    let timezone = query_ctx.timezone().to_string();
+    let arrow_schema = schema.arrow_schema();
+    let mut changed = false;
+    let fields = arrow_schema
+        .fields()
+        .iter()
+        .map(|field| match field.data_type() {
+            arrow::datatypes::DataType::Timestamp(unit, None) => {
+                changed = true;
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(arrow::datatypes::DataType::Timestamp(
+                        *unit,
+                        Some(Arc::from(timezone.as_str())),
+                    ))
+            }
+            _ => field.as_ref().clone(),
+        })
+        .collect::<Vec<_>>();
+    changed.then(|| Arc::new(arrow::datatypes::Schema::new(fields)))
 }
 
 fn check_copy_to_stdout(statement: &SqlParserStatement) -> Option<String> {

@@ -26,7 +26,9 @@ use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::timestamp::timestamp_array_to_primitive;
-use futures::Stream;
+#[cfg(feature = "enterprise")]
+use futures::TryStreamExt;
+use futures::{Stream, StreamExt};
 use prometheus::IntGauge;
 use smallvec::SmallVec;
 use snafu::ResultExt;
@@ -40,6 +42,7 @@ use crate::metrics::{
 };
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::read::flat_merge::{MergeMetrics, MergeMetricsReport};
+use crate::read::last_row::FlatLastTimestampSelector;
 use crate::read::pruner::PartitionPruner;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
@@ -50,6 +53,7 @@ use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
 use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
 use crate::sst::parquet::flat_format::{sequence_column_index, time_index_column_index};
+use crate::sst::parquet::json_align;
 use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
@@ -202,8 +206,6 @@ pub(crate) struct ScanMetricsSet {
     /// Elapsed time before the first poll operation.
     first_poll: Duration,
 
-    /// Number of send timeout in SeriesScan.
-    num_series_send_timeout: usize,
     /// Number of send full in SeriesScan.
     num_series_send_full: usize,
     /// Number of rows the series distributor scanned.
@@ -325,7 +327,6 @@ impl fmt::Debug for ScanMetricsSet {
             num_sst_batches,
             num_sst_rows,
             first_poll,
-            num_series_send_timeout,
             num_series_send_full,
             num_distributor_rows,
             num_distributor_batches,
@@ -459,9 +460,6 @@ impl fmt::Debug for ScanMetricsSet {
         }
 
         // Write non-zero distributor metrics
-        if *num_series_send_timeout > 0 {
-            write!(f, ", \"num_series_send_timeout\":{num_series_send_timeout}")?;
-        }
         if *num_series_send_full > 0 {
             write!(f, ", \"num_series_send_full\":{num_series_send_full}")?;
         }
@@ -775,7 +773,6 @@ impl ScanMetricsSet {
     /// Sets distributor metrics.
     fn set_distributor_metrics(&mut self, distributor_metrics: &SeriesDistributorMetrics) {
         let SeriesDistributorMetrics {
-            num_series_send_timeout,
             num_series_send_full,
             num_rows,
             num_batches,
@@ -784,7 +781,6 @@ impl ScanMetricsSet {
             divider_cost,
         } = distributor_metrics;
 
-        self.num_series_send_timeout += *num_series_send_timeout;
         self.num_series_send_full += *num_series_send_full;
         self.num_distributor_rows += *num_rows;
         self.num_distributor_batches += *num_batches;
@@ -1144,8 +1140,6 @@ impl fmt::Debug for PartitionMetrics {
 /// Metrics for the series distributor.
 #[derive(Default)]
 pub(crate) struct SeriesDistributorMetrics {
-    /// Number of send timeout in SeriesScan.
-    pub(crate) num_series_send_timeout: usize,
     /// Number of send full in SeriesScan.
     pub(crate) num_series_send_full: usize,
     /// Number of rows the series distributor scanned.
@@ -1158,6 +1152,15 @@ pub(crate) struct SeriesDistributorMetrics {
     pub(crate) yield_cost: Duration,
     /// Duration spent in divider operations.
     pub(crate) divider_cost: Duration,
+}
+
+/// Aligns memtable and extension batches; SST readers align before schema compatibility.
+pub(crate) fn align_query_source_batch(
+    context: &StreamContext,
+    batch: RecordBatch,
+) -> Result<RecordBatch> {
+    let query_schema = context.input.mapper.input_arrow_schema(false);
+    json_align::align_query_batch(batch, &query_schema)
 }
 
 /// Scans memtable ranges at `index` using flat format that returns RecordBatch.
@@ -1197,13 +1200,49 @@ pub(crate) fn scan_flat_mem_ranges(
     }
 }
 
+/// Aligns memtable JSON2 columns to query types before merge/dedup.
+///
+/// For append-only queries with `TimeSeriesRowSelector::LastRow { after_merge: false }`,
+/// first keeps all rows tied at each series' maximum timestamp within each sorted
+/// PUT-only batch, avoiding JSON2 conversion for discarded rows. Final cross-source
+/// LastRow selection still runs. Batches containing deletes are not reduced.
+/// This optimization uses the query's series row selector, not its merge mode;
+/// non-append tables retain all input rows for deduplication and last-non-null backfill.
+pub(crate) fn prepare_flat_mem_stream(
+    context: Arc<StreamContext>,
+    stream: impl Stream<Item = Result<RecordBatch>> + Send + 'static,
+) -> BoxedRecordBatchStream {
+    if context.input.read_cols.json_target_types().is_empty() {
+        return Box::pin(stream);
+    }
+
+    let select_last = context.input.append_mode
+        && matches!(
+            context.input.series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: false })
+        );
+    Box::pin(stream.map(move |batch| {
+        let batch = batch?;
+        // Select raw candidates before decoding JSON2; final cross-source selection remains.
+        let batch = if select_last {
+            FlatLastTimestampSelector::select_batch(batch)?
+        } else {
+            batch
+        };
+        align_query_source_batch(&context, batch)
+    }))
+}
+
 /// Files with row count greater than this threshold can contribute to the estimation.
 const SPLIT_ROW_THRESHOLD: u64 = DEFAULT_ROW_GROUP_SIZE as u64;
 /// Number of series threshold for splitting batches.
 const NUM_SERIES_THRESHOLD: u64 = 10240;
 /// Minimum batch size after splitting. The batch size is less than 60 because a series may only have
 /// 60 samples per hour.
-const BATCH_SIZE_THRESHOLD: u64 = 50;
+pub(crate) const BATCH_SIZE_THRESHOLD: u64 = 50;
+/// Minimum estimated rows per series for compaction to split batches. Shorter series
+/// would make compaction write one small batch per series.
+pub(crate) const MIN_COMPACTION_SPLIT_ROWS: usize = DEFAULT_READ_BATCH_SIZE / 2;
 
 /// Returns the estimated rows per batch after splitting if splitting flat record batches
 /// may improve merge performance. Returns `None` if splitting is not beneficial.
@@ -1569,12 +1608,10 @@ pub fn build_flat_file_range_scan_stream(
             let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch().await? {
                 let record_batch = if let Some(mapper) = mapper {
-                    let batch = mapper.project(record_batch)?;
-                    batch
+                    mapper.project(record_batch)?
                 } else {
                     record_batch
                 };
-
                 let Some(record_batch) = filter_flat_batch_by_sequence(
                     record_batch,
                     stream_ctx.input.sequence_range,
@@ -1629,10 +1666,15 @@ pub(crate) async fn scan_flat_extension_range(
     let range = context.input.extension_range(index.index);
     let reader = range.flat_reader(context.as_ref(), options);
     let stream = reader
-        .read(context, partition_metrics, index)
+        .read(context.clone(), partition_metrics, index)
         .await
         .context(crate::error::ScanExternalRangeSnafu)?;
-    Ok(stream)
+    if context.input.read_cols.json_target_types().is_empty() {
+        return Ok(stream);
+    }
+    Ok(Box::pin(stream.and_then(move |batch| {
+        std::future::ready(align_query_source_batch(&context, batch))
+    })))
 }
 
 pub(crate) async fn maybe_scan_flat_other_ranges(
@@ -1743,21 +1785,27 @@ pub(crate) fn split_record_batch(record_batch: RecordBatch, batches: &mut VecDeq
 
 #[cfg(test)]
 mod tests {
+    use arrow_select::concat::concat_batches;
+    use common_time::Timestamp;
+    use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt64Array};
+    use datatypes::types::json_type::JsonNativeType;
+    use futures::TryStreamExt;
+    use smallvec::{SmallVec, smallvec};
     use std::sync::Arc;
     use std::time::Instant;
-
-    use common_time::Timestamp;
-    use smallvec::{SmallVec, smallvec};
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::cache::CacheStrategy;
+    use crate::memtable::bulk::context::BulkIterContext;
+    use crate::memtable::bulk::part_reader::BulkPartBatchIter;
     use crate::memtable::{
         BoxedBatchIterator, BoxedRecordBatchIterator, IterBuilder, MemtableRange,
         MemtableRangeContext, MemtableStats,
     };
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::range::{MemRangeBuilder, SourceIndex};
+    use crate::read::read_columns::ReadColumns;
     use crate::read::scan_region::ScanInput;
     use crate::sst::file::{FileHandle, FileMeta};
     use crate::sst::file_purger::NoopFilePurger;
@@ -1858,6 +1906,148 @@ mod tests {
             row_group_indices,
             num_rows: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn test_memtable_last_row_selects_before_json2_alignment()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        struct BatchIter(RecordBatch, Arc<BulkIterContext>, Option<SequenceRange>);
+        impl IterBuilder for BatchIter {
+            fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
+                Ok(Box::new(std::iter::empty()))
+            }
+            fn is_record_batch(&self) -> bool {
+                true
+            }
+            fn build_record_batch(
+                &self,
+                _time_range: Option<FileTimeRange>,
+                metrics: Option<MemScanMetrics>,
+            ) -> Result<BoxedRecordBatchIterator> {
+                Ok(Box::new(BulkPartBatchIter::from_single(
+                    self.0.clone(),
+                    self.1.clone(),
+                    self.2,
+                    1,
+                    metrics,
+                )))
+            }
+        }
+        let (metadata, batch) = crate::test_util::sst_util::new_json2_record_batch()?;
+        let batch = concat_batches(&batch.schema(), &[batch.clone(), batch.slice(0, 1)])?;
+        let mut columns = batch.columns().to_vec();
+        columns[1] = Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3]));
+        let seq_index = sequence_column_index(batch.num_columns());
+        columns[seq_index] = Arc::new(UInt64Array::from(vec![1, 2, 3]));
+        let batch = RecordBatch::try_new(batch.schema(), columns)?;
+        let reader_context = Arc::new(BulkIterContext::new(
+            metadata.clone(),
+            None,
+            None,
+            false,
+            DEFAULT_READ_BATCH_SIZE,
+        )?);
+        let time_range = (Timestamp::new_millisecond(1), Timestamp::new_millisecond(3));
+        let env = SchedulerEnv::new().await;
+        for (append, selector, sequence, count) in [
+            (
+                true,
+                Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+                None,
+                1,
+            ),
+            (
+                true,
+                Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                None,
+                3,
+            ),
+            (
+                false,
+                Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+                None,
+                3,
+            ),
+            (true, None, None, 3),
+            (
+                true,
+                Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+                Some(SequenceRange::GtLtEq { min: 0, max: 2 }),
+                1,
+            ),
+        ] {
+            let range_context = Arc::new(MemtableRangeContext::new(
+                0,
+                Box::new(BatchIter(batch.clone(), reader_context.clone(), sequence)),
+                Default::default(),
+            ));
+            let stats = MemtableStats {
+                time_range: Some(time_range),
+                num_rows: 3,
+                num_ranges: 1,
+                series_count: 1,
+                ..Default::default()
+            };
+            let range = MemtableRange::new(range_context, stats.clone());
+            let read_cols = ReadColumns::new([0, 1])
+                .with_json_target_types([(0, JsonNativeType::Variant)].into_iter().collect());
+            let mapper =
+                FlatProjectionMapper::new_with_read_columns(&metadata, vec![0, 1], read_cols)?;
+            let input = ScanInput::builder(env.access_layer.clone(), mapper)
+                .with_append_mode(append)
+                .with_series_row_selector(selector)
+                .with_sequence_range(sequence)
+                .with_memtables(vec![MemRangeBuilder::new(range, stats)])
+                .build();
+            let context = Arc::new(StreamContext {
+                input,
+                ranges: vec![],
+                query_start: Instant::now(),
+            });
+            let metrics = PartitionMetrics::new(
+                metadata.region_id,
+                0,
+                "test_json2",
+                context.query_start,
+                false,
+                &ExecutionPlanMetricsSet::new(),
+            );
+            let mut raw_stream = Box::pin(scan_flat_mem_ranges(
+                context.clone(),
+                metrics,
+                RowGroupIndex {
+                    index: 0,
+                    row_group_index: -1,
+                },
+                time_range,
+            ));
+            let raw = raw_stream.try_next().await?.ok_or("expected a raw batch")?;
+            let expected_raw = if sequence.is_some() {
+                batch.slice(0, 2)
+            } else {
+                batch.clone()
+            };
+            assert_eq!(expected_raw, raw);
+            assert!(raw_stream.try_next().await?.is_none());
+            let mut stream = prepare_flat_mem_stream(context, futures::stream::iter([Ok(raw)]));
+            let output = stream.try_next().await?.ok_or("expected a JSON2 batch")?;
+            assert_eq!(count, output.num_rows());
+            let values = output
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or("expected aligned JSONB")?;
+            assert_eq!(
+                datatypes::types::parse_string_to_jsonb(if sequence.is_some() {
+                    r#"{"a":2}"#
+                } else {
+                    r#"{"a":1}"#
+                })?,
+                values.value(count - 1)
+            );
+            assert!(stream.try_next().await?.is_none());
+        }
+        Ok(())
     }
 
     #[tokio::test]

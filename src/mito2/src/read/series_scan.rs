@@ -17,7 +17,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
@@ -25,6 +25,7 @@ use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::{self, Instrument};
 use common_telemetry::warn;
+use datafusion::execution::memory_pool::MemoryPool;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::array::BinaryArray;
@@ -38,13 +39,14 @@ use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
 };
 use tokio::sync::Semaphore;
-use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{
     Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
+use crate::metrics::SCAN_MAX_CONCURRENT_FILES;
 use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner, PrunerOptions};
 use crate::read::scan_region::{ScanInput, StreamContext};
@@ -52,15 +54,12 @@ use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_average_batch_size,
     compute_parallel_channel_size,
 };
-use crate::read::seq_scan::SeqScan;
+use crate::read::seq_scan::{FlatReadMode, SeqScan};
 use crate::read::series_candidate::{SeriesCandidateScanner, is_sparse_metric_metadata};
 use crate::read::series_reader::{AssignedSeriesBatch, SeriesBatchCollector, SeriesReader};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
-
-/// Timeout to send a batch to a sender.
-const SEND_TIMEOUT: Duration = Duration::from_micros(100);
 
 /// Maximum number of candidate series retained before distributing assignments.
 const CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD: usize = 1_000_000;
@@ -266,12 +265,9 @@ impl SeriesScan {
                 metrics_set,
                 ctx.explain_verbose,
             ),
-            SeriesScanMode::TwoPhase => self.scan_two_phase_batch_in_partition(
-                partition,
-                part_metrics,
-                metrics_set,
-                ctx.explain_verbose,
-            ),
+            SeriesScanMode::TwoPhase => {
+                self.scan_two_phase_batch_in_partition(ctx, partition, part_metrics, metrics_set)
+            }
         }
     }
 
@@ -311,12 +307,12 @@ impl SeriesScan {
 
     fn scan_two_phase_batch_in_partition(
         &self,
+        ctx: &QueryScanContext,
         partition: usize,
         part_metrics: PartitionMetrics,
         metrics_set: &ExecutionPlanMetricsSet,
-        explain_verbose: bool,
     ) -> Result<ScanBatchStream> {
-        self.maybe_start_candidate_distributor(metrics_set, explain_verbose);
+        self.maybe_start_candidate_distributor(ctx, metrics_set);
         // Safety: `scan_batch_in_partition` validates the index, and the receiver
         // list always contains one entry for each output partition.
         let mut receiver = self.candidate_receivers.lock().unwrap()[partition]
@@ -406,8 +402,8 @@ impl SeriesScan {
 
     fn maybe_start_candidate_distributor(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
-        explain_verbose: bool,
     ) {
         let mut rx_list = self.candidate_receivers.lock().unwrap();
         if !rx_list.is_empty() {
@@ -416,7 +412,10 @@ impl SeriesScan {
 
         let (senders, receivers, active_receivers) =
             new_candidate_channel_list(self.properties.num_partitions());
+        // Capture the first partition's runtime pool once for the shared distributor.
+        // reset_state clears the receivers so the next execution captures a fresh pool.
         let mut distributor = SeriesCandidateDistributor {
+            memory_pool: ctx.memory_pool.clone(),
             stream_ctx: self.stream_ctx.clone(),
             range_semaphore: Arc::new(Semaphore::new(self.properties.num_partitions())),
             partitions: self.properties.partitions.clone(),
@@ -425,7 +424,7 @@ impl SeriesScan {
             active_receivers,
             metrics_set: metrics_set.clone(),
             metrics_list: self.metrics_list.clone(),
-            explain_verbose,
+            explain_verbose: ctx.explain_verbose,
         };
         let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
         let span = tracing::info_span!("SeriesScan::candidate_distributor", region_id = %region_id);
@@ -447,8 +446,9 @@ impl SeriesScan {
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let part_num = self.properties.num_partitions();
         let metrics_set = ExecutionPlanMetricsSet::default();
+        let ctx = QueryScanContext::default();
         let streams = (0..part_num)
-            .map(|i| self.scan_partition(&QueryScanContext::default(), &metrics_set, i))
+            .map(|i| self.scan_partition(&ctx, &metrics_set, i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
         let chained_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
         Ok(Box::pin(chained_stream))
@@ -458,6 +458,7 @@ impl SeriesScan {
     pub(crate) fn scan_all_partitions(&self) -> Result<ScanBatchStream> {
         let metrics_set = ExecutionPlanMetricsSet::new();
 
+        let ctx = QueryScanContext::default();
         let streams = (0..self.properties.partitions.len())
             .map(|partition| {
                 let metrics = new_partition_metrics(
@@ -468,12 +469,7 @@ impl SeriesScan {
                     &self.metrics_list,
                 );
 
-                self.scan_batch_in_partition(
-                    &QueryScanContext::default(),
-                    partition,
-                    metrics,
-                    &metrics_set,
-                )
+                self.scan_batch_in_partition(&ctx, partition, metrics, &metrics_set)
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -493,6 +489,15 @@ impl SeriesScan {
                 range_meta.indices.len()
             })
             .sum();
+
+        if !self.stream_ctx.input.compaction {
+            SCAN_MAX_CONCURRENT_FILES
+                .with_label_values(&["query"])
+                .observe(total_files as f64);
+        }
+        if self.stream_ctx.input.uses_scan_memory_limit() {
+            return Ok(());
+        }
 
         let max_concurrent_files = self.stream_ctx.input.max_concurrent_scan_files;
         if total_files > max_concurrent_files {
@@ -718,6 +723,7 @@ impl SeriesDistributor {
 
         // Create PartitionPruner covering all partitions
         let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
+        let needs_merge = all_partition_ranges.len() > 1;
         let partition_pruner = Arc::new(PartitionPruner::new(
             self.pruner.clone(),
             &all_partition_ranges,
@@ -750,7 +756,11 @@ impl SeriesDistributor {
                     SeqScan::build_flat_partition_range_read(
                         &stream_ctx,
                         &part_range,
-                        false,
+                        if needs_merge {
+                            FlatReadMode::CrossRangeMerge
+                        } else {
+                            FlatReadMode::Sequential
+                        },
                         &part_metrics,
                         partition_pruner,
                         file_scan_semaphore,
@@ -830,7 +840,6 @@ impl SeriesDistributor {
         }
 
         metrics.scan_cost += fetch_start.elapsed();
-        metrics.num_series_send_timeout = self.senders.num_timeout;
         metrics.num_series_send_full = self.senders.num_full;
         part_metrics.set_distributor_metrics(&metrics);
 
@@ -842,6 +851,7 @@ impl SeriesDistributor {
 
 /// Discovers metric series and sends one reader assignment to each partition.
 struct SeriesCandidateDistributor {
+    memory_pool: Arc<dyn MemoryPool>,
     stream_ctx: Arc<StreamContext>,
     range_semaphore: Arc<Semaphore>,
     partitions: Vec<Vec<PartitionRange>>,
@@ -875,7 +885,7 @@ impl SeriesCandidateDistributor {
             self.partitions.clone(),
             self.pruner.clone(),
             self.range_semaphore.clone(),
-            self.stream_ctx.input.scan_memory_pool.clone(),
+            self.memory_pool.clone(),
             self.metrics_set.clone(),
             part_metrics.clone(),
         )?;
@@ -982,8 +992,6 @@ struct SenderList {
     num_nones: usize,
     /// Index of the current partition to send.
     sender_idx: usize,
-    /// Number of timeout.
-    num_timeout: usize,
     /// Number of full senders.
     num_full: usize,
 }
@@ -995,7 +1003,6 @@ impl SenderList {
             senders,
             num_nones,
             sender_idx: 0,
-            num_timeout: 0,
             num_full: 0,
         }
     }
@@ -1031,46 +1038,35 @@ impl SenderList {
     }
 
     /// Finds a partition and sends the batch to the partition.
-    async fn send_batch(&mut self, mut batch: SeriesBatch) -> Result<()> {
-        // Sends the batch without blocking first.
-        match self.try_send_batch(batch)? {
-            Some(b) => {
-                // Unable to send batch to partition.
-                batch = b;
-            }
-            None => {
-                return Ok(());
-            }
-        }
+    async fn send_batch(&mut self, batch: SeriesBatch) -> Result<()> {
+        let Some(batch) = self.try_send_batch(batch)? else {
+            return Ok(());
+        };
 
         loop {
             ensure!(self.num_nones < self.senders.len(), InvalidSenderSnafu);
 
-            let sender_idx = self.fetch_add_sender_idx();
-            let Some(sender) = &self.senders[sender_idx] else {
-                continue;
+            // Waits on every partition at once and sends to whichever frees a slot first. A
+            // consumer may leave partitions unpolled for a long time, e.g. one that drains them one
+            // after another, and waiting on such a partition would stall the scan.
+            let closed = {
+                let reservations = self.senders.iter().enumerate().filter_map(|(idx, sender)| {
+                    sender
+                        .as_ref()
+                        .map(|sender| Box::pin(async move { (idx, sender.reserve().await) }))
+                });
+                let ((idx, reserved), _, _) = futures::future::select_all(reservations).await;
+                match reserved {
+                    Ok(permit) => {
+                        permit.send(Ok(batch));
+                        return Ok(());
+                    }
+                    Err(_) => idx,
+                }
             };
-            // Adds a timeout to avoid blocking indefinitely and sending
-            // the batch in a round-robin fashion when some partitions
-            // don't poll their inputs. This may happen if we have a
-            // node like sort merging. But it is rare when we are using SeriesScan.
-            match sender.send_timeout(Ok(batch), SEND_TIMEOUT).await {
-                Ok(()) => break,
-                Err(SendTimeoutError::Timeout(res)) => {
-                    self.num_timeout += 1;
-                    // Safety: we send Ok.
-                    batch = res.unwrap();
-                }
-                Err(SendTimeoutError::Closed(res)) => {
-                    self.senders[sender_idx] = None;
-                    self.num_nones += 1;
-                    // Safety: we send Ok.
-                    batch = res.unwrap();
-                }
-            }
+            self.senders[closed] = None;
+            self.num_nones += 1;
         }
-
-        Ok(())
     }
 
     async fn send_error(&self, error: Error) {
@@ -1278,6 +1274,37 @@ mod tests {
 
         drop(receivers[1].take());
         assert_eq!(0, active_receivers.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn distributor_does_not_stall_on_partitions_read_one_after_another() {
+        const NUM_BATCHES: usize = 2000;
+        let (mut senders, receivers) = new_legacy_channel_list(16);
+        let producer = tokio::spawn(async move {
+            for _ in 0..NUM_BATCHES {
+                senders
+                    .send_batch(SeriesBatch::Flat(FlatSeriesBatch::default()))
+                    .await
+                    .unwrap();
+            }
+        });
+        // Reads partition 0 to its end before touching the next one, so all other partitions stay
+        // full while the producer still has batches to send.
+        let consume = async {
+            let mut received = 0;
+            for mut receiver in receivers.into_iter().flatten() {
+                while let Some(batch) = receiver.recv().await {
+                    batch.unwrap();
+                    received += 1;
+                }
+            }
+            received
+        };
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), consume)
+            .await
+            .expect("the distributor stalled on partitions the consumer was not reading");
+        producer.await.unwrap();
+        assert_eq!(NUM_BATCHES, received);
     }
 
     fn new_test_record_batch(

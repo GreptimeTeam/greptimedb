@@ -509,6 +509,7 @@ impl ClusterInfo for MetaClient {
                             memory_usage_bytes: node_info.memory_usage_bytes,
                             hostname: node_info.hostname,
                             env_vars: Default::default(),
+                            schedulable: None,
                         }
                     } else {
                         // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
@@ -525,6 +526,7 @@ impl ClusterInfo for MetaClient {
                             memory_usage_bytes: 0,
                             hostname: "".to_string(),
                             env_vars: Default::default(),
+                            schedulable: None,
                         }
                     }
                 })
@@ -543,6 +545,7 @@ impl ClusterInfo for MetaClient {
                             memory_usage_bytes: node_info.memory_usage_bytes,
                             hostname: node_info.hostname,
                             env_vars: Default::default(),
+                            schedulable: None,
                         }
                     } else {
                         // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
@@ -559,6 +562,7 @@ impl ClusterInfo for MetaClient {
                             memory_usage_bytes: 0,
                             hostname: "".to_string(),
                             env_vars: Default::default(),
+                            schedulable: None,
                         }
                     }
                 }))

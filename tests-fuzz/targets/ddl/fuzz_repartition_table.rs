@@ -187,7 +187,7 @@ async fn execute_insert_with_retry(ctx: &FuzzContext, sql: &str) -> Result<()> {
         match ctx
             .greptime
             // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
-            .execute(sql)
+            .execute(sqlx::AssertSqlSafe(sql))
             .await
         {
             Ok(_) => {
@@ -250,7 +250,7 @@ async fn execute_repartition_table(ctx: FuzzContext, input: FuzzInput) -> Result
     let expr = generate_create_expr(&input, &mut rng).unwrap();
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&expr)?;
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -271,7 +271,7 @@ async fn execute_repartition_table(ctx: FuzzContext, input: FuzzInput) -> Result
         let translator = RepartitionExprTranslator;
         let sql = translator.translate(&expr)?;
         info!("Initial partition sql: {sql}");
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -306,7 +306,7 @@ async fn execute_repartition_table(ctx: FuzzContext, input: FuzzInput) -> Result
         let translator = RepartitionExprTranslator;
         let sql = translator.translate(&expr)?;
         info!("Repartition sql: {sql}");
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -378,7 +378,7 @@ async fn execute_repartition_table(ctx: FuzzContext, input: FuzzInput) -> Result
     // Cleans up
     let table_name = table_ctx.name.clone();
     let sql = format!("DROP TABLE {}", table_name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;

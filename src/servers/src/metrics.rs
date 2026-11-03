@@ -154,12 +154,12 @@ lazy_static! {
     .unwrap();
     pub static ref FLUSH_TOTAL: IntCounter = register_int_counter!(
         "greptime_prom_store_flush_total",
-        "Total number of batch flushes"
+        "Total number of successful batch flushes"
     )
     .unwrap();
     pub static ref FLUSH_ROWS: Histogram = register_histogram!(
         "greptime_prom_store_flush_rows",
-        "Number of rows per flush",
+        "Number of rows per successful flush",
         vec![100.0, 1000.0, 10000.0, 50000.0, 100000.0, 500000.0]
     )
     .unwrap();
@@ -318,6 +318,11 @@ lazy_static! {
     pub static ref METRIC_POSTGRES_PREPARED_COUNT: IntCounter = register_int_counter!(
         "greptime_servers_postgres_prepared_count",
         "servers postgres prepared count"
+    )
+    .unwrap();
+    pub static ref METRIC_POSTGRES_COPY_IN_ROWS: IntCounter = register_int_counter!(
+        "greptime_servers_postgres_copy_in_rows",
+        "servers postgres COPY FROM STDIN rows written"
     )
     .unwrap();
     pub static ref METRIC_SERVER_GRPC_DB_REQUEST_TIMER: HistogramVec = register_histogram_vec!(

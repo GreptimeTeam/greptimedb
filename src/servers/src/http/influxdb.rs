@@ -24,7 +24,7 @@ use common_grpc::precision::Precision;
 use common_telemetry::tracing;
 use session::context::{Channel, QueryContext, QueryContextRef};
 
-use crate::error::{Result, TimePrecisionSnafu};
+use crate::error::Result;
 use crate::http::header::write_cost_header_map;
 use crate::influxdb::InfluxdbRequest;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
@@ -107,30 +107,13 @@ pub async fn influxdb_write(
     ))
 }
 
-fn parse_time_precision(value: &str) -> Result<Precision> {
-    // Precision conversion needs to be compatible with influxdb v1 v2 api.
-    // For details, see the Influxdb documents.
-    // https://docs.influxdata.com/influxdb/v1.8/tools/api/#apiv2write-http-endpoint
-    // https://docs.influxdata.com/influxdb/v1.8/tools/api/#write-http-endpoint
-    match value {
-        "n" | "ns" => Ok(Precision::Nanosecond),
-        "u" | "us" => Ok(Precision::Microsecond),
-        "ms" => Ok(Precision::Millisecond),
-        "s" => Ok(Precision::Second),
-        "m" => Ok(Precision::Minute),
-        "h" => Ok(Precision::Hour),
-        unknown => TimePrecisionSnafu {
-            name: unknown.to_string(),
-        }
-        .fail(),
-    }
-}
+pub(crate) use crate::influxdb::parse_time_precision;
 
 #[cfg(test)]
 mod tests {
     use common_grpc::precision::Precision;
 
-    use crate::http::influxdb::parse_time_precision;
+    use super::parse_time_precision;
 
     #[test]
     fn test_parse_time_precision() {

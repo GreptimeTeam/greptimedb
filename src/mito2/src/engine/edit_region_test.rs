@@ -26,7 +26,7 @@ use common_time::util::current_time_millis;
 use datatypes::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use object_store::ObjectStore;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
     RegionBulkInsertsRequest, RegionCloseRequest, RegionPutRequest, RegionRequest,
 };
@@ -38,6 +38,7 @@ use crate::engine::MitoEngine;
 use crate::engine::listener::EventListener;
 use crate::manifest::action::RegionEdit;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
 use crate::time_provider::mock::MockTimeProvider;
@@ -563,6 +564,71 @@ async fn test_region_edit_with_file_sequence_is_not_merged() {
     assert_eq!(Some(1), region_file_sequence(&region, first_file_id));
     assert_eq!(Some(2), region_file_sequence(&region, second_file_id));
     assert_eq!(Some(3), region_file_sequence(&region, third_file_id));
+}
+
+#[tokio::test]
+async fn test_failed_region_edit_preserves_sequence() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    region.version_control.update_last_sequence(2);
+    let manifest_guard = region.manifest_ctx.manifest_manager.write().await;
+    let (tx, rx) = oneshot::channel();
+    engine
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::EditRegion(RegionEditRequest::new(
+                region_id,
+                test_region_edit(region_id, FileId::random()),
+                false,
+                tx,
+            )),
+        )
+        .await
+        .unwrap();
+    // Sync fails before taking the manifest lock, after the edit starts.
+    assert!(
+        engine
+            .sync_region(region_id, RegionManifestInfo::mito(0, 0, 0).into())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        region.state(),
+        RegionRoleState::Leader(RegionLeaderState::Editing)
+    );
+    assert_eq!(region.version_control.current().last_sequence, 3);
+    assert_eq!(region.version_control.committed_sequence(), 0);
+    region.set_role(RegionRole::Follower);
+    drop(manifest_guard);
+    assert!(rx.await.unwrap().is_err());
+    assert_eq!(region.version_control.current().last_sequence, 3);
+    assert_eq!(region.version_control.committed_sequence(), 0);
+
+    region.set_role(RegionRole::Leader);
+    let file_id = FileId::random();
+    engine
+        .edit_region(region_id, test_region_edit(region_id, file_id))
+        .await
+        .unwrap();
+    assert_eq!(region_file_sequence(&region, file_id), Some(4));
+    let current = region.version_control.current();
+    assert_eq!((current.last_sequence, current.committed_sequence), (4, 4));
 }
 
 #[tokio::test]

@@ -93,7 +93,7 @@ async fn execute_create_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> 
     let expr = generate_expr(input)?;
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&expr)?;
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -110,7 +110,7 @@ async fn execute_create_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> 
 
     // Cleans up
     let sql = format!("DROP TABLE {}", expr.table_name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;

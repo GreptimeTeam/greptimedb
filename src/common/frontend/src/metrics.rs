@@ -14,12 +14,12 @@
 
 //! Cache lookup counters shared by frontend, pipeline, and protocol handlers.
 //!
-//! The `type` label identifies `otlp_trace_aux`, `otlp_metrics_legacy`,
+//! The `type` label identifies `otlp_trace_aux`,
 //! `pipeline_table`, `pipeline`, `pipeline_original`, `pipeline_failover`, or
 //! `mysql_prepared_stmt`. Counters aggregate across catalogs and connections.
 //! Trace lookups count distinct service/operation keys once per request, excluding
-//! rechecks; legacy metric lookups count each requested metric name. Pipeline
-//! loaders count successful coalesced waiters as hits and failed loads as misses.
+//! rechecks. Pipeline loaders count successful coalesced waiters as hits and
+//! failed loads as misses.
 //! Failover counts one outcome after resolving all candidate schemas; an ambiguous
 //! result is a miss. Table and prepared-statement caches count each lookup.
 //! Both outcomes for all known caches are exported from the first metric update.
@@ -27,9 +27,8 @@
 use lazy_static::lazy_static;
 use prometheus::{IntCounterVec, register_int_counter_vec};
 
-const CACHE_TYPES: [&str; 7] = [
+const CACHE_TYPES: [&str; 6] = [
     "otlp_trace_aux",
-    "otlp_metrics_legacy",
     "pipeline_table",
     "pipeline",
     "pipeline_original",

@@ -197,6 +197,8 @@ mod tests {
         let store = new_hdfs_object_store(&config).await.unwrap();
         assert_eq!(HDFS_NATIVE_SCHEME, store.info().scheme());
         assert_eq!("/greptimedb/", store.info().root());
+        // The sweep recognizes this store as one whose writes leave temporary files.
+        assert!(crate::temp_file::writes_temporary_files(&store));
     }
 
     #[tokio::test]

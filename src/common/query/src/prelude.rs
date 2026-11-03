@@ -91,8 +91,6 @@ pub fn greptime_native_histogram() -> &'static str {
 const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 /// Default value column name constant for backward compatibility.
 const GREPTIME_VALUE: &str = "greptime_value";
-/// Default counter column name for OTLP metrics (legacy mode).
-pub const GREPTIME_COUNT: &str = "greptime_count";
 /// Stored series label that opts ordinary float samples into raw-delta math.
 pub const OTLP_AGGREGATION_TEMPORALITY_LABEL: &str = "otlp_aggregation_temporality";
 /// Authoritative raw-delta value for [`OTLP_AGGREGATION_TEMPORALITY_LABEL`].

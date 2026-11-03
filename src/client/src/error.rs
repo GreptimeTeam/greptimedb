@@ -18,7 +18,7 @@ use common_error::define_from_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use snafu::{Location, Snafu, location};
+use snafu::{Location, OptionExt, Snafu, location};
 use tonic::Code;
 use tonic::metadata::errors::InvalidMetadataValue;
 
@@ -26,6 +26,15 @@ use tonic::metadata::errors::InvalidMetadataValue;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display(
+        "Region request has {} failed entries; {}",
+        response.failures.len(),
+        response.first_failure().map(|(index, error)| format!("entry {index}: {}", error.output_msg())).unwrap_or_default()
+    ))]
+    PartialRegion {
+        response: Box<api::region::BatchRegionResponse<Error>>,
+    },
+
     #[snafu(display("Illegal Flight messages, reason: {}", reason))]
     IllegalFlightMessages {
         reason: String,
@@ -109,11 +118,12 @@ pub enum Error {
         location: Location,
     },
 
-    // Server error carried in Tonic Status's metadata.
+    // Server error carried in a protobuf response status.
     #[snafu(display("{}", msg))]
     Server {
         code: StatusCode,
         msg: String,
+        retry_hint: RetryHint,
         #[snafu(implicit)]
         location: Location,
     },
@@ -163,6 +173,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::PartialRegion { response } => response
+                .first_failure()
+                .map_or(StatusCode::Internal, |(_, error)| error.status_code()),
             Error::IllegalFlightMessages { .. }
             | Error::MissingField { .. }
             | Error::IllegalDatabaseResponse { .. } => StatusCode::Internal,
@@ -188,7 +201,8 @@ impl ErrorExt for Error {
 
     fn retry_hint(&self) -> RetryHint {
         match self {
-            Error::Tonic { retry_hint, .. } => *retry_hint,
+            Error::PartialRegion { .. } => RetryHint::Retryable,
+            Error::Tonic { retry_hint, .. } | Error::Server { retry_hint, .. } => *retry_hint,
             Error::FlightGet { source, .. }
             | Error::FlightStream { source, .. }
             | Error::FlowServer { source, .. }
@@ -220,9 +234,22 @@ define_from_tonic_status!(Error, Tonic);
 
 impl From<Error> for common_meta::error::Error {
     fn from(error: Error) -> Self {
-        Self::External {
-            source: BoxedError::new(error),
-            location: location!(),
+        match error {
+            Error::PartialRegion { response } => Self::PartialRegion {
+                response: Box::new(api::region::BatchRegionResponse {
+                    affected_rows: response.affected_rows,
+                    extensions: response.extensions,
+                    failures: response
+                        .failures
+                        .into_iter()
+                        .map(|(index, error)| (index, error.into()))
+                        .collect(),
+                }),
+            },
+            error => Self::External {
+                source: BoxedError::new(error),
+                location: location!(),
+            },
         }
     }
 }
@@ -256,5 +283,22 @@ impl Error {
                 self.tonic_code(),
                 Some(Code::Cancelled) | Some(Code::DeadlineExceeded)
             )
+    }
+}
+
+impl Error {
+    /// Decodes an application error carried in a protobuf response.
+    pub(crate) fn try_from_response_status(status: &api::v1::Status) -> Result<Self> {
+        let code = StatusCode::from_u32(status.status_code).with_context(|| {
+            IllegalDatabaseResponseSnafu {
+                err_msg: format!("Unknown server status: {}", status.status_code),
+            }
+        })?;
+        Ok(ServerSnafu {
+            code,
+            msg: status.err_msg.clone(),
+            retry_hint: status.retry_hint.parse().unwrap_or(RetryHint::NonRetryable),
+        }
+        .build())
     }
 }

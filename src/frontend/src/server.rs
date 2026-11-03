@@ -409,6 +409,7 @@ where
 
         if opts.postgres.enable {
             // Init PosgresSQL Server
+            let with_metric_engine = effective_prom_store_options(&opts).with_metric_engine;
             let opts = &opts.postgres;
             let pg_addr = parse_addr(&opts.addr)?;
 
@@ -421,6 +422,7 @@ where
             let pg_server = Box::new(
                 PostgresServer::new(
                     instance.clone(),
+                    instance.clone(),
                     opts.tls.should_force_tls(),
                     tls_server_config,
                     opts.keep_alive.as_secs(),
@@ -428,6 +430,8 @@ where
                     user_provider.clone(),
                     Some(self.instance.process_manager().clone()),
                 )
+                .with_influxdb_handler(instance.clone())
+                .with_otlp_handler(instance.clone(), with_metric_engine)
                 .with_batching_enabled(postgres_batching),
             ) as Box<dyn Server>;
 

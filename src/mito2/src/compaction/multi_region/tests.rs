@@ -1202,7 +1202,7 @@ async fn bounded_workers_merge_overlapping_sources_without_deadlock_or_reorderin
         targets.keys().collect::<Vec<_>>(),
         output.files.keys().collect::<Vec<_>>()
     );
-    println!(
+    common_telemetry::info!(
         "workers={workers}, multi_column={multi_column}, stats={:?}",
         output.stats
     );
@@ -1238,7 +1238,7 @@ async fn bounded_workers_merge_overlapping_sources_without_deadlock_or_reorderin
                 output_paths.insert(path.clone()),
                 "shared output file {path}"
             );
-            println!(
+            common_telemetry::info!(
                 "region={id}, window={file_window}, rows={}, file={path}",
                 file.num_rows
             );
@@ -1329,7 +1329,7 @@ async fn bounded_workers_merge_overlapping_sources_without_deadlock_or_reorderin
         // Do not sort actual rows: this checks stability across input batches,
         // merge passes, output batches and SST file boundaries, not just a multiset.
         assert_eq!(expected, windows, "incorrect rows or ordering for {id}");
-        println!(
+        common_telemetry::info!(
             "verified region={id}, files={file_count}, rows={}",
             windows.values().map(Vec::len).sum::<usize>()
         );

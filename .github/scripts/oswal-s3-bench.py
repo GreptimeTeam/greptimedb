@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -80,6 +81,7 @@ WITH(
   'compaction.twcs.time_window' = '2h'
 )"""
 GROUP_NAME = re.compile(r"[a-z][a-z0-9]{0,11}")
+IMAGE_LABEL = re.compile(r"[a-z][a-z0-9]{0,7}")
 RESERVED_ENV = ("GREPTIMEDB_STANDALONE__STORAGE__", "GREPTIMEDB_STANDALONE__WAL__")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Docker's reference grammar: path components separated by ".", "_", "__" or runs of "-".
@@ -88,6 +90,18 @@ IMAGE = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-
 NIGHTLY = re.compile(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?-nightly-(\d{8})")
 TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 DIGEST = re.compile(r".+@sha256:[0-9a-f]{64}")
+# Rows/s of a load cell in 1000-row batches on c6id.2xlarge at the concurrency levels earlier runs
+# measured, interpolated on a log scale between them; durable writes slow down with several regions.
+# Smaller batches are taken to keep the request rate, so their rows/s shrink with the batch.
+MEASURED_BATCH_ROWS = 1000
+LOAD_RATES = {"durable": [(1, 9_000), (8, 34_000), (32, 55_000)],
+              "durable, partitioned": [(1, 7_000), (8, 26_000), (32, 55_000)],
+              "other": [(1, 28_000), (8, 60_000)]}
+# Starting, scraping and stopping a server, and the restart of a restart cell or a crash cycle.
+CELL_SECONDS, RESTART_SECONDS, CYCLE_SECONDS = 5, 60, 15
+# Checkout, dependencies, image pulls and the bucket probe; corpus generation per million rows; and the
+# deletion of the run's objects one at a time, which took 12-17 % of the cells' time in earlier runs.
+JOB_SECONDS, GENERATE_SECONDS_PER_MILLION, CLEANUP_SHARE = 180, 30, 0.2
 
 
 def append_github(variable: str, name: str, value: str) -> None:
@@ -115,16 +129,18 @@ def check_regions(bucket: str, runner: str) -> None:
                          "a cross-region bucket measures the WAN, not S3")
 
 
-def build_manifest(plan: dict, greptimedb_inspect: list, runtime_image: str,
+def build_manifest(plan: dict, images: list, runtime_image: str,
                    instance_type: str, region: str, prefix: str) -> dict:
-    image = next((d for d in greptimedb_inspect[0].get("RepoDigests") or [] if DIGEST.fullmatch(d)), None)
-    if image is None:
-        raise ValueError("the GreptimeDB image has no sha256 repository digest")
+    """The run's record; `images` are the checked images, each pinned to its digest, the first the reference."""
+    if [image["label"] for image in images] != plan["images"]:
+        raise ValueError(f"the checked images {[i['label'] for i in images]} are not the plan's {plan['images']}")
+    if not all(DIGEST.fullmatch(image["image"]) for image in images):
+        raise ValueError("every GreptimeDB image must be pinned to a sha256 digest")
     return {"smoke": plan["smoke"], "rows": plan["rows"], "rounds": plan["rounds"],
             "concurrency": plan["concurrency"], "batch_rows": plan["batch_rows"],
             "configs": plan["configs"], "extra_env": plan["extra_env"],
-            "restart": plan["restart"], "groups": plan["groups"],
-            "greptimedb_image": image, "runtime_image": runtime_image,
+            "restart": plan["restart"], "groups": plan["groups"], "warmup": plan["warmup"],
+            "greptimedb_image": images[0]["image"], "greptimedb_images": images, "runtime_image": runtime_image,
             "instance_type": instance_type, "region": region, "prefix": prefix}
 
 
@@ -166,8 +182,32 @@ def partitioned_table(summary: dict, partitions: int) -> str:
     return AGENT_TABLE.format(partitions=clause)
 
 
-def group_cells(group: dict, smoke: bool) -> list:
-    """The cells of one group, in run order; a group without a name is the top-level inputs."""
+def parse_images(text: str) -> list:
+    """The images to compare: a JSON list of 2..4 {label, image}, the first the reference. Empty
+    means the one image of greptimedb_tag or greptimedb_image, with an empty label."""
+    if not text.strip():
+        return [{"label": "", "image": ""}]
+    images = json.loads(text)
+    if not isinstance(images, list) or not 2 <= len(images) <= 4 \
+            or not all(isinstance(i, dict) and set(i) == {"label", "image"} for i in images):
+        raise ValueError("images must be a JSON list of 2..4 objects, each with only a label and an image")
+    labels = [image["label"] for image in images]
+    for image in images:
+        if not isinstance(image["label"], str) or not IMAGE_LABEL.fullmatch(image["label"]):
+            raise ValueError(f"an image label is up to 8 lowercase letters and digits, got {image['label']!r}")
+        full_reference("an image", image["image"])
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"image labels repeat: {labels}")
+    return images
+
+
+def cell_id(group: str, round_number: int, level: int, config: str, label: str) -> str:
+    return (f"{group}-" if group else "") + f"{round_number}-{level}-{config}" + (f"-{label}" if label else "")
+
+
+def group_cells(group: dict, smoke: bool, labels: list) -> list:
+    """The cells of one group, in run order; a group without a name is the top-level inputs.
+    Each cell runs once per image label, back to back."""
     name, mode = group.get("name", ""), group.get("mode", "load")
     if mode not in ("load", "crash", "drop"):
         raise ValueError(f"group {name!r}: mode must be load, crash or drop, got {mode!r}")
@@ -219,14 +259,16 @@ def group_cells(group: dict, smoke: bool) -> list:
     series = [config for config in WAL_CONFIGS if config in chosen]
     cells = []
     for round_number in range(1, rounds + 1):
-        # Reverse the order every other round so no configuration always runs first.
+        # Reverse the order every other round so no configuration or image always runs first.
+        forward = round_number % 2
         for level in levels:
-            for config in series if round_number % 2 else reversed(series):
+            for config in series if forward else reversed(series):
                 wal = WAL_CONFIGS[config] | ({"FLUSH_INTERVAL": RESTART_FLUSH_INTERVAL} if restart and config not in BASELINES else {})
-                cells.append(common | {
-                    "id": (f"{name}-" if name else "") + f"{round_number}-{level}-{config}",
-                    "round": round_number, "concurrency": level, "config": config, "wal": wal, "env": env,
-                })
+                for label in labels if forward else reversed(labels):
+                    cells.append(common | {
+                        "id": cell_id(name, round_number, level, config, label), "round": round_number,
+                        "concurrency": level, "config": config, "image": label, "wal": wal, "env": env,
+                    })
     return cells
 
 
@@ -251,11 +293,20 @@ def parse_groups(text: str, defaults: dict) -> list:
 
 
 def build_plan(concurrency: str, rows: str, batch_rows: str, rounds: str, smoke: bool,
-               configs: str = "R,D,E", extra_env: str = "", restart: bool = False, groups: str = "") -> dict:
+               configs: str = "R,D,E", extra_env: str = "", restart: bool = False, groups: str = "",
+               images: str = "", warmup: bool = False) -> dict:
     defaults = {"concurrency": concurrency, "rows": rows, "rounds": rounds, "configs": configs,
                 "extra_env": extra_env, "restart": restart}
     resolved = parse_groups(groups, defaults)
-    cells = [cell for group in resolved for cell in group_cells(group, smoke)]
+    labels = [image["label"] for image in parse_images(images)]
+    cells = [cell for group in resolved for cell in group_cells(group, smoke, labels)]
+    if warmup:
+        # Round 0 runs the first load cell once per image before anything else; no statistic uses it.
+        first = next((cell for cell in cells if cell["mode"] == "load"), None)
+        if first is None:
+            raise ValueError("warmup needs a load group")
+        cells = [first | {"id": cell_id(first["group"], 0, first["concurrency"], first["config"], label),
+                          "round": 0, "image": label, "warmup": True} for label in labels] + cells
     if len({cell["id"] for cell in cells}) != len(cells):
         raise ValueError("two cells share an id")
     corpora = []
@@ -270,8 +321,34 @@ def build_plan(concurrency: str, rows: str, batch_rows: str, rounds: str, smoke:
         "concurrency": sorted({cell["concurrency"] for cell in cells}),
         "configs": list(dict.fromkeys(cell["config"] for cell in cells)),
         "extra_env": parse_extra_env(extra_env), "groups": [g.get("name", "") for g in resolved],
-        "restart": restart, "corpora": corpora, "cells": cells,
+        "restart": restart, "images": labels, "warmup": warmup, "corpora": corpora, "cells": cells,
     }
+
+
+def load_rate(cell: dict) -> float:
+    durable = cell["wal"].get("ACK_MODE") == "durable"
+    points = LOAD_RATES["other" if not durable else "durable, partitioned" if cell["partitions"] > 1 else "durable"]
+    level = cell["concurrency"]
+    for (low, low_rate), (high, high_rate) in zip(points, points[1:]):
+        if level < high:
+            return low_rate + (high_rate - low_rate) * math.log(max(level, low) / low) / math.log(high / low)
+    return points[-1][1]
+
+
+def cell_seconds(cell: dict, batch_rows: int) -> float:
+    if cell["mode"] == "crash":
+        return CELL_SECONDS + cell["cycles"] * (sum(cell["kill_after"]) / 2 + CYCLE_SECONDS)
+    if cell["mode"] == "drop":
+        return CELL_SECONDS + cell["write_seconds"] + RESTART_SECONDS / 2
+    rate = load_rate(cell) * min(1.0, batch_rows / MEASURED_BATCH_ROWS)
+    return CELL_SECONDS + cell["rows"] / rate + cell["idle_seconds"] + (RESTART_SECONDS if cell["restart"] else 0)
+
+
+def estimate_minutes(plan: dict) -> int:
+    """The benchmark job's minutes on c6id.2xlarge, from the times of earlier runs."""
+    generate = GENERATE_SECONDS_PER_MILLION * sum(corpus["rows"] for corpus in plan["corpora"]) / 1e6
+    cells = sum(cell_seconds(cell, plan["batch_rows"]) for cell in plan["cells"])
+    return math.ceil((JOB_SECONDS + generate + cells * (1 + CLEANUP_SHARE)) / 60)
 
 
 def newest_nightly(tags: list[str]) -> str:
@@ -281,13 +358,28 @@ def newest_nightly(tags: list[str]) -> str:
     return max(dated)[1]
 
 
+def full_reference(name: str, image: str) -> str:
+    if not isinstance(image, str) or not IMAGE.fullmatch(image) \
+            or not re.search(r"(:[^/]+|@sha256:[0-9a-f]{64})$", image):
+        raise ValueError(f"{name} must be a full reference with a tag or digest: {image!r}")
+    return image
+
+
 def resolve_image(image: str, tag: str) -> str:
     """The full image reference when given, else greptime/greptimedb at the resolved tag."""
     if image:
-        if not IMAGE.fullmatch(image) or not re.search(r"(:[^/]+|@sha256:[0-9a-f]{64})$", image):
-            raise ValueError(f"greptimedb_image must be a full reference with a tag or digest: {image!r}")
-        return image
+        return full_reference("greptimedb_image", image)
     return f"greptime/greptimedb:{resolve_tag(tag)}"
+
+
+def resolve_images(images: str, image: str, tag: str) -> list:
+    """The images to pull and check: the list to compare, or the one image of the other two inputs."""
+    entries = parse_images(images)
+    if entries[0]["label"]:
+        if image:
+            raise ValueError("set either images or greptimedb_image, not both")
+        return entries
+    return [{"label": "", "image": resolve_image(image, tag)}]
 
 
 def resolve_tag(requested: str) -> str:
@@ -347,13 +439,15 @@ def main() -> int:
     plan.add_argument("--smoke", choices=("true", "false"), required=True)
     plan.add_argument("--restart", choices=("true", "false"), default="false")
     plan.add_argument("--configs", default="R,D,E")
-    for name in ("extra-env", "groups"):
+    plan.add_argument("--warmup", choices=("true", "false"), default="false")
+    for name in ("extra-env", "groups", "images"):
         plan.add_argument(f"--{name}", default="")
     for name in ("timeout-minutes", "ttl-hours", "output"):
         plan.add_argument(f"--{name}")
     image = commands.add_parser("image")
     image.add_argument("--tag", required=True)
     image.add_argument("--image", default="")
+    image.add_argument("--images", default="")
     regions = commands.add_parser("regions")
     for name in ("bucket", "runner"):
         regions.add_argument(f"--{name}", required=True)
@@ -361,7 +455,7 @@ def main() -> int:
     table.add_argument("--summary", type=Path, required=True)
     table.add_argument("--partitions", type=int, required=True)
     manifest = commands.add_parser("manifest")
-    for name in ("results", "runtime-image", "instance-type", "region", "prefix"):
+    for name in ("results", "images", "runtime-image", "instance-type", "region", "prefix"):
         manifest.add_argument(f"--{name}", required=True)
     for name in ("probe", "cleanup"):
         bucket = commands.add_parser(name)
@@ -373,15 +467,21 @@ def main() -> int:
         if args.timeout_minutes or args.ttl_hours:
             validate_budgets(args.timeout_minutes or "", args.ttl_hours or "")
         result = build_plan(args.concurrency, args.rows, args.batch_rows, args.rounds, args.smoke == "true",
-                            args.configs, args.extra_env, args.restart == "true", args.groups)
+                            args.configs, args.extra_env, args.restart == "true", args.groups,
+                            args.images, args.warmup == "true")
+        minutes = estimate_minutes(result)
+        if args.timeout_minutes and minutes > int(args.timeout_minutes):
+            raise ValueError(f"the plan needs about {minutes} minutes on c6id.2xlarge, "
+                             f"more than the {args.timeout_minutes}-minute benchmark timeout")
         if args.output:
             with open(args.output, "w") as output:
                 json.dump(result, output, indent=2)
-        print(f"{len(result['cells'])} cells; corpora {[c['rows'] for c in result['corpora']]}")
+        print(f"{len(result['cells'])} cells; corpora {[c['rows'] for c in result['corpora']]}; "
+              f"about {minutes} minutes on c6id.2xlarge")
     elif args.command == "image":
-        reference = resolve_image(args.image, args.tag)
-        append_github("GITHUB_OUTPUT", "greptimedb_ref", reference)
-        print(f"GreptimeDB image: {reference}")
+        images = resolve_images(args.images, args.image, args.tag)
+        append_github("GITHUB_OUTPUT", "requested_images", json.dumps(images))
+        print("GreptimeDB images: " + ", ".join(f"{i['label']} {i['image']}".strip() for i in images))
     elif args.command == "regions":
         check_regions(args.bucket, args.runner)
         print(f"bucket and runner both in {args.runner}")
@@ -389,12 +489,10 @@ def main() -> int:
         print(partitioned_table(json.loads(args.summary.read_text()), args.partitions))
     elif args.command == "manifest":
         results = Path(args.results)
-        manifest = build_manifest(json.loads((results / "plan.json").read_text()),
-                                  json.loads((results / "images" / "greptimedb.json").read_text()),
+        manifest = build_manifest(json.loads((results / "plan.json").read_text()), json.loads(args.images),
                                   args.runtime_image, args.instance_type, args.region, args.prefix)
         (results / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        append_github("GITHUB_ENV", "GREPTIMEDB_IMAGE", manifest["greptimedb_image"])
-        print(f"GreptimeDB image: {manifest['greptimedb_image']}")
+        print("GreptimeDB images: " + ", ".join(i["image"] for i in manifest["greptimedb_images"]))
     else:
         if not re.fullmatch(r"oswal-bench/[0-9]+-[0-9]+", args.prefix):
             raise ValueError(f"refusing a prefix outside oswal-bench/<run>: {args.prefix!r}")

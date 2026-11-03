@@ -1,0 +1,97 @@
+CREATE TABLE json_dot_access (ts TIMESTAMP TIME INDEX, j JSON);
+
+Affected Rows: 0
+
+INSERT INTO json_dot_access VALUES
+    (1, '{"a":{"b":2},"items":[{"name":"first"},{"name":"second"}],"a.b":"literal","UPPER":"quoted","enabled":true}'),
+    (2, '{"a":{"b":4},"items":[],"enabled":false}'),
+    (3, '{"a":null}'),
+    (4, '{}'),
+    (5, NULL);
+
+Affected Rows: 5
+
+SELECT ts, j.a.b AS nested, j."a.b" AS dotted_key, j."UPPER" AS quoted_key,
+       j.missing AS missing, j.items[1].name AS item
+FROM json_dot_access ORDER BY ts;
+
++-------------------------+--------+------------+------------+---------+--------+
+| ts                      | nested | dotted_key | quoted_key | missing | item   |
++-------------------------+--------+------------+------------+---------+--------+
+| 1970-01-01T00:00:00.001 | 2      | literal    | quoted     |         | second |
+| 1970-01-01T00:00:00.002 | 4      |            |            |         |        |
+| 1970-01-01T00:00:00.003 |        |            |            |         |        |
+| 1970-01-01T00:00:00.004 |        |            |            |         |        |
+| 1970-01-01T00:00:00.005 |        |            |            |         |        |
++-------------------------+--------+------------+------------+---------+--------+
+
+SELECT ts, j.a.b = json_get(j, '$.a.b') AS same_value,
+       j.a.b + 1 AS incremented, j.a.b::BIGINT AS cast_value,
+       abs(j.a.b) AS absolute
+FROM json_dot_access ORDER BY ts;
+
++-------------------------+------------+-------------+------------+----------+
+| ts                      | same_value | incremented | cast_value | absolute |
++-------------------------+------------+-------------+------------+----------+
+| 1970-01-01T00:00:00.001 | true       | 3           | 2          | 2.0      |
+| 1970-01-01T00:00:00.002 | true       | 5           | 4          | 4.0      |
+| 1970-01-01T00:00:00.003 |            |             |            |          |
+| 1970-01-01T00:00:00.004 |            |             |            |          |
+| 1970-01-01T00:00:00.005 |            |             |            |          |
++-------------------------+------------+-------------+------------+----------+
+
+SELECT t.ts, t.j.a.b AS qualified FROM json_dot_access AS t
+WHERE t.j.a.b > 2 AND t.j.enabled = false ORDER BY t.ts;
+
++-------------------------+-----------+
+| ts                      | qualified |
++-------------------------+-----------+
+| 1970-01-01T00:00:00.002 | 4         |
++-------------------------+-----------+
+
+SELECT sum(j.a.b) AS total FROM json_dot_access;
+
++-------+
+| total |
++-------+
+| 6.0   |
++-------+
+
+SELECT ts, payload.a.b AS nested
+FROM (SELECT ts, j AS payload FROM json_dot_access) ORDER BY ts;
+
++-------------------------+--------+
+| ts                      | nested |
++-------------------------+--------+
+| 1970-01-01T00:00:00.001 | 2      |
+| 1970-01-01T00:00:00.002 | 4      |
+| 1970-01-01T00:00:00.003 |        |
+| 1970-01-01T00:00:00.004 |        |
+| 1970-01-01T00:00:00.005 |        |
++-------------------------+--------+
+
+ADMIN FLUSH_TABLE('json_dot_access');
+
++--------------------------------------+
+| ADMIN FLUSH_TABLE('json_dot_access') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+SELECT ts, j.a.b AS nested, j.items[1].name AS item
+FROM json_dot_access ORDER BY ts;
+
++-------------------------+--------+--------+
+| ts                      | nested | item   |
++-------------------------+--------+--------+
+| 1970-01-01T00:00:00.001 | 2      | second |
+| 1970-01-01T00:00:00.002 | 4      |        |
+| 1970-01-01T00:00:00.003 |        |        |
+| 1970-01-01T00:00:00.004 |        |        |
+| 1970-01-01T00:00:00.005 |        |        |
++-------------------------+--------+--------+
+
+DROP TABLE json_dot_access;
+
+Affected Rows: 0
+

@@ -59,7 +59,7 @@ use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::{MemtableBuilderProvider, ensure_json2_not_use_time_series_memtable};
+use crate::memtable::{MemtableBuilderProvider, ensure_json2_uses_flat_format};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::options::RegionOptions;
@@ -337,9 +337,9 @@ impl RegionOpener {
         let region_id = self.region_id;
         let region_dir = self.region_dir();
         let metadata = self.build_metadata()?;
-        // Tries to open the region.
-        match self.maybe_open(config, wal).await {
-            Ok(Some(region)) => {
+        // Only an absent region may be created; an open error must not replace its manifest.
+        match self.maybe_open(config, wal).await? {
+            Some(region) => {
                 let recovered = region.metadata();
                 // Checks the schema of the region.
                 let expect = &metadata;
@@ -354,19 +354,10 @@ impl RegionOpener {
 
                 return Ok(region);
             }
-            Ok(None) => {
+            None => {
                 debug!(
                     "No data under directory {}, region_id: {}",
                     region_dir, self.region_id
-                );
-            }
-            // The region exists but the WAL does not hold its history:
-            // creating it again would replace its manifest.
-            Err(e @ error::Error::CheckWalHistory { .. }) => return Err(e),
-            Err(e) => {
-                warn!(e;
-                    "Failed to open region {} before creating it, region_dir: {}",
-                    self.region_id, region_dir
                 );
             }
         }
@@ -386,7 +377,7 @@ impl RegionOpener {
             options.sst_format = Some(FormatType::PrimaryKey);
             FormatType::PrimaryKey
         };
-        ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
+        ensure_json2_uses_flat_format(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
         // The region's WAL history starts in this log store, so reopening
         // the region on it passes the history check without any entry. It is
@@ -412,6 +403,7 @@ impl RegionOpener {
             flushed_entry_id,
             region_manifest_options,
             sst_format,
+            options.append_mode,
             &self.stats,
         )
         .await?;
@@ -549,7 +541,7 @@ impl RegionOpener {
         let metadata = maybe_upgrade_json2_layout(metadata)?;
         // Updates the region options with the manifest.
         sanitize_region_options(&manifest, &mut region_options);
-        ensure_json2_not_use_time_series_memtable(&metadata, &region_options)?;
+        ensure_json2_uses_flat_format(&metadata, &region_options)?;
         region_options.validate_column_compression(&metadata)?;
 
         let region_id = self.region_id;
@@ -804,23 +796,43 @@ pub(crate) fn version_builder_from_manifest(
 
 /// Updates region options by persistent options.
 pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut RegionOptions) {
-    // The caller-supplied options win when they specify an explicit `sst_format`,
-    // so re-parsed options (e.g. bulk memtable forcing flat format) take effect on
-    // the running region instead of being clobbered by the persisted manifest value.
-    // Fall back to the manifest only when the caller did not provide a value.
-    match options.sst_format {
-        Some(format) if format != manifest.sst_format => {
-            common_telemetry::warn!(
+    if let Some(encoding) = options.primary_key_encoding
+        && encoding != manifest.metadata.primary_key_encoding
+    {
+        common_telemetry::warn!(
+            "Overriding primary key encoding from {:?} to {:?} for region {}",
+            encoding,
+            manifest.metadata.primary_key_encoding,
+            manifest.metadata.region_id,
+        );
+    }
+    options.primary_key_encoding = Some(manifest.metadata.primary_key_encoding);
+    if manifest.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+        options.sst_format = Some(FormatType::Flat);
+    }
+    // Caller options take precedence over the manifest, except JSON2 always requires flat output.
+    let format = options.sst_format.unwrap_or(manifest.sst_format);
+    // Older versions allowed JSON2 with primary-key output; recover without rewriting its history.
+    if format != FormatType::Flat
+        && manifest
+            .metadata
+            .column_metadatas
+            .iter()
+            .any(|column| column.column_schema.data_type.is_json2())
+    {
+        warn!(
+            "Overriding SST format from {:?} to flat for existing JSON2 region {}",
+            format, manifest.metadata.region_id,
+        );
+        options.sst_format = Some(FormatType::Flat);
+    } else {
+        if format != manifest.sst_format {
+            warn!(
                 "Overriding SST format from {:?} (manifest) to {:?} (options) for region {}",
-                manifest.sst_format,
-                format,
-                manifest.metadata.region_id,
+                manifest.sst_format, format, manifest.metadata.region_id,
             );
         }
-        Some(_) => {}
-        None => {
-            options.sst_format = Some(manifest.sst_format);
-        }
+        options.sst_format = Some(format);
     }
     if let Some(manifest_append_mode) = manifest.append_mode
         && options.append_mode != manifest_append_mode
@@ -1012,9 +1024,7 @@ where
             // columns like the write path, otherwise the memtable rejects the
             // batch. Skips sparse batches as they don't carry tag columns by
             // design.
-            if region_metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse {
-                part.fill_missing_columns(&region_metadata)?;
-            }
+            part.fill_missing_columns(&region_metadata)?;
             rows_replayed += part.num_rows();
             // During replay, we should adopt the sequence from WAL.
             let bulk_sequence_from_wal = part.sequence;
@@ -1289,7 +1299,7 @@ async fn preload_parquet_meta_cache_for_files(
                 }
                 match metadata {
                     SstMetaPreparation::Prepared(metadata) => {
-                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        cache_manager.put_compact_sst_meta(file_id, metadata.compact);
                         loaded += 1;
                     }
                     SstMetaPreparation::DecodedOnly { encoding_error, .. } => warn!(
@@ -1332,7 +1342,7 @@ async fn preload_parquet_meta_cache_for_files(
                     Ok(SstMetaPreparation::Prepared(metadata)) => {
                         // Preload the compact canonical entry only. Query traffic promotes decoded
                         // entries into the separate acceleration tier according to actual demand.
-                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        cache_manager.put_compact_sst_meta(file_id, metadata.compact);
                         loaded += 1;
                     }
                     Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
@@ -1450,6 +1460,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use store_api::codec::PrimaryKeyEncoding;
 
     use arrow_schema::extension::ExtensionType;
     use common_base::readable_size::ReadableSize;
@@ -1631,6 +1642,22 @@ mod tests {
     }
 
     #[test]
+    fn test_sparse_reopen_uses_persisted_encoding_and_flat_sst() {
+        for supplied in [None, Some(PrimaryKeyEncoding::Dense)] {
+            let mut manifest = build_test_manifest(FormatType::PrimaryKey);
+            Arc::make_mut(&mut manifest.metadata).primary_key_encoding = PrimaryKeyEncoding::Sparse;
+            let mut options = RegionOptions {
+                primary_key_encoding: supplied,
+                sst_format: Some(FormatType::PrimaryKey),
+                ..Default::default()
+            };
+            sanitize_region_options(&manifest, &mut options);
+            assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
+            assert_eq!(options.sst_format, Some(FormatType::Flat));
+        }
+    }
+
+    #[test]
     fn test_sanitize_region_options_options_format_wins() {
         // Manifest persisted PrimaryKey, but the re-parsed options now request Flat
         // (e.g., bulk memtable). The options' value must win.
@@ -1654,6 +1681,31 @@ mod tests {
         };
         sanitize_region_options(&manifest, &mut options);
         assert_eq!(options.sst_format, Some(FormatType::Flat));
+    }
+
+    #[rstest::rstest]
+    fn test_sanitize_region_options_recovers_json2(
+        #[values(FormatType::PrimaryKey, FormatType::Flat)] persisted: FormatType,
+        #[values(None, Some(FormatType::PrimaryKey), Some(FormatType::Flat))] requested: Option<
+            FormatType,
+        >,
+    ) {
+        let mut manifest = build_test_manifest(persisted);
+        let mut metadata = manifest.metadata.as_ref().clone();
+        metadata.column_metadatas[2].column_schema.data_type =
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
+        manifest.metadata = Arc::new(
+            RegionMetadataBuilder::from_existing(metadata)
+                .build()
+                .unwrap(),
+        );
+        let mut options = RegionOptions {
+            sst_format: requested,
+            ..Default::default()
+        };
+        sanitize_region_options(&manifest, &mut options);
+        assert_eq!(Some(FormatType::Flat), options.sst_format);
+        assert_eq!(persisted, manifest.sst_format);
     }
 
     fn sst_parquet_bytes(batch: &RecordBatch) -> Vec<u8> {
@@ -1749,6 +1801,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 
@@ -1825,6 +1878,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 
@@ -1844,6 +1898,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
     }
@@ -1898,6 +1953,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 

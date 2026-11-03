@@ -18,10 +18,9 @@
 
 use std::collections::HashSet;
 
-use arrow::datatypes::DataType;
 use common_telemetry::debug;
 use datafusion_common::Result as DfResult;
-use datafusion_expr::{Expr, LogicalPlan, Operator};
+use datafusion_expr::{Expr, LogicalPlan, Operator, utils::split_conjunction};
 use datatypes::value::Value;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 
@@ -48,33 +47,46 @@ impl PredicateExtractor {
         let partition_set: HashSet<String> = partition_columns.iter().cloned().collect();
 
         for filter_expr in filter_exprs {
-            match DataFusionExprConverter::convert(&filter_expr) {
-                Ok(partition_expr) => {
-                    // Check expression for safe partition pruning
-                    match ExpressionChecker::check_expression_for_pruning(
-                        &partition_expr,
-                        &partition_set,
-                    ) {
-                        ExpressionCheckResult::UseAsIs(expr) => {
-                            partition_exprs.push(expr);
-                        }
-                        ExpressionCheckResult::UsePartial(exprs) => {
-                            partition_exprs.extend(exprs);
-                        }
-                        ExpressionCheckResult::Drop => {
-                            debug!(
-                                "Dropping mixed expression for correctness: {}",
-                                partition_expr
-                            );
-                        }
-                    }
-                }
+            let partition_expr = match DataFusionExprConverter::convert(&filter_expr) {
+                Ok(expr) => Some(expr),
                 Err(err) => {
                     debug!(
-                        "Failed to convert filter expression to PartitionExpr: {}, skipping",
+                        "Failed to convert filter expression to PartitionExpr: {}, trying conjuncts",
                         err
                     );
-                    continue;
+                    split_conjunction(&filter_expr)
+                        .into_iter()
+                        .filter_map(|conjunct| match DataFusionExprConverter::convert(conjunct) {
+                            Ok(expr) => Some(expr),
+                            Err(err) => {
+                                debug!(
+                                    "Failed to convert filter conjunct to PartitionExpr: {}, skipping",
+                                    err
+                                );
+                                None
+                            }
+                        })
+                        // Keep salvaged conjuncts in one AND expression, not as alternatives.
+                        .reduce(PartitionExpr::and)
+                }
+            };
+            let Some(partition_expr) = partition_expr else {
+                continue;
+            };
+
+            // Check expression for safe partition pruning
+            match ExpressionChecker::check_expression_for_pruning(&partition_expr, &partition_set) {
+                ExpressionCheckResult::UseAsIs(expr) => {
+                    partition_exprs.push(expr);
+                }
+                ExpressionCheckResult::UsePartial(exprs) => {
+                    partition_exprs.extend(exprs);
+                }
+                ExpressionCheckResult::Drop => {
+                    debug!(
+                        "Dropping mixed expression for correctness: {}",
+                        partition_expr
+                    );
                 }
             }
         }
@@ -215,7 +227,7 @@ impl ExpressionChecker {
         result: &mut Vec<PartitionExpr>,
     ) {
         match operand {
-            Operand::Column(_) | Operand::Value(_) => {
+            Operand::Column(_) | Operand::Value(_) | Operand::IcebergHash(_) => {
                 // This shouldn't happen in well-formed expressions
             }
             Operand::Expr(expr) => {
@@ -240,6 +252,7 @@ impl ExpressionChecker {
     ) -> bool {
         match operand {
             Operand::Column(col) => partition_columns.contains(col),
+            Operand::IcebergHash(hash) => partition_columns.contains(hash.column()),
             Operand::Value(_) => true, // Values are always safe
             Operand::Expr(expr) => {
                 Self::expr_only_involves_partition_columns(expr, partition_columns)
@@ -423,7 +436,11 @@ impl DataFusionExprConverter {
                 Ok(Operand::Column(column_name))
             }
             Expr::Literal(scalar_value, _) => {
-                let value = Value::try_from(scalar_value.clone()).unwrap();
+                let value = Value::try_from(scalar_value.clone()).map_err(|err| {
+                    datafusion_common::DataFusionError::Plan(format!(
+                        "Failed to convert literal for partition pruning: {err}"
+                    ))
+                })?;
                 Ok(Operand::Value(value))
             }
             Expr::Alias(alias_expr) => {
@@ -431,19 +448,20 @@ impl DataFusionExprConverter {
                 Self::convert_to_operand(&alias_expr.expr)
             }
             Expr::Cast(cast_expr) => {
-                // For safe casts, unwrap to the inner expression
-                // For unsafe casts, skip with debug logging
-                if Self::is_safe_cast_for_partition_pruning(cast_expr.field.data_type()) {
-                    Self::convert_to_operand(&cast_expr.expr)
+                // Column casts need input type/value equivalence proof; literals must use the actual cast value.
+                if let Expr::Literal(value, _) = cast_expr.expr.as_ref() {
+                    let value = value.cast_to(cast_expr.field.data_type())?;
+                    let value = Value::try_from(value).map_err(|err| {
+                        datafusion_common::DataFusionError::Plan(format!(
+                            "Failed to convert cast literal for partition pruning: {err}"
+                        ))
+                    })?;
+                    Ok(Operand::Value(value))
                 } else {
-                    debug!(
-                        "Skipping unsafe cast for partition pruning: {:?}",
-                        cast_expr.field.data_type()
-                    );
-                    Err(datafusion_common::DataFusionError::Plan(format!(
-                        "Cast to {:?} not supported for partition pruning",
-                        cast_expr.field.data_type()
-                    )))
+                    debug!("Skipping cast expression for partition pruning: {:?}", expr);
+                    Err(datafusion_common::DataFusionError::Plan(
+                        "Cast expression not supported for partition pruning".to_string(),
+                    ))
                 }
             }
             other => {
@@ -480,46 +498,6 @@ impl DataFusionExprConverter {
             )));
         };
         Self::convert_operator(&negated)
-    }
-
-    /// Determine if a cast is safe for partition pruning
-    /// Safe casts don't change the logical meaning of constraints
-    fn is_safe_cast_for_partition_pruning(data_type: &DataType) -> bool {
-        match data_type {
-            // Integer widening casts are generally safe
-            DataType::Int8 => true,
-            DataType::Int16 => true,
-            DataType::Int32 => true,
-            DataType::Int64 => true,
-            DataType::UInt8 => true,
-            DataType::UInt16 => true,
-            DataType::UInt32 => true,
-            DataType::UInt64 => true,
-
-            // Float casts are generally safe for equality/inequality comparisons
-            DataType::Float32 => true,
-            DataType::Float64 => true,
-
-            // String casts might be safe in some cases
-            DataType::Utf8 => true,
-            DataType::LargeUtf8 => true,
-            // Dictionary encoding does not change the logical value. DataFusion inserts this cast
-            // when a predicate literal is compared with a dictionary-encoded scan column.
-            DataType::Dictionary(_, value_type) => {
-                Self::is_safe_cast_for_partition_pruning(value_type)
-            }
-
-            // Date/time casts might be safe if they don't change precision significantly
-            DataType::Date32 => true,
-            DataType::Date64 => true,
-            DataType::Timestamp(_, _) => true,
-
-            // Boolean casts are straightforward
-            DataType::Boolean => true,
-
-            // For other types, be conservative and skip
-            _ => false,
-        }
     }
 }
 
@@ -655,6 +633,190 @@ mod tests {
     }
 
     #[test]
+    fn test_cast_literals_are_evaluated_and_column_casts_are_skipped() {
+        let casts = [
+            (DataType::Int64, lit(1i64)),
+            (DataType::Float32, lit(1.0f32)),
+            (DataType::Utf8, lit("1")),
+            (DataType::Date32, lit(1i32)),
+            (
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Nanosecond, None),
+                lit(1i64),
+            ),
+        ];
+        for (data_type, value) in casts {
+            let cast = Expr::Cast(datafusion_expr::Cast::new(
+                Box::new(col("user_id")),
+                data_type,
+            ));
+            assert!(DataFusionExprConverter::convert(&cast.eq(value)).is_err());
+        }
+
+        let chain = Expr::Cast(datafusion_expr::Cast::new(
+            Box::new(Expr::Cast(datafusion_expr::Cast::new(
+                Box::new(col("user_id")),
+                DataType::Float64,
+            ))),
+            DataType::Int64,
+        ));
+        assert!(DataFusionExprConverter::convert(&chain.eq(lit(1i64))).is_err());
+
+        let cast_int = Expr::Cast(datafusion_expr::Cast::new(
+            Box::new(lit(1.5f64)),
+            DataType::Int64,
+        ));
+        assert_eq!(
+            DataFusionExprConverter::convert(&col("user_id").eq(cast_int))
+                .unwrap()
+                .rhs(),
+            &Operand::Value(Value::Int64(1))
+        );
+
+        let cast_string = Expr::Cast(datafusion_expr::Cast::new(
+            Box::new(lit("12")),
+            DataType::Int64,
+        ));
+        assert_eq!(
+            DataFusionExprConverter::convert(&col("user_id").eq(cast_string))
+                .unwrap()
+                .rhs(),
+            &Operand::Value(Value::Int64(12))
+        );
+
+        let unsupported = Expr::Cast(datafusion_expr::Cast::new(
+            Box::new(lit(1i64)),
+            DataType::Decimal256(10, 2),
+        ));
+        assert!(DataFusionExprConverter::convert_to_operand(&unsupported).is_err());
+    }
+
+    #[test]
+    fn test_cast_predicates_are_skipped_in_and_and_or() {
+        let cast = Expr::Cast(datafusion_expr::Cast::new(
+            Box::new(col("user_id")),
+            DataType::Float32,
+        ));
+        let lower = PartitionExpr::new(
+            Operand::Column("user_id".to_string()),
+            RestrictedOp::GtEq,
+            Operand::Value(Value::Int64(1)),
+        );
+        let upper = PartitionExpr::new(
+            Operand::Column("user_id".to_string()),
+            RestrictedOp::Lt,
+            Operand::Value(Value::Int64(10)),
+        );
+        let bounds = PartitionExpr::new(
+            Operand::Expr(lower.clone()),
+            RestrictedOp::And,
+            Operand::Expr(upper.clone()),
+        );
+        check_partition_expressions(vec![
+            FilterTestCase::new(
+                "cast_in_and_preserves_partition_bound",
+                col("user_id")
+                    .eq(lit(1i64))
+                    .and(cast.clone().eq(lit(1.0f32))),
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(1)),
+                )],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "cast_between_two_bounds_preserves_both",
+                col("user_id")
+                    .gt_eq(lit(1i64))
+                    .and(col("user_id").lt(lit(10i64)))
+                    .and(cast.clone().eq(lit(1.0f32))),
+                vec![bounds.clone()],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "cast_left_of_bounds_preserves_both",
+                cast.clone()
+                    .eq(lit(1.0f32))
+                    .and(col("user_id").gt_eq(lit(1i64)))
+                    .and(col("user_id").lt(lit(10i64))),
+                vec![bounds.clone()],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "cast_between_bounds_preserves_both",
+                col("user_id")
+                    .gt_eq(lit(1i64))
+                    .and(cast.clone().eq(lit(1.0f32)))
+                    .and(col("user_id").lt(lit(10i64))),
+                vec![bounds],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "is_not_null_cast_preserves_partition_bound",
+                col("user_id").eq(lit(1i64)).and(
+                    Expr::Cast(datafusion_expr::Cast::new(
+                        Box::new(col("value")),
+                        DataType::Int32,
+                    ))
+                    .is_not_null(),
+                ),
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(1)),
+                )],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "all_unsupported_conjunction_is_dropped",
+                Expr::Cast(datafusion_expr::Cast::new(
+                    Box::new(col("value")),
+                    DataType::Int32,
+                ))
+                .eq(lit(1i32))
+                .and(
+                    Expr::Cast(datafusion_expr::Cast::new(
+                        Box::new(col("timestamp")),
+                        DataType::Float32,
+                    ))
+                    .eq(lit(1.0f32)),
+                ),
+                vec![],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "nested_and_with_or_side_preserves_bound",
+                col("user_id").eq(lit(1i64)).and(
+                    col("user_id")
+                        .eq(lit(2i64))
+                        .or(cast.clone().eq(lit(1.0f32))),
+                ),
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(1)),
+                )],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "or_with_nested_and_cast_drops_whole_expression",
+                col("user_id")
+                    .eq(lit(1i64))
+                    .and(cast.clone().eq(lit(1.0f32)))
+                    .or(col("user_id").eq(lit(2i64))),
+                vec![],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "cast_in_or_drops_entire_predicate",
+                col("user_id").eq(lit(1i64)).or(cast.eq(lit(1.0f32))),
+                vec![],
+                vec!["user_id"],
+            ),
+        ]);
+    }
+
+    #[test]
     fn test_combines_table_scan_filters_as_conjunction() {
         let table_scan = create_test_table_scan();
         let filter_a = col("user_id").eq(lit(10i64));
@@ -663,32 +825,42 @@ mod tests {
             panic!("expected test table scan");
         };
         let plan = LogicalPlan::TableScan(datafusion_expr::logical_plan::TableScan {
-            filters: vec![filter_a, filter_b],
+            filters: vec![filter_a.clone(), filter_b.clone()],
+            ..scan.clone()
+        });
+        let partition_columns = ["user_id".to_string(), "value".to_string()];
+        let expected = vec![PartitionExpr::new(
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("user_id".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::Int64(10)),
+            )),
+            RestrictedOp::And,
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("value".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::Int64(20)),
+            )),
+        )];
+
+        let partition_exprs =
+            PredicateExtractor::extract_partition_expressions(&plan, &partition_columns).unwrap();
+        assert_eq!(partition_exprs, expected);
+
+        let unsupported = Expr::Cast(datafusion_expr::Cast::new(
+            Box::new(col("timestamp")),
+            DataType::Float32,
+        ))
+        .eq(lit(1.0f32));
+        let plan = LogicalPlan::TableScan(datafusion_expr::logical_plan::TableScan {
+            filters: vec![filter_a, unsupported, filter_b],
             ..scan
         });
 
-        let partition_exprs = PredicateExtractor::extract_partition_expressions(
-            &plan,
-            &["user_id".to_string(), "value".to_string()],
-        )
-        .unwrap();
+        let partition_exprs =
+            PredicateExtractor::extract_partition_expressions(&plan, &partition_columns).unwrap();
 
-        assert_eq!(
-            partition_exprs,
-            vec![PartitionExpr::new(
-                Operand::Expr(PartitionExpr::new(
-                    Operand::Column("user_id".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Int64(10)),
-                )),
-                RestrictedOp::And,
-                Operand::Expr(PartitionExpr::new(
-                    Operand::Column("value".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Int64(20)),
-                )),
-            )]
-        );
+        assert_eq!(partition_exprs, expected);
     }
 
     #[test]
@@ -1010,31 +1182,23 @@ mod tests {
     fn test_cast_expressions() {
         let cases = vec![
             FilterTestCase::new(
-                "safe_cast",
+                "column_cast_requires_type_proof",
                 Expr::Cast(datafusion_expr::Cast::new(
                     Box::new(col("user_id")),
                     DataType::Int64,
                 ))
                 .eq(lit(100i64)),
-                vec![PartitionExpr::new(
-                    Operand::Column("user_id".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Int64(100)),
-                )],
+                vec![],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
-                "cast_with_alias",
+                "cast_with_alias_requires_type_proof",
                 Expr::Cast(datafusion_expr::Cast::new(
                     Box::new(col("user_id").alias("uid")),
                     DataType::Int64,
                 ))
                 .eq(lit(100i64)),
-                vec![PartitionExpr::new(
-                    Operand::Column("user_id".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Int64(100)),
-                )],
+                vec![],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
@@ -1122,11 +1286,7 @@ mod tests {
                     let in_expr = col("user_id")
                         .alias("uid")
                         .in_list(vec![lit(100i64), lit(200i64)], false);
-                    let cast_expr = Expr::Cast(datafusion_expr::Cast::new(
-                        Box::new(col("user_id")),
-                        DataType::Int64,
-                    ));
-                    let between_expr = cast_expr.between(lit(300i64), lit(400i64));
+                    let between_expr = col("user_id").between(lit(300i64), lit(400i64));
                     in_expr.or(between_expr)
                 },
                 vec![PartitionExpr::new(

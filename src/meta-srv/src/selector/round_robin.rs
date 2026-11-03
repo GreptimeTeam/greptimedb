@@ -18,11 +18,9 @@ use common_meta::affinity::AffinityFallback;
 use common_meta::peer::Peer;
 use snafu::{ResultExt, ensure};
 
-use crate::error::{
-    self, ListActiveDatanodesSnafu, ListActiveFlownodesSnafu, NoEnoughAvailableNodeSnafu, Result,
-};
+use crate::error::{self, ListActiveFlownodesSnafu, NoEnoughAvailableNodeSnafu, Result};
 use crate::metasrv::{SelectTarget, SelectorContext};
-use crate::selector::{Selector, SelectorOptions};
+use crate::selector::{Selector, SelectorOptions, common};
 
 /// Round-robin selector that returns the next peer in the list in sequence.
 /// Datanodes are ordered by their node_id.
@@ -59,19 +57,22 @@ impl RoundRobinSelector {
         ctx: &SelectorContext,
     ) -> Result<Vec<Peer>> {
         let mut peers = match self.select_target {
-            SelectTarget::Datanode => ctx
-                .peer_discovery
-                .active_datanodes(opts.workload_filter)
-                .await
-                .context(ListActiveDatanodesSnafu)?
-                .into_iter()
-                .filter(|node| {
-                    opts.affinity
-                        .is_none_or(|requirements| ctx.affinity.matches(requirements, node))
-                })
-                .map(|node| node.peer)
-                .filter(|peer| !opts.exclude_peer_ids.contains(&peer.id))
-                .collect::<Vec<_>>(),
+            SelectTarget::Datanode => {
+                // 1. get alive, schedulable datanodes.
+                let alive_datanodes =
+                    common::active_schedulable_datanodes(ctx, opts.workload_filter).await?;
+
+                // 2. filter by affinity, then drop the excluded datanodes.
+                alive_datanodes
+                    .into_iter()
+                    .filter(|node| {
+                        opts.affinity
+                            .is_none_or(|requirements| ctx.affinity.matches(requirements, node))
+                    })
+                    .map(|node| node.peer)
+                    .filter(|peer| !opts.exclude_peer_ids.contains(&peer.id))
+                    .collect::<Vec<_>>()
+            }
             SelectTarget::Flownode => ctx
                 .peer_discovery
                 .active_flownodes(opts.workload_filter)
@@ -157,7 +158,7 @@ mod test {
     use common_meta::affinity::NoopAffinity;
 
     use super::*;
-    use crate::test_util::{create_meta_peer_client, put_datanodes};
+    use crate::test_util::{create_meta_peer_client, new_node_scheduling_discovery, put_datanodes};
 
     #[tokio::test]
     async fn test_round_robin_selector() {
@@ -166,7 +167,7 @@ mod test {
         let ctx = SelectorContext {
             affinity_fallback: Default::default(),
             affinity: Arc::new(NoopAffinity),
-            peer_discovery: meta_peer_client.clone(),
+            peer_discovery: Arc::new(new_node_scheduling_discovery(&meta_peer_client).1),
         };
         // add three nodes
         let peer1 = Peer {
@@ -227,7 +228,7 @@ mod test {
         let ctx = SelectorContext {
             affinity_fallback: Default::default(),
             affinity: Arc::new(NoopAffinity),
-            peer_discovery: meta_peer_client.clone(),
+            peer_discovery: Arc::new(new_node_scheduling_discovery(&meta_peer_client).1),
         };
         // add three nodes
         let peer1 = Peer {

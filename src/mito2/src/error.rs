@@ -230,6 +230,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to load SST metadata"))]
+    LoadSstMeta {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to load Parquet page"))]
+    LoadParquetPage {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to write parquet file"))]
     WriteParquet {
         #[snafu(source)]
@@ -688,6 +702,23 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
+    RegionLeaseExpired {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} lost its leader lease while writing to the WAL, the write may have been applied",
+        region_id
+    ))]
+    UnacknowledgedWrite {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to compact region {}", region_id))]
     CompactRegion {
         region_id: RegionId,
@@ -803,6 +834,18 @@ pub enum Error {
     BuildIndexAsync {
         region_id: RegionId,
         source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Index build did not complete for files {:?} in region {}",
+        file_ids,
+        region_id
+    ))]
+    IndexBuildIncomplete {
+        region_id: RegionId,
+        file_ids: Vec<FileId>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1458,6 +1501,9 @@ impl Error {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
             Error::ManifestDeltaNotFound { .. } => true,
+            Error::LoadSstMeta { source, .. } | Error::LoadParquetPage { source, .. } => {
+                source.is_object_not_found()
+            }
             _ => false,
         }
     }
@@ -1465,7 +1511,9 @@ impl Error {
     /// Returns whether a failed manifest update may have been persisted.
     ///
     /// Unknown errors are treated conservatively because deleting output SSTs after an ambiguous
-    /// manifest write could leave the manifest referencing missing files.
+    /// manifest write could leave the manifest referencing missing files. The retry layer returns
+    /// the last attempt's error, so an error that can follow a stored attempt (throttling, or a 403
+    /// from a revoked key, a changed bucket policy or clock skew) never proves nothing was written.
     pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
         match self {
             Error::UpdateManifest { .. }
@@ -1479,11 +1527,9 @@ impl Error {
                 ErrorKind::Unsupported
                     | ErrorKind::ConfigInvalid
                     | ErrorKind::NotFound
-                    | ErrorKind::PermissionDenied
                     | ErrorKind::IsADirectory
                     | ErrorKind::NotADirectory
                     | ErrorKind::AlreadyExists
-                    | ErrorKind::RateLimited
                     | ErrorKind::IsSameFile
                     | ErrorKind::ConditionNotMatch
                     | ErrorKind::RangeNotSatisfied
@@ -1588,7 +1634,9 @@ impl ErrorExt for Error {
             OpenRegion { source, .. } => source.status_code(),
 
             WriteParquet { .. } => StatusCode::StorageUnavailable,
-            WriteGroup { source, .. } => source.status_code(),
+            WriteGroup { source, .. }
+            | LoadSstMeta { source, .. }
+            | LoadParquetPage { source, .. } => source.status_code(),
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
@@ -1601,6 +1649,7 @@ impl ErrorExt for Error {
                 StatusCode::StorageUnavailable
             }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
+            IndexBuildIncomplete { .. } => StatusCode::IllegalState,
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,
@@ -1611,6 +1660,7 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1706,7 +1756,10 @@ impl ErrorExt for Error {
         match self {
             PartitionExprVersionMismatch { .. }
             | RegionNotFound { .. }
+            | RegionClosed { .. }
             | RejectWriteInStaging { .. }
+            | RegionLeaseExpired { .. }
+            | UnacknowledgedWrite { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
                 ..
@@ -1738,6 +1791,8 @@ impl ErrorExt for Error {
             | External { source, .. } => source.retry_hint(),
 
             OpenRegion { source, .. }
+            | LoadSstMeta { source, .. }
+            | LoadParquetPage { source, .. }
             | WriteGroup { source, .. }
             | FlushRegion { source, .. }
             | BuildIndexAsync { source, .. }
@@ -1846,9 +1901,49 @@ mod tests {
                 StatusCode::RegionNotFound,
                 RetryHint::RetryAfterRouteRefresh,
             ),
+            (
+                RegionClosedSnafu { region_id }.build(),
+                StatusCode::Cancelled,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+            (
+                RegionDroppedSnafu { region_id }.build(),
+                StatusCode::Cancelled,
+                RetryHint::NonRetryable,
+            ),
+            (
+                RegionTruncatedSnafu { region_id }.build(),
+                StatusCode::Cancelled,
+                RetryHint::NonRetryable,
+            ),
         ] {
             assert_eq!(error.status_code(), status);
             assert_eq!(error.retry_hint(), hint);
+        }
+    }
+
+    #[test]
+    fn test_shared_sst_metadata_preserves_error_semantics() {
+        for source in [
+            OpenDalSnafu {}
+                .into_error(object_store::Error::new(ErrorKind::NotFound, "missing SST")),
+            OpenDalSnafu {}.into_error(object_store::Error::new(
+                ErrorKind::Unexpected,
+                "read failed",
+            )),
+            RejectWriteSnafu {
+                region_id: RegionId::new(1, 1),
+            }
+            .build(),
+        ] {
+            let expected_not_found = source.is_object_not_found();
+            let expected_status = source.status_code();
+            let expected_retry = source.retry_hint();
+            let source = Arc::new(source);
+            let wrapped = LoadSstMetaSnafu.into_error(source);
+            assert_eq!(expected_not_found, wrapped.is_object_not_found());
+            assert_eq!(expected_status, wrapped.status_code());
+            assert_eq!(expected_retry, wrapped.retry_hint());
         }
     }
 
@@ -1858,11 +1953,9 @@ mod tests {
             ErrorKind::Unsupported,
             ErrorKind::ConfigInvalid,
             ErrorKind::NotFound,
-            ErrorKind::PermissionDenied,
             ErrorKind::IsADirectory,
             ErrorKind::NotADirectory,
             ErrorKind::AlreadyExists,
-            ErrorKind::RateLimited,
             ErrorKind::IsSameFile,
             ErrorKind::ConditionNotMatch,
             ErrorKind::RangeNotSatisfied,
@@ -1875,9 +1968,18 @@ mod tests {
             );
         }
 
-        let error =
-            OpenDalSnafu {}.into_error(object_store::Error::new(ErrorKind::Unexpected, "test"));
-        assert!(error.may_have_persisted_manifest_update());
+        // The last retry can fail with these kinds even though an earlier attempt was stored.
+        for kind in [
+            ErrorKind::Unexpected,
+            ErrorKind::RateLimited,
+            ErrorKind::PermissionDenied,
+        ] {
+            let error = OpenDalSnafu {}.into_error(object_store::Error::new(kind, "test"));
+            assert!(
+                error.may_have_persisted_manifest_update(),
+                "error kind {kind:?} should not prove the manifest was not persisted"
+            );
+        }
 
         let region_id = RegionId::new(1, 1);
         let error = RegionTruncatedSnafu { region_id }.build();

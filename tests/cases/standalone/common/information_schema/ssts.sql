@@ -80,4 +80,39 @@ FROM (
   LIMIT 1
 );
 
+-- Timestamp filters must run before ordering and limiting. Sort columns must
+-- remain available even when they are absent from the output projection.
+SELECT min_ts, max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0 AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+ORDER BY min_ts ASC NULLS LAST, max_ts ASC
+LIMIT 2;
+
+SELECT min_ts, max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0
+ORDER BY max_ts DESC NULLS FIRST, min_ts DESC
+LIMIT 2 OFFSET 1;
+
+SELECT visible
+FROM information_schema.ssts_manifest
+WHERE region_id > 0 AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+ORDER BY min_ts DESC
+LIMIT 2;
+
+-- Table predicates share region metadata pruning, including when table_id
+-- is not part of the output projection.
+SELECT min_ts, max_ts FROM information_schema.ssts_manifest
+WHERE table_id > 0 ORDER BY min_ts, max_ts LIMIT 2;
+
+SELECT min_ts FROM information_schema.ssts_manifest
+WHERE table_id = 0 ORDER BY min_ts LIMIT 1;
+
+-- A false region predicate and a zero limit must produce empty results.
+SELECT min_ts FROM information_schema.ssts_manifest
+WHERE region_id = 0 ORDER BY min_ts LIMIT 1;
+
+SELECT min_ts FROM information_schema.ssts_manifest
+ORDER BY min_ts LIMIT 0;
+
 DROP TABLE sst_case;

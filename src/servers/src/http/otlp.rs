@@ -116,7 +116,6 @@ pub async fn metrics(
         promote_scope_attrs: http_opts.promote_scope_attrs,
         with_metric_engine,
         // set by the frontend from its config
-        is_legacy: false,
         resource_info: false,
         metric_type: MetricType::Init,
         metric_translation_strategy: http_opts.metric_translation_strategy,

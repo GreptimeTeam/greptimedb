@@ -67,6 +67,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::discovery;
+use crate::discovery::node_info::NodeInfoAccessor;
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
@@ -74,7 +75,9 @@ use crate::error::{
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
+use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
+use crate::procedure::drain_datanode::manager::DrainDatanodeManagerRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
@@ -514,9 +517,13 @@ pub trait SelectorFactory: Send + Sync {
     fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef;
 
     /// Builds the resolver shared by allocation and failover callers.
+    ///
+    /// The accessor includes last-known records of inactive source nodes; discovery
+    /// is the shared scheduling-aware view of active nodes.
     fn build_affinity_resolver(
         &self,
-        _meta_peer_client: MetaPeerClientRef,
+        _node_info_accessor: Arc<dyn NodeInfoAccessor>,
+        _peer_discovery: PeerDiscoveryRef,
     ) -> Option<AffinityResolverRef> {
         None
     }
@@ -600,6 +607,7 @@ pub struct Metasrv {
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
+    drain_datanode_manager: DrainDatanodeManagerRef,
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
@@ -611,6 +619,7 @@ pub struct Metasrv {
     resource_stat: ResourceStatRef,
     gc_ticker: Option<GcTickerRef>,
     database_operator: DatabaseOperatorRef,
+    node_scheduling_manager: NodeSchedulingManagerRef,
 
     plugins: Plugins,
 }
@@ -852,6 +861,10 @@ impl Metasrv {
         &self.kv_backend
     }
 
+    /// Returns the undecorated peer client.
+    ///
+    /// Its `active_datanodes` does not know about node scheduling states. Use
+    /// [`Metasrv::selector_ctx`] for any consumer that places regions or picks datanodes.
     pub fn meta_peer_client(&self) -> &MetaPeerClientRef {
         &self.meta_peer_client
     }
@@ -860,6 +873,7 @@ impl Metasrv {
         &self.selector
     }
 
+    /// Returns the selector context, whose `peer_discovery` stamps node scheduling states.
     pub fn selector_ctx(&self) -> &SelectorContext {
         &self.selector_ctx
     }
@@ -904,6 +918,11 @@ impl Metasrv {
         &self.region_migration_manager
     }
 
+    /// Returns the [`DrainDatanodeManagerRef`].
+    pub fn drain_datanode_manager(&self) -> &DrainDatanodeManagerRef {
+        &self.drain_datanode_manager
+    }
+
     pub fn publish(&self) -> Option<PublisherRef> {
         self.plugins.get::<PublisherRef>()
     }
@@ -922,6 +941,10 @@ impl Metasrv {
 
     pub fn database_operator(&self) -> &DatabaseOperatorRef {
         &self.database_operator
+    }
+
+    pub fn node_scheduling_manager(&self) -> &NodeSchedulingManagerRef {
+        &self.node_scheduling_manager
     }
 
     pub fn plugins(&self) -> &Plugins {
