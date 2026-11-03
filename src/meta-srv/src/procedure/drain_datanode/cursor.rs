@@ -280,7 +280,6 @@ mod tests {
     use crate::procedure::drain_datanode::drain_datanode_end::DrainDatanodeEnd;
     use crate::procedure::drain_datanode::test_util::{
         TestEnv, create_kafka_table, leader_region, leader_regions, new_persistent_context,
-        set_leader_regions,
     };
     use crate::procedure::drain_datanode::{DrainDatanodeStrategy, MAX_RESCAN_ROUNDS, State};
     use crate::procedure::region_migration::manager::{
@@ -450,13 +449,13 @@ mod tests {
             Some(3),
             DrainDatanodeStrategy::FailFast,
         ));
-        set_leader_regions(&mut ctx, vec![region_id]);
+        let mut cursor = DrainDatanodeCursor {
+            region_group: vec![region_id],
+            ..Default::default()
+        };
         let procedure_ctx = TestingEnv::procedure_context();
 
-        let (next, status) = DrainDatanodeCursor::default()
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
+        let (next, status) = cursor.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         assert!(matches!(status, Status::Executing { .. }));
         assert!(next.as_any().is::<DrainDatanodeEnd>());
@@ -465,46 +464,50 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_datanode_skips_region_whose_migration_is_running() {
-        let env = TestEnv::new().await;
-        let region_id = RegionId::new(1024, 1);
-        env.create_table(vec![leader_region(region_id, 1)]).await;
+        for scan_before_migration in [false, true] {
+            let env = TestEnv::new().await;
+            let region_id = RegionId::new(1024, 1);
+            env.create_table(vec![leader_region(region_id, 1)]).await;
 
-        let mut ctx = env.context(new_persistent_context(
-            Some(2),
-            DrainDatanodeStrategy::FailFast,
-        ));
-        set_leader_regions(&mut ctx, vec![region_id]);
-        let procedure_ctx = TestingEnv::procedure_context();
+            let mut ctx = env.context(new_persistent_context(
+                Some(2),
+                DrainDatanodeStrategy::FailFast,
+            ));
+            let mut cursor = DrainDatanodeCursor::default();
+            if scan_before_migration {
+                cursor.start_scan(&mut ctx).unwrap();
+                cursor.region_group = cursor.read_next_group(&mut ctx, 1).await.unwrap().unwrap();
+                assert_eq!(vec![region_id], cursor.region_group);
+            }
+            let procedure_ctx = TestingEnv::procedure_context();
 
-        // A manual migration of the same region is already running. Building it keeps the
-        // region in the running set of the migration manager until it is dropped.
-        let _child = env
-            .region_migration_manager
-            .build_subprocedure(
-                common_procedure::ProcedureContext::default(),
-                RegionMigrationProcedureTask::new(
-                    region_id,
-                    Peer::empty(1),
-                    Peer::empty(2),
-                    Duration::from_secs(10),
-                    RegionMigrationTriggerReason::Manual,
-                ),
-            )
-            .await
-            .expect("the manual migration should be buildable");
+            // A manual migration of the same region is already running. Building it keeps the
+            // region in the running set of the migration manager until it is dropped.
+            let _child = env
+                .region_migration_manager
+                .build_subprocedure(
+                    common_procedure::ProcedureContext::default(),
+                    RegionMigrationProcedureTask::new(
+                        region_id,
+                        Peer::empty(1),
+                        Peer::empty(2),
+                        Duration::from_secs(10),
+                        RegionMigrationTriggerReason::Manual,
+                    ),
+                )
+                .await
+                .expect("the manual migration should be buildable");
 
-        let (next, status) = DrainDatanodeCursor::default()
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
+            let (next, status) = cursor.next(&mut ctx, &procedure_ctx).await.unwrap();
 
-        // The region is ignored for this round instead of failing the drain: it leaves the current batch
-        // and is neither migrated nor given up. The rescan re-adds it when the datanode still
-        // leads it.
-        assert!(matches!(status, Status::Executing { .. }));
-        assert!(next.as_any().is::<DrainDatanodeEnd>());
-        assert!(leader_regions(&ctx).is_empty());
-        assert!(ctx.volatile_ctx.failed_regions.is_empty());
+            // Both scanning and preparation skip regions owned by another migration.
+            assert!(matches!(status, Status::Executing { .. }));
+            assert!(next.as_any().is::<DrainDatanodeEnd>());
+            assert!(leader_regions(&ctx).is_empty());
+            assert!(ctx.volatile_ctx.failed_regions.is_empty());
+            assert_eq!(0, ctx.volatile_ctx.migrated);
+            assert!(env.region_migration_manager.tracker().contains(region_id));
+        }
     }
 
     #[tokio::test]
