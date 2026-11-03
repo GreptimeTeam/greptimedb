@@ -58,7 +58,6 @@ use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::common::utils::AsAny;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{MemoryPool, MemoryReservation, UnboundedMemoryPool};
@@ -2282,8 +2281,7 @@ impl FusedSeriesExec {
 
 #[cfg(feature = "test-utils")]
 pub fn is_canonical_producer_exec(plan: &dyn ExecutionPlan) -> bool {
-    plan.as_any()
-        .downcast_ref::<FusedSeriesExec>()
+    plan.downcast_ref::<FusedSeriesExec>()
         .is_some_and(|fused| fused.canonical_producer_for_test)
 }
 
