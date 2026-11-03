@@ -5291,19 +5291,40 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         let (native_columns, native_rows) =
             native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
         let root = observer.root_plan();
-        assert_eq!(
-            root.name(),
-            "FusedSeriesExec",
-            "{query}: the parent is the frontend's own: {}",
-            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
-        );
+        // A segmented statement publishes the statement's own column names from one projection over
+        // the fused parent; anything else above the parent would be a different plan shape.
+        let fused_parent = if root.name() == "ProjectionExec" {
+            let children = root.children();
+            assert_eq!(
+                1,
+                children.len(),
+                "{query}: the naming projection renames one input: {}",
+                datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+            );
+            assert_eq!(
+                "FusedSeriesExec",
+                children[0].name(),
+                "{query}: the parent under the naming projection is the frontend's own: {}",
+                datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+            );
+            Arc::clone(children[0])
+        } else {
+            assert_eq!(
+                root.name(),
+                "FusedSeriesExec",
+                "{query}: the parent is the frontend's own: {}",
+                datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+            );
+            Arc::clone(&root)
+        };
         assert_eq!(root.output_partitioning().partition_count(), 1, "{query}");
         assert_eq!(
-            root.children().len(),
+            fused_parent.children().len(),
             2,
             "{query}: one input per segmented prefix: {}",
             datafusion::physical_plan::displayable(root.as_ref()).indent(true)
         );
+        let root = fused_parent;
         // Each region answers one prefix: a repartition over the segment that evaluates the
         // selector, over the scan bound to that selector's metric.
         fn scan_metric(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> Option<String> {
@@ -5340,29 +5361,15 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         assert_eq!(native_rows, expected, "{query}");
 
         // The columns both routes report: the time index, one value column, and one column per
-        // label. The labels themselves are compared row by row above, and the time index is `ts` on
-        // both. The value column's *name* is not equal, and that is this route's existing naming for
-        // a computed value column rather than anything this shape introduces: the node names its
-        // fields after the tree's own root schema, while the existing planner names a computed column
-        // after its expression; the same difference is pinned for a cross-table
-        // pair by `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
-        // shape is asserted, and the value column's name is pinned as the raw field it comes from.
+        // label. The value column is named after the expression on both, because the boundary
+        // renames the field the node computes internally.
         assert_eq!(
-            native_columns.len(),
-            legacy_columns.len(),
-            "{query}: columns"
+            native_columns, legacy_columns,
+            "{query}: the boundary publishes the statement's column names"
         );
         assert!(
             legacy_columns.iter().any(|column| column == "ts"),
             "{query}"
-        );
-        assert!(
-            native_columns.iter().any(|column| column == "ts"),
-            "{query}"
-        );
-        assert!(
-            native_columns.iter().any(|column| column == "val"),
-            "{query}: {native_columns:?}"
         );
         let labels = native_rows
             .first()

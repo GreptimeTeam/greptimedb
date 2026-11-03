@@ -1747,17 +1747,10 @@ async fn check_two_source_segregation(
     assert_rows(&legacy.rows, expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, promql, true, observer).await;
-    // The value column this statement reports differs from the legacy plan's, and that is a known
-    // gap rather than an intended rename: the segmented parent names its value columns from the
-    // compiled tree, where a matching binary takes its left operand's field name, while the existing
-    // planner names a computed column after its expression. Every other native case in this file
-    // reports the legacy names because it is answered by the aggregate split, whose output schema is
-    // built from the legacy plan's columns. Restoring the legacy name for a segmented statement
-    // needs a rename above the parent node - its own schema has to keep the compiled field names its
-    // output columns are classified by - and that is deliberately not part of this change.
-    //
-    // Both schemas are pinned instead, so a future change to either naming rule shows up here
-    // instead of passing on values alone. QueryResult preserves this order for this statement.
+    // A segmented statement publishes the same names the existing plan does: the value column is
+    // named after the expression, not after the field the compiled tree calls it. The fused node
+    // itself keeps the compiled name internally, which is what its own output columns are
+    // classified by; only the boundary renames.
     assert_eq!(
         vec![
             "ts".to_string(),
@@ -1769,9 +1762,8 @@ async fn check_two_source_segregation(
         "`{query}`: the legacy plan names the value column after its expression"
     );
     assert_eq!(
-        vec!["ts".to_string(), "v".to_string()],
-        native.columns,
-        "`{query}`: the segmented native plan reports the compiled field name"
+        legacy.columns, native.columns,
+        "`{query}`: a segmented boundary publishes the statement's names"
     );
     assert_rows(&native.rows, expected, &format!("native `{query}`"));
     let parent_plan = capture

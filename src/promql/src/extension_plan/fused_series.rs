@@ -44,7 +44,7 @@ use std::collections::VecDeque;
 use std::fmt::{self, Formatter};
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
@@ -914,37 +914,10 @@ impl FusedSeries {
     /// The planner decides them from the whole tree - a match narrows them, `or` joins both sides'
     /// and a wrapper around either keeps them - and the output schema is where it records that.
     ///
-    /// A tree reading aggregate state cannot match root fields by name: its value columns carry the
-    /// statement's legacy names, which name the whole expression (`sum(m.v)`), while the root's
-    /// fields name the one metric field (`v`). It therefore relies on the order the split's output
-    /// schema is built in - the time index, then one column per root field, then the tags - which is
-    /// what `classify_aggregate_state_output` checks against the actual types rather than trusting.
     fn output_tags(&self) -> DataFusionResult<Vec<String>> {
         let Some(root) = self.tree.root().output.samples() else {
             return Ok(Vec::new());
         };
-        if self.reads_aggregate_state() {
-            let non_time_columns = self
-                .output_schema
-                .fields()
-                .iter()
-                .filter(|field| field.name() != &self.binding.time_index)
-                .map(|field| field.name())
-                .collect::<Vec<_>>();
-            let value_count = root.fields.len();
-            if non_time_columns.len() < value_count {
-                return Err(DataFusionError::Plan(format!(
-                    "FusedSeries output has {} non-time columns, fewer than the {} root value fields required for aggregate-state output",
-                    non_time_columns.len(),
-                    value_count
-                )));
-            }
-            return Ok(non_time_columns
-                .into_iter()
-                .skip(value_count)
-                .cloned()
-                .collect());
-        }
         Ok(self
             .output_schema
             .fields()
@@ -1759,95 +1732,6 @@ fn scalar_root_fields(
     }])
 }
 
-/// Classifies aggregate-state output columns by their planner-defined positions.
-fn classify_aggregate_state_output(
-    output_schema: &SchemaRef,
-    value_count: usize,
-    tags: &[String],
-    time_column: &str,
-) -> DataFusionResult<Vec<OutputColumn>> {
-    let time_indices = output_schema
-        .fields()
-        .iter()
-        .enumerate()
-        .filter(|(_, field)| field.name().as_str() == time_column)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let time_index = match time_indices.as_slice() {
-        [] => {
-            return Err(DataFusionError::Plan(format!(
-                "missing time column {time_column:?} in FusedSeriesExec output schema"
-            )));
-        }
-        [index] => *index,
-        _ => {
-            return Err(DataFusionError::Plan(format!(
-                "duplicate time column {time_column:?} in FusedSeriesExec output schema"
-            )));
-        }
-    };
-    let non_time_count = output_schema.fields().len() - 1;
-    let tag_count = non_time_count.saturating_sub(value_count);
-    if non_time_count < value_count || tag_count != tags.len() {
-        return Err(DataFusionError::Plan(format!(
-            "aggregate-state output has {non_time_count} non-time columns ({value_count} value columns and {tag_count} tag columns), but expected {value_count} value columns and {} tag columns",
-            tags.len()
-        )));
-    }
-
-    let mut classification = Vec::with_capacity(output_schema.fields().len());
-    let mut value_index = 0;
-    let mut tag_index = 0;
-    for (index, field) in output_schema.fields().iter().enumerate() {
-        let name = field.name();
-        if index == time_index {
-            match field.data_type() {
-                DataType::Timestamp(TimeUnit::Millisecond, None) => {}
-                other => {
-                    return Err(DataFusionError::Plan(format!(
-                        "time column {name:?} of FusedSeriesExec must be Timestamp(Millisecond, None), got {other:?}"
-                    )));
-                }
-            }
-            if field.is_nullable() {
-                return Err(DataFusionError::Plan(format!(
-                    "time column {name:?} of FusedSeriesExec must not be nullable"
-                )));
-            }
-            classification.push(OutputColumn::Time);
-        } else if value_index < value_count {
-            if field.data_type() != &DataType::Float64 {
-                return Err(DataFusionError::Plan(format!(
-                    "field column {name:?} of FusedSeriesExec must be Float64, got {:?}",
-                    field.data_type()
-                )));
-            }
-            if !field.is_nullable() {
-                return Err(DataFusionError::Plan(format!(
-                    "field column {name:?} of FusedSeriesExec must be nullable, because a grid point can be missing"
-                )));
-            }
-            classification.push(OutputColumn::Field(value_index));
-            value_index += 1;
-        } else {
-            if field.data_type() != &DataType::Utf8 {
-                return Err(DataFusionError::Plan(format!(
-                    "tag column {name:?} of FusedSeriesExec must be Utf8, got {:?}",
-                    field.data_type()
-                )));
-            }
-            if !field.is_nullable() {
-                return Err(DataFusionError::Plan(format!(
-                    "tag column {name:?} of FusedSeriesExec must be nullable, because range functions and map kernels drop the metric name"
-                )));
-            }
-            classification.push(OutputColumn::Tag(tag_index));
-            tag_index += 1;
-        }
-    }
-    Ok(classification)
-}
-
 /// Classifies every output column, rejecting anything the conversion cannot produce.
 pub(crate) fn classify_output(
     output_schema: &SchemaRef,
@@ -2219,19 +2103,6 @@ impl FusedSeriesExec {
         };
         let classification = if partial_root || frame_schema {
             Vec::new()
-        } else if tree_inputs(&tree)
-            .iter()
-            .any(|input| matches!(input.output, NativeType::AggregateState(_)))
-        {
-            let output_series = output_series
-                .as_ref()
-                .ok_or_else(|| DataFusionError::Plan("FusedSeries output is not samples".into()))?;
-            classify_aggregate_state_output(
-                &output_schema,
-                output_series.fields.len(),
-                &tags,
-                &time_column,
-            )?
         } else if scalar_root {
             let scalar_fields = scalar_root_fields(&output_schema, &tags, &time_column)?;
             classify_output(&output_schema, &scalar_fields, &tags, &time_column)?

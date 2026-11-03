@@ -587,8 +587,27 @@ fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
 /// a `SeriesFrame` over one table scan whose root is a `Partial` aggregate producing
 /// `AggregateState`. A `SeriesFrame` can also contain evaluated values, so its format and input
 /// shape alone do not establish that it exports state.
+///
+/// One wrapper may sit above the root: the projection that publishes a statement's own column names
+/// over a node whose internal fields are the metric's. It counts only when every expression is a
+/// column or an alias of one, and only one such wrapper is allowed - a computed expression or a
+/// second projection is an ordinary plan and keeps the encoding checks.
 fn is_in_process_plan(plan: &LogicalPlan) -> bool {
-    let LogicalPlan::Extension(extension) = plan else {
+    let (root, projected) = match plan {
+        LogicalPlan::Projection(projection) => (projection.input.as_ref(), Some(projection)),
+        _ => (plan, None),
+    };
+    if let Some(projection) = projected
+        && (matches!(projection.input.as_ref(), LogicalPlan::Projection(_))
+            || projection.expr.iter().any(|expr| match expr {
+                Expr::Column(_) => false,
+                Expr::Alias(alias) => !matches!(alias.expr.as_ref(), Expr::Column(_)),
+                _ => true,
+            }))
+    {
+        return false;
+    }
+    let LogicalPlan::Extension(extension) = root else {
         return false;
     };
     let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>() else {
@@ -607,10 +626,7 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
     };
     partial.format() == FusedOutputFormat::SeriesFrame
         && matches!(partial.children(), [LogicalPlan::TableScan(_)])
-        && matches!(
-            &partial.tree().root().expr,
-            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
-        )
+        && matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial)
         && matches!(&partial.tree().root().output, NativeType::AggregateState(_))
 }
 
@@ -619,11 +635,11 @@ impl PlanRewriter {
     /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
     fn new(plan: &LogicalPlan, in_process_region_transport: bool) -> Self {
         // An `Explain` wrapper describes the plan below it, which is the route's root here.
-        let native_root = match plan {
-            LogicalPlan::Analyze(analyze) => analyze.input.as_ref(),
-            _ => plan,
-        };
-        let skip_encodability_gate = in_process_region_transport && is_in_process_plan(native_root);
+        let skip_encodability_gate = in_process_region_transport
+            && match plan {
+                LogicalPlan::Analyze(analyze) => is_in_process_plan(analyze.input.as_ref()),
+                _ => is_in_process_plan(plan),
+            };
         Self {
             // Preserve the ordinary whole-plan fast path unless this is the in-process root
             // exception: no node in that tree needs an encoding check.

@@ -43,10 +43,9 @@ use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::UnboundedMemoryPool;
-use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder};
 use datafusion::prelude::Expr as DfExpr;
-use datafusion_expr::{Expr, lit};
+use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
@@ -63,7 +62,7 @@ use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    BinModifier, Call, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
+    BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
     VectorMatchCardinality, VectorSelector, token,
 };
 use session::context::QueryContextRef;
@@ -74,11 +73,8 @@ use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
     InfoInput, compile_selectors, compile_statement, constant_value, info_input, statement_grid,
 };
-use crate::promql::planner::{
-    DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner, ScalarFunc,
-};
+use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
-use promql::functions::Rate;
 
 /// The query-context key that turns the native fused-series route on for one query.
 ///
@@ -240,7 +236,7 @@ impl PromPlanner {
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,
-        _query_engine_state: &QueryEngineState,
+        query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, Option<super::PromPlannerContext>)>> {
         if !self.native_fused {
             return Ok(None);
@@ -721,7 +717,22 @@ impl PromPlanner {
                 let (legacy_fields, legacy_tags) = self
                     .legacy_output_columns(prom_expr, query_engine_state)
                     .await?;
-                let output_schema = fused_output_schema(&legacy_fields, &legacy_tags, &time)?;
+                let native_fields = match &final_tree.root().output {
+                    NativeType::Samples(schema) => schema
+                        .fields
+                        .iter()
+                        .map(|field| field.name.to_string())
+                        .collect::<Vec<_>>(),
+                    NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
+                    NativeType::AggregateState(_) => return Ok(None),
+                };
+                let Some(native_tags) = fused_output_tags(final_tree.root(), &source_tags) else {
+                    return Ok(None);
+                };
+                if !same_names(&native_tags, &legacy_tags) {
+                    return Ok(None);
+                }
+                let output_schema = fused_output_schema(&native_fields, &native_tags, &time)?;
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
@@ -731,19 +742,26 @@ impl PromPlanner {
                     final_tree,
                     FusedSeriesBinding {
                         grid,
-                        time_index: time,
+                        time_index: time.clone(),
                         tags,
                         metric_name: metric,
                     },
                     rawinput,
                     output_schema,
                 )?;
-                return Ok(Some((
-                    LogicalPlan::Extension(Extension {
-                        node: Arc::new(node),
-                    }),
-                    single_input_context,
-                )));
+                let plan = LogicalPlan::Extension(Extension {
+                    node: Arc::new(node),
+                });
+                let Some(plan) = native_naming_projection(
+                    &plan,
+                    &native_fields,
+                    &legacy_fields,
+                    &native_tags,
+                    &time,
+                ) else {
+                    return Ok(None);
+                };
+                return Ok(Some((plan, single_input_context)));
             }
             // Preserve the established refusal for repeated same-table operands unless
             // segmentation is needed to preserve a computed matching key.
@@ -754,6 +772,8 @@ impl PromPlanner {
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = Box::pin(segment_tree(
+                self,
+                query_engine_state,
                 prom_expr,
                 &compiled.tree,
                 &children,
@@ -842,6 +862,33 @@ impl PromPlanner {
             }),
             single_input_context,
         )))
+    }
+
+    /// The field and tag columns the *existing* planner names for `prom_expr`.
+    ///
+    /// The names are read off the plan the existing path builds for the same statement, and that
+    /// plan is then dropped: it is never executed and never stored, so the batch that answers the
+    /// query is the native route's own. A statement the existing planner cannot plan fails here the
+    /// same way it fails there, because the existing plan is the answer for this statement: an error
+    /// planning it is the error the statement has, whichever route asked.
+    ///
+    /// Only the planner context is saved and restored: the table provider's resolved-table cache
+    /// keeps the entries this speculative planning resolved, exactly as the aggregate-split branch,
+    /// which planned the same way before this helper existed, always did.
+    async fn legacy_output_columns(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let saved = self.ctx.clone();
+        let planned = self
+            .prom_root_expr_to_plan(prom_expr, query_engine_state)
+            .await;
+        let legacy_fields = self.ctx.field_columns.clone();
+        let legacy_tags = self.ctx.tag_columns.clone();
+        self.ctx = saved;
+        drop(planned?);
+        Ok((legacy_fields, legacy_tags))
     }
 
     /// The columns a [`FusedSeries`] node over `tree` produces.
@@ -1353,6 +1400,8 @@ fn build_inner_segment(
 /// produces is one the physical planner would otherwise have had to gather as a whole.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 async fn segment_tree(
+    planner: &mut PromPlanner,
+    query_engine_state: &QueryEngineState,
     prom_expr: &PromExpr,
     tree: &NativeTree,
     children: &[LogicalPlan],
@@ -1379,6 +1428,13 @@ async fn segment_tree(
     if children.len() > 1 && groups_by_metric_name(tree.root()) {
         return Ok(None);
     }
+    // Preserve the established refusal for statements the existing planner cannot name.
+    let Ok((legacy_fields, legacy_tags)) = planner
+        .legacy_output_columns(prom_expr, query_engine_state)
+        .await
+    else {
+        return Ok(None);
+    };
     let mut current_tree = tree.clone();
     let mut current_children = children.to_vec();
     let mut current_tags = source_tags.to_vec();
@@ -1477,237 +1533,95 @@ async fn segment_tree(
             metric_name: metric.clone(),
         },
         inputs,
-        output_schema,
+        Arc::clone(&output_schema),
     ) else {
         return Ok(None);
     };
     let plan = LogicalPlan::Extension(Extension {
         node: Arc::new(plan),
     });
-    let Some(projected) = segmented_aggregate_projection(
-        planner,
-        query_engine_state,
-        prom_expr,
-        &plan,
-        tree,
-        bare_scans,
-        per_source,
-    ) else {
-        return Ok(Some(plan));
-    };
-    Ok(Some(projected))
-}
-
-/// Applies the legacy expression-derived names to a completed segmented aggregate.
-#[allow(clippy::type_complexity)]
-fn segmented_aggregate_projection(
-    planner: &PromPlanner,
-    query_engine_state: &QueryEngineState,
-    prom_expr: &PromExpr,
-    plan: &LogicalPlan,
-    tree: &NativeTree,
-    scans: &[LogicalPlan],
-    per_source: &[(Option<Arc<str>>, String, Vec<String>)],
-) -> Option<LogicalPlan> {
-    fn collect<'a>(expr: &'a PromExpr, operations: &mut Vec<&'a PromExpr>) -> bool {
-        match expr {
-            PromExpr::Paren(paren) => collect(&paren.expr, operations),
-            PromExpr::Aggregate(aggregate) => {
-                operations.push(expr);
-                collect(&aggregate.expr, operations)
-            }
-            PromExpr::Call(Call { func, args }) if func.name == "abs" && args.args.len() == 1 => {
-                operations.push(expr);
-                collect(&args.args[0], operations)
-            }
-            PromExpr::Call(Call { func, args }) if func.name == "rate" && args.args.len() == 1 => {
-                let PromExpr::MatrixSelector(_) = &*args.args[0] else {
-                    return false;
-                };
-                operations.push(expr);
-                true
-            }
-            PromExpr::VectorSelector(_) => true,
-            _ => false,
-        }
-    }
-
-    let mut operations = Vec::new();
-    if !collect(prom_expr, &mut operations)
-        || !operations
-            .iter()
-            .any(|expr| matches!(expr, PromExpr::Aggregate(_)))
-    {
-        return None;
-    }
-    let source_fields = tree_source_fields(tree).ok()?;
-    let mut bound_inputs = Vec::new();
-    fn visit(node: &NativeNode, inputs: &mut Vec<BoundInput>) {
-        match &node.expr {
-            NativeExpr::Input(input) => inputs.push(input.clone()),
-            NativeExpr::Instant { input, .. }
-            | NativeExpr::Window { input, .. }
-            | NativeExpr::Merge { input }
-            | NativeExpr::Map { input, .. }
-            | NativeExpr::Timestamp { input }
-            | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => visit(input, inputs),
-            NativeExpr::Binary { left, right, .. }
-            | NativeExpr::Set { left, right, .. }
-            | NativeExpr::Info {
-                base: left,
-                info: right,
-                ..
-            } => {
-                visit(left, inputs);
-                visit(right, inputs);
-            }
-            _ => {}
-        }
-    }
-    visit(tree.root(), &mut bound_inputs);
-    bound_inputs.sort_by_key(|input| input.source_index);
-    bound_inputs.dedup_by_key(|input| input.source_index);
-    if bound_inputs.len() != source_fields.len() {
-        return None;
-    }
-    let mut named_fields = Vec::new();
-    for (input, names) in bound_inputs.iter().zip(&source_fields) {
-        let scan = scans.get(input.source_index)?;
-        let mut columns = Vec::new();
-        for name in names {
-            let (qualifier, field) = scan
-                .schema()
-                .qualified_field_with_unqualified_name(name)
-                .ok()?;
-            columns.push(DfExpr::Column(datafusion::prelude::Column::new(
-                qualifier.cloned(),
-                field.name(),
-            )));
-        }
-        named_fields.push(columns);
-    }
-    if named_fields.len() != 1 {
-        return None;
-    }
-    let mut naming_exprs = named_fields.pop()?;
-    let source_index = bound_inputs.first()?.source_index;
-    let time_index = &per_source.get(source_index)?.1;
-    let mut exprs = Vec::new();
-    for operation in operations.iter().rev() {
-        exprs = match operation {
-            PromExpr::Aggregate(aggregate) => naming_exprs
-                .clone()
-                .into_iter()
-                .map(|input| {
-                    PromPlanner::create_numeric_aggregate_expr(
-                        aggregate.op,
-                        &aggregate.param,
-                        input,
-                    )
-                    .ok()
-                    .map(PromPlanner::alias_extremum_as_builtin)
-                })
-                .collect::<Option<Vec<_>>>()?,
-            PromExpr::Call(call) if call.func.name == "abs" => {
-                let scalar = planner
-                    .resolve_scalar_function("abs", query_engine_state, false)
-                    .ok()?;
-                let func = match scalar {
-                    ScalarFunc::DataFusionBuiltin(func) | ScalarFunc::DataFusionUdf(func) => func,
-                    _ => return None,
-                };
-                naming_exprs
-                    .clone()
-                    .into_iter()
-                    .map(|input| {
-                        let value = input;
-                        Some(DfExpr::ScalarFunction(ScalarFunction {
-                            func: Arc::clone(&func),
-                            args: vec![value],
-                        }))
-                    })
-                    .collect::<Option<Vec<_>>>()?
-            }
-            PromExpr::Call(call) if call.func.name == "rate" => {
-                let PromExpr::Call(_) = operation else {
-                    return None;
-                };
-                let PromExpr::MatrixSelector(matrix) = &*call.args.args[0] else {
-                    return None;
-                };
-                let range_ms = i64::try_from(matrix.range.as_millis()).ok()?;
-                let rate_udf = Arc::new(Rate::scalar_udf());
-                naming_exprs
-                    .clone()
-                    .into_iter()
-                    .map(|input| {
-                        let value =
-                            DfExpr::Column(datafusion::prelude::Column::from_name(match &input {
-                                DfExpr::Column(column) => column.name.clone(),
-                                _ => input.schema_name().to_string(),
-                            }));
-                        Some(DfExpr::ScalarFunction(ScalarFunction {
-                            func: Arc::clone(&rate_udf),
-                            args: vec![
-                                DfExpr::Column(datafusion::prelude::Column::from_name(
-                                    RangeManipulate::build_timestamp_range_name(time_index),
-                                )),
-                                value,
-                                DfExpr::Column(datafusion::prelude::Column::from_name(time_index)),
-                                lit(range_ms),
-                            ],
-                        }))
-                    })
-                    .collect::<Option<Vec<_>>>()?
-            }
-            _ => return None,
-        };
-        naming_exprs = exprs
-            .iter()
-            .map(|expr| {
-                DfExpr::Column(datafusion::prelude::Column::from_name(
-                    expr.schema_name().to_string(),
-                ))
-            })
-            .collect();
-    }
     let root_fields = match &tree.root().output {
-        NativeType::Samples(schema) => schema.fields.len(),
-        _ => return None,
-    };
-    if exprs.len() != root_fields {
-        return None;
-    }
-    let desired_names = exprs
-        .iter()
-        .map(|expr| expr.schema_name().to_string())
-        .collect::<Vec<_>>();
-    let root_schema = plan.schema();
-    let root_names = match &tree.root().output {
         NativeType::Samples(schema) => schema
             .fields
             .iter()
             .map(|field| field.name.to_string())
             .collect::<Vec<_>>(),
-        _ => return None,
+        NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
+        NativeType::AggregateState(_) => return Ok(Some(plan)),
     };
-    if desired_names.len() != root_names.len() {
+    // `fused_root_schema` publishes the time column, then the root fields, then the tags, so the
+    // tag names are what remains once those are removed.
+    let native_tags = output_schema
+        .fields()
+        .iter()
+        .map(|field| field.name())
+        .filter(|name| name.as_str() != time_index && !root_fields.iter().any(|f| f == *name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !same_names(&native_tags, &legacy_tags) {
+        return Ok(None);
+    }
+    let Some(projected) = native_naming_projection(
+        &plan,
+        &root_fields,
+        &legacy_fields,
+        &native_tags,
+        time_index,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(projected))
+}
+
+fn same_names(left: &[String], right: &[String]) -> bool {
+    left.len() == right.len()
+        && left.iter().collect::<std::collections::HashSet<_>>().len() == left.len()
+        && right.iter().collect::<std::collections::HashSet<_>>().len() == right.len()
+        && left.iter().all(|name| right.contains(name))
+}
+
+/// Applies legacy value names to native root columns without changing tag identity.
+fn native_naming_projection(
+    plan: &LogicalPlan,
+    native_fields: &[String],
+    legacy_fields: &[String],
+    native_tags: &[String],
+    time_index: &str,
+) -> Option<LogicalPlan> {
+    if native_fields.len() != legacy_fields.len() {
         return None;
     }
-    let mut projection = root_schema
+    let mut names = std::collections::HashSet::new();
+    if !std::iter::once(time_index)
+        .chain(native_fields.iter().map(String::as_str))
+        .chain(native_tags.iter().map(String::as_str))
+        .all(|name| names.insert(name))
+    {
+        return None;
+    }
+    let mut unique_legacy = std::collections::HashSet::new();
+    if !legacy_fields.iter().all(|name| {
+        unique_legacy.insert(name.as_str()) && name != time_index && !native_tags.contains(name)
+    }) {
+        return None;
+    }
+    let schema = plan.schema();
+    let mut projection = Vec::with_capacity(schema.fields().len());
+    for (qualifier, field) in schema.iter() {
+        let name = field.name();
+        let expr = if let Some(index) = native_fields.iter().position(|native| native == name) {
+            DfExpr::Column(datafusion::prelude::Column::new(qualifier.cloned(), name))
+                .alias(legacy_fields.get(index)?.clone())
+        } else {
+            DfExpr::Column(datafusion::prelude::Column::new(qualifier.cloned(), name))
+        };
+        projection.push(expr);
+    }
+    if native_fields
         .iter()
-        .map(|(qualifier, field)| {
-            DfExpr::Column(datafusion::prelude::Column::new(
-                qualifier.cloned(),
-                field.name(),
-            ))
-        })
-        .collect::<Vec<_>>();
-    for (current, desired) in root_names.iter().zip(desired_names) {
-        let position = root_schema.index_of_column_by_name(None, current)?;
-        projection[position] =
-            DfExpr::Column(datafusion::prelude::Column::from_name(current)).alias(desired);
+        .any(|name| schema.index_of_column_by_name(None, name).is_none())
+    {
+        return None;
     }
     LogicalPlanBuilder::from(plan.clone())
         .project(projection)
@@ -2382,7 +2296,7 @@ mod tests {
     use super::{
         ArrowDataType, ArrowTimeUnit, NATIVE_PROMQL_EXTENSION_KEY, NativeType, collect_selectors,
         cut_segments, fused_output_schema, fused_output_tags, hybrid_binary_admitted,
-        independent_scan_pair, native_promql_requested, nested_vector_match, scan_time_filter,
+        independent_scan_pair, native_promql_requested, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {

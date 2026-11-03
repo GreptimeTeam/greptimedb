@@ -45,7 +45,7 @@ use datatypes::series::SeriesOrdering;
 use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
-use promql::native::plan::{AggregateStage, NativeExpr, NativeNode};
+use promql::native::plan::{AggregateStage, NativeExpr, NativeNode, NativeType};
 use promql::vector_match::MatchingLabels;
 use promql_parser::label::Labels;
 use promql_parser::parser;
@@ -2852,6 +2852,7 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
             sources,
             "{query}"
         );
+        // This pair route is not an aggregate route: it publishes the node's own field names.
         assert_eq!(
             vec!["field_0", "tag_0", "timestamp"],
             sorted_column_names(&plan),
@@ -3310,11 +3311,28 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
             fused.binding().metric_name.is_none(),
             "{query}"
         );
-        assert_eq!(
-            vec!["field_0", "tag_0", "timestamp"],
-            sorted_column_names(&plan),
-            "{query}"
-        );
+        // A tree cut into segments publishes the statement's own column names at that boundary, so
+        // it must report what the existing plan reports. A tree that stays one node has no boundary
+        // to publish anything and keeps the node's field names.
+        if cross_table {
+            let legacy = build_native_fused_plan_with_provider(
+                query,
+                false,
+                native_two_table_provider(vec![]).await,
+            )
+            .await;
+            assert_eq!(
+                sorted_column_names(&legacy),
+                sorted_column_names(&plan),
+                "{query}: a segmented boundary publishes the statement's names"
+            );
+        } else {
+            assert_eq!(
+                vec!["field_0", "tag_0", "timestamp"],
+                sorted_column_names(&plan),
+                "{query}"
+            );
+        }
     }
 }
 
@@ -3667,11 +3685,19 @@ async fn native_fused_multi_source_segments_bind_their_own_table_scan() {
 }
 
 /// Nested rate/aggregate expressions keep identical schema names on both planning routes.
+///
+/// The names are the statement's own, whatever operation sits above the fold: the boundary aliases
+/// the native value column from the plan the existing route names it by, so the set of functions
+/// that can wrap an aggregate does not decide whether a column keeps its name.
 #[tokio::test]
 async fn native_fused_nested_rate_abs_aggregates_keep_legacy_schema_names() {
     for query in [
         "sum(abs(avg(rate(some_metric[5m])) by (tag_0)))",
         "abs(sum(avg(rate(some_metric[5m])) by (tag_0)))",
+        // Wrappers the old name reconstruction did not model. Each keeps the statement's name.
+        "ceil(sum(avg(some_metric) by (tag_0)))",
+        "(sum(avg(some_metric) by (tag_0)) + 1) / 2",
+        "floor(sum(avg(some_metric) by (tag_0)))",
     ] {
         let native = build_native_fused_plan(query, true).await;
         let legacy = build_native_fused_plan(query, false).await;
@@ -3702,6 +3728,26 @@ async fn native_fused_nested_rate_abs_aggregates_keep_legacy_schema_names() {
                 .any(|field| field.data_type() == &ArrowDataType::Float64),
             "{query}: legacy plan must retain a Float64 value field: {legacy}"
         );
+        // The value names live at the boundary, not inside the node: a split aggregate's Final tree
+        // names its values after the native root fields.
+        if let Some(final_node) = find_final_split(&native) {
+            let internal = final_node
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect::<Vec<_>>();
+            let NativeType::Samples(root) = &final_node.tree().root().output else {
+                panic!("{query}: a final split answers samples: {native}");
+            };
+            for field in root.fields.iter() {
+                assert!(
+                    internal.iter().any(|name| name == field.name.as_ref()),
+                    "{query}: the node publishes its own value name {}: {internal:?}",
+                    field.name
+                );
+            }
+        }
     }
 }
 
@@ -3744,7 +3790,7 @@ async fn native_fused_clamp_aggregate_is_admitted_without_legacy_registration() 
     ] {
         let plan = build_native_fused_plan(query, true).await;
         assert!(
-            find_aggregate_finalize(&plan).is_some() || find_fused_series(&plan).is_some(),
+            find_fused_series(&plan).is_some(),
             "`{query}` should be accepted by native: {}",
             plan.display_indent()
         );
