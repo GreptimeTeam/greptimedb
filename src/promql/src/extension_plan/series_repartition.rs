@@ -17,13 +17,15 @@
 //! Canonical routing hashes complete labels; matching routing hashes the evaluator's own PromQL
 //! matching key. Routing groups are not merge identities: evaluated series merge only by exact name
 //! and tags. Raw ownership is the complete primary key plus exact label agreement; each input's
-//! complete chain or EOF establishes its contribution to a raw identity.
+//! complete chain or EOF establishes its contribution to a raw identity for contiguous inputs.
+//! An interleaved raw frame here consists of concatenated, independently closed producer chains;
+//! identities can recur, but open chains cannot be multiplexed. The owner retains those raw
+//! identities until every input reaches normal EOF, then reconstructs contiguous output.
 //!
 //! Chains are transported intact to owners with their input-partition ID, followed by one charged
-//! normal-EOF message per live output from each completed input. Owners group exact identities and
-//! may publish an identity as soon as every input has contributed its final chain or normal EOF. The
-//! frame is the child's own: evaluated chunks are decoded only to read routing labels; aggregate-state
-//! batches are schema-checked and read only for routing labels. Outputs publish the child's layout.
+//! normal-EOF message per live output from each completed input. Owners group exact identities and,
+//! except for interleaved raw input, may publish an identity as soon as every input has contributed
+//! its final chain or normal EOF. Evaluated chunks are decoded only to read routing labels.
 //!
 //! # Routing
 //!
@@ -46,8 +48,9 @@
 //! before routing it as one atomic unit. This prevents chains from interleaving during transport; it
 //! does not establish the output order or final series boundaries. For a full exact identity (metric
 //! name and every tag name/value), the input contract is that each identity closes at most once per
-//! input. Each owner therefore waits only for each distinct input's final chain or normal EOF before
-//! merging and publishing that identity.
+//! input, except for the independently closed chains of an interleaved raw frame. Each owner waits
+//! for each distinct input's final chain or normal EOF before merging a contiguous identity, and
+//! for all input EOFs before merging an interleaved raw identity.
 //!
 //! What that costs is stated rather than hidden. Nothing of a chain is handed over before the chain
 //! closes, so the first chunk of a series reaches its output later than a chunk-at-a-time design would
@@ -78,7 +81,8 @@
 //!
 //! Producer queues are unbounded: unread owners do not stall routing, but their retained chains
 //! continue to consume pool-accounted memory. Owners publish each exact identity after its per-input
-//! close/EOF barrier, with finality recomputed for that output series.
+//! close/EOF barrier, or all input EOFs for interleaved raw frames, with finality recomputed for
+//! that output series.
 //!
 //! # Memory, backpressure and end of stream
 //!
@@ -194,7 +198,7 @@ pub enum IdentityCompletion {
 /// its own output from it.
 pub struct SeriesRepartitionExec {
     input: Arc<dyn ExecutionPlan>,
-    /// The frame the child declares, re-declared by every output batch.
+    /// The child frame's series schema, re-declared by every output batch.
     series_schema: Arc<SeriesSchema>,
     /// The one hash configuration of this node's execution.
     routing: Routing,
@@ -330,6 +334,19 @@ impl SeriesRepartitionExec {
         } else {
             SeriesOrdering::Contiguous
         };
+        if content == FrameContent::Raw
+            && ordering == SeriesOrdering::Interleaved
+            && identity_completion == IdentityCompletion::CompleteDisjoint
+        {
+            return Err(DataFusionError::Plan(
+                "SeriesRepartition cannot use CompleteDisjoint with interleaved raw input".into(),
+            ));
+        }
+        let output_ordering = if ordering == SeriesOrdering::Interleaved {
+            SeriesOrdering::Contiguous
+        } else {
+            ordering
+        };
         let declared = match content {
             FrameContent::Evaluated => common_query::series_frame::frame_schema_with(
                 &series_schema,
@@ -340,7 +357,7 @@ impl SeriesRepartitionExec {
             FrameContent::Raw => raw_series_frame_schema_with_ordering(
                 &series_schema,
                 &store_api::region_engine::NO_BOUND_LABEL_SOURCE,
-                ordering,
+                output_ordering,
             )?,
             FrameContent::AggregateState => input.schema(),
         };
@@ -368,8 +385,12 @@ impl SeriesRepartitionExec {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(declared),
             Partitioning::UnknownPartitioning(outputs),
-            // Each exact identity becomes final independently at its per-input close/EOF barrier.
-            EmissionType::Incremental,
+            // Interleaved raw identities can recur until every input has ended.
+            if ordering == SeriesOrdering::Interleaved {
+                EmissionType::Final
+            } else {
+                EmissionType::Incremental
+            },
             // The node ends when its child does, and spends its life waiting until then.
             input.properties().boundedness,
         )
@@ -549,7 +570,11 @@ impl ExecutionPlan for SeriesRepartitionExec {
                 let raw = RawOutputStream {
                     inner: Some(Box::pin(inner)),
                     schema: Arc::clone(&self.series_schema),
-                    ordering: self.ordering,
+                    ordering: if self.ordering == SeriesOrdering::Interleaved {
+                        SeriesOrdering::Contiguous
+                    } else {
+                        self.ordering
+                    },
                 };
                 pack_raw_series(Box::pin(raw))?
             }
@@ -1973,7 +1998,8 @@ struct PendingGroup {
 /// A key-then-time raw frame promises its keys arrive in order, and this owner publishes in key
 /// order only when it publishes them together: an identity that is complete while a smaller one is
 /// still waiting would go out first and break that promise. Watermarks let it publish once every
-/// input has advanced past the identity, without waiting for every input to end.
+/// input has advanced past the identity, without waiting for every input to end. An interleaved
+/// raw identity can recur even after an input contributed, so only all normal EOFs complete it.
 fn group_ready(
     group: &PendingGroup,
     eof: &[bool],
@@ -1982,6 +2008,9 @@ fn group_ready(
     completion: IdentityCompletion,
     key: &OwnerKey,
 ) -> bool {
+    if ordering == SeriesOrdering::Interleaved && matches!(key, OwnerKey::Raw(_)) {
+        return eof.iter().all(|eof| *eof);
+    }
     if ordering == SeriesOrdering::KeyThenTime {
         let OwnerKey::Raw(key) = key else {
             return false;
@@ -2106,7 +2135,7 @@ struct RepartitionStream {
     lease: OutputLease,
     schema: Arc<SeriesSchema>,
     pool: Arc<dyn MemoryPool>,
-    /// What the frame this stream emits declares about the order of its keys.
+    /// The input's ordering and identity completion guarantee.
     ordering: SeriesOrdering,
     identity_completion: IdentityCompletion,
     groups: BTreeMap<OwnerKey, PendingGroup>,
@@ -2253,10 +2282,10 @@ impl RepartitionStream {
 impl RepartitionStream {
     /// Publishes one complete raw identity.
     ///
-    /// Raw pieces are only published once every input reached its normal EOF, because a piece's
-    /// `is_last` closes that producer's stream, not the series. The workspace this reconstruction
-    /// needs is charged before it runs and rides with the output until the packer hands the batch
-    /// off, like any other owner output.
+    /// A piece's `is_last` closes that producer's chain, not the reconstructed series. For
+    /// interleaved input, pieces are retained until every input reaches normal EOF. The workspace
+    /// reconstruction needs is charged as it runs and rides with the output until the packer
+    /// hands the batch off, like any other owner output.
     fn finish_raw_group(&mut self, group: PendingGroup) -> DataFusionResult<()> {
         let labels = group
             .raw_chunks
@@ -2458,6 +2487,12 @@ impl Stream for RepartitionStream {
                     _metadata,
                 })) => {
                     drained += 1;
+                    if input >= this.eof.len() {
+                        this.lease.fail(Arc::new(DataFusionError::Execution(
+                            "series repartition input index is out of range".into(),
+                        )));
+                        continue;
+                    }
                     let (key, pieces) = match chain {
                         RoutedChain::Evaluated(chain) => {
                             let Some(first) = chain.first() else {
@@ -2526,7 +2561,11 @@ impl Stream for RepartitionStream {
                         )));
                         continue;
                     };
-                    if input >= group.received.len() || group.received[input] {
+                    if input >= group.received.len()
+                        || (group.received[input]
+                            && !(this.ordering == SeriesOrdering::Interleaved
+                                && matches!(&key, OwnerKey::Raw(_))))
+                    {
                         this.lease.fail(Arc::new(DataFusionError::Execution(
                             "input repeated an exact series identity".into(),
                         )));
