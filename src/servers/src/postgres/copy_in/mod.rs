@@ -34,6 +34,7 @@
 mod codec;
 mod csv;
 mod influxdb;
+mod jsonl;
 mod options;
 mod otlp;
 mod parse;
@@ -50,12 +51,11 @@ use api::v1::{
     Row as GrpcRow, RowInsertRequest, RowInsertRequests, Rows as GrpcRows, SemanticType,
 };
 use async_trait::async_trait;
-use codec::{CopyFormat, RecordParser};
+use codec::{CopyFormat, RecordParser, TableBoundCodec};
 use common_catalog::consts::{TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY};
 use common_grpc::precision::Precision;
 use common_query::OutputData;
 use common_telemetry::{info, warn};
-use csv::CsvCodec;
 use datafusion::sql::sqlparser::ast::{CopyTarget, Statement as SqlParserStatement};
 use datatypes::data_type::DataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
@@ -107,6 +107,8 @@ type FormatBuilder = fn(options::CopyOptionSet) -> PgWireResult<CopyFormat>;
 /// unknown-format error.
 const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("csv", csv::build_csv_codec),
+    ("jsonl", jsonl::build_jsonl_codec),
+    ("json", jsonl::build_jsonl_codec),
     ("influxdb", influxdb::build_influxdb_codec),
     ("influxdb_line", influxdb::build_influxdb_codec),
     ("otlp", otlp::build_otlp_codec),
@@ -294,7 +296,7 @@ enum Payload {
 
 impl CopyInState {
     fn new(
-        codec: &CsvCodec,
+        codec: &dyn TableBoundCodec,
         columns: Vec<String>,
         table_info: Arc<TableInfo>,
         query_ctx: QueryContextRef,
@@ -494,7 +496,7 @@ impl CopyInState {
 }
 
 fn resolve_columns(
-    codec: &CsvCodec,
+    codec: &dyn TableBoundCodec,
     columns: Vec<String>,
     schema: &SchemaRef,
     table_info: &Arc<TableInfo>,
@@ -590,35 +592,10 @@ impl PostgresServerHandlerInner {
         // Each format states its own target rule and ingestion shape
         // explicitly.
         let state = match &stmt.format {
-            // csv requires a target table: records are parsed against
-            // its columns and inserted in batches.
-            CopyFormat::Csv(codec) => {
-                if stmt.table.is_empty() {
-                    return Err(unsupported(
-                        "format csv requires a table: COPY tbl [(cols)] FROM STDIN WITH (FORMAT csv)",
-                    ));
-                }
-                let (catalog, schema, table) = resolve_table_name(&query_ctx, &stmt.table)?;
-
-                let Some(table_info) = self
-                    .copy_in_handler
-                    .copy_in_table(&catalog, &schema, &table, query_ctx.clone())
-                    .await
-                    .map_err(convert_err)?
-                else {
-                    return Err(copy_in_error(
-                        PgErrorCode::Ec42P01,
-                        format!("relation \"{}\" does not exist", stmt.table.join(".")),
-                    ));
-                };
-
-                // The insert path resolves the bare table name against the
-                // query context, so point the context at the resolved
-                // catalog and schema when the COPY target is qualified.
-                let query_ctx = adjust_query_context(query_ctx, &catalog, &schema);
-
-                CopyInState::new(codec, stmt.columns, table_info, query_ctx, table)?
-            }
+            // Table-bound formats require a target table: records are
+            // parsed against its columns and inserted in batches.
+            CopyFormat::Csv(codec) => self.table_bound_state(&stmt, codec).await?,
+            CopyFormat::Jsonl(codec) => self.table_bound_state(&stmt, codec).await?,
             // influxdb forbids a target table — each line names its own
             // measurement — and completes through the line-protocol
             // pipeline the HTTP write endpoints use; the server must be
@@ -689,6 +666,43 @@ impl PostgresServerHandlerInner {
 
     /// Flushes the buffered payload of an in-progress copy. Returns the
     /// number of rows written by the flushed batch.
+    /// Resolves the target table and builds the table-bound copy state
+    /// shared by csv and jsonl.
+    async fn table_bound_state(
+        &self,
+        stmt: &CopyFromStdin,
+        codec: &dyn TableBoundCodec,
+    ) -> PgWireResult<CopyInState> {
+        let query_ctx = self.new_query_context();
+        if stmt.table.is_empty() {
+            return Err(unsupported(format!(
+                "format {} requires a table: COPY tbl [(cols)] FROM STDIN WITH (FORMAT {})",
+                stmt.format.name(),
+                stmt.format.name()
+            )));
+        }
+        let (catalog, schema, table) = resolve_table_name(&query_ctx, &stmt.table)?;
+
+        let Some(table_info) = self
+            .copy_in_handler
+            .copy_in_table(&catalog, &schema, &table, query_ctx.clone())
+            .await
+            .map_err(convert_err)?
+        else {
+            return Err(copy_in_error(
+                PgErrorCode::Ec42P01,
+                format!("relation \"{}\" does not exist", stmt.table.join(".")),
+            ));
+        };
+
+        // The insert path resolves the bare table name against the query
+        // context, so point the context at the resolved catalog and schema
+        // when the COPY target is qualified.
+        let query_ctx = adjust_query_context(query_ctx, &catalog, &schema);
+
+        CopyInState::new(codec, stmt.columns.clone(), table_info, query_ctx, table)
+    }
+
     async fn flush_copy_in(&self, state: &mut CopyInState) -> PgWireResult<u64> {
         let query_ctx = state.query_ctx.clone();
         // The buffered influxdb payload is completed through the

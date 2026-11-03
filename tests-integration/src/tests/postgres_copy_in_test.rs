@@ -1411,3 +1411,163 @@ async fn test_postgres_copy_in_prom_write_memory_quota() {
 
     pg_server.shutdown().await.unwrap();
 }
+
+/// `COPY ... FROM STDIN WITH (FORMAT jsonl)` ingests newline-delimited
+/// JSON objects through arrow-json — the same engine as file-based
+/// `COPY FROM 'file.json'` — including objects split across CopyData
+/// chunks, absent-key NULLs and session-timezone timestamp parsing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_jsonl_end_to_end() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_jsonl").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query("CREATE TABLE js (host STRING, val DOUBLE, ts TIMESTAMP, TIME INDEX(ts))")
+        .await
+        .unwrap();
+
+    let payload: Vec<u8> = br#"{"host":"a","val":1.5,"ts":"2024-01-01 00:00:00"}
+{"host":"b","ts":"2024-01-01 00:00:01"}
+{"val":3.5,"ts":"2024-01-01 00:00:02"}"#
+        .to_vec();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY js (host, val, ts) FROM STDIN WITH (FORMAT jsonl)",
+        payload.chunks(13).map(Bytes::copy_from_slice).collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 3);
+
+    let messages = client
+        .simple_query("SELECT host, val FROM js ORDER BY ts")
+        .await
+        .unwrap();
+    let rows: Vec<(String, String)> = messages
+        .iter()
+        .filter_map(|m| {
+            let tokio_postgres::SimpleQueryMessage::Row(row) = m else {
+                return None;
+            };
+            Some((
+                row.get(0).unwrap_or("").to_string(),
+                row.get(1).unwrap_or("").to_string(),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("a".into(), "1.5".into()),
+            ("b".into(), "".into()),   // absent key -> NULL val
+            ("".into(), "3.5".into()), // absent key -> NULL host
+        ]
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+/// Offset-free timestamp strings parse in the session timezone, like
+/// SQL INSERT and the csv format.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_jsonl_session_timezone_parity() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_jsonl_tz").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query("CREATE TABLE js_tz (host STRING PRIMARY KEY, ts TIMESTAMP, TIME INDEX(ts))")
+        .await
+        .unwrap();
+    client
+        .simple_query("SET TIMEZONE TO 'Asia/Shanghai'")
+        .await
+        .unwrap();
+    client
+        .simple_query("INSERT INTO js_tz VALUES ('insert', '2024-01-01 00:00:00')")
+        .await
+        .unwrap();
+    let rows = feed_copy_in(
+        &client,
+        "COPY js_tz (host, ts) FROM STDIN WITH (FORMAT jsonl)",
+        vec![Bytes::from_static(
+            br#"{"host":"copy","ts":"2024-01-01 00:00:00"}"#,
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    // The same input string through INSERT and COPY must store the same
+    // instant.
+    let messages = client
+        .simple_query("SELECT host, CAST(ts AS BIGINT) FROM js_tz ORDER BY host")
+        .await
+        .unwrap();
+    let rows: Vec<(String, Option<String>)> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+                row.get(0).unwrap_or("").to_string(),
+                row.get(1).map(str::to_string),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 2, "both rows must exist: {rows:?}");
+    assert_eq!(
+        rows[0].1, rows[1].1,
+        "INSERT and COPY must store the same instant: {rows:?}"
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+/// Malformed JSON fails the copy with the decoder's error and the
+/// connection stays usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_jsonl_errors() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_jsonl_err").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query("CREATE TABLE js_err (host STRING, ts TIMESTAMP, TIME INDEX(ts))")
+        .await
+        .unwrap();
+
+    let error = feed_copy_in(
+        &client,
+        "COPY js_err (host, ts) FROM STDIN WITH (FORMAT jsonl)",
+        vec![Bytes::from_static(
+            br#"{"host":"a","ts":"not a timestamp"}"#,
+        )],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.as_db_error().is_some(), "unexpected error: {error}");
+
+    let messages = client
+        .simple_query("SELECT count(*) FROM js_err")
+        .await
+        .unwrap();
+    let count: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(count, vec!["0".to_string()]);
+
+    // The connection stays usable.
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}
