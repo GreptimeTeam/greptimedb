@@ -294,10 +294,9 @@ struct QueryResult {
 }
 
 impl QueryResult {
-    /// Reads the batches of one PromQL result. The value column is found by type: the frontend names
-    /// it after the expression it computes (`sum(v)` and the like), so that name is checked against
-    /// the legacy run instead of being assumed here. `count` reports an integer, so every numeric
-    /// type is accepted; the timestamp column was taken first and is therefore not a candidate.
+    /// Reads the batches of one PromQL result. The value column is found by type rather than name;
+    /// its schema name is preserved in `columns`. `count` reports an integer, so every numeric type
+    /// is accepted; the timestamp column was taken first and is therefore not a candidate.
     fn from_batches(batches: &RecordBatches, query: &str) -> Self {
         let schema = batches.schema();
         let fields = schema.arrow_schema().fields();
@@ -390,6 +389,9 @@ struct AggregateCase {
     /// split cut out. The producer then exports that aggregate's *state*, not an answer, so a
     /// group's values are finished by the merge above it rather than once per partition.
     partial_state: Option<&'static str>,
+    /// Native output schema. The native aggregate preserves its source field name (`v`), rather
+    /// than the legacy planner's computed-expression name.
+    native_value_column: &'static str,
 }
 
 /// Builds one case from a PromQL expression and its `(labels, value)` rows.
@@ -410,6 +412,7 @@ fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool
         per_partition,
         root_values: None,
         partial_state: None,
+        native_value_column: "v",
     }
 }
 
@@ -574,18 +577,17 @@ async fn native_hybrid_binary_05_06_08() {
         OutputData::RecordBatches(batches) => batches,
         other => panic!("`{unpartitioned}` was expected to stream: {other:?}"),
     };
-    let values = rows
+    let result = QueryResult::from_batches(&rows, &tql_eval(&unpartitioned));
+    let expected = [ResultRow {
+        ts_millis: EVAL_MILLIS,
+        labels: [("job".to_string(), "api".to_string())].into(),
+        value: Some(5.0),
+    }];
+    assert_native_schema(&result, "v", &expected, &tql_eval(&unpartitioned));
+    let values = result
+        .rows
         .iter()
-        .flat_map(|batch| {
-            batch
-                .column_by_name("value")
-                .expect("the result has a value column")
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .expect("the value column is Float64")
-                .values()
-                .to_vec()
-        })
+        .map(|row| row.value.expect("the result row has a numeric value"))
         .collect::<Vec<_>>();
     assert_eq!(
         vec![5.0],
@@ -1143,21 +1145,25 @@ fn assert_rows(actual: &[ResultRow], expected: &[ResultRow], context: &str) {
     }
 }
 
-/// Asserts both routes report the answer with the same columns.
-///
-/// The value column is named after the expression the frontend computes, which is the legacy naming:
-/// a native run that renamed it, or dropped, added or reordered a column, fails here rather than
-/// passing on values alone. Column order is not compared, only the answer's shape.
-fn assert_same_columns(native: &QueryResult, legacy: &QueryResult, query: &str) {
-    let sorted = |result: &QueryResult| {
-        let mut columns = result.columns.clone();
-        columns.sort();
-        columns
-    };
+/// Asserts the native schema against the value field and labels expected from the fixture.
+fn assert_native_schema(
+    native: &QueryResult,
+    value_column: &str,
+    expected_rows: &[ResultRow],
+    query: &str,
+) {
+    assert!(
+        !expected_rows.is_empty(),
+        "`{query}`: native schema needs independently expected nonempty rows"
+    );
+    let mut expected = vec!["ts".to_string(), value_column.to_string()];
+    expected.extend(expected_rows[0].labels.keys().cloned());
+    let mut actual = native.columns.clone();
+    expected.sort();
+    actual.sort();
     assert_eq!(
-        sorted(legacy),
-        sorted(native),
-        "`{query}`: the native route must report the columns the legacy plan reports"
+        expected, actual,
+        "`{query}`: unexpected native output schema"
     );
 }
 
@@ -1564,7 +1570,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, promql, true, observer).await;
-    assert_same_columns(&native, &legacy, &query);
+    assert_native_schema(&native, case.native_value_column, &case.expected, &query);
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
 
     assert_eq!(
@@ -1727,12 +1733,6 @@ async fn native_aggregate_topk_over_global_partitions() {
     let (legacy, legacy_capture) = run(false).await;
     assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
     let (native, capture) = run(true).await;
-    assert_same_columns(&native, &legacy, &sql);
-    assert_rows(
-        &native.rows,
-        &legacy.rows,
-        &format!("native vs legacy `{sql}`"),
-    );
     assert_eq!(20, native.rows.len(), "both timestamps return ten rows");
     let distinct_timestamps = native
         .rows
@@ -1762,6 +1762,12 @@ async fn native_aggregate_topk_over_global_partitions() {
         }
     }
     expected.sort_by(|a, b| (a.ts_millis, &a.labels).cmp(&(b.ts_millis, &b.labels)));
+    assert_native_schema(&native, "v", &expected, &sql);
+    assert_rows(
+        &native.rows,
+        &legacy.rows,
+        &format!("native vs legacy `{sql}`"),
+    );
     assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
     assert_eq!(1, capture.fused.len());
     assert_eq!(1, capture.finalize.len());
@@ -2145,7 +2151,7 @@ async fn native_histogram_quantile_over_the_cut_answers_what_the_complete_input_
             native.rows.len(),
             legacy.rows.len()
         );
-        assert_same_columns(&native, &legacy, &query);
+        assert_native_schema(&native, "v", &legacy.rows, &query);
         // The equivalence the admission rests on: the rows the same statement reports over the
         // complete input, labels included.
         assert_rows(

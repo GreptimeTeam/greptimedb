@@ -6624,7 +6624,7 @@ async fn assert_computed_matching_key_runtime_parallelism(
             found.push(Arc::clone(plan));
         }
         for child in plan.children() {
-            walk(&child, found);
+            walk(child, found);
         }
     }
 
@@ -6668,7 +6668,6 @@ async fn assert_computed_matching_key_runtime_parallelism(
         nonempty >= 2,
         "at least two matching output partitions must produce rows; counts={rows_by_partition:?}"
     );
-    eprintln!("{query}: output partition rows={rows_by_partition:?}");
 
     let legacy_rows = native_labelled_rows(native_tql_output(&instance, &sql, false).await)
         .await
