@@ -17,7 +17,7 @@ mod function_plans;
 mod island;
 mod matching_filters;
 pub(crate) mod native;
-pub use native::NATIVE_PROMQL_EXTENSION_KEY;
+pub use native::{NATIVE_PROMQL_EXTENSION_KEY, discovers_metric_name};
 
 mod set_operator;
 
