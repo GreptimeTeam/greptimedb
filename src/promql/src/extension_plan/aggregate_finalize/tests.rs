@@ -454,7 +454,7 @@ fn a_vector_operation_that_is_neither_topk_nor_a_histogram_is_declined() {
 }
 
 #[test]
-fn limitk_above_the_cut_is_declined_because_merge_does_not_preserve_input_order() {
+fn limitk_above_the_cut_is_not_supported_by_the_split() {
     let error = finalize(
         vector_over(
             complete(AggregateKind::Sum, by(&["k0"]))(window()),

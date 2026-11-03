@@ -24,8 +24,8 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels};
 
 use super::{
-    Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, limit_ratio, limitk,
-    natural_less, sample_offset, scalar, sort_instant, topk,
+    Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, compare_labels, group_key,
+    limit_ratio, limitk, natural_less, sample_offset, scalar, sort_instant, topk,
 };
 use crate::golden::fold_pieces;
 use crate::grid_series::reference::{
@@ -176,22 +176,95 @@ fn select_operators_match_prometheus() {
             }
             other => panic!("unknown case {other}"),
         },
+        false,
     );
-    assert!(checked > 200, "{checked} result series checked");
+    assert!(checked.0 > 200, "{} result series checked", checked.0);
 }
 
-/// `limitk` and `limit_ratio` evaluated by the Prometheus v3.15.0 engine; see the header of
-/// `limit_cases.txt`.
+/// `limit_ratio` and `limitk` parameters follow the Prometheus v3.15.0 golden cases. Where
+/// Prometheus selected a different subset because its input was not label-sorted, the expected
+/// `limitk` subset is computed separately from the documented deterministic rule.
 #[test]
-fn limit_operators_match_prometheus() {
-    let checked = check_cases(include_str!("limit_cases.txt"), |spec, schema, series| {
-        let param: f64 = spec[2].parse().unwrap();
-        match spec[1] {
-            "limitk" => limitk(param, &grouping(spec[3], spec[4]), schema, series),
-            _ => limit_ratio(param, schema, series),
-        }
-    });
+fn limit_operators_against_prometheus_fixtures() {
+    let (checked, order_dependent) = check_cases(
+        include_str!("limit_cases.txt"),
+        |spec, schema, series| {
+            let param: f64 = spec[2].parse().unwrap();
+            match spec[1] {
+                "limitk" => limitk(param, &grouping(spec[3], spec[4]), schema, series),
+                _ => limit_ratio(param, schema, series),
+            }
+        },
+        true,
+    );
     assert!(checked > 200, "{checked} result series checked");
+    assert_eq!(
+        order_dependent, 6,
+        "six Prometheus picks depend on input order"
+    );
+}
+
+/// Complete labels, including the metric name and a shorter prefix, rank independently of input
+/// order and of values. Each point is ranked separately and a missing sample is not a candidate.
+#[test]
+fn limitk_uses_complete_labels_at_each_sparse_point() {
+    let schema = schema(5, 1);
+    let make = |labels, values: &[Option<f64>]| {
+        build(
+            &schema,
+            metric(labels),
+            &values.iter().map(|value| vec![*value]).collect(),
+        )
+        .unwrap()
+    };
+    let input = vec![
+        make(
+            "__name__=z,job=a",
+            &[Some(50.0), Some(51.0), None, Some(53.0), None],
+        ),
+        make(
+            "__name__=m,job=a,zone=x",
+            &[Some(30.0), None, Some(32.0), Some(33.0), None],
+        ),
+        make(
+            "__name__=m,job=a",
+            &[Some(10.0), None, Some(12.0), None, Some(14.0)],
+        ),
+        make(
+            "__name__=a,job=z",
+            &[Some(70.0), Some(71.0), None, None, Some(74.0)],
+        ),
+    ];
+    for order in [input.clone(), input.into_iter().rev().collect()] {
+        let result = limitk(2.0, &Grouping::By(Vec::new()), &schema, &order).unwrap();
+        let actual: BTreeMap<_, _> = fold_pieces(result)
+            .into_iter()
+            .map(|series| (render(&series.metric), series))
+            .collect();
+        let expected = [
+            (
+                "__name__=a,job=z",
+                vec![Some(70.0), Some(71.0), None, None, Some(74.0)],
+            ),
+            (
+                "__name__=m,job=a",
+                vec![Some(10.0), None, Some(12.0), None, Some(14.0)],
+            ),
+            (
+                "__name__=m,job=a,zone=x",
+                vec![None, None, Some(32.0), Some(33.0), None],
+            ),
+            (
+                "__name__=z,job=a",
+                vec![None, Some(51.0), None, Some(53.0), None],
+            ),
+        ];
+        assert_eq!(actual.len(), expected.len());
+        for (labels, values) in expected {
+            let dense = values.into_iter().map(|value| vec![value]).collect();
+            assert_result_eq(actual.get(labels), &dense, &metric(labels));
+        }
+    }
 }
 
 /// The labels of the fixtures are short; these need the long length prefix of `stringlabels`.
@@ -264,8 +337,16 @@ fn limit_operators_keep_histogram_samples() {
     let mut builder = GridSeriesBuilder::try_new(Arc::new(one_field.clone())).unwrap();
     builder.push_samples(1, &[Some(sample())]).unwrap();
     let series = builder.finish(metric("__name__=a")).unwrap().unwrap();
-    let kept = limitk(1.0, &Grouping::By(Vec::new()), &one_field, &[series]).unwrap();
+    let other = build(
+        &one_field,
+        metric("__name__=z"),
+        &vec![vec![None], vec![Some(99.0)], vec![None]],
+    )
+    .unwrap();
+    // The smaller histogram label set wins despite arriving after the larger float label set.
+    let kept = limitk(1.0, &Grouping::By(Vec::new()), &one_field, &[other, series]).unwrap();
     assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].metric.name(), Some("a"));
     assert_eq!(kinds(&kept[0], 0), [(1, "histogram")]);
 }
 
@@ -408,13 +489,15 @@ fn grouping(kind: &str, labels: &str) -> Grouping {
     }
 }
 
-/// Evaluates each case of a fixture with `eval` and returns how many result series matched; a
-/// case with an `error` line must fail with that message.
+/// Evaluates the fixture and counts checked series and order-dependent Prometheus `limitk` picks.
+/// A case with an `error` line must fail with that message.
 fn check_cases(
     text: &str,
     eval: impl Fn(&[&str], &SeriesSchema, &[Series]) -> Result<Vec<Series>, DataFusionError>,
-) -> usize {
+    deterministic_limitk: bool,
+) -> (usize, usize) {
     let mut checked = 0;
+    let mut order_dependent = 0;
     for case in text.split("end\n").filter(|case| case.contains("case ")) {
         let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
         let spec: Vec<&str> = lines[0].split_whitespace().skip(1).collect();
@@ -443,6 +526,49 @@ fn check_cases(
             .filter_map(|(metric, dense)| build(&schema, metric.clone(), dense))
             .collect();
 
+        if deterministic_limitk && spec[1] == "limitk" && error.is_none() {
+            // Prometheus's golden results retain the first arrivals. Derive this project's
+            // expectation independently, by sorting present fixture inputs at each grid point.
+            let k = spec[2].parse::<f64>().unwrap().max(0.0) as usize;
+            let grouping = grouping(spec[3], spec[4]);
+            let mut sorted: Vec<_> = inputs.iter().collect();
+            sorted.sort_by(|a, b| compare_labels(&a.0, &b.0));
+            let mut deterministic = BTreeMap::new();
+            for point in 0..points {
+                let mut counts = BTreeMap::new();
+                for (labels, values) in &sorted {
+                    let Some(value) = values[point][0] else {
+                        continue;
+                    };
+                    let count = counts.entry(group_key(labels, &grouping)).or_insert(0usize);
+                    if *count < k {
+                        let rows = deterministic
+                            .entry(render(labels))
+                            .or_insert_with(|| vec![vec![None]; points]);
+                        rows[point][0] = Some(value);
+                        *count += 1;
+                    }
+                }
+            }
+            let bits = |result: &BTreeMap<String, Dense>| {
+                result
+                    .iter()
+                    .map(|(labels, rows)| {
+                        (
+                            labels.clone(),
+                            rows.iter()
+                                .map(|row| row[0].map(f64::to_bits))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            };
+            if bits(&expected) != bits(&deterministic) {
+                order_dependent += 1;
+                expected = deterministic;
+            }
+        }
+
         let actual = match (eval(&spec, &schema, &series), error) {
             (Ok(actual), None) => actual,
             (Err(actual), Some(expected)) => {
@@ -468,7 +594,7 @@ fn check_cases(
             checked += 1;
         }
     }
-    checked
+    (checked, order_dependent)
 }
 
 /// The fixture's label rendering: `name=value` pairs in name order, `-` when empty.

@@ -10362,11 +10362,10 @@ fn topk_ranks_whole_series_at_each_point() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// `limitk` takes series in the order its input hands them over, not in label order, and the two
-/// series a map folds into `{job="z"}` are one series placed where it first arrived: it is kept at
-/// both points although `{job="y"}` sorts first and arrived before the piece that fills point 0.
+/// `limitk` ranks complete label sets after merging pieces a map folds into one logical series.
+/// `{job="y"}` sorts before `{job="z"}` at both points, even though `z` arrived first.
 #[test]
-fn limitk_takes_series_in_input_order() {
+fn limitk_selects_label_order_after_merging_pieces() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
     let tree = NativeTree::try_new(vector_op(
@@ -10394,8 +10393,233 @@ fn limitk_takes_series_in_input_order() {
     let chunks = run(&mut execution);
     assert_eq!(
         decided_by_job(&chunks),
-        vec![("z".to_string(), vec![(0, Some(3.0)), (1, Some(1.0))])]
+        vec![("y".to_string(), vec![(0, Some(2.0)), (1, Some(2.0))])]
     );
+}
+
+/// Pieces folded into one logical label set must occupy just one of two slots at each step.
+#[test]
+fn limitk_counts_merged_labelset_as_one_candidate() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+        BoundVectorOp::LimitK {
+            k: 2.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    for chunk in [
+        evaluated_chunk_of(&schema, named_metric("a", "a"), 0, vec![Some(1.0)], true),
+        evaluated_chunk_of(&schema, named_metric("b", "a"), 1, vec![Some(2.0)], true),
+        evaluated_chunk_of(
+            &schema,
+            named_metric("c", "b"),
+            0,
+            vec![Some(3.0), Some(4.0)],
+            true,
+        ),
+        evaluated_chunk_of(
+            &schema,
+            named_metric("d", "c"),
+            0,
+            vec![Some(5.0), Some(6.0)],
+            true,
+        ),
+    ] {
+        execution.push_evaluated(InputId::new(0), chunk).unwrap();
+    }
+    let mut actual = decided_by_job(&run(&mut execution));
+    actual.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        actual,
+        vec![
+            ("a".to_string(), vec![(0, Some(1.0)), (1, Some(2.0))]),
+            ("b".to_string(), vec![(0, Some(3.0)), (1, Some(4.0))]),
+        ]
+    );
+}
+
+/// Empty-valued labels do not affect the rank of the logical series a map merges, whichever
+/// equivalent fragment arrives first.
+#[test]
+fn limitk_canonicalizes_empty_labels_after_merging_in_either_order() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let with_empty = SeriesLabels::try_new(
+        Some("m".into()),
+        vec![
+            Label {
+                name: "aa".into(),
+                value: "".into(),
+            },
+            Label {
+                name: "job".into(),
+                value: "b".into(),
+            },
+        ],
+    )
+    .unwrap();
+    for reverse in [false, true] {
+        let mut pieces = [
+            evaluated_chunk_of(&schema, with_empty.clone(), 0, vec![Some(10.0)], true),
+            evaluated_chunk_of(&schema, named_metric("m", "b"), 1, vec![Some(20.0)], true),
+        ];
+        if reverse {
+            pieces.reverse();
+        }
+        let mut execution = executor(&tree, pool());
+        for chunk in pieces {
+            execution.push_evaluated(InputId::new(0), chunk).unwrap();
+        }
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("m", "a"),
+                    0,
+                    vec![Some(1.0), Some(2.0)],
+                    true,
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            decided_by_job(&run(&mut execution)),
+            vec![("a".to_string(), vec![(0, Some(1.0)), (1, Some(2.0))])],
+            "reverse={reverse}"
+        );
+    }
+}
+
+/// Distinct source series sharing a canonical key are admitted together, even across the k=1
+/// boundary, and their values do not depend on either arrival order.
+#[test]
+fn limitk_selects_every_series_with_a_selected_canonical_key() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let with_empty = SeriesLabels::try_new(
+        Some("m".into()),
+        vec![
+            Label {
+                name: "aa".into(),
+                value: "".into(),
+            },
+            Label {
+                name: "job".into(),
+                value: "b".into(),
+            },
+        ],
+    )
+    .unwrap();
+    let expected = |job: &str, empty: bool, value| (job.to_string(), empty, vec![(0, Some(value))]);
+    for (k, competitor, wanted) in [
+        (
+            1.0,
+            "z",
+            vec![expected("b", false, 10.0), expected("b", true, 20.0)],
+        ),
+        (1.0, "a", vec![expected("a", false, 30.0)]),
+        (
+            2.0,
+            "a",
+            vec![
+                expected("a", false, 30.0),
+                expected("b", false, 10.0),
+                expected("b", true, 20.0),
+            ],
+        ),
+    ] {
+        let tree = NativeTree::try_new(vector_op(
+            evaluated_input(Arc::clone(&grid)),
+            BoundVectorOp::LimitK {
+                k,
+                group: Grouping::By(Arc::from([])),
+            },
+        ))
+        .unwrap();
+        for reverse in [false, true] {
+            let mut chunks = vec![
+                evaluated_chunk_of(&schema, named_metric("m", "b"), 0, vec![Some(10.0)], true),
+                evaluated_chunk_of(&schema, with_empty.clone(), 0, vec![Some(20.0)], true),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("m", competitor),
+                    0,
+                    vec![Some(30.0)],
+                    true,
+                ),
+            ];
+            if reverse {
+                chunks.reverse();
+            }
+            let mut execution = executor(&tree, pool());
+            for chunk in chunks {
+                execution.push_evaluated(InputId::new(0), chunk).unwrap();
+            }
+            let mut actual: Vec<_> = run(&mut execution)
+                .iter()
+                .map(|chunk| {
+                    (
+                        chunk.series.metric.get("job").unwrap().to_string(),
+                        chunk.series.metric.get("aa").is_some(),
+                        decided(std::slice::from_ref(chunk)),
+                    )
+                })
+                .collect();
+            actual.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+            assert_eq!(
+                actual, wanted,
+                "k={k}, competitor={competitor}, reverse={reverse}"
+            );
+        }
+    }
+}
+
+/// The vector workspace includes one complete key, heap and set entry per possible candidate,
+/// a present-member slot and a temporary key while comparing a new sample.
+#[test]
+fn limitk_reserves_heap_and_complete_label_keys() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let series = [
+        evaluated_chunk_of(&schema, named_metric("m", "a"), 0, vec![Some(1.0)], true).series,
+        evaluated_chunk_of(&schema, named_metric("m", "b"), 0, vec![Some(2.0)], true).series,
+    ];
+    let group = Grouping::By(Arc::from([]));
+    let limit = vector_workspace_bytes(
+        &BoundVectorOp::LimitK {
+            k: 1.0,
+            group: group.clone(),
+        },
+        &schema,
+        &series,
+    );
+    let top = vector_workspace_bytes(
+        &BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group,
+        },
+        &schema,
+        &series,
+    );
+    let label = std::mem::size_of::<(Arc<str>, Arc<str>)>();
+    let entries = 2 * std::mem::size_of::<Arc<crate::grid_series::LabelSet>>()
+        + std::mem::size_of::<crate::grid_series::LabelSet>()
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<(usize, usize)>();
+    assert!(limit >= top + series.len() * (entries + 2 * label) + 2 * label);
 }
 
 /// A binary node above a vector node reads what `topk` kept, once the vector node has read its
@@ -10602,10 +10826,10 @@ fn a_table_shared_by_queued_results_stays_charged_until_the_last_leaves() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// `limitk` takes the order a sort below it decided: `sort_desc` puts `{job="z"}` first, so it is
-/// the one `limitk(1, ...)` keeps, although `{job="a"}` sorts first by label.
+/// A value sort below `limitk` does not affect its selection: `{job="a"}` has the smaller label
+/// set even though `sort_desc` puts `{job="z"}` first.
 #[test]
-fn limitk_keeps_the_order_a_sort_below_it_decided() {
+fn limitk_ignores_the_order_a_sort_below_it_decided() {
     let grid = grid(0, 60_000, 1);
     let schema = evaluated_schema(Arc::clone(&grid));
     let tree = NativeTree::try_new(vector_op(
@@ -10630,7 +10854,7 @@ fn limitk_keeps_the_order_a_sort_below_it_decided() {
     }
     assert_eq!(
         decided_by_job(&run(&mut execution)),
-        vec![("z".to_string(), vec![(0, Some(2.0))])]
+        vec![("a".to_string(), vec![(0, Some(1.0))])]
     );
 }
 

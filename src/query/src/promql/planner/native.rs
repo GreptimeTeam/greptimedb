@@ -669,13 +669,10 @@ impl PromPlanner {
         // tree multi-input, and the one execution above then reads the Mito input through its own
         // raw source as well.
         let multi_input = selectors.len() > 1 && logical_ids_differ;
-        // A multi-input tree skips the split below, so the refusals the split makes for reasons that
-        // are not about what the runtime computes have to be made here.
-        //
-        // The aggregate split keeps its prefix per-series, which is why it declines an operation
-        // whose answer depends on the order its input arrives in. A multi-input node reads its
-        // inputs' partitions in the order they became ready, so that refusal is repeated here.
-        if multi_input && depends_on_input_order(root) {
+        // A multi-input tree skips the split below, so repeat its conservative refusal of `limitk`
+        // here. Selection is deterministic, but this multi-input execution path has not been
+        // verified for it.
+        if multi_input && contains_unverified_multi_input_limitk(root) {
             return Ok(None);
         }
         // The split names the columns its groups report from the existing planner. A grouping by the
@@ -1795,20 +1792,12 @@ fn data_free(node: &NativeNode) -> bool {
     }
 }
 
-/// Whether `node` holds an operation whose answer depends on the order its input arrives in.
+/// Whether `node` contains `limitk`, which remains conservatively declined for a multi-input tree.
 ///
-/// `limitk` keeps the first `k` series of each group *in input order* ([`promql::select::limitk`]).
-/// A node with more than one input reads its inputs' partitions through a gather that hands over
-/// whichever partition became ready first, so the schedule would decide which series a query keeps
-/// and the same data could answer differently between two runs. Prometheus defines the selection
-/// over a series set, not over an arrival order.
-///
-/// Only this operation's *selection* depends on that order. `topk` breaks ties by label and
-/// `limit_ratio` selects by a label hash, so a reordered gather changes neither. The instant
-/// `sort`s keep tied series in the order they arrived, and a floating-point fold such as `stdvar`
-/// can differ in its last bits, but neither changes which series a statement keeps. The aggregate
-/// split declines `LimitK` for the same reason, and only a multi-input node repeats that refusal.
-fn depends_on_input_order(node: &NativeNode) -> bool {
+/// Its selection uses deterministic logical label sets ([`promql::select::limitk`]), but the
+/// multi-input path has not been verified for it. The aggregate split also declines `LimitK`; this
+/// guard repeats that refusal when a multi-input tree skips the split.
+fn contains_unverified_multi_input_limitk(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
@@ -1819,18 +1808,26 @@ fn depends_on_input_order(node: &NativeNode) -> bool {
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. } => depends_on_input_order(input),
+        | NativeExpr::Aggregate { input, .. } => contains_unverified_multi_input_limitk(input),
         NativeExpr::ParameterizedMap {
             input, parameters, ..
-        } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
+        } => {
+            contains_unverified_multi_input_limitk(input)
+                || parameters
+                    .iter()
+                    .any(contains_unverified_multi_input_limitk)
+        }
         NativeExpr::Vector { input, op } => {
-            matches!(op, BoundVectorOp::LimitK { .. }) || depends_on_input_order(input)
+            matches!(op, BoundVectorOp::LimitK { .. })
+                || contains_unverified_multi_input_limitk(input)
         }
         NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            depends_on_input_order(left) || depends_on_input_order(right)
+            contains_unverified_multi_input_limitk(left)
+                || contains_unverified_multi_input_limitk(right)
         }
         NativeExpr::Info { base, info, .. } => {
-            depends_on_input_order(base) || depends_on_input_order(info)
+            contains_unverified_multi_input_limitk(base)
+                || contains_unverified_multi_input_limitk(info)
         }
     }
 }

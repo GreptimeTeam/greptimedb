@@ -5629,19 +5629,10 @@ async fn native_promql_declines_ranking_grouped_by_a_value_field() {
     assert_eq!(native_rows.len(), 2);
 }
 
-/// `limitk` keeps the series that arrive first, so a multi-input node must not answer it.
-///
-/// A node with more than one input hands its inputs' partitions over in the order they became ready,
-/// while `limitk` keeps the first `k` series of each group in input order: the schedule would decide
-/// which series a query keeps, where Prometheus defines the selection over a series set. The
-/// aggregate split declines it for the same reason, and that refusal is repeated for a multi-input
-/// node.
-///
-/// The existing planner cannot plan `limitk` at all - it has no kernel for the operator - so the
-/// statement fails on both routes today. What this pins is that the native route does not change
-/// that outcome by answering it, and in particular does not answer it differently between runs.
+/// The multi-input eligibility guard still conservatively declines `limitk` even though the
+/// selection kernel is now order-independent; legacy numeric planning cannot plan the operator.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
+async fn native_promql_multi_input_limitk_remains_conservatively_declined() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_limitk_order",
@@ -5675,34 +5666,30 @@ async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
     let query = "native_order_left and on(host) limitk(1, native_order_right)";
     let sql = format!("TQL EVAL (0, 0, '1s') {query}");
 
-    // The route declines, so the statement is planned by the one that was always its answer.
+    // The unchanged multi-input guard declines the shape; its fallback still reports the legacy
+    // numeric planner's unsupported token rather than producing a selected series.
     observer.clear();
-    let native = instance
+    let result = instance
         .do_query(&sql, native_query_context(true, 4))
         .await
         .remove(0);
     assert!(
         observer.fused().is_none(),
-        "{query}: the route must decline a selection whose answer depends on arrival order"
+        "{query}: multi-input guard must decline"
     );
-    let legacy = instance
-        .do_query(&sql, native_query_context(false, 4))
-        .await
-        .remove(0);
-    // Both routes report the same outcome: the decline leads to the plan this statement already had,
-    // not to an answer the schedule could change.
-    assert_eq!(
-        native.is_err(),
-        legacy.is_err(),
-        "{query}: the route must not change whether the statement is answerable"
-    );
-    if let (Err(native_error), Err(legacy_error)) = (native, legacy) {
-        assert_eq!(
-            native_error.to_string(),
-            legacy_error.to_string(),
-            "{query}: the decline must lead to the plan this statement already had"
-        );
+    let error = result.expect_err("legacy numeric planning does not support limitk");
+    let mut causes = Vec::new();
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(current) = cause {
+        causes.push(current.to_string());
+        cause = current.source();
     }
+    assert!(
+        causes
+            .iter()
+            .any(|cause| cause.contains("Unexpected token")),
+        "{query}: {causes:?}"
+    );
 }
 
 /// A tree the native runtime cannot execute keeps the existing plan, rather than failing the
@@ -6585,6 +6572,157 @@ fn eval_text(output: Output) -> String {
         out.push_str(&row.join(" | "));
     }
     out
+}
+
+/// A real metric scan supplies two series from different scan partitions to the segmented
+/// `limitk` and complete sum. No legacy comparison is valid: legacy numeric planning lacks limitk.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_sum_limitk_selects_label_minimum_across_scan_partitions() {
+    use datafusion::physical_plan::metrics::MetricValue;
+
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_sum_limitk_segments")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE limitk_metric_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table' = 'true'); \
+         CREATE TABLE limitk_metric (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table' = 'limitk_metric_phy'); \
+         INSERT INTO limitk_metric (host, ts, val) VALUES ('a', 0, 10), ('b', 0, 100)",
+        QueryContext::arc(),
+    ).await;
+
+    // Both rows have the same metric name and only the `host` label, so the complete label sets
+    // compare by `a` versus `b`: the expected selection is derived from the fixture, not arrival.
+    // There are exactly two samples; the native prefix counters below prove that two actual scan
+    // partitions contributed, not just that the scan declares multiple partitions.
+    for (expr, aggregate) in [
+        ("limitk(1, limitk_metric)", false),
+        ("sum(limitk(1, limitk_metric))", true),
+    ] {
+        observer.clear();
+        let sql = format!("TQL EVAL (0, 0, '1s') {expr}");
+        let output = native_tql_output(&instance, &sql, true).await;
+        if aggregate {
+            assert_eq!(eval_values(output), vec![(0, 10.0)], "{expr}");
+        } else {
+            assert_eq!(
+                native_result_rows(output).await,
+                vec![(0, "a".to_string(), 10.0)],
+                "{expr}"
+            );
+        }
+
+        let nodes = observed_physical_nodes(&observer);
+        let parent = nodes
+            .iter()
+            .find(|node| {
+                node.name() == "FusedSeriesExec"
+                    && format!(
+                        "{}",
+                        datafusion::physical_plan::displayable(node.as_ref()).indent(true)
+                    )
+                    .contains("Vector limitk 1 by []")
+            })
+            .expect("the planner must use a native limitk segment");
+        let display = datafusion::physical_plan::displayable(parent.as_ref())
+            .indent(true)
+            .to_string();
+        assert!(
+            display.contains("Input evaluated samples source=0"),
+            "{display}"
+        );
+        assert_eq!(
+            parent.output_partitioning().partition_count(),
+            1,
+            "{display}"
+        );
+        if aggregate {
+            assert!(
+                display.contains("Aggregate sum by [] complete"),
+                "{display}"
+            );
+        }
+        let region = nodes
+            .iter()
+            .find(|node| {
+                node.name() == "FusedSeriesExec"
+                    && node.output_partitioning().partition_count() > 1
+                    && format!(
+                        "{}",
+                        datafusion::physical_plan::displayable(node.as_ref()).indent(true)
+                    )
+                    .contains("Instant")
+            })
+            .expect("the native instant prefix must preserve scan partitions");
+        let values = output_values_per_partition(region).expect("native prefix partition counters");
+        assert_eq!(
+            values.iter().filter(|count| **count > 0).count(),
+            2,
+            "two nonempty native partitions: {values:?}"
+        );
+        assert_eq!(
+            values.iter().sum::<u64>(),
+            2,
+            "exactly two input samples: {values:?}"
+        );
+        let scan = observed_series_scans(&observer);
+        assert_eq!(
+            scan.len(),
+            1,
+            "one selector has one scan with multiple partitions"
+        );
+        assert!(scan[0].output_partitioning().partition_count() >= 2);
+        assert_eq!(
+            scan[0].output_partitioning().partition_count(),
+            values.len(),
+            "the native prefix counters are for the actual scan partitions"
+        );
+        assert_eq!(region.children().len(), 1);
+        // EnsureCooperative can insert a transparent scheduling wrapper around the scan.
+        let child = region.children()[0];
+        let child = child
+            .downcast_ref::<CooperativeExec>()
+            .map_or(child, |cooperative| cooperative.input());
+        assert!(
+            Arc::ptr_eq(child, &scan[0]),
+            "the measured native prefix reads that scan through at most a cooperative wrapper"
+        );
+        let mut scan_rows = vec![0usize; values.len()];
+        for metric in scan[0].metrics().expect("scan metrics").iter() {
+            if let MetricValue::OutputRows(count) = metric.value()
+                && let Some(partition) = metric.partition()
+                && let Some(rows) = scan_rows.get_mut(partition)
+            {
+                *rows += count.value();
+            }
+        }
+        assert_eq!(
+            scan_rows
+                .iter()
+                .map(|rows| *rows as u64)
+                .collect::<Vec<_>>(),
+            values,
+            "the two prefix values come from different scan partitions"
+        );
+        common_telemetry::info!(
+            "{expr}: scan output rows by partition {scan_rows:?}; native instant output values {values:?}"
+        );
+        assert!(
+            nodes.iter().any(|node| node
+                .downcast_ref::<promql::extension_plan::SeriesRepartitionExec>()
+                .is_some_and(|router| router.identity_completion()
+                    == promql::extension_plan::IdentityCompletion::CompleteDisjoint)),
+            "the region must publish complete-disjoint series at its boundary"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -7615,11 +7753,10 @@ fn fused_nodes_in_root(
     found
 }
 
-fn debug_merge_scan_child(child: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> String {
+fn debug_merge_scan_child(mut child: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> String {
     // A matching segment re-declares each source at the configured width, so a one-partition
     // region scan arrives under a router. Look through both the cooperative wrapper and that
     // router to reach the scan the source is actually read from.
-    let mut child = child;
     while child.is::<CooperativeExec>()
         || child.is::<promql::extension_plan::SeriesRepartitionExec>()
     {
