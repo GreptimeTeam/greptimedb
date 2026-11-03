@@ -1266,29 +1266,16 @@ impl Instance {
             let mut seen = HashSet::with_capacity(targets.len());
             targets.retain(|target| seen.insert(target.clone()));
         }
-        if let [target] = targets.as_slice() {
-            return if self
-                .is_physical_query_permission_target(target, query_ctx)
-                .await?
-            {
-                Ok(PermissionTableTargets::Unresolved)
-            } else {
-                Ok(PermissionTableTargets::resolved(targets))
-            };
-        }
-
         // Bound catalog load and inspect results in target order to preserve serial semantics.
-        for chunk in targets.chunks(CONCURRENCY) {
+        for chunk in targets.chunks_mut(CONCURRENCY) {
             let results = future::join_all(
                 chunk
                     .iter()
                     .map(|target| self.is_physical_query_permission_target(target, query_ctx)),
             )
             .await;
-            for result in results {
-                if result? {
-                    return Ok(PermissionTableTargets::Unresolved);
-                }
+            for (target, result) in chunk.iter_mut().zip(results) {
+                target.is_physical_metric_table = result?;
             }
         }
 
@@ -1513,6 +1500,35 @@ impl PrometheusHandler for Instance {
                 .context(AuthSnafu)
             {
                 Ok(_) => allowed.push(metric),
+                Err(error)
+                    if error.status_code()
+                        == common_error::status_code::StatusCode::PermissionDenied => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(allowed)
+    }
+
+    async fn filter_metadata_schema_names(
+        &self,
+        schema_names: Vec<String>,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        let checker = self.plugins.get::<PermissionCheckerRef>();
+        let mut allowed = Vec::with_capacity(schema_names.len());
+        for schema in schema_names {
+            match checker
+                .as_ref()
+                .check_permission(
+                    query_ctx.current_user(),
+                    PermissionReq::SchemaRead {
+                        catalog: query_ctx.current_catalog(),
+                        schema: &schema,
+                    },
+                )
+                .context(AuthSnafu)
+            {
+                Ok(_) => allowed.push(schema),
                 Err(error)
                     if error.status_code()
                         == common_error::status_code::StatusCode::PermissionDenied => {}
@@ -2148,9 +2164,9 @@ mod tests {
         ) -> auth::error::Result<PermissionResp> {
             let reject = match targets {
                 PermissionTableTargets::Unresolved => true,
-                PermissionTableTargets::Resolved(targets) => {
-                    targets.iter().any(|target| target.table == "denied")
-                }
+                PermissionTableTargets::Resolved(targets) => targets
+                    .iter()
+                    .any(|target| target.table == "denied" || target.is_physical_metric_table),
             };
             Ok(if reject {
                 PermissionResp::Reject
@@ -3586,6 +3602,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_physical_target_permission_reaches_checker() -> TestResult<()> {
+        struct PhysicalChecker {
+            allow: bool,
+        }
+        impl PermissionChecker for PhysicalChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn grpc_table_targets(
+                &self,
+                request: &api::v1::greptime_request::Request,
+                catalog: &str,
+                schema: &str,
+            ) -> PermissionTableTargets {
+                let api::v1::greptime_request::Request::Ddl(ddl) = request else {
+                    panic!("expected DDL")
+                };
+                let Some(api::v1::ddl_request::Expr::CommentOn(comment)) = &ddl.expr else {
+                    panic!("expected comment")
+                };
+                PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                    catalog,
+                    schema,
+                    &comment.object_name,
+                )])
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                let PermissionTableTargets::Resolved(targets) = targets else {
+                    panic!("physical target must retain its identity")
+                };
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].catalog, "greptime");
+                assert_eq!(targets[0].schema, "public");
+                assert_eq!(targets[0].table, "physical_metric");
+                assert!(targets[0].is_physical_metric_table);
+                Ok(if self.allow {
+                    PermissionResp::Allow
+                } else {
+                    PermissionResp::Reject
+                })
+            }
+        }
+        for allow in [true, false] {
+            let plugins = Plugins::new();
+            plugins.insert::<PermissionCheckerRef>(Arc::new(PhysicalChecker { allow }));
+            let instance = test_instance_with_plugins(
+                test_physical_table(1024, "physical_metric")?,
+                test_table(1025, "target")?,
+                plugins,
+            )
+            .await?;
+            let ctx = test_query_ctx(1);
+            for sql in [
+                "SHOW CREATE TABLE physical_metric",
+                "SELECT * FROM physical_metric",
+            ] {
+                let result = instance
+                    .check_sql_permission(&parse_one_sql(sql), &ctx)
+                    .await;
+                assert_eq!(allow, result.is_ok());
+                if let Err(error) = result {
+                    assert_eq!(StatusCode::PermissionDenied, error.status_code());
+                }
+            }
+            if !allow {
+                let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+                    expr: Some(api::v1::ddl_request::Expr::CommentOn(
+                        api::v1::CommentOnExpr {
+                            object_name: "physical_metric".to_string(),
+                            object_type: api::v1::CommentObjectType::Table as i32,
+                            ..Default::default()
+                        },
+                    )),
+                });
+                let err = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+                    &instance, request, ctx,
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(StatusCode::PermissionDenied, err.status_code());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_physical_query_targets_fail_closed() -> TestResult<()> {
         let physical_table = "physical_metric";
         let plugins = Plugins::new();
@@ -3609,9 +3722,10 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let physical_target = PermissionTableTarget::new("greptime", "public", physical_table);
+        let physical_target = PermissionTableTarget::new("greptime", "public", physical_table)
+            .with_physical_metric_table(true);
         assert_eq!(
-            PermissionTableTargets::Unresolved,
+            PermissionTableTargets::Resolved(vec![logical_target.clone(), physical_target.clone()]),
             instance
                 .resolve_query_permission_targets(
                     PermissionTableTargets::resolved(
