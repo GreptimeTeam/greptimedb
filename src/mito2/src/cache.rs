@@ -59,6 +59,7 @@ use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::parquet_page::ParquetPageCache;
+use crate::cache::range_cache::RangeScanCacheValue;
 use crate::cache::write_cache::WriteCacheRef;
 use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, InvalidMetadataSnafu, InvalidParquetSnafu,
@@ -67,7 +68,7 @@ use crate::error::{
 use crate::memtable::record_batch_estimated_size;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
-use crate::read::range_cache::{RangeScanCacheKey, RangeScanCacheValue};
+use crate::read::range_cache::RangeScanCacheKey;
 use crate::read::read_columns::JsonTargetTypes;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::parquet::PARQUET_METADATA_KEY;
@@ -172,27 +173,6 @@ impl RangeResultMemoryLimiter {
             .clone()
             .try_acquire_many_owned(permits.try_into().ok()?)
             .ok()
-    }
-
-    /// Transfers a load's reservation to its completed result without a gap in
-    /// accounting. Compaction may shrink buffers or add metadata; growing the
-    /// reservation must remain nonblocking just like loading more input.
-    pub(crate) fn try_resize(
-        &self,
-        permit: Option<tokio::sync::OwnedSemaphorePermit>,
-        bytes: usize,
-    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        let Some(mut permit) = permit else {
-            return self.try_acquire(bytes);
-        };
-        let required = bytes.div_ceil(self.permit_bytes).max(1);
-        let reserved = permit.num_permits();
-        if required > reserved {
-            permit.merge(self.try_acquire((required - reserved).checked_mul(self.permit_bytes)?)?);
-        } else {
-            drop(permit.split(reserved - required));
-        }
-        Some(permit)
     }
 
     pub(crate) async fn acquire(&self, bytes: usize) -> Result<tokio::sync::SemaphorePermit<'_>> {
@@ -1022,7 +1002,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::put_range_result()].
     /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -1033,7 +1013,7 @@ impl CacheStrategy {
         }
     }
 
-    pub(crate) fn range_cache_worker(&self) -> Option<&Arc<range_cache::RangeCacheWorker>> {
+    pub(crate) fn range_result_cache(&self) -> Option<&RangeResultCacheRef> {
         match self {
             Self::EnableAll(manager) => manager.range_result_cache.as_ref(),
             Self::Compaction(_) | Self::Disabled => None,
@@ -1048,22 +1028,9 @@ impl CacheStrategy {
         }
     }
 
-    pub(crate) fn range_result_memory_limiter(&self) -> Option<&Arc<RangeResultMemoryLimiter>> {
-        match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                Some(cache_manager.range_result_memory_limiter())
-            }
-            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
-        }
-    }
-
-    pub(crate) fn range_result_cache_size(&self) -> Option<usize> {
-        match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                Some(cache_manager.range_result_cache_size())
-            }
-            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
-        }
+    #[cfg(test)]
+    pub(crate) fn range_concat_memory(&self) -> Option<&Arc<RangeResultMemoryLimiter>> {
+        self.range_result_cache().map(|cache| cache.concat_memory())
     }
 
     /// Calls [CacheManager::write_cache()].
@@ -1157,11 +1124,10 @@ pub struct CacheManager {
     /// Cache for time series selectors.
     selector_result_cache: Option<SelectorResultCache>,
     /// Cache for range scan outputs in flat format.
-    range_result_cache: Option<RangeResultCache>,
+    range_result_cache: Option<RangeResultCacheRef>,
     /// Configured capacity for range scan outputs in flat format.
+    #[cfg(test)]
     range_result_cache_size: u64,
-    /// Shared memory limiter for async range-result cache tasks.
-    range_result_memory_limiter: Arc<RangeResultMemoryLimiter>,
     /// Cache for index result.
     index_result_cache: Option<IndexResultCache>,
     /// Cache for prefilter result.
@@ -1540,7 +1506,7 @@ impl CacheManager {
     }
 
     /// Puts range scan result into cache.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -1556,10 +1522,7 @@ impl CacheManager {
         self.range_result_cache.is_some()
     }
 
-    pub(crate) fn range_result_memory_limiter(&self) -> &Arc<RangeResultMemoryLimiter> {
-        &self.range_result_memory_limiter
-    }
-
+    #[cfg(test)]
     pub(crate) fn range_result_cache_size(&self) -> usize {
         self.range_result_cache_size as usize
     }
@@ -1788,7 +1751,7 @@ impl CacheManagerBuilder {
                 .build()
         });
         let range_result_cache = (self.range_result_cache_size != 0)
-            .then(|| range_cache::RangeCacheWorker::new(self.range_result_cache_size));
+            .then(|| range_cache::RangeResultCache::new(self.range_result_cache_size));
         CacheManager {
             sst_meta_cache,
             sst_decoded_meta_cache,
@@ -1800,11 +1763,8 @@ impl CacheManagerBuilder {
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             range_result_cache,
+            #[cfg(test)]
             range_result_cache_size: self.range_result_cache_size,
-            range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::new(
-                self.range_result_cache_size as usize,
-                RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize,
-            )),
             index_result_cache,
             prefilter_result_cache,
         }
@@ -2021,7 +1981,7 @@ type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (file id, row group id, time series row selector) to [SelectorResultValue].
 type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
 /// Maps partition-range scan key to cached flat batches.
-type RangeResultCache = Arc<range_cache::RangeCacheWorker>;
+type RangeResultCacheRef = Arc<range_cache::RangeResultCache>;
 
 #[cfg(test)]
 mod tests {
@@ -2042,9 +2002,7 @@ mod tests {
     use crate::cache::test_util::{
         parquet_meta, sst_parquet_meta, sst_parquet_meta_with_region_metadata,
     };
-    use crate::read::range_cache::{
-        RangeScanCacheKey, RangeScanCacheValue, ScanRequestFingerprintBuilder,
-    };
+    use crate::read::range_cache::{RangeScanCacheKey, ScanRequestFingerprintBuilder};
     use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::row_selection::RowGroupSelection;
 
@@ -3014,7 +2972,7 @@ mod tests {
             }
             .build(),
         };
-        let value = Arc::new(RangeScanCacheValue::new(Vec::new(), 0));
+        let value = Arc::new(RangeScanCacheValue::empty());
 
         assert!(cache.get_range_result(&key).is_none());
         cache.put_range_result(key.clone(), value.clone());
@@ -3043,17 +3001,27 @@ mod tests {
 
         assert_eq!(cache.range_result_cache_size(), cache_size as usize);
         assert_eq!(
-            cache.range_result_memory_limiter().permit_bytes(),
+            cache
+                .range_result_cache
+                .as_ref()
+                .unwrap()
+                .concat_memory()
+                .permit_bytes(),
             RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize
         );
         assert_eq!(
-            cache.range_result_memory_limiter().available_permits(),
+            cache
+                .range_result_cache
+                .as_ref()
+                .unwrap()
+                .concat_memory()
+                .available_permits(),
             (cache_size as usize).div_ceil(RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize)
         );
     }
 
     #[tokio::test]
-    async fn range_result_memory_limiter_rejects_oversized_request() {
+    async fn test_range_concat_memory_rejects_oversized_request() {
         let limiter = RangeResultMemoryLimiter::new(2 * 1024, 1024);
         assert_eq!(limiter.available_permits(), 2);
 
@@ -3066,7 +3034,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn range_result_memory_limiter_allows_request_up_to_capacity() {
+    async fn test_range_concat_memory_allows_request_up_to_capacity() {
         let limiter = RangeResultMemoryLimiter::new(2 * 1024, 1024);
         let permit = limiter.acquire(2 * 1024).await.unwrap();
         assert_eq!(limiter.available_permits(), 0);
@@ -3075,23 +3043,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::empty_result(None, 0, Some(1))]
-    #[case::new_result(None, 1025, Some(2))]
-    #[case::unchanged(Some(1024), 1024, Some(1))]
-    #[case::grow(Some(1024), 2048, Some(2))]
-    #[case::shrink(Some(3072), 1024, Some(1))]
-    #[case::exhausted(Some(1024), 4096, None)]
-    #[case::oversized(Some(1024), usize::MAX, None)]
+    #[case::empty_result(0, Some(1))]
+    #[case::rounded_result(1025, Some(2))]
+    #[case::exhausted(4096, None)]
+    #[case::oversized(usize::MAX, None)]
     #[test]
-    fn range_result_memory_reservation_resizes_without_waiting(
-        #[case] input_size: Option<usize>,
+    fn test_range_result_memory_reservation_is_nonblocking(
         #[case] result_size: usize,
         #[case] expected_permits: Option<usize>,
     ) {
         let limiter = RangeResultMemoryLimiter::new(4096, 1024);
         let blocker = limiter.try_acquire(1024).unwrap();
-        let input_permit = input_size.map(|size| limiter.try_acquire(size).unwrap());
-        let result_permit = limiter.try_resize(input_permit, result_size);
+        let result_permit = limiter.try_acquire(result_size);
         assert_eq!(
             result_permit.as_ref().map(|permit| permit.num_permits()),
             expected_permits

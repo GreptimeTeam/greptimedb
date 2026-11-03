@@ -15,9 +15,11 @@
 //! Shared memory cache primitives with native asynchronous load deduplication.
 
 mod cache;
+mod sync_cache;
 
 pub mod metrics;
 pub mod page;
 pub mod paged;
 
 pub use cache::{Cache, RemovalCause};
+pub use sync_cache::SyncCache;

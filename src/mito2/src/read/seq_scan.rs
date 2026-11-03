@@ -302,13 +302,14 @@ impl SeqScan {
         file_scan_semaphore: Option<Arc<Semaphore>>,
         merge_semaphore: Option<Arc<Semaphore>>,
     ) -> Result<(BoxedRecordBatchStream, usize)> {
-        let cache_key = build_range_cache_key(stream_ctx, part_range).map(|key| {
-            if read_mode == FlatReadMode::CrossRangeMerge {
-                key.for_cross_range_merge()
-            } else {
-                key
-            }
-        });
+        let cache_key =
+            build_range_cache_key(stream_ctx, part_range, Some(&partition_pruner)).map(|key| {
+                if read_mode == FlatReadMode::CrossRangeMerge {
+                    key.for_cross_range_merge()
+                } else {
+                    key
+                }
+            });
         let ctx = stream_ctx.clone();
         let range = *part_range;
         let metrics = part_metrics.clone();
