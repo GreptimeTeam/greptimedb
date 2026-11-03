@@ -285,7 +285,6 @@ pub fn json_fulltext_options_to_proto(
     options: FulltextOptions,
 ) -> crate::v1::JsonFulltextIndexOptions {
     crate::v1::JsonFulltextIndexOptions {
-        enable: options.enable,
         analyzer: match options.analyzer {
             FulltextAnalyzer::English => Analyzer::English.into(),
             FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
@@ -301,6 +300,7 @@ pub fn json_fulltext_options_to_proto(
 }
 
 /// Validates fulltext options received for a JSON2 type hint.
+/// The presence of these options enables the fulltext index.
 pub fn json_fulltext_options_from_proto(
     options: crate::v1::JsonFulltextIndexOptions,
 ) -> datatypes::error::Result<FulltextOptions> {
@@ -317,7 +317,7 @@ pub fn json_fulltext_options_from_proto(
         .build()
     })?;
     FulltextOptions::new(
-        options.enable,
+        true,
         as_fulltext_option_analyzer(analyzer),
         options.case_sensitive,
         as_fulltext_option_backend(backend),
