@@ -1,0 +1,497 @@
+-- Port from Prometheus `promql/promqltest/testdata/functions.test`.
+-- Include stddev/stdvar over time
+-- load 10s
+--   metric 0 8 8 2 3
+create table metric (ts timestamp(3) time index, val double);
+
+Affected Rows: 0
+
+insert into metric values
+    (0,0),
+    (10000,8),
+    (20000,8),
+    (30000,2),
+    (40000,3);
+
+Affected Rows: 5
+
+-- SQLNESS SORT_RESULT 2 1
+select * from metric;
+
++---------------------+-----+
+| ts                  | val |
++---------------------+-----+
+| 1970-01-01T00:00:00 | 0.0 |
+| 1970-01-01T00:00:10 | 8.0 |
+| 1970-01-01T00:00:20 | 8.0 |
+| 1970-01-01T00:00:30 | 2.0 |
+| 1970-01-01T00:00:40 | 3.0 |
++---------------------+-----+
+
+-- eval instant at 1m stdvar_over_time(metric[2m])
+--   {} 10.56
+tql eval (60, 60, '1s') stdvar_over_time(metric[2m]);
+
++---------------------+-------------------------------------+
+| ts                  | prom_stdvar_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:01:00 | 10.559999999999999                  |
++---------------------+-------------------------------------+
+
+-- eval instant at 1m stddev_over_time(metric[2m])
+--   {} 3.249615
+tql eval (60, 60, '1s') stddev_over_time(metric[2m]);
+
++---------------------+-------------------------------------+
+| ts                  | prom_stddev_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:01:00 | 3.249615361854384                   |
++---------------------+-------------------------------------+
+
+-- eval instant at 1m stddev_over_time((metric[2m]))
+--   {} 3.249615
+tql eval (60, 60, '1s') stddev_over_time((metric[2m]));
+
++---------------------+-------------------------------------+
+| ts                  | prom_stddev_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:01:00 | 3.249615361854384                   |
++---------------------+-------------------------------------+
+
+drop table metric;
+
+Affected Rows: 0
+
+-- load 10s
+--   metric 1.5990505637277868 1.5990505637277868 1.5990505637277868
+create table metric (ts timestamp(3) time index, val double);
+
+Affected Rows: 0
+
+insert into metric values
+    (0,1.5990505637277868),
+    (10000,1.5990505637277868),
+    (20000,1.5990505637277868);
+
+Affected Rows: 3
+
+-- eval instant at 55s stdvar_over_time(metric[1m])
+--   {} 0
+tql eval (55, 55, '1s') stdvar_over_time(metric[1m]);
+
++---------------------+-------------------------------------+
+| ts                  | prom_stdvar_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:00:55 | 0.0                                 |
++---------------------+-------------------------------------+
+
+-- eval instant at 55s stddev_over_time(metric[1m])
+--   {} 0
+tql eval (55, 55, '1s') stddev_over_time(metric[1m]);
+
++---------------------+-------------------------------------+
+| ts                  | prom_stddev_over_time(ts_range,val) |
++---------------------+-------------------------------------+
+| 1970-01-01T00:00:55 | 0.0                                 |
++---------------------+-------------------------------------+
+
+drop table metric;
+
+Affected Rows: 0
+
+-- Port from functions.test L632 - L680, commit 001ee2620e094970e5657ce39275b2fccdbd1359
+-- Include quantile over time
+-- load 10s
+-- 	data{test="two samples"} 0 1
+-- 	data{test="three samples"} 0 1 2
+-- 	data{test="uneven samples"} 0 1 4
+create table data (ts timestamp(3) time index, val double, test string primary key);
+
+Affected Rows: 0
+
+insert into data values
+    (0, 0, "two samples"),
+    (10000, 1, "two samples"),
+    (0, 0, "three samples"),
+    (10000, 1, "three samples"),
+    (20000, 2, "three samples"),
+    (0, 0, "uneven samples"),
+    (10000, 1, "uneven samples"),
+    (20000, 4, "uneven samples");
+
+Affected Rows: 8
+
+-- eval instant at 1m quantile_over_time(0, data[2m])
+-- 	{test="two samples"} 0
+-- 	{test="three samples"} 0
+-- 	{test="uneven samples"} 0
+--
+-- Prometheus `v3.9.1` updates these cases to use a larger range to avoid the (t-r) boundary.
+-- See PR #13904 ("left-open and right-closed lookback/matrix selections").
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') quantile_over_time(0, data[2m]);
+
++---------------------+--------------------------------------------------+----------------+
+| ts                  | prom_quantile_over_time(ts_range,val,Float64(0)) | test           |
++---------------------+--------------------------------------------------+----------------+
+| 1970-01-01T00:01:00 | 0.0                                              | three samples  |
+| 1970-01-01T00:01:00 | 0.0                                              | two samples    |
+| 1970-01-01T00:01:00 | 0.0                                              | uneven samples |
++---------------------+--------------------------------------------------+----------------+
+
+-- eval instant at 1m quantile_over_time(0.5, data[2m])
+-- 	{test="two samples"} 0.5
+-- 	{test="three samples"} 1
+-- 	{test="uneven samples"} 1
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') quantile_over_time(0.5, data[2m]);
+
++---------------------+----------------------------------------------------+----------------+
+| ts                  | prom_quantile_over_time(ts_range,val,Float64(0.5)) | test           |
++---------------------+----------------------------------------------------+----------------+
+| 1970-01-01T00:01:00 | 0.5                                                | two samples    |
+| 1970-01-01T00:01:00 | 1.0                                                | three samples  |
+| 1970-01-01T00:01:00 | 1.0                                                | uneven samples |
++---------------------+----------------------------------------------------+----------------+
+
+-- eval instant at 1m quantile_over_time(0.75, data[2m])
+-- 	{test="two samples"} 0.75
+-- 	{test="three samples"} 1.5
+-- 	{test="uneven samples"} 2.5
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') quantile_over_time(0.75, data[2m]);
+
++---------------------+-----------------------------------------------------+----------------+
+| ts                  | prom_quantile_over_time(ts_range,val,Float64(0.75)) | test           |
++---------------------+-----------------------------------------------------+----------------+
+| 1970-01-01T00:01:00 | 0.75                                                | two samples    |
+| 1970-01-01T00:01:00 | 1.5                                                 | three samples  |
+| 1970-01-01T00:01:00 | 2.5                                                 | uneven samples |
++---------------------+-----------------------------------------------------+----------------+
+
+-- eval instant at 1m quantile_over_time(0.8, data[2m])
+-- 	{test="two samples"} 0.8
+-- 	{test="three samples"} 1.6
+-- 	{test="uneven samples"} 2.8
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') quantile_over_time(0.8, data[2m]);
+
++---------------------+----------------------------------------------------+----------------+
+| ts                  | prom_quantile_over_time(ts_range,val,Float64(0.8)) | test           |
++---------------------+----------------------------------------------------+----------------+
+| 1970-01-01T00:01:00 | 0.8                                                | two samples    |
+| 1970-01-01T00:01:00 | 1.6                                                | three samples  |
+| 1970-01-01T00:01:00 | 2.8000000000000003                                 | uneven samples |
++---------------------+----------------------------------------------------+----------------+
+
+-- eval instant at 1m quantile_over_time(1, data[2m])
+-- 	{test="two samples"} 1
+-- 	{test="three samples"} 2
+-- 	{test="uneven samples"} 4
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') quantile_over_time(1, data[2m]);
+
++---------------------+--------------------------------------------------+----------------+
+| ts                  | prom_quantile_over_time(ts_range,val,Float64(1)) | test           |
++---------------------+--------------------------------------------------+----------------+
+| 1970-01-01T00:01:00 | 1.0                                              | two samples    |
+| 1970-01-01T00:01:00 | 2.0                                              | three samples  |
+| 1970-01-01T00:01:00 | 4.0                                              | uneven samples |
++---------------------+--------------------------------------------------+----------------+
+
+-- eval instant at 1m quantile_over_time(-1, data[2m])
+-- 	{test="two samples"} -Inf
+-- 	{test="three samples"} -Inf
+-- 	{test="uneven samples"} -Inf
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') quantile_over_time(-1, data[2m]);
+
++---------------------+---------------------------------------------------+----------------+
+| ts                  | prom_quantile_over_time(ts_range,val,Float64(-1)) | test           |
++---------------------+---------------------------------------------------+----------------+
+| 1970-01-01T00:01:00 | -inf                                              | three samples  |
+| 1970-01-01T00:01:00 | -inf                                              | two samples    |
+| 1970-01-01T00:01:00 | -inf                                              | uneven samples |
++---------------------+---------------------------------------------------+----------------+
+
+-- eval instant at 1m quantile_over_time(2, data[2m])
+-- 	{test="two samples"} +Inf
+-- 	{test="three samples"} +Inf
+-- 	{test="uneven samples"} +Inf
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') quantile_over_time(2, data[2m]);
+
++---------------------+--------------------------------------------------+----------------+
+| ts                  | prom_quantile_over_time(ts_range,val,Float64(2)) | test           |
++---------------------+--------------------------------------------------+----------------+
+| 1970-01-01T00:01:00 | inf                                              | three samples  |
+| 1970-01-01T00:01:00 | inf                                              | two samples    |
+| 1970-01-01T00:01:00 | inf                                              | uneven samples |
++---------------------+--------------------------------------------------+----------------+
+
+-- eval instant at 1m (quantile_over_time(2, (data[2m])))
+-- 	{test="two samples"} +Inf
+-- 	{test="three samples"} +Inf
+-- 	{test="uneven samples"} +Inf
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') (quantile_over_time(2, (data[2m])));
+
++---------------------+--------------------------------------------------+----------------+
+| ts                  | prom_quantile_over_time(ts_range,val,Float64(2)) | test           |
++---------------------+--------------------------------------------------+----------------+
+| 1970-01-01T00:01:00 | inf                                              | three samples  |
+| 1970-01-01T00:01:00 | inf                                              | two samples    |
+| 1970-01-01T00:01:00 | inf                                              | uneven samples |
++---------------------+--------------------------------------------------+----------------+
+
+drop table data;
+
+Affected Rows: 0
+
+-- Port from functions.test L773 - L802, commit 001ee2620e094970e5657ce39275b2fccdbd1359
+-- Include max/min/last over time
+-- load 10s
+-- 	data{type="numbers"} 2 0 3
+-- 	data{type="some_nan"} 2 0 NaN
+-- 	data{type="some_nan2"} 2 NaN 1
+-- 	data{type="some_nan3"} NaN 0 1
+-- 	data{type="only_nan"} NaN NaN NaN
+create table data (ts timestamp(3) time index, val double, ty string primary key);
+
+Affected Rows: 0
+
+insert into data values
+    (0, 2::double, 'numbers'),
+    (10000, 0::double, 'numbers'),
+    (20000, 3::double, 'numbers'),
+    (0, 2::double, 'some_nan'),
+    (10000, 0::double, 'some_nan'),
+    (20000, 'NaN'::double, 'some_nan'),
+    (0, 2::double, 'some_nan2'),
+    (10000, 'NaN'::double, 'some_nan2'),
+    (20000, 1::double, 'some_nan2'),
+    (0, 'NaN'::double, 'some_nan3'),
+    (10000, 0::double, 'some_nan3'),
+    (20000, 1::double, 'some_nan3'),
+    (0, 'NaN'::double, 'only_nan'),
+    (10000, 'NaN'::double, 'only_nan'),
+    (20000, 'NaN'::double, 'only_nan');
+
+Affected Rows: 15
+
+-- eval instant at 1m min_over_time(data[2m])
+-- 	{type="numbers"} 0
+-- 	{type="some_nan"} 0
+-- 	{type="some_nan2"} 1
+-- 	{type="some_nan3"} 0
+-- 	{type="only_nan"} NaN
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') min_over_time(data[2m]);
+
++---------------------+----------------------------------+-----------+
+| ts                  | prom_min_over_time(ts_range,val) | ty        |
++---------------------+----------------------------------+-----------+
+| 1970-01-01T00:01:00 | 0.0                              | numbers   |
+| 1970-01-01T00:01:00 | 0.0                              | some_nan  |
+| 1970-01-01T00:01:00 | 0.0                              | some_nan3 |
+| 1970-01-01T00:01:00 | 1.0                              | some_nan2 |
+| 1970-01-01T00:01:00 | NaN                              | only_nan  |
++---------------------+----------------------------------+-----------+
+
+-- eval instant at 1m max_over_time(data[2m])
+-- 	{type="numbers"} 3
+-- 	{type="some_nan"} 2
+-- 	{type="some_nan2"} 2
+-- 	{type="some_nan3"} 1
+-- 	{type="only_nan"} NaN
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') max_over_time(data[2m]);
+
++---------------------+----------------------------------+-----------+
+| ts                  | prom_max_over_time(ts_range,val) | ty        |
++---------------------+----------------------------------+-----------+
+| 1970-01-01T00:01:00 | 1.0                              | some_nan3 |
+| 1970-01-01T00:01:00 | 2.0                              | some_nan  |
+| 1970-01-01T00:01:00 | 2.0                              | some_nan2 |
+| 1970-01-01T00:01:00 | 3.0                              | numbers   |
+| 1970-01-01T00:01:00 | NaN                              | only_nan  |
++---------------------+----------------------------------+-----------+
+
+-- eval instant at 1m last_over_time(data[2m])
+-- 	data{type="numbers"} 3
+-- 	data{type="some_nan"} NaN
+-- 	data{type="some_nan2"} 1
+-- 	data{type="some_nan3"} 1
+-- 	data{type="only_nan"} NaN
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') last_over_time(data[2m]);
+
++---------------------+-----------------------------------+-----------+
+| ts                  | prom_last_over_time(ts_range,val) | ty        |
++---------------------+-----------------------------------+-----------+
+| 1970-01-01T00:01:00 | 1.0                               | some_nan2 |
+| 1970-01-01T00:01:00 | 1.0                               | some_nan3 |
+| 1970-01-01T00:01:00 | 3.0                               | numbers   |
+| 1970-01-01T00:01:00 | NaN                               | only_nan  |
+| 1970-01-01T00:01:00 | NaN                               | some_nan  |
++---------------------+-----------------------------------+-----------+
+
+drop table data;
+
+Affected Rows: 0
+
+-- Sliding min/max regression: overlapping 30s windows expire extrema at the
+-- left boundary, retain equal extrema, and end with a sparse empty window.
+create table moving_extrema (ts timestamp(3) time index, val double, series string primary key);
+
+Affected Rows: 0
+
+insert into moving_extrema values
+    (0, 5::double, 'moving'),
+    (10000, 1::double, 'moving'),
+    (20000, 4::double, 'moving'),
+    (30000, 4::double, 'moving'),
+    (40000, 2::double, 'moving'),
+    (60000, 3::double, 'moving');
+
+Affected Rows: 6
+
+-- eval range from 20s to 100s min_over_time(moving_extrema[30s]); 90s and 100s are empty.
+-- 	{series="moving"} 1 1 2 2 2 3 3
+-- SQLNESS SORT_RESULT 2 1
+tql eval (20, 100, '10s') min_over_time(moving_extrema[30s]);
+
++---------------------+----------------------------------+--------+
+| ts                  | prom_min_over_time(ts_range,val) | series |
++---------------------+----------------------------------+--------+
+| 1970-01-01T00:00:20 | 1.0                              | moving |
+| 1970-01-01T00:00:30 | 1.0                              | moving |
+| 1970-01-01T00:00:40 | 2.0                              | moving |
+| 1970-01-01T00:00:50 | 2.0                              | moving |
+| 1970-01-01T00:01:00 | 2.0                              | moving |
+| 1970-01-01T00:01:10 | 3.0                              | moving |
+| 1970-01-01T00:01:20 | 3.0                              | moving |
++---------------------+----------------------------------+--------+
+
+-- eval range from 20s to 100s max_over_time(moving_extrema[30s]); 90s and 100s are empty.
+-- 	{series="moving"} 5 4 4 4 3 3 3
+-- SQLNESS SORT_RESULT 2 1
+tql eval (20, 100, '10s') max_over_time(moving_extrema[30s]);
+
++---------------------+----------------------------------+--------+
+| ts                  | prom_max_over_time(ts_range,val) | series |
++---------------------+----------------------------------+--------+
+| 1970-01-01T00:00:20 | 5.0                              | moving |
+| 1970-01-01T00:00:30 | 4.0                              | moving |
+| 1970-01-01T00:00:40 | 4.0                              | moving |
+| 1970-01-01T00:00:50 | 4.0                              | moving |
+| 1970-01-01T00:01:00 | 3.0                              | moving |
+| 1970-01-01T00:01:10 | 3.0                              | moving |
+| 1970-01-01T00:01:20 | 3.0                              | moving |
++---------------------+----------------------------------+--------+
+
+drop table moving_extrema;
+
+Affected Rows: 0
+
+-- Dense sliding min/max: 40-sample windows advancing 5 samples, the shape the UDF
+-- reuses candidates for rather than rescanning. Values follow the timestamp, so each
+-- window's minimum is its oldest sample and its maximum is its newest, and both
+-- extrema expire on every step.
+create table dense_extrema (ts timestamp_s time index, val double, series string primary key);
+
+Affected Rows: 0
+
+insert into dense_extrema values (0, 0::double, 'dense');
+
+Affected Rows: 1
+
+-- Doubling eight times gives 256 rows at a one-second cadence, with val = ts.
+insert into dense_extrema select to_unixtime(ts) + 1, val + 1, series from dense_extrema;
+
+Affected Rows: 1
+
+insert into dense_extrema select to_unixtime(ts) + 2, val + 2, series from dense_extrema;
+
+Affected Rows: 2
+
+insert into dense_extrema select to_unixtime(ts) + 4, val + 4, series from dense_extrema;
+
+Affected Rows: 4
+
+insert into dense_extrema select to_unixtime(ts) + 8, val + 8, series from dense_extrema;
+
+Affected Rows: 8
+
+insert into dense_extrema select to_unixtime(ts) + 16, val + 16, series from dense_extrema;
+
+Affected Rows: 16
+
+insert into dense_extrema select to_unixtime(ts) + 32, val + 32, series from dense_extrema;
+
+Affected Rows: 32
+
+insert into dense_extrema select to_unixtime(ts) + 64, val + 64, series from dense_extrema;
+
+Affected Rows: 64
+
+insert into dense_extrema select to_unixtime(ts) + 128, val + 128, series from dense_extrema;
+
+Affected Rows: 128
+
+select count(*), min(val), max(val) from dense_extrema;
+
++----------+------------------------+------------------------+
+| count(*) | min(dense_extrema.val) | max(dense_extrema.val) |
++----------+------------------------+------------------------+
+| 256      | 0.0                    | 255.0                  |
++----------+------------------------+------------------------+
+
+-- 	{series="dense"} 61 66 71 76 81 86 91 96 101 106 111 116 121
+-- SQLNESS SORT_RESULT 2 1
+tql eval (100, 160, '5s') min_over_time(dense_extrema[40s]);
+
++---------------------+----------------------------------+--------+
+| ts                  | prom_min_over_time(ts_range,val) | series |
++---------------------+----------------------------------+--------+
+| 1970-01-01T00:01:40 | 61.0                             | dense  |
+| 1970-01-01T00:01:45 | 66.0                             | dense  |
+| 1970-01-01T00:01:50 | 71.0                             | dense  |
+| 1970-01-01T00:01:55 | 76.0                             | dense  |
+| 1970-01-01T00:02:00 | 81.0                             | dense  |
+| 1970-01-01T00:02:05 | 86.0                             | dense  |
+| 1970-01-01T00:02:10 | 91.0                             | dense  |
+| 1970-01-01T00:02:15 | 96.0                             | dense  |
+| 1970-01-01T00:02:20 | 101.0                            | dense  |
+| 1970-01-01T00:02:25 | 106.0                            | dense  |
+| 1970-01-01T00:02:30 | 111.0                            | dense  |
+| 1970-01-01T00:02:35 | 116.0                            | dense  |
+| 1970-01-01T00:02:40 | 121.0                            | dense  |
++---------------------+----------------------------------+--------+
+
+-- 	{series="dense"} 100 105 110 115 120 125 130 135 140 145 150 155 160
+-- SQLNESS SORT_RESULT 2 1
+tql eval (100, 160, '5s') max_over_time(dense_extrema[40s]);
+
++---------------------+----------------------------------+--------+
+| ts                  | prom_max_over_time(ts_range,val) | series |
++---------------------+----------------------------------+--------+
+| 1970-01-01T00:01:40 | 100.0                            | dense  |
+| 1970-01-01T00:01:45 | 105.0                            | dense  |
+| 1970-01-01T00:01:50 | 110.0                            | dense  |
+| 1970-01-01T00:01:55 | 115.0                            | dense  |
+| 1970-01-01T00:02:00 | 120.0                            | dense  |
+| 1970-01-01T00:02:05 | 125.0                            | dense  |
+| 1970-01-01T00:02:10 | 130.0                            | dense  |
+| 1970-01-01T00:02:15 | 135.0                            | dense  |
+| 1970-01-01T00:02:20 | 140.0                            | dense  |
+| 1970-01-01T00:02:25 | 145.0                            | dense  |
+| 1970-01-01T00:02:30 | 150.0                            | dense  |
+| 1970-01-01T00:02:35 | 155.0                            | dense  |
+| 1970-01-01T00:02:40 | 160.0                            | dense  |
++---------------------+----------------------------------+--------+
+
+drop table dense_extrema;
+
+Affected Rows: 0
+

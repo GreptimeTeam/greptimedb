@@ -1,0 +1,92 @@
+{
+  "name": "selector-and-lookback",
+  "series": [
+    {
+      "labels": {"__name__": "http_requests", "host": "a", "job": "api"},
+      "samples": [
+        {"t": 0, "v": 10},
+        {"t": 60000, "v": 12},
+        {"t": 120000, "v": 15}
+      ]
+    },
+    {
+      "labels": {"__name__": "http_requests", "host": "b", "job": "api"},
+      "samples": [
+        {"t": 0, "v": 20},
+        {"t": 60000, "v": 18},
+        {"t": 120000, "v": 25}
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "name": "instant selector at a sample time",
+      "expr": "http_requests",
+      "kind": "instant",
+      "time": 60000
+    },
+    {
+      "name": "instant selector inside the lookback window",
+      "expr": "http_requests",
+      "kind": "instant",
+      "time": 90000
+    },
+    {
+      "name": "instant selector past the lookback window",
+      "expr": "http_requests",
+      "kind": "instant",
+      "time": 600000
+    },
+    {
+      "name": "matcher narrows one label",
+      "expr": "http_requests{host=\"a\"}",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "negative matcher",
+      "expr": "http_requests{host!=\"a\"}",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "range selector gives a matrix",
+      "expr": "http_requests",
+      "kind": "range",
+      "start": 0,
+      "end": 120000,
+      "step": 60000
+    },
+    {
+      "name": "offset reads an earlier sample",
+      "expr": "http_requests offset 1m",
+      "kind": "instant",
+      "time": 120000
+    },
+    {
+      "name": "at modifier pins the evaluation time",
+      "expr": "http_requests @ 60000",
+      "kind": "instant",
+      "time": 120000
+    },
+    {
+      "name": "sum folds the labels away",
+      "expr": "sum(http_requests)",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "sum by keeps one label",
+      "expr": "sum by (job) (http_requests)",
+      "kind": "instant",
+      "time": 0
+    },
+    {
+      "name": "an unknown function is refused",
+      "expr": "definitely_not_a_function(http_requests)",
+      "kind": "instant",
+      "time": 0,
+      "expect_error": true
+    }
+  ]
+}

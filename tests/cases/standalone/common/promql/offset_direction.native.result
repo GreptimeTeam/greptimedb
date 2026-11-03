@@ -1,0 +1,44 @@
+-- Regression for offset direction: positive offsets should query past data.
+create table offset_direction (
+    ts timestamp time index,
+    val double,
+    host string primary key
+);
+
+Affected Rows: 0
+
+insert into offset_direction values
+    (940000, 10.0, 'a'),
+    (1000000, 20.0, 'a'),
+    (1060000, 30.0, 'a');
+
+Affected Rows: 3
+
+tql eval (1000, 1000, '1s') offset_direction;
+
++---------------------+------+------+
+| ts                  | val  | host |
++---------------------+------+------+
+| 1970-01-01T00:16:40 | 20.0 | a    |
++---------------------+------+------+
+
+tql eval (1000, 1000, '1s') offset_direction offset 60s;
+
++---------------------+------+------+
+| ts                  | val  | host |
++---------------------+------+------+
+| 1970-01-01T00:16:40 | 10.0 | a    |
++---------------------+------+------+
+
+tql eval (1000, 1000, '1s') offset_direction offset -60s;
+
++---------------------+------+------+
+| ts                  | val  | host |
++---------------------+------+------+
+| 1970-01-01T00:16:40 | 30.0 | a    |
++---------------------+------+------+
+
+drop table offset_direction;
+
+Affected Rows: 0
+

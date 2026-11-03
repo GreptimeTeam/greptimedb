@@ -1,5 +1,102 @@
 name: VMBench Long Range
 on:
+  # A caller repeats only the inputs it cares about; the rest keep their defaults below.
+  workflow_call:
+    inputs:
+      run_greptimedb:
+        description: Run GreptimeDB
+        type: boolean
+        default: true
+        required: false
+      run_victoriametrics:
+        description: Run VictoriaMetrics
+        type: boolean
+        default: false
+        required: false
+      range_preset:
+        description: Long-range query window (fixed dataset per preset)
+        type: choice
+        options:
+        - 1w
+        - 1mo
+        default: 1w
+        required: true
+      compare_greptimedb:
+        description: Compare baseline and candidate sequentially on the same host (adds one full GreptimeDB run)
+        type: boolean
+        default: false
+        required: false
+      baseline_greptimedb_tag:
+        description: Baseline Docker Hub greptime/greptimedb tag; required when comparison is enabled
+        type: string
+        default: v1.2.1
+        required: false
+      greptimedb_tag:
+        description: Candidate Docker Hub greptime/greptimedb tag
+        type: string
+        default: latest
+        required: true
+      victoriametrics_tag:
+        description: Docker Hub victoriametrics/victoria-metrics tag or tag@sha256 digest
+        type: string
+        default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
+        required: true
+      runtime_image:
+        description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
+        type: string
+        default: auto
+        required: true
+      provider:
+        description: Cloud provider for the benchmark runner
+        type: choice
+        options: [Aliyun, AWS]
+        default: Aliyun
+        required: true
+      instance_type:
+        description: 'Instance type; auto = Aliyun: ecs.c9i.2xlarge, AWS: c7i.2xlarge (both 8 vCPU / 16 GiB). Enter a specific type to override.'
+        type: string
+        default: auto
+        required: true
+      benchmark_root:
+        description: Absolute disk-backed work directory (outside the o11ybench checkout)
+        type: string
+        default: /home/runner/benchmark-data
+        required: true
+      system_disk_gib:
+        description: 'System disk GiB: auto (or 0) = 80; enter 20..2048 to override'
+        type: string
+        default: auto
+        required: true
+      benchmark_timeout_minutes:
+        description: Benchmark job timeout in minutes (1..360)
+        type: number
+        default: 360
+        required: true
+      janitor_ttl_hours:
+        description: Instance lifetime before janitor eligibility (1..168 hours; at least timeout + 2h)
+        type: number
+        default: 8
+        required: true
+      db_cpus:
+        description: CPU limit per DB container
+        type: string
+        default: '8'
+        required: true
+      db_memory:
+        description: Memory limit per DB container
+        type: string
+        default: 16g
+        required: true
+    secrets:
+      # The benchmark runner credentials; a caller passes them with `secrets: inherit`.
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      ALIYUN_ACCESS_KEY_ID:
+        required: false
+      ALIYUN_ACCESS_KEY_SECRET:
+        required: false
   workflow_dispatch:
     inputs:
       run_greptimedb:

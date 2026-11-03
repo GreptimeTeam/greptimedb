@@ -83,6 +83,10 @@ pub struct StoreConfig {
     pub(crate) setup_mysql: Option<ServiceProvider>,
     pub enable_flat_format: bool,
     pub enable_gc: bool,
+    /// Opt the server into the native PromQL route; the per-request half is a query hint.
+    pub enable_native_promql: bool,
+    /// Query-context hints sent with every gRPC statement, as `key=value`.
+    pub query_hints: Vec<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -103,6 +107,11 @@ pub struct Env {
     store_config: StoreConfig,
     /// Extra command line arguments when starting GreptimeDB binaries.
     extra_args: Vec<String>,
+    /// Query-context hints sent with every gRPC statement, as `key=value`.
+    ///
+    /// They carry per-request settings such as the native PromQL route, which no startup option can
+    /// select on its own.
+    query_hints: Arc<Vec<(String, String)>>,
     /// Cache for the inferred gRPC argument style per `bins_dir`.
     grpc_arg_style_cache: Arc<Mutex<HashMap<PathBuf, GrpcArgStyle>>>,
     compat_config_stage: Arc<Mutex<CompatConfigStage>>,
@@ -180,6 +189,7 @@ impl Env {
     ) -> Self {
         Self {
             sqlness_home: data_home,
+            query_hints: Arc::new(store_config.query_hints.clone()),
             server_addrs,
             wal,
             pull_version_on_need,
@@ -744,7 +754,7 @@ impl Env {
             crate::util::retry_with_backoff(
                 || async {
                     let mut client = db.client.lock().await;
-                    match client.grpc_query("SELECT 1").await {
+                    match client.grpc_query("SELECT 1", &[]).await {
                         Ok(_) => Ok(()),
                         Err(e) => Err(format!("Query endpoint not ready: {e}")),
                     }
@@ -792,8 +802,13 @@ impl GreptimeDB {
 
     async fn grpc_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
         let mut client = self.client.lock().await;
+        let hints = self.env.query_hints.clone();
+        let hints: Vec<(&str, &str)> = hints
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
 
-        match client.grpc_query(&query).await {
+        match client.grpc_query(&query, &hints).await {
             Ok(rows) => Box::new(OutputFormatter::from(rows)),
             Err(e) => Box::new(ErrorFormatter::from(e)),
         }
@@ -861,7 +876,7 @@ impl GreptimeDB {
         }
 
         // Default: gRPC
-        match client.grpc_query(query).await {
+        match client.grpc_query(query, &[]).await {
             Ok(output) => Ok(OutputFormatter::from(output).to_string()),
             Err(e) => {
                 let status_code = e.status_code();
@@ -1061,6 +1076,8 @@ mod tests {
                 setup_mysql: None,
                 enable_flat_format: false,
                 enable_gc: false,
+                enable_native_promql: false,
+                query_hints: Vec::new(),
             },
             vec![],
         )

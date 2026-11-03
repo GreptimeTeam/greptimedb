@@ -125,7 +125,7 @@ impl GreptimeDB {
     async fn grpc_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
         let mut client = self.client.lock().await;
 
-        match client.grpc_query(&query).await {
+        match client.grpc_query(&query, &[]).await {
             Ok(rows) => Box::new(OutputFormatter::from(rows)),
             Err(e) => Box::new(ErrorFormatter::from(e)),
         }
