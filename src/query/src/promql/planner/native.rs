@@ -659,6 +659,7 @@ impl PromPlanner {
             && NativeExecutionState::try_new(
                 &compiled.tree,
                 Arc::new(UnboundedMemoryPool::default()),
+                None,
             )
             .is_err()
         {

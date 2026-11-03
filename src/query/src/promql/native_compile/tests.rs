@@ -2964,7 +2964,7 @@ fn execute_compiled(query: &str, chunks: Vec<RawSeriesChunk>) -> Vec<EvaluatedCh
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
     let mut execution = NativeExecutor::new(
-        NativeExecutionState::try_new(&tree, pool)
+        NativeExecutionState::try_new(&tree, pool, None)
             .unwrap_or_else(|error| panic!("`{query}` was not executable: {error}")),
     );
     for chunk in chunks {
@@ -4395,7 +4395,7 @@ fn aggregate_results(output: &[EvaluatedChunk]) -> Vec<AggSeries> {
 /// decided at each absolute grid position.
 fn run_aggregate_tree(tree: &NativeTree, chunks: Vec<RawSeriesChunk>) -> Vec<AggSeries> {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
-    let state = NativeExecutionState::try_new(tree, pool).unwrap();
+    let state = NativeExecutionState::try_new(tree, pool, None).unwrap();
     let mut execution = NativeExecutor::new(state);
     for chunk in chunks {
         execution
@@ -4496,7 +4496,7 @@ fn a_compiled_sum_aggregates_series_chunks_after_input_ends() {
             ),
         ];
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
-        let state = NativeExecutionState::try_new(&tree, pool).unwrap();
+        let state = NativeExecutionState::try_new(&tree, pool, None).unwrap();
         let mut execution = NativeExecutor::new(state);
         for chunk in chunks {
             execution.push_raw(InputId::new(0), chunk).unwrap();
@@ -4779,7 +4779,7 @@ fn a_compiled_sum_over_a_rate_aggregates_series_chunks_after_input_ends() {
         ),
     ];
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
-    let state = NativeExecutionState::try_new(&tree, pool).unwrap();
+    let state = NativeExecutionState::try_new(&tree, pool, None).unwrap();
     let mut execution = NativeExecutor::new(state);
     for chunk in chunks {
         execution.push_raw(InputId::new(0), chunk).unwrap();
