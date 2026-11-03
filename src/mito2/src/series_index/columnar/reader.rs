@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
@@ -28,6 +29,7 @@ use snafu::ResultExt;
 
 use crate::cache::columnar::{self as metadata_cache, MetadataCache};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result, SerdeJsonSnafu};
+use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::columnar::codec::{self, Dictionary};
 use crate::series_index::columnar::metadata::{self, Block, Column, Page, PageReference, Trailer};
@@ -226,8 +228,11 @@ impl FormatReader for ColumnarReader {
         Ok(Box::pin(async_stream::try_stream! {
             // Retained across every yield, even after the reader object is dropped.
             let _handle = handle;
+            let mut metrics = ColumnarReadMetrics::default();
             for part in &manifest.files {
                 if !matches_range(part.first, part.last, &request) { continue; }
+                let started = Instant::now();
+                *metrics.counts.entry("series_parts").or_default() += 1;
                 let path = manifest.part_path(part.part_id);
                 let size = part.file_size;
                 let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
@@ -244,6 +249,7 @@ impl FormatReader for ColumnarReader {
                 }).await?;
                 require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
                 let root = load_metadata_page(cache.as_ref(), &store, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
+                metrics.add_elapsed("columnar_series_metadata_wall", started.elapsed());
                 let (mut active, children) = match root.as_ref() {
                     Page::Leaf(_) => (Some(root.clone()), Vec::new()),
                     Page::Internal(children) => (None, children.clone()),
@@ -255,18 +261,31 @@ impl FormatReader for ColumnarReader {
                     let page = if let Some(page) = active.take() { page } else {
                         let Some(child) = child_iter.next() else { break; };
                         if !matches_range(child.first, child.last, &request) { continue; }
-                        load_metadata_page(cache.as_ref(), &store, (&path, size), &child, 1, trailer.payload_end, &names).await?
+                        let started = Instant::now();
+                        let page = load_metadata_page(cache.as_ref(), &store, (&path, size), &child, 1, trailer.payload_end, &names).await?;
+                        metrics.add_elapsed("columnar_series_metadata_wall", started.elapsed());
+                        page
                     };
                     let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in depth-two series index"))? };
                     for block in blocks {
+                        *metrics.counts.entry("series_blocks_considered").or_default() += 1;
                         observed_rows = observed_rows.checked_add(u64::from(block.rows)).ok_or_else(|| invalid("series part row count overflow"))?;
                         for column in &block.columns {
                             column.payload.validate(previous_payload_end, trailer.payload_end, false)?;
                             previous_payload_end = column.payload.end()?;
                         }
                         if !matches_range(block.first_id(), block.last_id(), &request) || !matches_statistics(block, &request.filters) { continue; }
-                        if let Some(mut output) = read_block(&store, &path, block, &request, projected.clone()).await? {
-                            while let Some(batch) = output.next_batch()? { yield batch; }
+                        *metrics.counts.entry("series_blocks_read").or_default() += 1;
+                        *metrics.counts.entry("series_rows_examined").or_default() += u64::from(block.rows);
+                        if let Some(mut output) = read_block(&store, &path, block, &request, projected.clone(), &mut metrics).await? {
+                            loop {
+                                let started = Instant::now();
+                                let batch = output.next_batch()?;
+                                metrics.add_elapsed("columnar_series_materialize", started.elapsed());
+                                let Some(batch) = batch else { break; };
+                                *metrics.counts.entry("series_rows_output").or_default() += batch.num_rows() as u64;
+                                yield batch;
+                            }
                         }
                     }
                 }
@@ -433,6 +452,7 @@ async fn load_column_chunk(
     path: &str,
     column: &Column,
     block: &Block,
+    metrics: &mut ColumnarReadMetrics,
 ) -> Result<Decoded> {
     let integer = column.name == TSID_COLUMN || column.name == ROW_COUNT_COLUMN;
     let expected = if integer {
@@ -446,12 +466,17 @@ async fn load_column_chunk(
             column.payload.encoding, column.name
         )));
     }
+    let started = Instant::now();
     let bytes = read_range(store, path, column.payload.offset, column.payload.end()?).await?;
+    metrics.add_elapsed("columnar_series_fetch_wall", started.elapsed());
+    *metrics.counts.entry("series_column_reads").or_default() += 1;
+    *metrics.bytes.entry("series_payload_fetched").or_default() += bytes.len() as u64;
+    let started = Instant::now();
     let rows = block.rows as usize;
     let first = block.first;
     let last = block.last;
     let bytes = column.payload.unpack(&bytes)?;
-    if integer {
+    let result = if integer {
         let values = codec::decode_integers(&bytes, rows)?;
         if column.name == TSID_COLUMN {
             require(
@@ -486,15 +511,23 @@ async fn load_column_chunk(
             "series dictionary bounds mismatch",
         )?;
         Ok(Decoded::Strings(dictionary))
-    }
+    };
+    metrics.add_elapsed("columnar_series_decode", started.elapsed());
+    result
 }
 
-async fn get_column(store: &ObjectStore, path: &str, block: &Block, name: &str) -> Result<Decoded> {
+async fn get_column(
+    store: &ObjectStore,
+    path: &str,
+    block: &Block,
+    name: &str,
+    metrics: &mut ColumnarReadMetrics,
+) -> Result<Decoded> {
     if name == TABLE_ID_COLUMN {
         return Ok(Decoded::Table(block.table_id, block.rows as usize));
     }
     match block.columns.iter().find(|c| c.name == name) {
-        Some(column) => load_column_chunk(store, path, column, block).await,
+        Some(column) => load_column_chunk(store, path, column, block, metrics).await,
         None => Ok(Decoded::Null(block.rows as usize)),
     }
 }
@@ -505,11 +538,12 @@ async fn read_block(
     block: &Block,
     request: &SeriesReadRequest,
     schema: SchemaRef,
+    metrics: &mut ColumnarReadMetrics,
 ) -> Result<Option<ProjectedBlock>> {
     let mut decoded = HashMap::new();
     let mut selected: Vec<_> = (0..block.rows as usize).collect();
     if let Some(ids) = &request.ids {
-        let column = get_column(store, path, block, TSID_COLUMN).await?;
+        let column = get_column(store, path, block, TSID_COLUMN, metrics).await?;
         if let Decoded::Integers(values) = &column {
             selected.retain(|&i| {
                 ids.contains(&MetricSeriesId {
@@ -526,15 +560,18 @@ async fn read_block(
         }
         let name = filter.column_name();
         if !decoded.contains_key(name) {
+            *metrics.counts.entry("series_filter_columns").or_default() += 1;
             decoded.insert(
                 name.to_owned(),
-                Arc::new(get_column(store, path, block, name).await?),
+                Arc::new(get_column(store, path, block, name, metrics).await?),
             );
         }
+        let started = Instant::now();
         decoded
             .get(name)
             .ok_or_else(|| invalid("missing decoded filter column"))?
             .filter(filter, &mut selected)?;
+        metrics.add_elapsed("columnar_series_filter", started.elapsed());
     }
     if selected.is_empty() {
         return Ok(None);
@@ -542,9 +579,13 @@ async fn read_block(
     let mut columns = Vec::with_capacity(request.projection.len());
     for name in &request.projection {
         if !decoded.contains_key(name) {
+            *metrics
+                .counts
+                .entry("series_projection_columns")
+                .or_default() += 1;
             decoded.insert(
                 name.clone(),
-                Arc::new(get_column(store, path, block, name).await?),
+                Arc::new(get_column(store, path, block, name, metrics).await?),
             );
         }
         columns.push(

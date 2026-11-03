@@ -679,6 +679,13 @@ impl StagerNotifier for StagerMetrics {
 /// Stream-local counters avoid contended metric updates for every tiny sample block.
 /// Stage durations sum elapsed work within a stream, not CPU time or query wall latency.
 /// Stages ending in `_wall` include awaits; concurrent streams can overlap.
+/// Preparation components partition the work inside `columnar_prepare_wall`; reader
+/// stages (`columnar_series_*`) are nested within preparation's discovery stage.
+/// `columnar_prepare_acquire_wall` is per caller and includes waiting for shared
+/// preparation, so overlapping caller times must not be summed as execution time.
+/// Series decode includes decompression and integrity validation; materialization
+/// includes dictionary expansion into projected Arrow arrays. Counters are aggregated
+/// per stream/preparation, never labeled by query, file, column name, or series ID.
 #[derive(Default)]
 pub(crate) struct ColumnarReadMetrics {
     pub(crate) counts: std::collections::BTreeMap<&'static str, u64>,

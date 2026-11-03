@@ -88,6 +88,11 @@ impl Preparation {
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
     ) -> std::result::Result<Arc<dyn PreparedSeriesSource>, BoxedError> {
+        // Per caller, including time awaiting another partition's shared preparation.
+        // This overlaps prepare_wall and must not be added to its component timings.
+        let acquire_timer = crate::metrics::READ_STAGE_ELAPSED
+            .with_label_values(&["columnar_prepare_acquire_wall"])
+            .start_timer();
         let expected = labels.clone();
         let result = self
             .source
@@ -98,6 +103,7 @@ impl Preparation {
                     .map_err(Arc::new)
             })
             .await;
+        drop(acquire_timer);
         let source = result.as_ref().map_err(|error| {
             BoxedError::new(crate::error::ScanSeriesSnafu.into_error(error.clone()))
         })?;
@@ -304,6 +310,7 @@ impl ColumnarPreparedSource {
             .with_label_values(&["columnar_prepare_wall"])
             .start_timer();
         let mut preparation_metrics = crate::metrics::ColumnarReadMetrics::default();
+        preparation_metrics.counts.insert("prepare_executions", 1);
         let started = Instant::now();
         let input = &context.input;
         let metadata = input.region_metadata();
