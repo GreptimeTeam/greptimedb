@@ -3477,8 +3477,6 @@ async fn native_fused_data_free_vector_does_not_block_segmentation() {
     let query = "sum(topk(1, some_metric)) + vector(1)";
     let native = build_native_fused_plan(query, true).await;
     let legacy = build_native_fused_plan(query, false).await;
-    println!("native enabled:\n{}", native.display_indent());
-    println!("legacy:\n{}", legacy.display_indent());
 
     let LogicalPlan::Extension(Extension { node }) = &native else {
         panic!("expected a native parent rather than a legacy root: {native}");
@@ -3517,8 +3515,6 @@ async fn native_fused_data_free_vector_does_not_block_segmentation() {
         matches!(&prefix.tree().root().expr, NativeExpr::Instant { .. }),
         "the prefix must evaluate the selector in its own segment: {native}"
     );
-    println!("native parent tree: {}", parent.tree());
-    println!("native prefix tree: {}", prefix.tree());
     assert!(find_fused_series(&legacy).is_none(), "{legacy}");
 }
 
