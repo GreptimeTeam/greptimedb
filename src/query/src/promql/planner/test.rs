@@ -48,7 +48,7 @@ use promql::extension_plan::{AggregateFinalize, FusedSeries, HistogramFold, RawS
 use promql::native::plan::NativeExpr;
 use promql_parser::label::Labels;
 use promql_parser::parser;
-use session::context::QueryContext;
+use session::context::{MetricDiscoveryScope, QueryContext};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::Table;
 use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder};
@@ -1129,14 +1129,27 @@ async fn build_test_table_provider_with_tsid_tag_fields_and_field_order_and_time
                 .is_ok()
         );
     }
+    // The scope is what discovery consults before it reads anything, and its default declines, so
+    // a fixture that wants discovery to run has to say so.
+    let query_ctx = {
+        let base = QueryContext::arc();
+        let mut ctx = (*base).clone();
+        ctx.set_metric_discovery_scope(SCOPE.with(|scope| {
+            scope
+                .borrow()
+                .clone()
+                .unwrap_or(MetricDiscoveryScope::Unrestricted)
+        }));
+        Arc::new(ctx)
+    };
+    DfTableSourceProvider::new(catalog_list, false, query_ctx, DummyDecoder::arc(), false)
+}
 
-    DfTableSourceProvider::new(
-        catalog_list,
-        false,
-        QueryContext::arc(),
-        DummyDecoder::arc(),
-        false,
-    )
+thread_local! {
+    /// What the metric fixture's provider reports as the request's discovery scope, so a test can
+    /// deny a table without rebuilding the catalog.
+    static SCOPE: std::cell::RefCell<Option<MetricDiscoveryScope>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// A schema of logical metric tables, one tag and one field each, all served through the one
@@ -2076,6 +2089,29 @@ async fn native_metric_discovery_names_each_metric_where_the_operator_keeps_it()
             .any(|field| field.name() == METRIC_NAME);
         assert_eq!(expected, has_name, "{query}: {plan:?}");
     }
+}
+
+/// The scope is the authority on which of the discovered metrics a caller may see. A denied table
+/// never becomes a source, so its name reaches neither the plan nor the answer.
+#[tokio::test]
+async fn native_metric_discovery_reads_only_what_the_scope_allows() {
+    SCOPE.with(|scope| {
+        *scope.borrow_mut() = Some(MetricDiscoveryScope::allowed([(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "alpha_total".to_string(),
+        )]))
+    });
+    let plan = build_native_fused_plan_with_provider(
+        "{tag_0=\"x\"}",
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    let formatted = format!("{plan:?}");
+    assert!(formatted.contains("alpha_total"), "{formatted}");
+    assert!(!formatted.contains("beta_total"), "{formatted}");
+    SCOPE.with(|scope| *scope.borrow_mut() = None);
 }
 
 /// One input per discovered metric, and each names the metric it reads.
