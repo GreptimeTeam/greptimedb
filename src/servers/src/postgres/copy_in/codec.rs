@@ -51,11 +51,15 @@
 //! format-specific shapes) and rejects the rest with
 //! `reject_leftovers`.
 
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use pgwire::error::PgWireResult;
 
 use crate::postgres::copy_in::csv::CsvCodec;
 use crate::postgres::copy_in::influxdb::InfluxdbOptions;
+use crate::postgres::copy_in::jsonl::JsonlCodec;
 use crate::postgres::copy_in::otlp::OtlpOptions;
+use crate::postgres::copy_in::prom_write::PromWriteOptions;
 
 /// A resolved COPY FROM STDIN format with its validated options.
 #[derive(Debug, Clone)]
@@ -63,6 +67,10 @@ pub(super) enum CopyFormat {
     /// Table-bound CSV: records are parsed incrementally against the
     /// targeted table's columns and inserted in batches.
     Csv(CsvCodec),
+    /// Table-bound newline-delimited JSON: objects decode against the
+    /// targeted table's columns through arrow-json, the engine behind
+    /// file-based `COPY ... FROM 'file.json'`.
+    Jsonl(JsonlCodec),
     /// Table-less influxdb line protocol: the whole payload is one
     /// bounded request body, completed through the line-protocol
     /// pipeline the HTTP write endpoints use (one COPY statement is one
@@ -74,6 +82,67 @@ pub(super) enum CopyFormat {
     /// matching OTLP pipeline the OTLP/HTTP endpoints use. Advertises
     /// wire format code 1.
     Otlp(OtlpOptions),
+    /// Table-less, **binary** Prometheus Remote Write: one request body
+    /// (v1 or v2, compressed protobuf), buffered whole and completed
+    /// through the same ingestion core the `/v1/prometheus/write`
+    /// endpoint runs. Advertises wire format code 1.
+    PromWrite(PromWriteOptions),
+}
+
+impl CopyFormat {
+    /// The canonical format name, used in error messages.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            CopyFormat::Csv(_) => "csv",
+            CopyFormat::Jsonl(_) => "jsonl",
+            CopyFormat::Influxdb(_) => "influxdb",
+            CopyFormat::Otlp(_) => "otlp",
+            CopyFormat::PromWrite(_) => "promwrite",
+        }
+    }
+}
+
+/// A table-bound COPY format: records decode against the targeted
+/// table's columns into insertable rows (csv, jsonl). Implemented by
+/// the codec config structs; the copy lifecycle treats every
+/// table-bound format identically through it.
+pub(crate) trait TableBoundCodec: Send + Sync {
+    /// Validates that a column of `data_type` can be ingested.
+    fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()>;
+    /// Creates the stateful parser for one copy stream over the
+    /// targeted columns (in COPY field order). `timezone` is the
+    /// session timezone for offset-free timestamp strings.
+    fn create_parser(
+        &self,
+        columns: &[ColumnSchema],
+        timezone: &str,
+    ) -> PgWireResult<Box<dyn RecordParser + Send>>;
+}
+
+impl TableBoundCodec for CsvCodec {
+    fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
+        CsvCodec::check_column_type(self, data_type)
+    }
+    fn create_parser(
+        &self,
+        columns: &[ColumnSchema],
+        timezone: &str,
+    ) -> PgWireResult<Box<dyn RecordParser + Send>> {
+        CsvCodec::create_parser(self, columns, timezone)
+    }
+}
+
+impl TableBoundCodec for JsonlCodec {
+    fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
+        JsonlCodec::check_column_type(self, data_type)
+    }
+    fn create_parser(
+        &self,
+        columns: &[ColumnSchema],
+        timezone: &str,
+    ) -> PgWireResult<Box<dyn RecordParser + Send>> {
+        JsonlCodec::create_parser(self, columns, timezone)
+    }
 }
 
 /// A parsed, insertable row: one gRPC value per targeted column, in COPY

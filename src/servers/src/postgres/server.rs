@@ -29,9 +29,12 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::error::Result;
 use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
+use crate::prom_remote_write::validation::PromValidationMode;
 use crate::query_handler::CopyInHandlerRef;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+use crate::query_handler::PipelineHandlerRef;
+use crate::query_handler::PromStoreProtocolHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::ReloadableTlsServerConfig;
@@ -45,6 +48,7 @@ pub struct PostgresServer {
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     otlp_with_metric_engine: bool,
+    prom_write_state: Option<crate::http::prom_store::PromStoreState>,
     bind_addr: Option<SocketAddr>,
     process_manager: Option<ProcessManagerRef>,
 }
@@ -85,6 +89,7 @@ impl PostgresServer {
             influxdb_handler: None,
             otlp_handler: None,
             otlp_with_metric_engine: false,
+            prom_write_state: None,
             bind_addr: None,
             process_manager,
         }
@@ -120,6 +125,33 @@ impl PostgresServer {
         self
     }
 
+    /// Wires the Prometheus Remote Write ingestion used by table-less
+    /// `COPY FROM STDIN WITH (FORMAT promwrite)` — the same handler,
+    /// metric-engine flag and validation mode the HTTP endpoint's state
+    /// carries.
+    pub fn with_prom_remote_write(
+        mut self,
+        handler: PromStoreProtocolHandlerRef,
+        pipeline_handler: Option<PipelineHandlerRef>,
+        with_metric_engine: bool,
+        validation_mode: PromValidationMode,
+        memory_limiter: crate::request_memory_limiter::ServerMemoryLimiter,
+    ) -> Self {
+        self.prom_write_state = Some(crate::http::prom_store::PromStoreState {
+            prom_store_handler: handler,
+            pipeline_handler,
+            prom_store_with_metric_engine: with_metric_engine,
+            prom_validation_mode: validation_mode,
+            pending_rows_batcher: None,
+            // The same shared quota the HTTP ingestion protocols
+            // enforce (`max_in_flight_write_bytes`): decompression and
+            // conversion memory are charged against it, so COPY cannot
+            // bypass the aggregate budget.
+            memory_limiter,
+        });
+        self
+    }
+
     fn accept(
         &self,
         io_runtime: Runtime,
@@ -137,6 +169,7 @@ impl PostgresServer {
             influxdb_handler: self.influxdb_handler.clone(),
             otlp_handler: self.otlp_handler.clone(),
             otlp_with_metric_engine: self.otlp_with_metric_engine,
+            prom_write_state: self.prom_write_state.clone(),
             user_provider: make_handler.user_provider.clone(),
             param_provider: make_handler.param_provider.clone(),
             force_tls: make_handler.force_tls,

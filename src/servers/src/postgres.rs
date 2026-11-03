@@ -94,6 +94,10 @@ pub struct PostgresServerHandlerInner {
     /// HTTP wiring passes from its options.
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     otlp_with_metric_engine: bool,
+    /// Completes `COPY FROM STDIN WITH (FORMAT promwrite)` payloads
+    /// through the shared remote-write ingestion core — the same state
+    /// the `/v1/prometheus/write` endpoint runs.
+    prom_write_state: Option<crate::http::prom_store::PromStoreState>,
     force_tls: bool,
     auth_driver: AuthDriver<Arc<GreptimeDBStartupParameters>, UserInfoRef>,
     /// SCRAM selected; failures get the uniform metric label.
@@ -118,6 +122,8 @@ pub(crate) struct MakePostgresServerHandler {
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     #[builder(default)]
     otlp_with_metric_engine: bool,
+    #[builder(default)]
+    prom_write_state: Option<crate::http::prom_store::PromStoreState>,
     user_provider: Option<UserProviderRef>,
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,
@@ -171,6 +177,7 @@ impl MakePostgresServerHandler {
             influxdb_handler: self.influxdb_handler.clone(),
             otlp_handler: self.otlp_handler.clone(),
             otlp_with_metric_engine: self.otlp_with_metric_engine,
+            prom_write_state: self.prom_write_state.clone(),
             force_tls: self.force_tls,
             auth_driver: AuthDriver::new(self.param_provider.clone())
                 .with_pid_secret_key_generator(Arc::new(ZeroPidSecretKeyGenerator)),

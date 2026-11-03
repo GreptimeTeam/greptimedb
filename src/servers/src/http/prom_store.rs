@@ -158,6 +158,41 @@ async fn remote_write_v1(
     is_zstd: bool,
     body: Bytes,
 ) -> Result<axum::response::Response> {
+    if let Some(response) = vm_proto_version_response(&params) {
+        return Ok(response);
+    }
+
+    let (db, query_ctx, _timer) =
+        prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V1_VERSION);
+    let query_ctx = Arc::new(query_ctx);
+
+    let outcome =
+        match ingest_remote_write_v1(&state, pipeline_info, is_zstd, query_ctx, body).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, error.rows_written);
+                return Err(error.error);
+            }
+        };
+    record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, outcome.rows_written);
+
+    Ok((
+        StatusCode::NO_CONTENT,
+        write_cost_header_map(outcome.write_cost),
+    )
+        .into_response())
+}
+
+/// The axum-free core of a remote-write v1 ingestion, shared with
+/// `COPY FROM STDIN WITH (FORMAT promwrite)`: decode, convert and write
+/// exactly as the HTTP endpoint does.
+pub(crate) async fn ingest_remote_write_v1(
+    state: &PromStoreState,
+    pipeline_info: PipelineInfo,
+    is_zstd: bool,
+    query_ctx: QueryContextRef,
+    body: Bytes,
+) -> std::result::Result<PromWriteOutcome, PromWriteError> {
     let PromStoreState {
         prom_store_handler,
         pipeline_handler,
@@ -167,29 +202,29 @@ async fn remote_write_v1(
         memory_limiter,
     } = state;
 
-    if let Some(response) = vm_proto_version_response(&params) {
-        return Ok(response);
-    }
-
-    let (db, query_ctx, _timer) =
-        prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V1_VERSION);
-    let query_ctx = Arc::new(query_ctx);
-
+    let no_progress = |error: error::Error| PromWriteError {
+        error,
+        rows_written: 0,
+    };
     let mut processor = PromSeriesProcessor::default_processor();
 
     if let Some(pipeline_name) = pipeline_info.pipeline_name {
         let pipeline_def = PipelineDefinition::from_name(
             &pipeline_name,
             to_pipeline_version(pipeline_info.pipeline_version.as_deref())
-                .context(PipelineSnafu)?,
+                .context(PipelineSnafu)
+                .map_err(no_progress)?,
             None,
         )
-        .context(PipelineSnafu)?;
-        let pipeline_handler = pipeline_handler.context(InternalSnafu {
-            err_msg: "pipeline handler is not set".to_string(),
-        })?;
+        .context(PipelineSnafu)
+        .map_err(no_progress)?;
+        let Some(pipeline_handler) = pipeline_handler else {
+            return Err(no_progress(error::Error::Internal {
+                err_msg: "pipeline handler is not set".to_string(),
+            }));
+        };
 
-        processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
+        processor.set_pipeline(pipeline_handler.clone(), query_ctx.clone(), pipeline_def);
     }
 
     // Keep the decode guards alive until the batches are built: the
@@ -197,11 +232,12 @@ async fn remote_write_v1(
     let (mut decoded, decode_guards) = decode_remote_write_request(
         is_zstd,
         body,
-        prom_validation_mode,
+        *prom_validation_mode,
         &mut processor,
-        &memory_limiter,
+        memory_limiter,
     )
-    .await?;
+    .await
+    .map_err(no_progress)?;
 
     // Parsing borrows the decode buffer, but row building copies out of it: tag
     // values through `decode_string`, column names through `to_owned`, and the
@@ -210,7 +246,7 @@ async fn remote_write_v1(
     // the decode guards charged against the aggregate memory quota.
     let req = if processor.use_pipeline {
         drop(decoded);
-        processor.exec_pipeline().await?
+        processor.exec_pipeline().await.map_err(no_progress)?
     } else {
         let req = decoded.as_insert_requests();
         drop(decoded);
@@ -219,27 +255,13 @@ async fn remote_write_v1(
     drop(decode_guards);
     let batches = into_prom_write_batches(req, query_ctx);
 
-    let outcome = match write_prometheus_rows_with_progress(
-        prom_store_handler,
-        pending_rows_batcher,
-        prom_store_with_metric_engine,
+    write_prometheus_rows_with_progress(
+        prom_store_handler.clone(),
+        pending_rows_batcher.clone(),
+        *prom_store_with_metric_engine,
         batches,
     )
     .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, error.rows_written);
-            return Err(error.error);
-        }
-    };
-    record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, outcome.rows_written);
-
-    Ok((
-        StatusCode::NO_CONTENT,
-        write_cost_header_map(outcome.write_cost),
-    )
-        .into_response())
 }
 
 async fn remote_write_v2(
@@ -251,15 +273,6 @@ async fn remote_write_v2(
     body: Bytes,
     body_reserved_bytes: u64,
 ) -> Result<axum::response::Response> {
-    let PromStoreState {
-        prom_store_handler,
-        pipeline_handler: _,
-        prom_store_with_metric_engine,
-        prom_validation_mode: _,
-        pending_rows_batcher,
-        memory_limiter,
-    } = state;
-
     if let Some(response) = vm_proto_version_response(&params) {
         return Ok(response);
     }
@@ -268,60 +281,23 @@ async fn remote_write_v2(
     // optional pipeline parameter and ingest samples directly.
     let _ = pipeline_info;
 
-    let (db, mut query_ctx, _timer) =
+    let (db, query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
-    let req =
-        match decode_remote_write_v2(is_zstd, body, &memory_limiter, body_reserved_bytes).await {
-            Ok(req) => req,
-            Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
+    let (outcome, sample_count, histogram_count) =
+        match ingest_remote_write_v2(&state, &db, is_zstd, query_ctx, body, body_reserved_bytes)
+            .await
+        {
+            Ok(tuple) => tuple,
+            Err(error) => {
+                return Ok(remote_write_v2_error_response(
+                    error.error,
+                    error.samples_written,
+                    error.histograms_written,
+                    0,
+                ));
+            }
         };
-    // The v2 per-series metadata upgrades the written tables' semantic options
-    // (metric type/unit, declared quality) at auto-create time.
-    if let Some(index) = req.semantic_index.encode(&query_ctx.current_schema()) {
-        query_ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
-    }
-    let query_ctx = Arc::new(query_ctx);
-    let (sample_count, histogram_count) = (req.sample_count, req.histogram_count);
-    let mut sample_batches = into_prom_write_batches(req.samples, query_ctx.clone());
-    let mut histogram_batches = into_prom_write_batches(req.histograms, query_ctx);
-    for (batches, histogram) in [(&mut sample_batches, false), (&mut histogram_batches, true)] {
-        let counter = if histogram {
-            crate::metrics::PROM_STORE_REMOTE_WRITE_HISTOGRAMS
-                .with_label_values(&[&db, REMOTE_WRITE_V2_VERSION])
-        } else {
-            crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-                .with_label_values(&[&db, REMOTE_WRITE_V2_VERSION])
-        };
-        for (ctx, _) in batches {
-            let counter = counter.clone();
-            let progress =
-                session::write_progress::WriteProgress::with_reservation(req.memory_guard.clone())
-                    .with_observer(move |rows| counter.inc_by(rows));
-            let mut fork = ctx.fork();
-            fork.set_write_progress(Arc::new(progress));
-            *ctx = Arc::new(fork);
-        }
-    }
-    let outcome = match write_prometheus_v2_rows_with_progress(
-        prom_store_handler,
-        pending_rows_batcher,
-        prom_store_with_metric_engine,
-        sample_batches,
-        histogram_batches,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return Ok(remote_write_v2_error_response(
-                error.error,
-                error.samples_written,
-                error.histograms_written,
-                0,
-            ));
-        }
-    };
     debug_assert!(outcome.samples_written <= sample_count);
     debug_assert!(outcome.histograms_written <= histogram_count);
     let mut headers = write_cost_header_map(outcome.write_cost);
@@ -338,6 +314,77 @@ async fn remote_write_v2(
         StatusCode::NO_CONTENT
     };
     Ok((status, headers).into_response())
+}
+
+/// The axum-free core of a remote-write v2 ingestion, shared with
+/// `COPY FROM STDIN WITH (FORMAT promwrite, version 2)`. Returns the
+/// outcome plus the request's sample/histogram counts (the HTTP
+/// endpoint's written-count assertions). `db` labels the per-batch
+/// write-progress counters exactly as the HTTP route does.
+pub(crate) async fn ingest_remote_write_v2(
+    state: &PromStoreState,
+    db: &str,
+    is_zstd: bool,
+    query_ctx: QueryContext,
+    body: Bytes,
+    body_reserved_bytes: u64,
+) -> std::result::Result<(PromWriteV2Outcome, u64, u64), PromWriteV2Error> {
+    let PromStoreState {
+        prom_store_handler,
+        pending_rows_batcher,
+        prom_store_with_metric_engine,
+        memory_limiter,
+        ..
+    } = state;
+
+    let mut query_ctx = query_ctx;
+    let req = match decode_remote_write_v2(is_zstd, body, memory_limiter, body_reserved_bytes).await
+    {
+        Ok(req) => req,
+        Err(error) => {
+            return Err(PromWriteV2Error {
+                error,
+                samples_written: 0,
+                histograms_written: 0,
+            });
+        }
+    };
+    // The v2 per-series metadata upgrades the written tables' semantic options
+    // (metric type/unit, declared quality) at auto-create time.
+    if let Some(index) = req.semantic_index.encode(&query_ctx.current_schema()) {
+        query_ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
+    }
+    let query_ctx = Arc::new(query_ctx);
+    let (sample_count, histogram_count) = (req.sample_count, req.histogram_count);
+    let mut sample_batches = into_prom_write_batches(req.samples, query_ctx.clone());
+    let mut histogram_batches = into_prom_write_batches(req.histograms, query_ctx);
+    for (batches, histogram) in [(&mut sample_batches, false), (&mut histogram_batches, true)] {
+        let counter = if histogram {
+            crate::metrics::PROM_STORE_REMOTE_WRITE_HISTOGRAMS
+                .with_label_values(&[db, REMOTE_WRITE_V2_VERSION])
+        } else {
+            crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
+                .with_label_values(&[db, REMOTE_WRITE_V2_VERSION])
+        };
+        for (ctx, _) in batches {
+            let counter = counter.clone();
+            let progress =
+                session::write_progress::WriteProgress::with_reservation(req.memory_guard.clone())
+                    .with_observer(move |rows| counter.inc_by(rows));
+            let mut fork = ctx.fork();
+            fork.set_write_progress(Arc::new(progress));
+            *ctx = Arc::new(fork);
+        }
+    }
+    let outcome = write_prometheus_v2_rows_with_progress(
+        prom_store_handler.clone(),
+        pending_rows_batcher.clone(),
+        *prom_store_with_metric_engine,
+        sample_batches,
+        histogram_batches,
+    )
+    .await?;
+    Ok((outcome, sample_count, histogram_count))
 }
 
 fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response::Response> {
@@ -357,9 +404,28 @@ fn prepare_remote_write_context(
 ) -> (String, QueryContext, HistogramTimer) {
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
-    let physical_table = params
-        .physical_table
-        .clone()
+    stamp_remote_write_extensions(
+        &mut query_ctx,
+        params.physical_table.as_deref(),
+        remote_write_version,
+    );
+    let timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
+        .with_label_values(&[db.as_str(), remote_write_version])
+        .start_timer();
+
+    (db, query_ctx, timer)
+}
+
+/// Stamps the remote-write context extensions shared by the HTTP
+/// endpoint and COPY FROM STDIN: physical table and the Prometheus
+/// semantic identity the batched and direct write paths both rely on.
+pub(crate) fn stamp_remote_write_extensions(
+    query_ctx: &mut QueryContext,
+    physical_table: Option<&str>,
+    remote_write_version: &str,
+) {
+    let physical_table = physical_table
+        .map(String::from)
         .unwrap_or_else(|| GREPTIME_PHYSICAL_TABLE.to_string());
     query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
     // Stamp the Prometheus metric identity here, before `as_req_iter` splits into the
@@ -371,34 +437,29 @@ fn prepare_remote_write_context(
     query_ctx.set_extension(SEMANTIC_SOURCE, SOURCE_PROMETHEUS);
     query_ctx.set_extension(SEMANTIC_SOURCE_VERSION, remote_write_version);
     query_ctx.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
-    let timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
-        .with_label_values(&[db.as_str(), remote_write_version])
-        .start_timer();
-
-    (db, query_ctx, timer)
 }
 
-struct PromWriteOutcome {
-    write_cost: usize,
-    rows_written: u64,
+pub(crate) struct PromWriteOutcome {
+    pub(crate) write_cost: usize,
+    pub(crate) rows_written: u64,
 }
 
-struct PromWriteError {
-    error: error::Error,
-    rows_written: u64,
+pub(crate) struct PromWriteError {
+    pub(crate) error: error::Error,
+    pub(crate) rows_written: u64,
 }
 
-struct PromWriteV2Outcome {
-    accepted: bool,
-    write_cost: usize,
-    samples_written: u64,
-    histograms_written: u64,
+pub(crate) struct PromWriteV2Outcome {
+    pub(crate) accepted: bool,
+    pub(crate) write_cost: usize,
+    pub(crate) samples_written: u64,
+    pub(crate) histograms_written: u64,
 }
 
-struct PromWriteV2Error {
-    error: error::Error,
-    samples_written: u64,
-    histograms_written: u64,
+pub(crate) struct PromWriteV2Error {
+    pub(crate) error: error::Error,
+    pub(crate) samples_written: u64,
+    pub(crate) histograms_written: u64,
 }
 
 type PromWriteBatch = (QueryContextRef, RowInsertRequests);
