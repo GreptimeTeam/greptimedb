@@ -220,6 +220,13 @@ struct PendingBatch {
     spans: Vec<Vec<Range<usize>>>,
     /// One output column per field, written by the batch kernel.
     columns: Vec<Vec<Option<f64>>>,
+    /// Per field, the first sample index whose timestamp is after the last point's window end.
+    ///
+    /// Every point in a batch evaluates a later timestamp than the one before it, so a field's
+    /// window end only moves forward: this cursor walks the timestamps once per batch instead of
+    /// binary-searching them once per point. It is relative to the field's retained arrays, which
+    /// [`FieldSamples::advance`] drains, so [`Self::clear_points`] resets it.
+    ends: Vec<usize>,
 }
 
 impl PendingBatch {
@@ -229,6 +236,7 @@ impl PendingBatch {
             eval_ts: Vec::new(),
             spans: vec![Vec::new(); fields],
             columns: vec![Vec::new(); fields],
+            ends: vec![0; fields],
         }
     }
 
@@ -248,6 +256,7 @@ impl PendingBatch {
             + self.eval_ts.capacity() * std::mem::size_of::<i64>()
             + spans * std::mem::size_of::<Range<usize>>()
             + columns * std::mem::size_of::<Option<f64>>()
+            + self.ends.capacity() * std::mem::size_of::<usize>()
     }
 
     /// Drops the accumulated points, keeping the allocations.
@@ -257,6 +266,8 @@ impl PendingBatch {
         for spans in &mut self.spans {
             spans.clear();
         }
+        // `advance` drains the retained arrays, so an index into them does not survive a flush.
+        self.ends.fill(0);
     }
 }
 
@@ -266,10 +277,18 @@ fn accumulate(pending: &mut PendingBatch, index: usize, eval_ts: i64, fields: &[
     debug_assert_eq!(pending.spans.len(), fields.len());
     pending.indices.push(index);
     pending.eval_ts.push(eval_ts);
-    for (spans, field) in pending.spans.iter_mut().zip(fields) {
-        let end = field.head
-            + field.timestamps[field.head..].partition_point(|&timestamp| timestamp <= eval_ts);
-        spans.push(field.head..end);
+    for ((spans, end), field) in pending
+        .spans
+        .iter_mut()
+        .zip(pending.ends.iter_mut())
+        .zip(fields)
+    {
+        // The window ends after every sample at or before `eval_ts`, and `eval_ts` never goes
+        // backwards within a batch, so the end walks forward instead of being searched for.
+        while *end < field.timestamps.len() && field.timestamps[*end] <= eval_ts {
+            *end += 1;
+        }
+        spans.push(field.head..*end);
     }
 }
 
