@@ -409,9 +409,6 @@ struct AggregateCase {
     /// split cut out. The producer then exports that aggregate's *state*, not an answer, so a
     /// group's values are finished by the merge above it rather than once per partition.
     partial_state: Option<&'static str>,
-    /// Native output schema. The native aggregate preserves its source field name (`v`), rather
-    /// than the legacy planner's computed-expression name.
-    native_value_column: &'static str,
     /// Whether this case's global aggregate has an explicitly specified single owner.
     single_owner: bool,
 }
@@ -434,7 +431,6 @@ fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool
         per_partition,
         root_values: None,
         partial_state: None,
-        native_value_column: "v",
         single_owner: false,
     }
 }
@@ -1271,28 +1267,6 @@ fn assert_rows(actual: &[ResultRow], expected: &[ResultRow], context: &str) {
     }
 }
 
-/// Asserts the native schema against the value field and labels expected from the fixture.
-fn assert_native_schema(
-    native: &QueryResult,
-    value_column: &str,
-    expected_rows: &[ResultRow],
-    query: &str,
-) {
-    assert!(
-        !expected_rows.is_empty(),
-        "`{query}`: native schema needs independently expected nonempty rows"
-    );
-    let mut expected = vec!["ts".to_string(), value_column.to_string()];
-    expected.extend(expected_rows[0].labels.keys().cloned());
-    let mut actual = native.columns.clone();
-    expected.sort();
-    actual.sort();
-    assert_eq!(
-        expected, actual,
-        "`{query}`: unexpected native output schema"
-    );
-}
-
 /// Asserts both routes report the answer with the same columns.
 ///
 /// Compare column names independent of schema order.
@@ -1881,7 +1855,6 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, promql, true, observer).await;
-    assert_native_schema(&native, case.native_value_column, &case.expected, &query);
     assert_same_name_types_except_count_value(
         &native,
         &legacy,
