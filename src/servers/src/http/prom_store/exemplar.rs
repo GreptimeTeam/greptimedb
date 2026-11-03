@@ -446,7 +446,7 @@ mod tests {
                 None,
                 vec![Exemplar {
                     metric: "metric".into(),
-                    series_labels: BTreeMap::new(),
+                    series_labels: BTreeMap::new().into(),
                     labels: BTreeMap::new(),
                     timestamp: 1,
                     value: 1.0,
@@ -505,7 +505,7 @@ mod tests {
             None,
             vec![Exemplar {
                 metric: "metric".into(),
-                series_labels: BTreeMap::new(),
+                series_labels: BTreeMap::new().into(),
                 labels: BTreeMap::new(),
                 timestamp: 1,
                 value: 1.0,
@@ -575,7 +575,7 @@ mod tests {
             None,
             vec![Exemplar {
                 metric: "metric".into(),
-                series_labels: BTreeMap::new(),
+                series_labels: BTreeMap::new().into(),
                 labels: BTreeMap::new(),
                 timestamp: 1,
                 value: 1.0,
@@ -766,7 +766,7 @@ mod tests {
                     schema,
                     vec![Exemplar {
                         metric: "metric".into(),
-                        series_labels: BTreeMap::new(),
+                        series_labels: BTreeMap::new().into(),
                         labels: BTreeMap::new(),
                         timestamp: 1,
                         value: 1.0,

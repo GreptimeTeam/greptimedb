@@ -16,6 +16,7 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use api::prom_store::remote::{Exemplar, Sample};
 use bytes::Buf;
@@ -184,8 +185,11 @@ impl PromTimeSeries {
                     ))
                 })
                 .collect::<Result<Vec<_>, DecodeError>>()?;
-            let inherited = crate::exemplar::labels(inherited, false, validate_label_name)
-                .map_err(|error| DecodeError::new(error.to_string()))?;
+            let inherited = Arc::new(
+                crate::exemplar::labels(inherited, false, validate_label_name)
+                    .map_err(|error| DecodeError::new(error.to_string()))?,
+            );
+            let metric: Arc<str> = self.table_name.as_str().into();
             for exemplar in self.exemplars.drain(..) {
                 let observation: crate::error::Result<_> = (|| {
                     let labels = crate::exemplar::labels(
@@ -197,7 +201,7 @@ impl PromTimeSeries {
                         validate_label_name,
                     )?;
                     Ok(crate::exemplar::Exemplar {
-                        metric: self.table_name.clone(),
+                        metric: metric.clone(),
                         series_labels: inherited.clone(),
                         timestamp: crate::exemplar::timestamp_from_millis(exemplar.timestamp)?,
                         value: exemplar.value,
@@ -541,6 +545,60 @@ mod tests {
                 &expected_rows,
             );
         }
+    }
+
+    #[test]
+    fn test_exemplar_decoder_shares_series_data_before_row_expansion() {
+        let metric = "m".repeat(64 * 1024);
+        let label = "x".repeat(64 * 1024);
+        let count = 128;
+        let wire = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: "__name__".into(),
+                        value: metric.clone(),
+                    },
+                    Label {
+                        name: "host".into(),
+                        value: label.clone(),
+                    },
+                ],
+                exemplars: vec![Exemplar::default(); count],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(wire.len() < 256 * 1024);
+        let mut decoder = PromWriteRequest::default();
+        decoder
+            .decode(
+                wire,
+                PromValidationMode::Strict,
+                &mut PromSeriesProcessor::default_processor(),
+            )
+            .unwrap();
+        let requests = std::mem::take(&mut decoder.table_data.exemplars);
+        drop(decoder);
+
+        let observations = &requests[&None];
+        assert_eq!(observations.len(), count);
+        let first = &observations[0];
+        for observation in observations {
+            assert_eq!(&*observation.metric, metric.as_str());
+            assert_eq!(observation.series_labels["host"], label);
+            // Decoding retains one copy of series strings regardless of exemplar count.
+            assert_eq!(observation.metric.as_ptr(), first.metric.as_ptr());
+            assert_eq!(
+                observation.series_labels["host"].as_ptr(),
+                first.series_labels["host"].as_ptr()
+            );
+        }
+        assert!(
+            crate::exemplar::estimated_row_bytes(&requests).unwrap()
+                >= count * (metric.len() + label.len())
+        );
     }
 
     #[test]

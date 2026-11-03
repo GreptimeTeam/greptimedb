@@ -4780,7 +4780,7 @@ async fn test_exemplar_precreated_table_options(
     )).await;
     let (request, _) = into_rows(vec![Exemplar {
         metric: "metric_source".into(),
-        series_labels: BTreeMap::from([("job".into(), "api".into())]),
+        series_labels: BTreeMap::from([("job".into(), "api".into())]).into(),
         timestamp: 1_234_567_890,
         value: 2.0,
         labels: BTreeMap::new(),
@@ -4847,7 +4847,7 @@ async fn test_exemplar_source_identity_policy() {
     let request = |name: &str| {
         into_rows(vec![Exemplar {
             metric: name.into(),
-            series_labels: BTreeMap::from([("job".into(), "api".into())]),
+            series_labels: BTreeMap::from([("job".into(), "api".into())]).into(),
             timestamp: 1,
             value: 2.0,
             labels: BTreeMap::new(),

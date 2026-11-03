@@ -15,6 +15,7 @@
 //! Normalized metric exemplars shared by Remote Write and OTLP conversion.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, RowInsertRequests, Value};
@@ -35,10 +36,11 @@ use crate::error::{InvalidPromRemoteRequestSnafu, Result};
 use crate::row_writer::{self, MultiTableData};
 
 /// One observation belonging to a query-visible metric series.
+/// Metric names and inherited labels are shared until row construction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Exemplar {
-    pub metric: String,
-    pub series_labels: BTreeMap<String, String>,
+    pub metric: Arc<str>,
+    pub series_labels: Arc<BTreeMap<String, String>>,
     pub timestamp: i64,
     pub value: f64,
     pub labels: BTreeMap<String, String>,
@@ -52,6 +54,7 @@ pub(crate) fn estimated_row_bytes(requests: &ExemplarRequests) -> Option<usize> 
     requests.values().try_fold(0usize, |total, exemplars| {
         let mut tags = BTreeSet::new();
         let mut payload = 0usize;
+        // Shared series data is copied into each output row.
         for exemplar in exemplars {
             tags.extend(exemplar.series_labels.keys());
             payload = payload.checked_add(exemplar.metric.len().checked_mul(4)?)?;
@@ -161,12 +164,12 @@ pub fn into_rows(exemplars: Vec<Exemplar>) -> Result<(RowInsertRequests, BTreeSe
     let mut sources = BTreeSet::new();
     for exemplar in exemplars {
         ensure!(
-            !exemplar.metric.is_empty() && exemplar.metric != METRICS_EXEMPLARS_TABLE,
+            !exemplar.metric.is_empty() && exemplar.metric.as_ref() != METRICS_EXEMPLARS_TABLE,
             InvalidPromRemoteRequestSnafu {
                 msg: "invalid or reserved exemplar source metric name"
             }
         );
-        sources.insert(exemplar.metric.clone());
+        sources.insert(exemplar.metric.to_string());
         let table = tables.get_or_default_table_data(
             METRICS_EXEMPLARS_TABLE,
             exemplar.series_labels.len() + 6,
@@ -191,7 +194,14 @@ pub fn into_rows(exemplars: Vec<Exemplar>) -> Result<(RowInsertRequests, BTreeSe
             &mut row,
         )?;
         row_writer::write_tag(table, EXEMPLAR_METRIC_COLUMN, &exemplar.metric, &mut row)?;
-        row_writer::write_tags(table, exemplar.series_labels.into_iter(), &mut row)?;
+        row_writer::write_tags(
+            table,
+            exemplar
+                .series_labels
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.clone())),
+            &mut row,
+        )?;
         row_writer::write_fields(
             table,
             std::iter::once((
@@ -273,7 +283,7 @@ mod tests {
     fn test_exemplar_tsid_uses_only_source_labels() {
         let exemplar = Exemplar {
             metric: "cpu".into(),
-            series_labels: BTreeMap::from([("job".into(), "api".into())]),
+            series_labels: BTreeMap::from([("job".into(), "api".into())]).into(),
             timestamp: 1,
             value: 2.0,
             labels: BTreeMap::from([("trace_id".into(), "a".into())]),

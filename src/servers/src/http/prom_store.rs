@@ -234,8 +234,7 @@ async fn remote_write_v1(
     let query_ctx = if exemplars.is_empty() {
         query_ctx
     } else {
-        // Covers retained exemplars and subsequent shared-schema row construction.
-        // shortcut: V1 decoding allocates first, reserve earlier if decoding peaks must be bounded.
+        // Reserve for row expansion before copying shared metric names and series labels.
         let bytes = crate::exemplar::estimated_row_bytes(&exemplars)
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or_else(|| {
@@ -1387,6 +1386,77 @@ mod tests {
 
         async fn read(&self, _: ReadRequest, _: QueryContextRef) -> Result<PromStoreResponse> {
             unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_v1_exemplar_shared_series_expansion_is_charged() {
+        use api::prom_store::remote;
+
+        use crate::http::{HttpOptions, HttpServerBuilder};
+
+        for large_field in ["__name__", "host"] {
+            for count in [128, 1] {
+                let request = remote::WriteRequest {
+                    timeseries: vec![remote::TimeSeries {
+                        labels: ["__name__", "host"]
+                            .into_iter()
+                            .map(|name| remote::Label {
+                                name: name.into(),
+                                value: if name == large_field {
+                                    "x".repeat(64 * 1024)
+                                } else {
+                                    "metric".into()
+                                },
+                            })
+                            .collect(),
+                        exemplars: vec![remote::Exemplar::default(); count],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                let limiter = ServerMemoryLimiter::new(1024 * 1024, OnExhaustedPolicy::Fail);
+                let handler = Arc::new(ExemplarMemoryHandler {
+                    limiter: limiter.clone(),
+                    progress: Mutex::new(None),
+                });
+                let server = HttpServerBuilder::new(HttpOptions::default())
+                    .with_memory_limiter(limiter.clone())
+                    .with_prom_handler(
+                        handler.clone(),
+                        None,
+                        true,
+                        PromValidationMode::Strict,
+                        None,
+                    )
+                    .build();
+                let response = server
+                    .build(server.make_app())
+                    .unwrap()
+                    .oneshot(
+                        Request::post("/v1/prometheus/write")
+                            .header(header::CONTENT_TYPE, "application/x-protobuf")
+                            .header(header::CONTENT_ENCODING, DEFAULT_ENCODING)
+                            .body(Body::from(
+                                crate::prom_store::snappy_compress(&request.encode_to_vec())
+                                    .unwrap(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let progress = handler.progress.lock().unwrap().take();
+                if count == 1 {
+                    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+                    assert!(progress.is_some());
+                    assert!(limiter.used_bytes() >= 64 * 1024);
+                } else {
+                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                    assert!(progress.is_none());
+                }
+                drop(progress);
+                assert_eq!(limiter.used_bytes(), 0);
+            }
         }
     }
 

@@ -487,70 +487,74 @@ fn convert_remote_write_v2(
         };
 
         decode_series_leaves(series, writer, tags, row_count, &mut scratch)?;
-        for exemplar in scratch.exemplars.drain(..) {
-            ensure!(
-                exemplar.labels_refs.len() % 2 == 0,
-                error::InvalidPromRemoteRequestSnafu {
-                    msg: "exemplar label references must contain name/value pairs",
-                }
-            );
-            let exemplar_label_bytes =
-                exemplar
+        if !scratch.exemplars.is_empty() {
+            let inherited = Arc::new(inherited);
+            let exemplar_metric: Arc<str> = exemplar_metric.into();
+            for exemplar in scratch.exemplars.drain(..) {
+                ensure!(
+                    exemplar.labels_refs.len() % 2 == 0,
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: "exemplar label references must contain name/value pairs",
+                    }
+                );
+                let exemplar_label_bytes =
+                    exemplar
+                        .labels_refs
+                        .iter()
+                        .try_fold(0usize, |bytes, index| {
+                            bytes.checked_add(
+                                request.symbols.get(*index as usize).map_or(0, |s| s.len()),
+                            )
+                        });
+                // Symbol references can expand into repeated owned labels for every exemplar.
+                budget.reserve((|| {
+                    label_bytes?
+                        .checked_add(exemplar_label_bytes?)?
+                        .checked_mul(4)?
+                        .checked_add(
+                            labels_refs
+                                .len()
+                                .checked_add(exemplar.labels_refs.len())?
+                                .checked_mul(128)?,
+                        )?
+                        .checked_add(2 * std::mem::size_of::<crate::exemplar::Exemplar>())
+                })())?;
+                let labels = exemplar
                     .labels_refs
+                    .as_chunks::<2>()
+                    .0
                     .iter()
-                    .try_fold(0usize, |bytes, index| {
-                        bytes.checked_add(
-                            request.symbols.get(*index as usize).map_or(0, |s| s.len()),
-                        )
-                    });
-            // Symbol references can expand into repeated owned labels for every exemplar.
-            budget.reserve((|| {
-                label_bytes?
-                    .checked_add(exemplar_label_bytes?)?
-                    .checked_mul(4)?
-                    .checked_add(
-                        labels_refs
-                            .len()
-                            .checked_add(exemplar.labels_refs.len())?
-                            .checked_mul(128)?,
-                    )?
-                    .checked_add(2 * std::mem::size_of::<crate::exemplar::Exemplar>())
-            })())?;
-            let labels = exemplar
-                .labels_refs
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| {
-                    Ok((
-                        symbol_ref(&request.symbols, pair[0], "exemplar label")?.to_string(),
-                        symbol_ref(&request.symbols, pair[1], "exemplar value")?.to_string(),
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let observation: Result<_> = (|| {
-                Ok(crate::exemplar::Exemplar {
-                    metric: exemplar_metric.clone(),
-                    series_labels: inherited.clone(),
-                    timestamp: crate::exemplar::timestamp_from_millis(exemplar.timestamp)?,
-                    value: exemplar.value,
-                    labels: crate::exemplar::labels(labels, true, |name| !name.is_empty())?,
-                })
-            })();
-            let observation = match observation {
-                Ok(observation) => observation,
-                Err(_) => {
-                    crate::metrics::EXEMPLARS_DROPPED_TOTAL
-                        .with_label_values(&["prometheus_v2"])
-                        .inc();
-                    continue;
-                }
-            };
-            exemplars
-                .entry(exemplar_schema.clone())
-                .or_default()
-                .push(observation);
-            exemplar_count_total = checked_total(exemplar_count_total, 1, "exemplar")?;
+                    .map(|pair| {
+                        Ok((
+                            symbol_ref(&request.symbols, pair[0], "exemplar label")?.to_string(),
+                            symbol_ref(&request.symbols, pair[1], "exemplar value")?.to_string(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let observation: Result<_> = (|| {
+                    Ok(crate::exemplar::Exemplar {
+                        metric: exemplar_metric.clone(),
+                        series_labels: inherited.clone(),
+                        timestamp: crate::exemplar::timestamp_from_millis(exemplar.timestamp)?,
+                        value: exemplar.value,
+                        labels: crate::exemplar::labels(labels, true, |name| !name.is_empty())?,
+                    })
+                })();
+                let observation = match observation {
+                    Ok(observation) => observation,
+                    Err(_) => {
+                        crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                            .with_label_values(&["prometheus_v2"])
+                            .inc();
+                        continue;
+                    }
+                };
+                exemplars
+                    .entry(exemplar_schema.clone())
+                    .or_default()
+                    .push(observation);
+                exemplar_count_total = checked_total(exemplar_count_total, 1, "exemplar")?;
+            }
         }
         sample_count_total = checked_total(sample_count_total, counts.samples, "sample")?;
         histogram_count_total =
@@ -2451,7 +2455,10 @@ mod tests {
         assert_eq!(ctx_req.sample_count, 1);
         assert_eq!(ctx_req.histogram_count, 1);
         assert_eq!(ctx_req.exemplar_count, 1);
-        assert_eq!(ctx_req.exemplars[&None][0].metric, "histogram_metric");
+        assert_eq!(
+            ctx_req.exemplars[&None][0].metric.as_ref(),
+            "histogram_metric"
+        );
         assert_eq!(ctx_req.samples.all_req().count(), 1);
         assert_eq!(ctx_req.histograms.all_req().count(), 1);
     }
