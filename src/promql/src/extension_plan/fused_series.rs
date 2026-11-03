@@ -56,7 +56,9 @@ use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{
+    MemoryConsumer, MemoryPool, MemoryReservation, UnboundedMemoryPool,
+};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -82,6 +84,7 @@ use crate::native::plan::{
     reads_across_series,
 };
 use crate::source::materialize_raw_labels;
+use crate::vector_match::DuplicateEvidence;
 
 #[cfg(test)]
 mod tests;
@@ -1086,6 +1089,65 @@ pub(crate) fn classify_output(
     Ok(classification)
 }
 
+/// Whether the tree has a binary with two vector operands that can produce a duplicate verdict.
+fn native_tree_has_vector_binary(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Binary { left, right, .. } => {
+            (!matches!(left.output, NativeType::Scalar(_))
+                && !matches!(right.output, NativeType::Scalar(_)))
+                || native_tree_has_vector_binary(left)
+                || native_tree_has_vector_binary(right)
+        }
+        NativeExpr::VectorOf { input }
+        | NativeExpr::Instant { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => native_tree_has_vector_binary(input),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            native_tree_has_vector_binary(input)
+                || parameters.iter().any(native_tree_has_vector_binary)
+        }
+        NativeExpr::Set { left, right, .. } => {
+            native_tree_has_vector_binary(left) || native_tree_has_vector_binary(right)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            native_tree_has_vector_binary(base) || native_tree_has_vector_binary(info)
+        }
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
+    }
+}
+
+/// Evidence shared by the output partitions of this plan's single execution.
+struct EvidenceClaims {
+    evidence: Option<Arc<DuplicateEvidence>>,
+    claimed: Vec<bool>,
+}
+
+fn claim_evidence(
+    claims: &Mutex<EvidenceClaims>,
+    partition: usize,
+    partitions: usize,
+    pool: &Arc<dyn MemoryPool>,
+) -> DataFusionResult<Arc<DuplicateEvidence>> {
+    let mut claims = claims.lock().unwrap_or_else(|e| e.into_inner());
+    if claims.evidence.is_none() {
+        claims.evidence = Some(Arc::new(DuplicateEvidence::new(pool, partitions)));
+        claims.claimed = vec![false; partitions];
+    }
+    if claims.claimed.get(partition).copied().unwrap_or(false) {
+        return Err(DataFusionError::Execution(
+            "FusedSeries plan instance was executed more than once for the same partition".into(),
+        ));
+    }
+    claims.claimed[partition] = true;
+    Ok(Arc::clone(claims.evidence.as_ref().unwrap()))
+}
+
 /// The physical node that runs a compiled native tree over its input's raw series.
 pub struct FusedSeriesExec {
     /// The PromQL text the tree was compiled from, which is what the plan line shows.
@@ -1105,6 +1167,8 @@ pub struct FusedSeriesExec {
     tags: Arc<[String]>,
     /// The columns this node produces.
     output_schema: SchemaRef,
+    /// The evidence claimed by this plan's output partitions.
+    duplicate_evidence: Mutex<EvidenceClaims>,
     /// Per-node metrics, registered by each execution of the tree.
     metric: ExecutionPlanMetricsSet,
     /// Aggregate state exported by each partition, when this is the partial mode.
@@ -1171,7 +1235,8 @@ impl FusedSeriesExec {
             )));
         }
         // Building a state proves the runtime executes this tree; drop the validation state now.
-        let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
+        let _ =
+            NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)?;
         let output_series = tree.root().output.samples();
         let scalar_root = matches!(tree.root().output, NativeType::Scalar(_));
         if let Some(op) = &partial_fold {
@@ -1274,6 +1339,10 @@ impl FusedSeriesExec {
             time_column,
             tags: tags.into(),
             output_schema,
+            duplicate_evidence: Mutex::new(EvidenceClaims {
+                evidence: None,
+                claimed: Vec::new(),
+            }),
             metric: ExecutionPlanMetricsSet::new(),
             properties,
             partial_fold,
@@ -1310,6 +1379,10 @@ impl DisplayAs for FusedSeriesExec {
 impl ExecutionPlan for FusedSeriesExec {
     fn name(&self) -> &str {
         Self::name()
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metric.clone_inner())
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -1391,10 +1464,35 @@ impl ExecutionPlan for FusedSeriesExec {
                 "FusedSeries output partition is out of range".into(),
             ));
         }
-        let state = NativeExecutionState::try_new(
+        let partitions = self.properties.partitioning.partition_count();
+        let needs_evidence = partitions > 1 && native_tree_has_vector_binary(self.tree.root());
+        let evidence = if needs_evidence {
+            Some(claim_evidence(
+                &self.duplicate_evidence,
+                partition,
+                partitions,
+                &context.runtime_env().memory_pool,
+            )?)
+        } else {
+            None
+        };
+        let mut claim = evidence.as_ref().map(|evidence| EvidenceClaim {
+            evidence: Arc::clone(evidence),
+            active: true,
+        });
+        let state = match NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
-        )?;
+            evidence.clone(),
+        ) {
+            Ok(state) => state,
+            Err(error) => {
+                if let Some(claim) = &mut claim {
+                    claim.abort();
+                }
+                return Err(error);
+            }
+        };
         state.register_metrics(&self.metric, partition);
         let mut streams = Vec::new();
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
@@ -1472,6 +1570,9 @@ impl ExecutionPlan for FusedSeriesExec {
             _export_budget: Arc::clone(&export_budget),
             ready: VecDeque::new(),
             done: false,
+            duplicate_evidence: evidence,
+            evidence_completed: false,
+            evidence_claim: claim,
         };
         if frame_mode {
             let schema = evaluated_output(&self.tree)?;
@@ -1482,9 +1583,15 @@ impl ExecutionPlan for FusedSeriesExec {
             Ok(Box::pin(stream))
         }
     }
+}
 
-    fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metric.clone_inner())
+impl Drop for FusedSeriesStream {
+    fn drop(&mut self) {
+        if !self.evidence_completed
+            && let Some(claim) = &mut self.evidence_claim
+        {
+            claim.abort();
+        }
     }
 }
 
@@ -1606,6 +1713,37 @@ pub struct FusedSeriesStream {
     ready: VecDeque<RecordBatch>,
     /// Whether the input ended and everything it settled has been handed out.
     done: bool,
+    duplicate_evidence: Option<Arc<DuplicateEvidence>>,
+    evidence_completed: bool,
+    evidence_claim: Option<EvidenceClaim>,
+}
+
+struct EvidenceClaim {
+    evidence: Arc<DuplicateEvidence>,
+    active: bool,
+}
+
+impl EvidenceClaim {
+    fn abort(&mut self) {
+        if self.active {
+            self.evidence.abort();
+            self.active = false;
+        }
+    }
+    fn complete(&mut self) -> bool {
+        if self.active {
+            self.active = false;
+            self.evidence.complete()
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for EvidenceClaim {
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 impl FusedSeriesStream {
@@ -1679,6 +1817,12 @@ impl FusedSeriesStream {
     /// hold the evaluator, the decoder's held batch and chunks, and the plan upstream of it.
     fn fail(&mut self) {
         self.done = true;
+        if !self.evidence_completed {
+            if let Some(claim) = &mut self.evidence_claim {
+                claim.abort();
+            }
+            self.evidence_completed = true;
+        }
         self.executor = None;
         self.partial_fold = None;
         self.inputs = None;
@@ -1763,6 +1907,21 @@ impl FusedSeriesStream {
                             return Poll::Ready(Some(Err(error)));
                         }
                         self.done = true;
+                        if self
+                            .evidence_claim
+                            .as_mut()
+                            .is_some_and(EvidenceClaim::complete)
+                            && let Some(candidate) = self
+                                .duplicate_evidence
+                                .as_ref()
+                                .and_then(|evidence| evidence.verdict())
+                        {
+                            self.fail();
+                            return Poll::Ready(Some(Err(DataFusionError::Execution(
+                                candidate.message(),
+                            ))));
+                        }
+                        self.evidence_completed = true;
                         continue;
                     }
                     Err(error) => {

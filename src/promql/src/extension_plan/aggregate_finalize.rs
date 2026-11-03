@@ -859,7 +859,7 @@ impl ExecutionPlan for AggregateFinalizeExec {
         // the reservation is registered here and given back when the stream is dropped, whether the
         // answer was read, dropped half way or refused.
         let answer = Arc::new(MemoryConsumer::new("AggregateFinalizeExec output").register(&pool));
-        let state = NativeExecutionState::try_new(&self.suffix, Arc::clone(&pool))?;
+        let state = NativeExecutionState::try_new(&self.suffix, Arc::clone(&pool), None)?;
         state.register_metrics(&self.metric, 0);
         let input_id = state.input_ids(0).next().ok_or_else(|| {
             DataFusionError::Execution("AggregateFinalize suffix has no source-0 input".to_string())

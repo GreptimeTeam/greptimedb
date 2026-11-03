@@ -156,7 +156,7 @@ fn bound_tree(schema: &Arc<SeriesSchema>) -> NativeTree {
 /// whole, so the chunks it is given are retained and the root answers on [`NativeExecutor::finish`].
 fn run(tree: &NativeTree, pushes: Vec<(InputId, EvaluatedChunk)>) -> Vec<EvaluatedChunk> {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-    let state = NativeExecutionState::try_new(tree, Arc::clone(&pool))
+    let state = NativeExecutionState::try_new(tree, Arc::clone(&pool), None)
         .expect("the runtime executes this tree");
     let mut executor = NativeExecutor::new(state);
     for (input_id, chunk) in pushes {
