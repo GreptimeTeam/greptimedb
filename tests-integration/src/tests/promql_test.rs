@@ -2146,28 +2146,6 @@ fn assert_delta_rows(
     }
 }
 
-/// The series scan one fused source reads.
-///
-/// A segment that matches two vectors, or that folds across series, routes its inputs before
-/// reading them, so the scan is no longer the fused node's direct child. Everything between is a
-/// pass-through for this purpose, which is what the walk skips.
-fn series_scan_below(
-    mut plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
-) -> &SeriesScanExec {
-    loop {
-        if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
-            return scan;
-        }
-        match plan.children().as_slice() {
-            [only] => plan = only,
-            children => panic!(
-                "{} children below {plan:?}, not one series scan",
-                children.len()
-            ),
-        }
-    }
-}
-
 fn assert_two_source_native_plan(
     observer: &NativePlanObserver,
     plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
@@ -3915,7 +3893,7 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
             assert_eq!(plan.name(), "FusedSeriesExec", "{context}");
             assert_eq!(plan.children().len(), 2, "{context}: fused inputs");
             assert!(
-                !Arc::ptr_eq(&plan.children()[0], &plan.children()[1]),
+                !Arc::ptr_eq(plan.children()[0], plan.children()[1]),
                 "{context}: each table has an independent frontend input"
             );
             let scans = observed_series_scans(&observer);
@@ -4646,7 +4624,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         [4, 4],
         "each occurrence routes independently"
     );
-    assert!(!Arc::ptr_eq(&plan.children()[0], &plan.children()[1]));
+    assert!(!Arc::ptr_eq(plan.children()[0], plan.children()[1]));
     let scans = observed_series_scans(&observer);
     assert_eq!(scans.len(), 2, "two distinct scans for repeated selector");
     for (index, scan) in scans.iter().enumerate() {

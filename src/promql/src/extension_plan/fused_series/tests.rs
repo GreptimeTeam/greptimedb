@@ -3644,7 +3644,6 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
         pool.reserved(),
         "execution-scoped evidence is released after all streams"
     );
-    let mut actual_rows = actual_rows;
     actual_rows.sort_by_key(|row| (row.0, row.2.clone()));
     let mut expected_rows = (0..4)
         .flat_map(|partition| {
