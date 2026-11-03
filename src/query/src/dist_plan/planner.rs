@@ -195,14 +195,25 @@ impl ExtensionPlanner for DistExtensionPlanner {
         }
 
         let optimized_plan = input_plan;
+        let direct_raw = matches!(input_plan, LogicalPlan::Extension(extension)
+            if extension.node.as_any().is::<promql::extension_plan::RawSeriesSource>());
         let Some(table_name) = Self::extract_full_table_name(input_plan)? else {
+            if direct_raw {
+                return Err(DataFusionError::Plan(
+                    "raw series source has no region route table".into(),
+                ));
+            }
             // no relation found in input plan, going to execute them locally
             return fallback(optimized_plan).await;
         };
 
-        let Ok(regions) = self.get_regions(&table_name, input_plan).await else {
-            // no peers found, going to execute them locally
-            return fallback(optimized_plan).await;
+        let (regions, series_disjoint) = match self.get_regions(&table_name, input_plan).await {
+            Ok(regions) => regions,
+            Err(error) if direct_raw => {
+                return Err(error);
+            }
+            // Existing non-raw plans may still execute locally when no peers are found.
+            Err(_) => return fallback(optimized_plan).await,
         };
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
@@ -230,7 +241,8 @@ impl ExtensionPlanner for DistExtensionPlanner {
             session.config().target_partitions(),
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
-        )?;
+        )?
+        .with_raw_series_disjoint(series_disjoint)?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
 }
@@ -248,7 +260,7 @@ impl DistExtensionPlanner {
         &self,
         table_name: &TableName,
         logical_plan: &LogicalPlan,
-    ) -> Result<Vec<RegionId>> {
+    ) -> Result<(Vec<RegionId>, bool)> {
         let mut extractor = TableScanExtractor::default();
         let _ = logical_plan.visit(&mut extractor)?;
         // Resolving by name again could bind an authorized scan to a replacement table.
@@ -380,7 +392,28 @@ impl DistExtensionPlanner {
             pruned_regions
         };
 
-        Ok(regions)
+        // A selected region is trivially disjoint. For several regions the proof must
+        // use the captured scan and the physical route's table metadata, not a logical
+        // metric table's possibly incomplete partition columns.
+        let series_disjoint = if regions.len() <= 1 {
+            true
+        } else if captured_table.is_none() {
+            false
+        } else {
+            let physical_info = if physical_table_id == table_info.table_id() {
+                Some(table_info.clone())
+            } else {
+                self.catalog_manager
+                    .table_info_by_id(physical_table_id)
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            physical_info.is_some_and(|info| {
+                physical_regions_disjoint(&info, &physical_table_route.region_routes, &regions)
+            })
+        };
+        Ok((regions, series_disjoint))
     }
 
     /// Resolves the partition-column types that are safe to use for region pruning.
@@ -469,6 +502,64 @@ impl DistExtensionPlanner {
             .optimizer()
             .optimize(plan.clone(), session_state, |_, _| {})
     }
+}
+
+/// Prove that every physical routing column belongs to the complete raw primary key.
+/// Unknown indices, missing route expressions, or route columns not represented in physical
+/// partition metadata cannot establish disjointness. Reserved-looking names have no special status.
+fn physical_regions_disjoint(
+    table_info: &TableInfo,
+    routes: &[common_meta::rpc::router::RegionRoute],
+    regions: &[RegionId],
+) -> bool {
+    let columns = table_info.meta.schema.column_schemas();
+    let partition_keys = &table_info.meta.partition_key_indices;
+    // Routing by any nonempty subset of the complete key keeps equal complete keys together.
+    // The reverse inclusion is not required: (host, rack) partitioned by host is disjoint.
+    if partition_keys.is_empty()
+        || table_info.meta.primary_key_indices.is_empty()
+        || partition_keys.iter().any(|index| {
+            columns.get(*index).is_none_or(|column| {
+                column.is_time_index() || !table_info.meta.primary_key_indices.contains(index)
+            })
+        })
+        || table_info
+            .meta
+            .primary_key_indices
+            .iter()
+            .any(|index| columns.get(*index).is_none())
+    {
+        return false;
+    }
+    let partition_names = partition_keys
+        .iter()
+        .map(|index| columns[*index].name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for region in regions {
+        let mut matching = routes
+            .iter()
+            .filter(|route| route.region.id.region_number() == region.region_number());
+        let Some(route) = matching.next() else {
+            return false;
+        };
+        if matching.next().is_some() {
+            return false;
+        }
+        let Ok(Some(expression)) = PartitionExpr::from_json_str(&route.region.partition_expr())
+        else {
+            return false;
+        };
+        let mut names = std::collections::HashSet::new();
+        expression.collect_column_names(&mut names);
+        if names.is_empty()
+            || names
+                .iter()
+                .any(|name| !partition_names.contains(name.as_str()))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataType)> {
@@ -578,7 +669,7 @@ mod tests {
     use table::table_name::TableName;
     use table::test_util::EmptyTable;
 
-    use super::DistExtensionPlanner;
+    use super::{DistExtensionPlanner, physical_regions_disjoint};
     use crate::region_query::{RegionQueryHandler, RegionQueryTarget};
 
     const LOGICAL_TABLE_ID: u32 = 1024;
@@ -793,7 +884,7 @@ mod tests {
     async fn region_routing_uses_captured_table() {
         let (mut planner, plan, table_name) = planner_and_plan(vec![0], vec![None]).await;
         planner.catalog_manager = MemoryCatalogManager::with_default_setup();
-        let regions = planner.get_regions(&table_name, &plan).await.unwrap();
+        let (regions, _) = planner.get_regions(&table_name, &plan).await.unwrap();
         assert_eq!(vec![RegionId::new(LOGICAL_TABLE_ID, 1)], regions);
     }
 
@@ -802,7 +893,7 @@ mod tests {
         let (planner, plan, table_name) =
             planner_and_plan(vec![0, 1], physical_partition_expressions()).await;
 
-        let regions = planner.get_regions(&table_name, &plan).await.unwrap();
+        let (regions, _) = planner.get_regions(&table_name, &plan).await.unwrap();
         assert_eq!(vec![RegionId::new(LOGICAL_TABLE_ID, 1)], regions);
     }
 
@@ -811,7 +902,7 @@ mod tests {
         let (planner, plan, table_name) =
             planner_and_plan(vec![0], physical_partition_expressions()).await;
 
-        let regions = planner.get_regions(&table_name, &plan).await.unwrap();
+        let (regions, _) = planner.get_regions(&table_name, &plan).await.unwrap();
         assert_all_logical_regions(regions);
     }
 
@@ -821,8 +912,81 @@ mod tests {
         expressions[1] = None;
         let (planner, plan, table_name) = planner_and_plan(vec![0, 1], expressions).await;
 
-        let regions = planner.get_regions(&table_name, &plan).await.unwrap();
+        let (regions, _) = planner.get_regions(&table_name, &plan).await.unwrap();
         assert_all_logical_regions(regions);
+    }
+
+    #[test]
+    fn disjoint_requires_raw_key_routing_and_valid_unique_routes() {
+        let regions = vec![
+            RegionId::new(LOGICAL_TABLE_ID, 1),
+            RegionId::new(LOGICAL_TABLE_ID, 2),
+        ];
+        let routes = vec![
+            region_route(1, Some(partition_col("host").lt(Value::String("m".into())))),
+            region_route(
+                2,
+                Some(partition_col("host").gt_eq(Value::String("m".into()))),
+            ),
+        ];
+        let mut info = table_info(PHYSICAL_TABLE_ID, "physical", &["host", "rack"], vec![0]);
+        info.meta.primary_key_indices = vec![0];
+        assert!(physical_regions_disjoint(&info, &routes, &regions));
+        info.meta.primary_key_indices = vec![0, 1];
+        assert!(physical_regions_disjoint(&info, &routes, &regions));
+        info.meta.partition_key_indices = vec![0, 1];
+        assert!(physical_regions_disjoint(&info, &routes, &regions));
+        info.meta.partition_key_indices = vec![0, 2];
+        assert!(!physical_regions_disjoint(&info, &routes, &regions));
+        info.meta.partition_key_indices = vec![0];
+        info.meta.primary_key_indices = vec![0];
+        let mut duplicate = routes.clone();
+        duplicate.push(routes[0].clone());
+        assert!(!physical_regions_disjoint(&info, &duplicate, &regions));
+        let mut missing = routes.clone();
+        missing[1] = region_route(2, None);
+        assert!(!physical_regions_disjoint(&info, &missing, &regions));
+        let mut unknown = routes.clone();
+        unknown[1] = region_route(2, Some(partition_col("rack").lt(Value::String("m".into()))));
+        assert!(!physical_regions_disjoint(&info, &unknown, &regions));
+        let mut malformed = routes.clone();
+        malformed[1].region.partition_expr = "{invalid".into();
+        assert!(!physical_regions_disjoint(&info, &malformed, &regions));
+        assert!(!physical_regions_disjoint(&info, &routes[..1], &regions));
+
+        info.meta.schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        info.meta.partition_key_indices = vec![0, 1];
+        info.meta.primary_key_indices = vec![0, 1];
+        assert!(!physical_regions_disjoint(&info, &routes, &regions));
+    }
+
+    #[tokio::test]
+    async fn disjoint_proof_uses_physical_not_logical_metadata() {
+        let (planner, plan, table_name) =
+            planner_and_plan(vec![0, 1], physical_partition_expressions()).await;
+        // The host predicate is selective; one selected region is always disjoint.
+        let (regions, disjoint) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(regions.len(), 1);
+        assert!(disjoint);
+        // With no pruning the fixture's physical metadata has no PK, so it cannot prove
+        // disjointness even though the logical partition keys name host.
+        let LogicalPlan::Filter(filter) = plan else {
+            panic!("expected filter")
+        };
+        let (regions, disjoint) = planner
+            .get_regions(&table_name, &filter.input)
+            .await
+            .unwrap();
+        assert_eq!(regions.len(), 3);
+        assert!(!disjoint);
     }
 
     fn assert_all_logical_regions(mut regions: Vec<RegionId>) {

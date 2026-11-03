@@ -86,10 +86,52 @@ pub trait RegionQueryHandler: Send + Sync {
 pub type RegionQueryHandlerRef = Arc<dyn RegionQueryHandler>;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use async_trait::async_trait;
     use common_meta::peer::Peer;
+    use session::ReadPreference;
+    use store_api::storage::RegionId;
 
-    use super::RegionQueryTarget;
+    use super::{RegionQueryHandler, RegionQueryTarget};
+
+    pub(crate) struct PlanningOnlyRegionQueryHandler;
+
+    #[async_trait]
+    impl RegionQueryHandler for PlanningOnlyRegionQueryHandler {
+        async fn select_target(
+            &self,
+            _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> crate::error::Result<RegionQueryTarget> {
+            unimplemented!("planning test does not dispatch regions")
+        }
+
+        async fn do_get(
+            &self,
+            _target: &RegionQueryTarget,
+            _request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            unimplemented!("planning test does not dispatch regions")
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _target: &RegionQueryTarget,
+            _query_id: String,
+            _update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            unimplemented!("planning test does not dispatch regions")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            unimplemented!("planning test does not dispatch regions")
+        }
+    }
 
     #[test]
     fn region_query_target_exposes_immutable_peer() {

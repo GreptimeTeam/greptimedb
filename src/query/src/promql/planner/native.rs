@@ -221,6 +221,7 @@ impl PromPlanner {
         logical_scan_id: &mut Option<u32>,
         logical_ids_differ: &mut bool,
         statement_kind: &mut Option<FieldKind>,
+        any_partitioned: &mut bool,
     ) -> Result<Option<PreparedInput>> {
         let (Some(metric), Some(time)) = (
             self.ctx.table_name.clone(),
@@ -351,12 +352,11 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        // A multi-scan plan has no placement over a table split into several regions: the
-        // dist analyzer refuses a multi-child node there, so such a query keeps the
-        // existing plan instead of failing.
-        if selector_count > 1 && table_meta.partition_column_names().next().is_some() {
-            return Ok(None);
-        }
+        // Whether this input's table is split into regions along a partition column. The
+        // canonical boundary below is the only part of this route that claims a whole-query
+        // label-set answer, and a region-local producer cannot see the pieces another region
+        // holds, so this fact decides whether that boundary may be claimed at all.
+        *any_partitioned |= table_meta.partition_column_names().next().is_some();
         // This route declares one output column per field, so every field it binds carries
         // one kind: `Float64`, or the canonical native histogram struct. A field of any
         // other type - an integer, a `Float32`, a decimal, a string - keeps the existing
@@ -527,6 +527,7 @@ impl PromPlanner {
             // The kind every bound field carries. A statement declares one column per field, so
             // selectors that disagree have no column to declare and keep the existing plan.
             let mut statement_kind: Option<FieldKind> = None;
+            let mut any_partitioned = false;
             for selector in &selectors {
                 self.ctx = original_context.clone();
                 // These matchers are alternatives the one scan below the node cannot represent, so the
@@ -668,6 +669,7 @@ impl PromPlanner {
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
                                 &mut statement_kind,
+                                &mut any_partitioned,
                             )
                             .await?
                         else {
@@ -765,6 +767,7 @@ impl PromPlanner {
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
                         &mut statement_kind,
+                        &mut any_partitioned,
                     )
                     .await?
                 else {
@@ -777,11 +780,18 @@ impl PromPlanner {
                 single_input_context,
                 logical_ids_differ,
                 statement_kind,
+                any_partitioned,
             )))
         }
         .await;
         self.ctx = original_context;
-        let Some((mut prepared, single_input_context, logical_ids_differ, statement_kind)) =
+        let Some((
+            mut prepared,
+            single_input_context,
+            logical_ids_differ,
+            statement_kind,
+            any_partitioned,
+        )) =
             preparation?
         else {
             return Ok(None);
@@ -801,6 +811,11 @@ impl PromPlanner {
                 .map(|(scan, ..)| scan)
                 .filter(|scan| !is_empty_discovered_input(scan)),
         ) || logical_ids_differ;
+        // Only cross-table selectors are converted into independent raw sources below.
+        // A same-table multi-scan cannot be placed in one of several regions safely.
+        if selectors.len() > 1 && !cross_table && any_partitioned {
+            return Ok(None);
+        }
         // The first input names the output's time index and, on one table, binds every scan.
         let Some((_, _, metric, time, tags, _)) = prepared.first() else {
             return Ok(None);

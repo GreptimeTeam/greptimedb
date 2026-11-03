@@ -3757,17 +3757,32 @@ async fn native_fused_same_table_nested_match_keeps_prior_admission() {
     );
 }
 
-/// Two selectors over tables split into regions are not one two-input node, across tables as on
-/// one; the hybrid route may still plan each operand natively under the existing join.
+/// Partitioned cross-table operands are independently transported by raw sources. Repeated
+/// scans of one partitioned table retain the region-local multi-scan refusal.
 #[tokio::test]
-async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
+async fn native_fused_partitioned_pair_requires_per_selector_raw_sources() {
     let plan = build_native_fused_plan_with_provider(
         "some_metric / other_metric",
         true,
         native_two_table_provider(vec![0]).await,
     )
     .await;
-    assert!(!has_pair_node(&plan), "{plan}");
+    let fused = find_fused_series(&plan).expect("cross-table pair is native");
+    assert_eq!(fused.inputs().len(), 2, "{plan}");
+    for input in fused.inputs() {
+        assert!(
+            matches!(input, LogicalPlan::Extension(extension)
+            if extension.node.as_any().is::<RawSeriesSource>()),
+            "{plan}"
+        );
+    }
+    let repeated = build_native_fused_plan_with_provider(
+        "some_metric / some_metric",
+        true,
+        native_two_table_provider(vec![0]).await,
+    )
+    .await;
+    assert!(!has_pair_node(&repeated), "{repeated}");
 }
 
 /// `some_metric` as [`native_two_table_provider`] builds it, and `other_metric` whose tags are
@@ -4113,22 +4128,17 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
     }
 }
 
-/// More than two selectors over tables split into regions are not one multi-input node, on one
-/// table as across two.
+/// More than two same-table selectors on a partitioned table must not be placed as a
+/// multi-child region-local node. Cross-table occurrences may each use a raw source.
 #[tokio::test]
-async fn native_fused_three_selectors_on_partitioned_tables_fall_back() {
-    for query in [
+async fn native_fused_same_table_three_selectors_on_partitioned_table_fall_back() {
+    let plan = build_native_fused_plan_with_provider(
         "some_metric + some_metric + some_metric",
-        "some_metric / other_metric * some_metric",
-    ] {
-        let plan = build_native_fused_plan_with_provider(
-            query,
-            true,
-            native_two_table_provider(vec![0]).await,
-        )
-        .await;
-        assert!(!has_pair_node(&plan), "{query}: {plan}");
-    }
+        true,
+        native_two_table_provider(vec![0]).await,
+    )
+    .await;
+    assert!(!has_pair_node(&plan), "{plan}");
 }
 
 /// Find the final half of a split aggregate.

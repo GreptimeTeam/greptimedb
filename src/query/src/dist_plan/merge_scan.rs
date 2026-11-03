@@ -48,10 +48,12 @@ use datafusion_common::{DFSchemaRef, DataFusionError, Result, Statistics};
 use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datatypes::extension::json::is_any_json_extension_type;
+use datatypes::series::frame::SeriesFrameDeclaration;
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
+use promql::extension_plan::RawSeriesSource;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContextRef,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
@@ -481,6 +483,7 @@ pub struct MergeScanExec {
     regions: Vec<RegionId>,
     plan: LogicalPlan,
     arrow_schema: ArrowSchemaRef,
+    remote_schema: ArrowSchemaRef,
     region_query_handler: RegionQueryHandlerRef,
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
@@ -520,6 +523,7 @@ impl MergeScanExec {
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
+        let remote_schema = Arc::new(arrow_schema.clone());
         let arrow_schema = Arc::new(arrow_schema.clone());
         let output_partition_count = Self::output_partition_count(regions.len(), target_partition);
 
@@ -567,6 +571,7 @@ impl MergeScanExec {
             regions,
             plan,
             arrow_schema,
+            remote_schema,
             region_query_handler,
             metric: ExecutionPlanMetricsSet::new(),
             sub_stage_metrics: Arc::default(),
@@ -578,6 +583,35 @@ impl MergeScanExec {
             target_partition,
             enable_per_region_metrics,
         })
+    }
+
+    /// Redeclares only a direct raw source when its selected regions may split a key.
+    pub(crate) fn with_raw_series_disjoint(mut self, disjoint: bool) -> Result<Self> {
+        if !disjoint
+            && matches!(&self.plan, LogicalPlan::Extension(extension)
+            if extension.node.as_any().is::<RawSeriesSource>())
+        {
+            SeriesFrameDeclaration::parse(self.remote_schema.as_ref())
+                .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+            let mut metadata = self.arrow_schema.metadata().clone();
+            metadata.insert("greptime.series.ordering".into(), "interleaved".into());
+            self.arrow_schema = Arc::new(arrow_schema::Schema::new_with_metadata(
+                self.arrow_schema.fields().clone(),
+                metadata,
+            ));
+            let equivalence = self
+                .properties
+                .equivalence_properties()
+                .clone()
+                .with_new_schema(self.arrow_schema.clone())?;
+            self.properties = Arc::new(
+                self.properties
+                    .as_ref()
+                    .clone()
+                    .with_eq_properties(equivalence),
+            );
+        }
+        Ok(self)
     }
 
     /// Conservative row-count upper bound for all selected regions.
@@ -612,6 +646,7 @@ impl MergeScanExec {
         let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
         let arrow_schema = self.arrow_schema.clone();
+        let remote_schema = self.remote_schema.clone();
         let query_ctx = self.query_ctx.clone();
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let partition_metrics_moved = self.partition_metrics.clone();
@@ -740,7 +775,7 @@ impl MergeScanExec {
                 }
                 let mut advertised_schema = stream.schema().arrow_schema().clone();
                 validate_remote_schema(
-                    arrow_schema.as_ref(),
+                    remote_schema.as_ref(),
                     advertised_schema.as_ref(),
                     "advertised remote stream",
                 )
@@ -806,7 +841,7 @@ impl MergeScanExec {
                     let df_batch = batch.into_df_record_batch();
                     if !Arc::ptr_eq(&advertised_schema, df_batch.schema_ref()) {
                         validate_remote_schema(
-                            arrow_schema.as_ref(),
+                            remote_schema.as_ref(),
                             df_batch.schema_ref().as_ref(),
                             "remote record batch",
                         )
@@ -1359,6 +1394,7 @@ mod tests {
     };
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::series::SeriesOrdering;
     use datatypes::series::frame::{self, FrameLabelMode};
     use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
     use datatypes::series::samples::{
@@ -3260,6 +3296,310 @@ mod tests {
             .into(),
             eval_grid: None,
         }
+    }
+
+    /// Exercise the distributed analyzer's real recovery projection with the pinned physical
+    /// planner. This documents the declaration that the query planner must repair at Fused input.
+    #[tokio::test]
+    async fn analyzer_recovery_projection_stamps_logical_raw_ordering() {
+        use crate::dist_plan::DistPlannerAnalyzer;
+        use crate::optimizer::test_util::mock_table_provider;
+        use common_query::series_frame::series_frame_ordering;
+        use datafusion::catalog::Session;
+        use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
+        use datafusion::physical_planner::{
+            DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner,
+        };
+        use datafusion_expr::{Extension, UserDefinedLogicalNode};
+        use datafusion_optimizer::analyzer::AnalyzerRule;
+
+        struct RawMergePlanner;
+        #[async_trait]
+        impl ExtensionPlanner for RawMergePlanner {
+            async fn plan_extension(
+                &self,
+                _planner: &dyn PhysicalPlanner,
+                node: &dyn UserDefinedLogicalNode,
+                _logical_inputs: &[&LogicalPlan],
+                _physical_inputs: &[Arc<dyn ExecutionPlan>],
+                session: &dyn Session,
+                _planning_ctx: &PhysicalPlanningContext,
+            ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+                let Some(scan) = node.as_any().downcast_ref::<MergeScanLogicalPlan>() else {
+                    return Ok(None);
+                };
+                let session = session.as_any().downcast_ref::<SessionState>().unwrap();
+                let exec = MergeScanExec::new(
+                    session,
+                    TableName::new("c", "s", "t"),
+                    vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+                    scan.input().clone(),
+                    UserDefinedLogicalNode::schema(scan).as_arrow(),
+                    Arc::new(TestRegionQueryHandler::default()),
+                    QueryContext::arc(),
+                    2,
+                    None,
+                    false,
+                )?
+                .with_raw_series_disjoint(false)?;
+                Ok(Some(Arc::new(exec)))
+            }
+        }
+        let table = LogicalPlanBuilder::scan(
+            "metric",
+            Arc::new(datafusion::datasource::DefaultTableSource::new(Arc::new(
+                mock_table_provider(RegionId::new(1024, 1)),
+            ))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let raw = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                RawSeriesSource::try_new(
+                    Arc::from("metric"),
+                    vec!["host".into()],
+                    vec!["v0".into()],
+                    table,
+                )
+                .unwrap(),
+            ),
+        });
+        let analyzed = DistPlannerAnalyzer::new(false)
+            .analyze(raw, &ConfigOptions::default())
+            .unwrap();
+        assert!(
+            matches!(analyzed, LogicalPlan::Projection(_)),
+            "expected analyzer recovery projection: {analyzed}"
+        );
+        assert_eq!(
+            series_frame_ordering(analyzed.schema().as_arrow()).unwrap(),
+            SeriesOrdering::Contiguous
+        );
+        let state = SessionStateBuilder::new()
+            .with_default_features()
+            .with_physical_optimizer_rules(vec![])
+            .build();
+        let planner =
+            DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(RawMergePlanner)]);
+        let physical = planner
+            .create_physical_plan(&analyzed, &state)
+            .await
+            .unwrap();
+        let merge = physical
+            .children()
+            .into_iter()
+            .find_map(|child| child.downcast_ref::<MergeScanExec>())
+            .expect("recovery projection must retain MergeScan child");
+        assert_eq!(
+            series_frame_ordering(merge.schema().as_ref()).unwrap(),
+            SeriesOrdering::Interleaved
+        );
+        assert_eq!(
+            series_frame_ordering(physical.schema().as_ref()).unwrap(),
+            SeriesOrdering::Contiguous,
+            "the recovery projection stamps its logical declaration; Fused must restore the producer's physical guarantee"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_region_root_series_frame_output_preserves_chains() {
+        use crate::optimizer::series_frame_output::SeriesFrameOutput;
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::datasource::source::DataSourceExec;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datatypes::series::SeriesLabels;
+        use promql::extension_plan::{IdentityCompletion, SeriesRepartitionExec};
+
+        let logical = RawSeriesSource::try_new(
+            Arc::from("metric"),
+            vec![],
+            vec!["value".into(), "other".into()],
+            LogicalPlanBuilder::empty(false).build().unwrap(),
+        )
+        .unwrap();
+        let remote_schema = Arc::new(
+            UserDefinedLogicalNodeCore::schema(&logical)
+                .as_arrow()
+                .clone(),
+        );
+        let raw = raw_test_series_schema();
+        let batch = |time, value| {
+            let chunk = RawSeriesChunk::try_new(
+                &raw,
+                Buffer::from(vec![1u8]),
+                Some(SeriesLabels::try_new(Some(Arc::from("metric")), vec![]).unwrap()),
+                RawTimestamps::try_new(ScalarBuffer::from(vec![time])).unwrap(),
+                SeriesFields::try_from_vec(vec![
+                    Samples::from_float(Float64Array::from(vec![value])),
+                    Samples::from_float(Float64Array::from(vec![value])),
+                ])
+                .unwrap(),
+                true,
+            )
+            .unwrap();
+            let packed = frame::pack_raw_series_chunk(&raw, FrameLabelMode::Explicit, None, &chunk)
+                .unwrap()
+                .remove(0);
+            DfRecordBatch::try_new(remote_schema.clone(), packed.columns().to_vec()).unwrap()
+        };
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(
+                &[vec![batch(10, 1.0)], vec![batch(20, 2.0)]],
+                remote_schema.clone(),
+                None,
+            )
+            .unwrap(),
+        ))) as Arc<dyn ExecutionPlan>;
+        let root = logical.to_per_series_execution_plan(input).unwrap();
+        let output = SeriesFrameOutput
+            .optimize(root, &ConfigOptions::default())
+            .unwrap();
+        let router = output.downcast_ref::<SeriesRepartitionExec>().unwrap();
+        assert_eq!(
+            router.identity_completion(),
+            IdentityCompletion::MergeInputs
+        );
+        assert_eq!(output.schema(), remote_schema);
+        let batches = datafusion::physical_plan::collect(output, Arc::new(TaskContext::default()))
+            .await
+            .unwrap();
+        let chunks = batches
+            .iter()
+            .flat_map(|batch| {
+                frame::unpack_raw_series_frame(&raw, FrameLabelMode::Explicit, None, batch).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let times = chunks
+            .iter()
+            .flat_map(|chunk| (0..chunk.time.len()).map(|i| chunk.time.timestamp(i).unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(times, vec![10, 20]);
+        assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_raw_merge_validates_remote_then_exposes_fragmented_batches() {
+        use common_query::series_frame::series_frame_ordering;
+        use datafusion_expr::Extension;
+        use datatypes::series::SeriesLabels;
+
+        let source = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                RawSeriesSource::try_new(
+                    Arc::from("metric"),
+                    vec![],
+                    vec!["value".into(), "other".into()],
+                    LogicalPlanBuilder::empty(false).build().unwrap(),
+                )
+                .unwrap(),
+            ),
+        });
+        let mut metadata = source.schema().as_arrow().metadata().clone();
+        metadata.insert("test.frame.producer".into(), "preserve-me".into());
+        let remote = Arc::new(ArrowSchema::new_with_metadata(
+            source.schema().as_arrow().fields().clone(),
+            metadata,
+        ));
+        let advertised = Arc::new(Schema::try_from(remote.clone()).unwrap());
+        let raw = raw_test_series_schema();
+        let chunk = RawSeriesChunk::try_new(
+            &raw,
+            Buffer::from(vec![1u8]),
+            Some(SeriesLabels::try_new(Some(Arc::from("metric")), vec![]).unwrap()),
+            RawTimestamps::try_new(ScalarBuffer::from(vec![10, 20])).unwrap(),
+            SeriesFields::try_from_vec(vec![
+                Samples::from_float(Float64Array::from(vec![1.0, 2.0])),
+                Samples::from_float(Float64Array::from(vec![3.0, 4.0])),
+            ])
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        let packed = frame::pack_raw_series_chunk(&raw, FrameLabelMode::Explicit, None, &chunk)
+            .unwrap()
+            .remove(0);
+        let packed = DfRecordBatch::try_new(remote.clone(), packed.columns().to_vec()).unwrap();
+        let region = RegionId::new(1024, 1);
+        for disjoint in [true, false] {
+            let batch = RecordBatch::from_df_record_batch(advertised.clone(), packed.clone());
+            let exec = MergeScanExec::new(
+                &SessionStateBuilder::new().build(),
+                TableName::new("c", "s", "t"),
+                vec![region, RegionId::new(1024, 2)],
+                source.clone(),
+                &remote,
+                Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                    region,
+                    advertised.clone(),
+                    vec![Ok(batch)],
+                )])),
+                QueryContext::arc(),
+                2,
+                None,
+                false,
+            )
+            .unwrap()
+            .with_raw_series_disjoint(disjoint)
+            .unwrap();
+            assert_eq!(exec.region_count(), 2);
+            assert_eq!(exec.partition_count(), 2);
+            assert_eq!(exec.remote_schema.as_ref(), remote.as_ref());
+            assert_eq!(
+                exec.schema().metadata().get("test.frame.producer"),
+                Some(&"preserve-me".to_string())
+            );
+            let expected = if disjoint {
+                SeriesOrdering::Contiguous
+            } else {
+                SeriesOrdering::Interleaved
+            };
+            assert_eq!(
+                series_frame_ordering(exec.schema().as_ref()).unwrap(),
+                expected
+            );
+            let schema = exec.schema();
+            let batches = collect_merge_scan(exec).await.unwrap();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].schema(), schema);
+            assert!(Arc::ptr_eq(&packed.columns()[0], &batches[0].columns()[0]));
+        }
+        let mut wrong_metadata = remote.metadata().clone();
+        wrong_metadata.insert(
+            "greptime.series.ordering".into(),
+            "read_key_then_time".into(),
+        );
+        let wrong = Arc::new(
+            Schema::try_from(Arc::new(ArrowSchema::new_with_metadata(
+                remote.fields().clone(),
+                wrong_metadata,
+            )))
+            .unwrap(),
+        );
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("c", "s", "t"),
+            vec![region],
+            source,
+            &remote,
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region,
+                wrong,
+                vec![],
+            )])),
+            QueryContext::arc(),
+            1,
+            None,
+            false,
+        )
+        .unwrap()
+        .with_raw_series_disjoint(false)
+        .unwrap();
+        assert!(
+            collect_merge_scan(exec).await.is_err(),
+            "the exposed schema must not weaken remote validation"
+        );
     }
 
     #[tokio::test]

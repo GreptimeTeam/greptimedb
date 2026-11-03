@@ -867,6 +867,26 @@ impl FusedSeries {
                 }
                 if declaration.content() != FrameContent::Evaluated {
                     let count = input.properties().partitioning.partition_count();
+                    if count == 0 {
+                        return Err(DataFusionError::Plan(format!(
+                            "FusedSeries input {index} has no partitions"
+                        )));
+                    }
+                    // Region streams may each close the same storage key. Reconcile those
+                    // fragments even when the merged stream has only one output partition.
+                    let (input, label_source, ordering) = if ordering == SeriesOrdering::Interleaved
+                    {
+                        let width = if normalize { 1 } else { count };
+                        let input = Arc::new(SeriesRepartitionExec::try_new_with_routing(
+                            input,
+                            width,
+                            SeriesRouting::RawPrimaryKey,
+                        )?) as Arc<dyn ExecutionPlan>;
+                        (input, RawLabelSource::Explicit, SeriesOrdering::Contiguous)
+                    } else {
+                        (input, label_source, ordering)
+                    };
+                    let count = input.properties().partitioning.partition_count();
                     if normalize && count != 1 {
                         let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
                             as Arc<dyn ExecutionPlan>;

@@ -38,17 +38,24 @@ use datafusion::execution::memory_pool::{
     FairSpillPool, GreedyMemoryPool, MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation,
     TrackConsumersPool,
 };
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::expressions::Column as PhysicalColumn;
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
-use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan, WindowUDF};
+use datafusion_common::DataFusionError;
+use datafusion_expr::{
+    AggregateUDF, Expr, LogicalPlan as DfLogicalPlan, UserDefinedLogicalNode, WindowUDF,
+};
 use datafusion_optimizer::Analyzer;
 use datafusion_optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion_optimizer::optimizer::Optimizer;
+use datatypes::series::frame::SeriesFrameDeclaration;
 use partition::manager::PartitionRuleManagerRef;
-use promql::extension_plan::PromExtensionPlanner;
+use promql::extension_plan::{FusedSeries, PromExtensionPlanner, RawSeriesSource};
 use session::context::QueryContextRef;
 use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
@@ -56,8 +63,8 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::QueryEngineContext;
 use crate::dist_plan::{
     DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, DynFilterRegistryManager,
-    MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
-    RemoteDynFilterRegistryLease,
+    MergeScanExec, MergeScanLogicalPlan, MergeSortExtensionPlanner,
+    RemoteDynFilterReceiverExtensionPlanner, RemoteDynFilterRegistryLease,
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -547,6 +554,174 @@ impl QueryEngineState {
     }
 }
 
+/// The analyzer restores the remote plan's logical schema with an identity projection. DataFusion
+/// stamps that logical frame declaration onto the physical projection, which would hide a
+/// MergeScan's weaker regional-fragment guarantee before PromQL chooses its exchanges. Repair only
+/// that exact paired raw-source shape, then let the ordinary PromQL extension planner build Fused.
+struct PromExtensionPlannerWithRawInputs;
+
+#[async_trait]
+impl ExtensionPlanner for PromExtensionPlannerWithRawInputs {
+    async fn plan_extension(
+        &self,
+        planner: &dyn PhysicalPlanner,
+        node: &dyn UserDefinedLogicalNode,
+        logical_inputs: &[&DfLogicalPlan],
+        physical_inputs: &[Arc<dyn ExecutionPlan>],
+        session: &dyn Session,
+        planning_ctx: &PhysicalPlanningContext,
+    ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
+        if node.as_any().is::<FusedSeries>() {
+            if logical_inputs.len() != physical_inputs.len() {
+                return Err(DataFusionError::Plan(
+                    "FusedSeries logical and physical input counts differ".into(),
+                ));
+            }
+            let physical_inputs = logical_inputs
+                .iter()
+                .zip(physical_inputs)
+                .map(|(logical, physical)| {
+                    repair_raw_recovery_projection(logical, physical)
+                        .map(|repaired| repaired.unwrap_or_else(|| Arc::clone(physical)))
+                })
+                .collect::<DfResult<Vec<_>>>()?;
+            return PromExtensionPlanner
+                .plan_extension(
+                    planner,
+                    node,
+                    logical_inputs,
+                    &physical_inputs,
+                    session,
+                    planning_ctx,
+                )
+                .await;
+        }
+        PromExtensionPlanner
+            .plan_extension(
+                planner,
+                node,
+                logical_inputs,
+                physical_inputs,
+                session,
+                planning_ctx,
+            )
+            .await
+    }
+}
+
+fn repair_raw_recovery_projection(
+    logical: &DfLogicalPlan,
+    physical: &Arc<dyn ExecutionPlan>,
+) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
+    let DfLogicalPlan::Projection(projection) = logical else {
+        return Ok(None);
+    };
+    let DfLogicalPlan::Extension(extension) = projection.input.as_ref() else {
+        return Ok(None);
+    };
+    let Some(scan) = extension
+        .node
+        .as_any()
+        .downcast_ref::<MergeScanLogicalPlan>()
+    else {
+        return Ok(None);
+    };
+    let DfLogicalPlan::Extension(remote) = scan.input() else {
+        return Ok(None);
+    };
+    if !remote.node.as_any().is::<RawSeriesSource>() {
+        return Ok(None);
+    };
+    let Some(physical_projection) = physical.downcast_ref::<ProjectionExec>() else {
+        return Ok(None);
+    };
+    if physical_projection
+        .input()
+        .downcast_ref::<MergeScanExec>()
+        .is_none()
+        || !logical_identity_projection(projection, scan.schema())
+        || !physical_identity_projection(physical_projection)
+    {
+        return Ok(None);
+    }
+
+    // Only the producer's ordering may differ. In particular, this is not permission for an
+    // arbitrary projection to relabel a different raw frame or discard unreserved metadata.
+    let logical_schema = projection.schema.as_arrow();
+    let physical_schema = physical_projection.input().schema();
+    if physical_projection.schema().as_ref() != logical_schema
+        || physical_schema.fields() != logical_schema.fields()
+        || !same_raw_frame_except_ordering(logical_schema, physical_schema.as_ref())?
+    {
+        return Ok(None);
+    }
+    if physical_projection.schema().as_ref() == physical_schema.as_ref() {
+        return Ok(None);
+    }
+    ProjectionExec::try_new_with_schema_metadata(
+        physical_projection.expr().to_vec(),
+        Arc::clone(physical_projection.input()),
+        physical_schema.as_ref(),
+    )
+    .map(|projection| Some(Arc::new(projection) as Arc<dyn ExecutionPlan>))
+}
+
+fn logical_identity_projection(
+    projection: &datafusion_expr::Projection,
+    input_schema: &datafusion_common::DFSchemaRef,
+) -> bool {
+    projection.expr.len() == input_schema.fields().len()
+        && projection
+            .expr
+            .iter()
+            .zip(input_schema.iter())
+            .all(|(expr, (qualifier, field))| {
+                *expr
+                    == Expr::Column(datafusion_common::Column::new(
+                        qualifier.cloned(),
+                        field.name(),
+                    ))
+            })
+}
+
+fn physical_identity_projection(projection: &ProjectionExec) -> bool {
+    projection.expr().len() == projection.input().schema().fields().len()
+        && projection.expr().iter().enumerate().all(|(index, expr)| {
+            expr.expr
+                .downcast_ref::<PhysicalColumn>()
+                .is_some_and(|column| column.index() == index && column.name() == expr.alias)
+        })
+}
+
+fn same_raw_frame_except_ordering(
+    logical: &arrow_schema::Schema,
+    physical: &arrow_schema::Schema,
+) -> DfResult<bool> {
+    const ORDERING: &str = "greptime.series.ordering";
+    let logical_declaration = SeriesFrameDeclaration::parse(logical)
+        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+    let physical_declaration = SeriesFrameDeclaration::parse(physical)
+        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+    if logical_declaration.content() != datatypes::series::frame::FrameContent::Raw
+        || physical_declaration.content() != datatypes::series::frame::FrameContent::Raw
+    {
+        return Ok(false);
+    }
+    let metadata_matches = logical
+        .metadata()
+        .iter()
+        .filter(|(key, _)| key.as_str() != ORDERING)
+        .all(|(key, value)| physical.metadata().get(key) == Some(value))
+        && physical
+            .metadata()
+            .iter()
+            .filter(|(key, _)| key.as_str() != ORDERING)
+            .all(|(key, value)| logical.metadata().get(key) == Some(value));
+    Ok(metadata_matches
+        && logical_declaration.labels() == physical_declaration.labels()
+        && logical_declaration.label_decode() == physical_declaration.label_decode())
+}
+
 struct DfQueryPlanner {
     physical_planner: DefaultPhysicalPlanner,
 }
@@ -629,7 +804,7 @@ impl DfQueryPlanner {
         enable_per_region_metrics: bool,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
-            Arc::new(PromExtensionPlanner),
+            Arc::new(PromExtensionPlannerWithRawInputs),
             Arc::new(RangeSelectPlanner),
             Arc::new(RemoteDynFilterReceiverExtensionPlanner),
         ];
@@ -757,6 +932,386 @@ mod tests {
         DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider,
         QueryRuntimeProviderRef,
     };
+
+    #[derive(Default)]
+    struct TestRawMergePlanner {
+        disjoint: bool,
+    }
+
+    #[async_trait]
+    impl ExtensionPlanner for TestRawMergePlanner {
+        async fn plan_extension(
+            &self,
+            _planner: &dyn PhysicalPlanner,
+            node: &dyn UserDefinedLogicalNode,
+            _logical_inputs: &[&DfLogicalPlan],
+            _physical_inputs: &[Arc<dyn ExecutionPlan>],
+            session: &dyn Session,
+            _planning_ctx: &PhysicalPlanningContext,
+        ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
+            let Some(scan) = node.as_any().downcast_ref::<MergeScanLogicalPlan>() else {
+                return Ok(None);
+            };
+            let session = session.as_any().downcast_ref::<SessionState>().unwrap();
+            let merge = MergeScanExec::new(
+                session,
+                table::table_name::TableName::new("c", "s", "metric"),
+                vec![
+                    store_api::storage::RegionId::new(1, 1),
+                    store_api::storage::RegionId::new(1, 2),
+                ],
+                scan.input().clone(),
+                scan.schema().as_arrow(),
+                Arc::new(crate::region_query::tests::PlanningOnlyRegionQueryHandler),
+                QueryContext::arc(),
+                session.config().target_partitions(),
+                None,
+                false,
+            )?
+            .with_raw_series_disjoint(self.disjoint)?;
+            Ok(Some(Arc::new(merge)))
+        }
+    }
+
+    /// The actual extension-planner assembly must repair the analyzer's identity recovery
+    /// projection before PromQL chooses whether raw regional fragments need reconciliation.
+    #[tokio::test]
+    async fn fused_raw_recovery_projection_preserves_merge_scan_ordering() {
+        use common_query::series_frame::series_frame_ordering;
+        use datafusion_expr::{Extension, LogicalPlanBuilder};
+        use datatypes::series::SeriesOrdering;
+        use datatypes::series::samples::{FieldSpec, SeriesSchema};
+        use datatypes::series::time::{EvalGrid, GridSpec};
+        use promql::extension_plan::{FusedSeriesBinding, SeriesRepartitionExec};
+        use promql::native::plan::{
+            BoundInput, BoundInstant, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+        };
+        use store_api::storage::RegionId;
+        use table::table_name::TableName;
+
+        let raw = RawSeriesSource::try_new(
+            Arc::from("metric"),
+            vec!["host".into()],
+            vec!["value".into()],
+            LogicalPlanBuilder::empty(false).build().unwrap(),
+        )
+        .unwrap();
+        let raw_schema = raw.schema().as_arrow().clone();
+        let raw = DfLogicalPlan::Extension(Extension {
+            node: Arc::new(raw),
+        });
+        let session = SessionStateBuilder::new().with_default_features().build();
+        for (disjoint, expected, needs_router) in [
+            (true, SeriesOrdering::Contiguous, false),
+            (false, SeriesOrdering::Interleaved, true),
+        ] {
+            let merge = MergeScanExec::new(
+                &session,
+                TableName::new("c", "s", "metric"),
+                vec![RegionId::new(1, 1), RegionId::new(1, 2)],
+                raw.clone(),
+                &raw_schema,
+                Arc::new(crate::region_query::tests::PlanningOnlyRegionQueryHandler),
+                QueryContext::arc(),
+                1,
+                None,
+                false,
+            )
+            .unwrap()
+            .with_raw_series_disjoint(disjoint)
+            .unwrap();
+            let merge = Arc::new(merge);
+            let physical_input: Arc<dyn ExecutionPlan> = Arc::new(
+                ProjectionExec::try_new_with_schema_metadata(
+                    (0..raw_schema.fields().len())
+                        .map(|index| {
+                            (
+                                Arc::new(datafusion::physical_expr::expressions::Column::new(
+                                    raw_schema.field(index).name(),
+                                    index,
+                                ))
+                                    as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+                                raw_schema.field(index).name().to_string(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    merge,
+                    &raw_schema,
+                )
+                .unwrap(),
+            );
+            let logical_merge = MergeScanLogicalPlan::new(raw.clone(), false).into_logical_plan();
+            let logical_input = LogicalPlanBuilder::from(logical_merge)
+                .project(raw.schema().iter().map(|(qualifier, field)| {
+                    Expr::Column(datafusion_common::Column::new(
+                        qualifier.cloned(),
+                        field.name(),
+                    ))
+                }))
+                .unwrap()
+                .build()
+                .unwrap();
+            let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 1).unwrap()).unwrap());
+            let raw_type = NativeType::Samples(Arc::new(SeriesSchema {
+                fields: vec![FieldSpec {
+                    name: "value".into(),
+                }]
+                .into(),
+                eval_grid: None,
+            }));
+            let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+                fields: vec![FieldSpec {
+                    name: "value".into(),
+                }]
+                .into(),
+                eval_grid: Some(Arc::clone(&grid)),
+            }));
+            let tree = NativeTree::try_new(NativeNode {
+                expr: NativeExpr::Instant {
+                    input: Box::new(NativeNode {
+                        expr: NativeExpr::Input(BoundInput {
+                            source_index: 0,
+                            output: raw_type.clone(),
+                            ordering: SeriesOrdering::Contiguous,
+                        }),
+                        output: raw_type,
+                    }),
+                    op: BoundInstant {
+                        lookback_ms: 0,
+                        offset_ms: 0,
+                        at_ms: None,
+                        value: InstantValue::Sample,
+                        output_grid: Arc::clone(&grid),
+                    },
+                },
+                output: evaluated,
+            })
+            .unwrap();
+            let fused = FusedSeries::try_new(
+                Arc::from("metric"),
+                tree,
+                FusedSeriesBinding {
+                    grid,
+                    time_index: "time".into(),
+                    tags: vec!["host".into()],
+                    metric_name: Some(Arc::from("metric")),
+                },
+                vec![logical_input.clone()],
+                Arc::new(
+                    datafusion_common::DFSchema::from_unqualified_fields(
+                        vec![
+                            arrow_schema::Field::new(
+                                "time",
+                                arrow_schema::DataType::Timestamp(
+                                    arrow_schema::TimeUnit::Millisecond,
+                                    None,
+                                ),
+                                false,
+                            ),
+                            arrow_schema::Field::new(
+                                "value",
+                                arrow_schema::DataType::Float64,
+                                true,
+                            ),
+                            arrow_schema::Field::new("host", arrow_schema::DataType::Utf8, true),
+                        ]
+                        .into(),
+                        Default::default(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+            let logical_extension = DfLogicalPlan::Extension(Extension {
+                node: Arc::new(fused),
+            });
+            let DfLogicalPlan::Projection(identity) = &logical_input else {
+                unreachable!()
+            };
+            let mut aliased = identity.clone();
+            aliased.expr[0] = aliased.expr[0].clone().alias("not_the_frame_key");
+            assert!(
+                repair_raw_recovery_projection(
+                    &DfLogicalPlan::Projection(aliased),
+                    &physical_input
+                )
+                .unwrap()
+                .is_none(),
+                "an alias is not the analyzer's identity recovery projection"
+            );
+            let repaired = repair_raw_recovery_projection(&logical_input, &physical_input).unwrap();
+            assert_eq!(
+                repaired.is_some(),
+                !disjoint,
+                "disjoint={disjoint}: logical={logical_input}, physical_schema={:?}, input_schema={:?}",
+                physical_input.schema(),
+                physical_input.children()[0].schema()
+            );
+            let physical_input = repaired.unwrap_or(physical_input);
+            let physical = PromExtensionPlannerWithRawInputs
+                .plan_extension(
+                    &DefaultPhysicalPlanner::default(),
+                    match &logical_extension {
+                        DfLogicalPlan::Extension(extension) => extension.node.as_ref(),
+                        _ => unreachable!(),
+                    },
+                    &[&logical_input],
+                    &[physical_input],
+                    &session,
+                    &PhysicalPlanningContext::default(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let child = physical.children()[0];
+            assert_eq!(
+                child.downcast_ref::<SeriesRepartitionExec>().is_some(),
+                needs_router,
+                "disjoint={disjoint}"
+            );
+            assert_eq!(
+                series_frame_ordering(child.schema().as_ref()).unwrap(),
+                SeriesOrdering::Contiguous
+            );
+            if let Some(router) = child.downcast_ref::<SeriesRepartitionExec>() {
+                assert_eq!(router.outputs(), 1);
+                assert_eq!(
+                    series_frame_ordering(router.children()[0].schema().as_ref()).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    /// Run the real analyzer and normal DataFusion optimizer pipeline, not a hand-built projection.
+    #[tokio::test]
+    async fn analyzer_to_fused_reconciles_only_fragmented_raw_frames() {
+        use common_query::series_frame::series_frame_ordering;
+        use datafusion::datasource::DefaultTableSource;
+        use datafusion_expr::{Extension, LogicalPlanBuilder};
+        use datafusion_optimizer::analyzer::AnalyzerRule;
+        use datatypes::series::SeriesOrdering;
+        use datatypes::series::samples::{FieldSpec, SeriesSchema};
+        use datatypes::series::time::{EvalGrid, GridSpec};
+        use promql::extension_plan::{FusedSeriesBinding, SeriesRepartitionExec};
+        use promql::native::plan::{
+            BoundInput, BoundInstant, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+        };
+        use store_api::storage::RegionId;
+
+        let table = LogicalPlanBuilder::scan(
+            "metric",
+            Arc::new(DefaultTableSource::new(Arc::new(
+                crate::optimizer::test_util::mock_table_provider(RegionId::new(1, 1)),
+            ))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let raw = RawSeriesSource::try_new(
+            Arc::from("metric"),
+            vec!["host".into()],
+            vec!["v0".into()],
+            table,
+        )
+        .unwrap();
+        let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 1).unwrap()).unwrap());
+        let raw_type = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vec![FieldSpec { name: "v0".into() }].into(),
+            eval_grid: None,
+        }));
+        let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vec![FieldSpec { name: "v0".into() }].into(),
+            eval_grid: Some(Arc::clone(&grid)),
+        }));
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        source_index: 0,
+                        output: raw_type.clone(),
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: raw_type,
+                }),
+                op: BoundInstant {
+                    lookback_ms: 0,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value: InstantValue::Sample,
+                    output_grid: Arc::clone(&grid),
+                },
+            },
+            output: evaluated,
+        })
+        .unwrap();
+        let output = datafusion_common::DFSchema::from_unqualified_fields(
+            vec![
+                arrow_schema::Field::new(
+                    "time",
+                    arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+                    false,
+                ),
+                arrow_schema::Field::new("v0", arrow_schema::DataType::Float64, true),
+                arrow_schema::Field::new("host", arrow_schema::DataType::Utf8, true),
+            ]
+            .into(),
+            Default::default(),
+        )
+        .unwrap();
+        let raw_plan = DfLogicalPlan::Extension(Extension {
+            node: Arc::new(raw),
+        });
+        for (disjoint, needs_router) in [(true, false), (false, true)] {
+            let fused = FusedSeries::try_new(
+                Arc::from("metric"),
+                tree.clone(),
+                FusedSeriesBinding {
+                    grid: Arc::clone(&grid),
+                    time_index: "time".into(),
+                    tags: vec!["host".into()],
+                    metric_name: Some(Arc::from("metric")),
+                },
+                vec![raw_plan.clone()],
+                Arc::new(output.clone()),
+            )
+            .unwrap();
+            let logical = DfLogicalPlan::Extension(Extension {
+                node: Arc::new(fused),
+            });
+            let analyzed = DistPlannerAnalyzer::new(false)
+                .analyze(
+                    logical,
+                    &datafusion_common::config::ConfigOptions::default(),
+                )
+                .unwrap();
+            let session = SessionStateBuilder::new().with_default_features().build();
+            let physical = DefaultPhysicalPlanner::with_extension_planners(vec![
+                Arc::new(PromExtensionPlannerWithRawInputs),
+                Arc::new(TestRawMergePlanner { disjoint }),
+            ])
+            .create_physical_plan(&analyzed, &session)
+            .await
+            .unwrap();
+            let child = physical.children()[0];
+            assert_eq!(
+                child.downcast_ref::<SeriesRepartitionExec>().is_some(),
+                needs_router,
+                "disjoint={disjoint}: {analyzed}"
+            );
+            if let Some(router) = child.downcast_ref::<SeriesRepartitionExec>() {
+                assert_eq!(
+                    series_frame_ordering(router.children()[0].schema().as_ref()).unwrap(),
+                    SeriesOrdering::Interleaved
+                );
+            }
+            assert_eq!(
+                series_frame_ordering(child.schema().as_ref()).unwrap(),
+                SeriesOrdering::Contiguous
+            );
+        }
+    }
 
     fn new_query_engine_state() -> QueryEngineState {
         new_query_engine_state_with(Plugins::default(), QueryOptions::default())
