@@ -89,8 +89,8 @@ use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, Grouping, InstantValue, NativeExpr, NativeNode,
-    NativeTree, NativeType, reads_across_series,
+    AggregateStage, Grouping, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+    reads_across_series,
 };
 use crate::native::state::{StateChunk, state_row_from_frame_row};
 use crate::source::materialize_raw_labels;
@@ -2802,37 +2802,25 @@ impl FusedSeriesStream {
                 feed.source
             ))
         })?;
-        let last = input_ids.len().saturating_sub(1);
-        let mut chunk = Some(feed.chunk);
-        for (index, input_id) in input_ids.iter().enumerate() {
-            let Some(owned) = (index == last).then(|| chunk.take().unwrap()) else {
-                // One source feeding several runtime inputs hands each the same value. State read
-                // from a frame arrives as one row per feed, so it is copied; a producer's batch
-                // carries the charge for its whole payload and cannot be shared, and no tree binds
-                // one such source twice.
-                match chunk.as_ref().expect("the feed is consumed once") {
-                    FusedChunk::Raw(value) => {
-                        executor.push_raw(*input_id, value.clone())?;
-                    }
-                    FusedChunk::Evaluated(value) => {
-                        executor.push_evaluated(*input_id, value.clone())?;
-                    }
-                    FusedChunk::State(StateChunk::Row(row)) => {
-                        executor.push_state(*input_id, StateChunk::Row(row.clone()))?;
-                    }
-                    FusedChunk::State(StateChunk::Series { .. }) => {
-                        return Err(DataFusionError::Execution(
-                            "one producer state batch cannot feed several runtime inputs"
-                                .to_string(),
-                        ));
-                    }
+        // One source feeding several runtime inputs hands each the same value. Raw and evaluated
+        // chunks are cloned for every input, which is what the base route does; a state row read
+        // from a frame is copied the same way. A producer's state batch carries the charge for its
+        // whole payload, and no tree binds one of those to several inputs.
+        let chunk = Some(feed.chunk);
+        for input_id in input_ids {
+            match chunk.as_ref().expect("the feed is read at most twice") {
+                FusedChunk::Raw(value) => executor.push_raw(*input_id, value.clone())?,
+                FusedChunk::Evaluated(value) => {
+                    executor.push_evaluated(*input_id, value.clone())?
                 }
-                continue;
-            };
-            match owned {
-                FusedChunk::Raw(chunk) => executor.push_raw(*input_id, chunk)?,
-                FusedChunk::Evaluated(chunk) => executor.push_evaluated(*input_id, chunk)?,
-                FusedChunk::State(chunk) => executor.push_state(*input_id, chunk)?,
+                FusedChunk::State(StateChunk::Row(row)) => {
+                    executor.push_state(*input_id, StateChunk::Row(row.clone()))?
+                }
+                FusedChunk::State(StateChunk::Series { .. }) => {
+                    return Err(DataFusionError::Execution(
+                        "one producer state batch cannot feed several runtime inputs".to_string(),
+                    ));
+                }
             }
         }
         if self.frame_mode || self.state_mode {

@@ -50,8 +50,8 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RangeManipulate,
-    RawSeriesSource, input_locality, matching_operands_drop_key, tree_source_fields,
+    FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
+    input_locality, matching_operands_drop_key, tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -714,9 +714,6 @@ impl PromPlanner {
                 None
             };
             if let Some((partial, final_tree)) = split {
-                let (legacy_fields, legacy_tags) = self
-                    .legacy_output_columns(prom_expr, query_engine_state)
-                    .await?;
                 let native_fields = match &final_tree.root().output {
                     NativeType::Samples(schema) => schema
                         .fields
@@ -729,9 +726,23 @@ impl PromPlanner {
                 let Some(native_tags) = fused_output_tags(final_tree.root(), &source_tags) else {
                     return Ok(None);
                 };
-                if !same_names(&native_tags, &legacy_tags) {
-                    return Ok(None);
-                }
+                // Naming is optional for native-admitted expressions: unsupported legacy shapes
+                // keep their native root field names rather than losing native admission.
+                let output_fields = match self
+                    .legacy_output_columns(prom_expr, query_engine_state)
+                    .await
+                {
+                    Ok((legacy_fields, legacy_tags))
+                        if same_names(&native_tags, &legacy_tags)
+                            && legacy_fields.len() == native_fields.len() =>
+                    {
+                        legacy_fields
+                    }
+                    _ => native_fields.clone(),
+                };
+                // The Final node's row converter binds the native tree's field names. Alias only
+                // above it; declaring legacy names here makes the projection miss native fields
+                // and would also prevent the physical node from classifying its output.
                 let output_schema = fused_output_schema(&native_fields, &native_tags, &time)?;
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
@@ -755,7 +766,7 @@ impl PromPlanner {
                 let Some(plan) = native_naming_projection(
                     &plan,
                     &native_fields,
-                    &legacy_fields,
+                    &output_fields,
                     &native_tags,
                     &time,
                 ) else {
@@ -1428,13 +1439,12 @@ async fn segment_tree(
     if children.len() > 1 && groups_by_metric_name(tree.root()) {
         return Ok(None);
     }
-    // Preserve the established refusal for statements the existing planner cannot name.
-    let Ok((legacy_fields, legacy_tags)) = planner
+    // A native-admitted statement remains answerable when the legacy planner cannot name it;
+    // only that statement falls back to the native root field names.
+    let legacy_names = planner
         .legacy_output_columns(prom_expr, query_engine_state)
         .await
-    else {
-        return Ok(None);
-    };
+        .ok();
     let mut current_tree = tree.clone();
     let mut current_children = children.to_vec();
     let mut current_tags = source_tags.to_vec();
@@ -1558,13 +1568,19 @@ async fn segment_tree(
         .filter(|name| name.as_str() != time_index && !root_fields.iter().any(|f| f == *name))
         .cloned()
         .collect::<Vec<_>>();
-    if !same_names(&native_tags, &legacy_tags) {
-        return Ok(None);
-    }
+    let (output_fields, _output_tags) = match legacy_names {
+        Some((legacy_fields, legacy_tags))
+            if same_names(&native_tags, &legacy_tags)
+                && legacy_fields.len() == root_fields.len() =>
+        {
+            (legacy_fields, legacy_tags)
+        }
+        _ => (root_fields.clone(), native_tags.clone()),
+    };
     let Some(projected) = native_naming_projection(
         &plan,
         &root_fields,
-        &legacy_fields,
+        &output_fields,
         &native_tags,
         time_index,
     ) else {
@@ -2677,6 +2693,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn numeric_aggregate_projection_keeps_grouping_tags_and_value_schema() {
         let sources = [vec![
             "host".to_string(),

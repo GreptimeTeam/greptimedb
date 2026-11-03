@@ -2223,16 +2223,29 @@ async fn native_fused_metric_fields_follow_logical_order() {
     }));
 }
 
-/// Every raw source nested below `plan` names its own metric occurrence.
+/// Every raw source or directly bound scan below `plan` names its own metric occurrence.
 fn fused_input_metrics(plan: &LogicalPlan) -> Vec<String> {
     fn visit(plan: &LogicalPlan, metrics: &mut Vec<String>) {
         if let LogicalPlan::Extension(Extension { node }) = plan {
             if let Some(source) = node.as_any().downcast_ref::<RawSeriesSource>() {
                 metrics.push(source.metric_name().to_string());
+            } else if let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+                && let Some(metric) = &fused.binding().metric_name
+            {
+                // A single-source segment binds its own metric rather than wrapping its scan in
+                // RawSeriesSource, even when other segments read different logical tables.
+                for _ in fused
+                    .children()
+                    .iter()
+                    .filter(|child| matches!(child, LogicalPlan::TableScan(_)))
+                {
+                    metrics.push(metric.to_string());
+                }
             }
-            for child in node.inputs() {
-                visit(child, metrics);
-            }
+        }
+        // Segmented boundaries may add projections above extension nodes.
+        for child in plan.inputs() {
+            visit(child, metrics);
         }
     }
     let mut metrics = Vec::new();
@@ -2257,18 +2270,23 @@ async fn native_fused_metric_engine_selectors_keep_their_own_logical_table() {
         build_native_fused_plan_with_provider("other_metric", true, provider().await).await;
     let fused = find_fused_series(&single).unwrap_or_else(|| panic!("{single}"));
     assert_eq!(Some("other_metric"), fused.binding().metric_name.as_deref());
-    for query in [
-        "some_metric / other_metric",
-        "some_metric + other_metric + some_metric",
+    for (query, expected_metrics) in [
+        (
+            "some_metric / other_metric",
+            vec!["some_metric", "other_metric"],
+        ),
+        (
+            "some_metric + other_metric + some_metric",
+            vec!["some_metric", "other_metric", "some_metric"],
+        ),
     ] {
         let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
         assert!(has_pair_node(&native), "{query}: {native}");
         let fused = find_fused_series(&native).unwrap_or_else(|| panic!("{query}: {native}"));
         assert_eq!(None, fused.binding().metric_name, "{query}");
-        assert!(
-            fused_input_metrics(&native)
-                .iter()
-                .any(|metric| metric == "other_metric"),
+        assert_eq!(
+            expected_metrics,
+            fused_input_metrics(&native),
             "{query}: {native}"
         );
     }
@@ -3311,28 +3329,31 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
             fused.binding().metric_name.is_none(),
             "{query}"
         );
-        // A tree cut into segments publishes the statement's own column names at that boundary, so
-        // it must report what the existing plan reports. A tree that stays one node has no boundary
-        // to publish anything and keeps the node's field names.
-        if cross_table {
-            let legacy = build_native_fused_plan_with_provider(
-                query,
-                false,
-                native_two_table_provider(vec![]).await,
-            )
-            .await;
-            assert_eq!(
-                sorted_column_names(&legacy),
-                sorted_column_names(&plan),
-                "{query}: a segmented boundary publishes the statement's names"
-            );
-        } else {
-            assert_eq!(
-                vec!["field_0", "tag_0", "timestamp"],
-                sorted_column_names(&plan),
-                "{query}"
-            );
-        }
+        // All four trees take the segmented route, including same-table selectors. Its projection
+        // boundary publishes expression-derived names rather than the native node's `field_0`.
+        assert!(
+            matches!(plan, LogicalPlan::Projection(_)),
+            "{query}: expected a segmented naming boundary: {plan}"
+        );
+        assert!(
+            fused.inputs().iter().any(|input| matches!(
+                input,
+                LogicalPlan::Extension(Extension { node })
+                    if node.as_any().downcast_ref::<FusedSeries>().is_some()
+            )),
+            "{query}: expected a segmented producer: {plan}"
+        );
+        let legacy = build_native_fused_plan_with_provider(
+            query,
+            false,
+            native_two_table_provider(vec![]).await,
+        )
+        .await;
+        assert_eq!(
+            sorted_column_names(&legacy),
+            sorted_column_names(&plan),
+            "{query}: a segmented boundary publishes the statement's names"
+        );
     }
 }
 
@@ -3425,12 +3446,33 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
         assert!(display.contains("TableScan: some_metric"), "{display}");
 
         let final_node = find_final_split(&plan).expect("the statement plans to a final split");
+        let final_display = final_node.tree().to_string();
+        assert_eq!(
+            1,
+            final_display.matches(" final").count(),
+            "`{query}`: the merge must be a Final aggregate: {final_display}"
+        );
         let partial = partial_below(final_node).expect("the final node reads a partial producer");
+        // The physical final must accept the producer's state and classify its own output fields.
+        let input = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+            Arc::clone(partial.schema().inner()),
+        ));
+        final_node
+            .to_execution_plan(vec![(
+                input,
+                store_api::region_engine::RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            )])
+            .unwrap_or_else(|error| panic!("`{query}`: invalid final physical plan: {error}"));
         let partial_display = partial.tree().to_string();
-        let NativeExpr::Aggregate { op, .. } = &partial.tree().root().expr else {
+        let NativeExpr::Aggregate { input, op } = &partial.tree().root().expr else {
             panic!("`{query}`: partial root is not an aggregate: {partial_display}");
         };
         assert_eq!(AggregateStage::Partial, op.stage, "`{query}`");
+        assert!(
+            super::native::pointwise_operand(input),
+            "`{query}`: the producer prefix must be per-series: {partial_display}"
+        );
         // The cut is the only aggregate in the producer: everything below it is the per-series
         // prefix, which folds nothing. A second stage marker would mean the split left an aggregate
         // in the half that runs per partition.
@@ -3443,14 +3485,26 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             !partial_display.contains(" complete") && !partial_display.contains(" final"),
             "`{query}`: {partial_display}"
         );
-        let mut expected_columns = vec!["field_0".to_string(), "timestamp".to_string()];
-        if query == "sum by (tag_0) (rate(some_metric[5m]))" {
-            expected_columns.push("tag_0".to_string());
+        // Final must publish native field names for physical conversion; the projection above it
+        // supplies expression-derived names when the legacy planner can name the statement.
+        let NativeType::Samples(schema) = &final_node.tree().root().output else {
+            panic!("`{query}`: final root does not produce samples");
+        };
+        for field in schema.fields.iter() {
+            assert!(
+                final_node
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|column| column.name() == field.name.as_ref()),
+                "`{query}`: final output is missing native field {}",
+                field.name
+            );
         }
-        expected_columns.sort();
+        let legacy = build_native_fused_plan(query, false).await;
         assert_eq!(
+            sorted_column_names(&legacy),
             sorted_column_names(&plan),
-            expected_columns,
             "`{query}` native output schema"
         );
     }
