@@ -192,7 +192,7 @@ impl FulltextIndexApplier {
         }
     }
 
-    /// Keeps only targets compatible with the SST's saved fulltext settings.
+    /// Keeps ordinary string columns and JSON paths with compatible saved fulltext settings.
     /// Returns `None` when no compatible request remains for this SST.
     pub fn compatible_requests_for_sst(
         &self,
@@ -246,6 +246,13 @@ impl FulltextIndexApplier {
         let Some(expected) = self.expected_options.get(target) else {
             return false;
         };
+        if let IndexTarget::ColumnId(id) = target {
+            // Rebuilding an ordinary column's index does not update Parquet metadata.
+            // Check only its type here; index readers use the actual blob's config.
+            return metadata
+                .column_by_id(*id)
+                .is_some_and(|column| column.column_schema.data_type.is_string());
+        }
         let Some(actual) = fulltext_target_options(metadata, target)
             .inspect_err(|err| warn!(err; "Failed to resolve SST fulltext options for {target:?}"))
             .ok()
@@ -253,8 +260,7 @@ impl FulltextIndexApplier {
         else {
             return false;
         };
-        // Ordinary column DDL forbids changing analyzer or case_sensitive, but
-        // permits backend changes. JSON path hints can change all three.
+        // JSON path hints can change backend, case sensitivity, and analyzer.
         expected.backend == actual.backend
             && expected.case_sensitive == actual.case_sensitive
             && (expected.backend == FulltextBackend::Bloom || expected.analyzer == actual.analyzer)
@@ -942,7 +948,7 @@ mod tests {
         assert!(
             applier
                 .compatible_requests_for_sst(&mock_metadata_with_fulltext(FulltextBackend::Tantivy))
-                .is_none()
+                .is_some()
         );
         let mut non_string = metadata.clone();
         non_string.column_metadatas[0].column_schema.data_type = ConcreteDataType::int64_datatype();
@@ -950,8 +956,17 @@ mod tests {
         assert!(
             applier
                 .compatible_requests_for_sst(&mock_metadata_without_fulltext())
-                .is_none()
+                .is_some()
         );
+        let mut disabled = metadata.clone();
+        disabled.column_metadatas[0]
+            .column_schema
+            .set_fulltext_options(&FulltextOptions {
+                enable: false,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(applier.compatible_requests_for_sst(&disabled).is_some());
     }
 
     /// A `matches_term` or `LIKE` predicate on `col`, or on `lower(col)` when `lowered`.
