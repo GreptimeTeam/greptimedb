@@ -11686,72 +11686,62 @@ fn partial_final_matches_complete_over_concatenated_input() {
 }
 
 #[test]
-fn partial_conversion_releases_only_the_groups_it_has_consumed() {
-    use crate::aggregate::{AccumulatorState, AggregateOp, PartialAggregate, PartialGroup};
+fn exporting_a_partial_charges_the_fold_and_the_groups_it_builds() {
+    use crate::aggregate::{AggregateOp, FloatAggregator};
 
     let grid = grid(0, 1, 16);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let (kind, components) =
-        crate::native::plan::aggregate_state_binding(AggregateKind::Sum).unwrap();
-    let state_schema = Arc::new(AggregateStateSchema {
-        group: Grouping::By(Arc::new([])),
-        kind,
-        components: components.into(),
-        accumulators: schema.fields.clone(),
-        grid,
-    });
-    let groups = || {
-        (0..8)
-            .map(|_| PartialGroup {
-                metric: metric(),
-                points: (0..16)
-                    .map(|point| (point, vec![Some(AccumulatorState::default())]))
-                    .collect(),
-            })
-            .collect::<Vec<_>>()
-    };
-    // What one group's own point and state vectors hold. Converting it releases that much and
-    // nothing more, so the charge may fall by at most this much at any single step.
-    let per_group = crate::aggregate::state::group_point_bytes(&groups()[0]);
-    assert!(per_group > 0, "a group keeps its points somewhere");
-
-    // The figure the fold says it holds for the whole aggregate. It is not the true storage of
-    // this hand-built aggregate, but it is what `finish_partial_budgeted` would have charged, and
-    // the conversion must start from it rather than from nothing.
-    let held_input_bytes = 8 * per_group + 4096;
-    let mut charges = Vec::new();
-    crate::native::state::state_chunk_from_partial(
-        PartialAggregate {
-            op: AggregateOp::Sum,
-            groups: groups(),
-        },
+    let series = datatypes::series::samples::Series::try_new(
         &schema,
-        state_schema,
-        held_input_bytes,
-        |bytes| {
-            charges.push(bytes);
-            Ok(())
-        },
+        metric(),
+        TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 16).unwrap()),
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(1.0); 16]))),
     )
     .unwrap();
+    let mut aggregator = FloatAggregator::try_new(
+        &schema,
+        AggregateOp::Sum,
+        crate::aggregate::Grouping::By(&[]),
+    )
+    .unwrap();
+    aggregator.update(&series).unwrap();
+    let fold_bytes = aggregator.state_bytes();
 
-    assert!(charges.len() > 1, "conversion reports intermediate budgets");
-    assert!(
-        charges[0] >= held_input_bytes,
-        "the first conversion step still holds the whole input: {charges:?}"
+    let mut charges = Vec::new();
+    let partial = aggregator
+        .finish_partial_budgeted(|bytes| {
+            charges.push(bytes);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        1,
+        charges.len(),
+        "the export is admitted once, before it runs"
     );
-    // Every step but the last still holds the input it has not consumed yet, so it may release at
-    // most the group it just took. The last call reports the finished output alone: by then the
-    // input is gone, including the labels it handed to the output.
-    for pair in charges.windows(2).take(charges.len() - 2) {
-        let (held, next) = (pair[0], pair[1]);
-        assert!(
-            next >= held || held - next <= per_group,
-            "a step may release at most the group it consumed ({per_group} bytes): {charges:?}"
-        );
-    }
+
+    // The groups it built, measured as the chunk that carries them is measured.
+    let (kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum).unwrap();
+    let chunk_bytes =
+        crate::native::state::state_bytes(&crate::native::state::StateChunk::Series {
+            series: partial.groups,
+            state_schema: Arc::new(AggregateStateSchema {
+                group: Grouping::By(Arc::new([])),
+                kind,
+                components: components.into(),
+                accumulators: schema.fields.clone(),
+                grid,
+            }),
+            reservation: None,
+        });
+    assert!(fold_bytes > 0, "the fold holds its blocks");
+    assert!(chunk_bytes > 0, "the export builds groups");
+    // The admitted figure covers what the export still reads *and* what it produced, because both
+    // are live while it runs. Charging only the output would leave the fold's blocks unaccounted.
     assert!(
-        *charges.last().unwrap() < *charges.get(charges.len() - 2).unwrap(),
-        "the finished output is charged on its own, without the input it replaced: {charges:?}"
+        charges[0] >= fold_bytes.saturating_add(chunk_bytes).saturating_sub(2048),
+        "the admitted figure covers the fold ({fold_bytes}) and the exported groups ({chunk_bytes}): {}",
+        charges[0]
     );
 }

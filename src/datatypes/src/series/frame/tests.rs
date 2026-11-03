@@ -5077,6 +5077,117 @@ mod aggregate_state_acceptance {
     }
 
     #[test]
+    fn aggregate_state_cursor_moves_dense_states_without_filtering() {
+        let schema = state_schema(&["a", "b"], 4);
+        let state = AggregateStateSchema::try_new(
+            Kind::Avg,
+            vec![
+                Component::Value,
+                Component::Mean,
+                Component::Compensation,
+                Component::Count,
+                Component::IncrementalMean,
+            ],
+        )
+        .unwrap();
+        let states = vec![values(4, 1.0), values(4, 5.0)];
+        let allocation = states[0].as_ptr();
+        let time = TimeAxis::from_grid_spans(
+            schema.eval_grid.clone().unwrap(),
+            vec![GridSpan::new(0, 2), GridSpan::new(2, 2)],
+        )
+        .unwrap();
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            &schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states,
+            },
+            true,
+        )
+        .unwrap();
+        let ChunkWalk::State(walk) = cursor.walk else {
+            panic!("expected state walk")
+        };
+        // The dense fast path preserves the caller's field allocation and values verbatim.
+        assert_eq!(walk.series.states[0].as_ptr(), allocation);
+        assert_eq!(walk.series.states, vec![values(4, 1.0), values(4, 5.0)]);
+        assert_eq!(
+            walk.series
+                .time
+                .positions()
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn aggregate_state_cursor_compacts_sparse_fields_and_preserves_runs() {
+        let schema = state_schema(&["a", "b"], 7);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let a = values(4, 1.0);
+        let b = values(4, 5.0);
+        let input = vec![
+            vec![Some(a[0].unwrap()), None, Some(a[2].unwrap()), None],
+            vec![None, Some(b[1].unwrap()), None, Some(b[3].unwrap())],
+        ];
+        let time = TimeAxis::from_grid_spans(
+            schema.eval_grid.clone().unwrap(),
+            vec![
+                GridSpan::new(0, 1),
+                GridSpan::new(2, 1),
+                GridSpan::new(4, 1),
+                GridSpan::new(6, 1),
+            ],
+        )
+        .unwrap();
+        let cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            &schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states: input,
+            },
+            false,
+        )
+        .unwrap();
+        let ChunkWalk::State(walk) = cursor.walk else {
+            panic!("expected state walk")
+        };
+        assert_eq!(
+            walk.series
+                .time
+                .positions()
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 4, 6]
+        );
+        assert_eq!(
+            walk.runs
+                .iter()
+                .map(|run| (run.position, run.len))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (2, 1), (4, 1), (6, 1)]
+        );
+        assert_eq!(
+            walk.series.states[0],
+            vec![Some(a[0].unwrap()), None, Some(a[2].unwrap()), None]
+        );
+        assert_eq!(
+            walk.series.states[1],
+            vec![None, Some(b[1].unwrap()), None, Some(b[3].unwrap())]
+        );
+    }
+
+    #[test]
     fn sparse_state_runs_and_empty_batch_decode() {
         let schema = state_schema(&["x"], 10);
         let (batch, decoder) = state_frame(

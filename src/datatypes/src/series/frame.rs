@@ -1194,17 +1194,17 @@ impl SeriesFrameCursor {
         let spans = positions_to_spans(&carried);
         let time =
             TimeAxis::from_grid_spans(series.time.grid().expect("validated grid").clone(), spans)?;
-        let states = series
-            .states
-            .iter()
-            .map(|field| {
-                field
-                    .iter()
-                    .zip(&contributing)
-                    .filter_map(|(value, contributes)| contributes.then_some(*value))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+        let mut states = series.states;
+        if contributing.iter().any(|contributes| !contributes) {
+            for field in &mut states {
+                let mut row = 0;
+                field.retain(|_| {
+                    let keep = contributing[row];
+                    row += 1;
+                    keep
+                });
+            }
+        }
         let runs: Vec<GridRun> = time.runs().collect();
         let series = StateSeries {
             metric: series.metric,
@@ -1275,7 +1275,7 @@ impl StateWalk {
             return Ok(None);
         }
         self.done = true;
-        let states = self.series.states.clone();
+        let states = std::mem::take(&mut self.series.states);
         let time = RowTime::Spans(
             self.runs
                 .iter()
@@ -1878,68 +1878,60 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
             let DataType::Struct(components) = item.data_type() else {
                 return invalid_series("state list item is not a component struct");
             };
-            let present: Vec<bool> = rows
-                .iter()
-                .flat_map(|row| {
-                    let RowPayload::States(fields) = &row.payload else {
-                        return Vec::new().into_iter();
-                    };
-                    fields[index]
-                        .iter()
-                        .map(Option::is_some)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                })
-                .collect();
+            // Absence lives on the item, so the child struct's validity is one flag per position.
+            // A row of a state frame always carries states; a caller that hands in the wrong payload
+            // is refused here rather than panicking inside an iterator.
+            let mut present = Vec::with_capacity(positions);
+            for row in rows {
+                let RowPayload::States(fields) = &row.payload else {
+                    return invalid_series("state frame row carries sample payload");
+                };
+                present.extend(fields[index].iter().map(Option::is_some));
+            }
             debug_assert_eq!(present.len(), positions);
 
             let arrays: Vec<ArrayRef> = components
                 .iter()
                 .map(|component| {
-                    let mut floats: Vec<Option<f64>> = Vec::with_capacity(positions);
-                    let mut booleans: Vec<Option<bool>> = Vec::with_capacity(positions);
-                    for row in rows {
-                        let RowPayload::States(fields) = &row.payload else {
-                            return invalid_series("state frame row carries sample payload");
-                        };
-                        for value in &fields[index] {
-                            match (component.name().as_str(), value) {
-                                ("value", Some(state)) => {
-                                    floats.push(Some(state.value));
-                                    booleans.push(None);
+                    let component_name = component.name();
+                    let array: ArrayRef = match component_name.as_str() {
+                        "value" | "mean" | "compensation" | "count" => {
+                            let mut floats = Vec::with_capacity(positions);
+                            for row in rows {
+                                let RowPayload::States(fields) = &row.payload else {
+                                    return invalid_series(
+                                        "state frame row carries sample payload",
+                                    );
+                                };
+                                for value in &fields[index] {
+                                    floats.push(value.map(|state| match component_name.as_str() {
+                                        "value" => state.value,
+                                        "mean" => state.mean,
+                                        "compensation" => state.compensation,
+                                        "count" => state.count,
+                                        _ => unreachable!(),
+                                    }));
                                 }
-                                ("mean", Some(state)) => {
-                                    floats.push(Some(state.mean));
-                                    booleans.push(None);
-                                }
-                                ("compensation", Some(state)) => {
-                                    floats.push(Some(state.compensation));
-                                    booleans.push(None);
-                                }
-                                ("count", Some(state)) => {
-                                    floats.push(Some(state.count));
-                                    booleans.push(None);
-                                }
-                                ("incremental_mean", Some(state)) => {
-                                    floats.push(None);
-                                    booleans.push(Some(state.incremental_mean));
-                                }
-                                (
-                                    "value" | "mean" | "compensation" | "count"
-                                    | "incremental_mean",
-                                    None,
-                                ) => {
-                                    floats.push(None);
-                                    booleans.push(None);
-                                }
-                                _ => return invalid_series("unknown state component"),
                             }
+                            Arc::new(Float64Array::from(floats))
                         }
-                    }
-                    let array: ArrayRef = if component.name().as_str() == "incremental_mean" {
-                        Arc::new(BooleanArray::from(booleans))
-                    } else {
-                        Arc::new(Float64Array::from(floats))
+                        "incremental_mean" => {
+                            let mut booleans = Vec::with_capacity(positions);
+                            for row in rows {
+                                let RowPayload::States(fields) = &row.payload else {
+                                    return invalid_series(
+                                        "state frame row carries sample payload",
+                                    );
+                                };
+                                booleans.extend(
+                                    fields[index]
+                                        .iter()
+                                        .map(|value| value.map(|state| state.incremental_mean)),
+                                );
+                            }
+                            Arc::new(BooleanArray::from(booleans))
+                        }
+                        _ => return invalid_series("unknown state component"),
                     };
                     Ok(array)
                 })

@@ -1041,39 +1041,70 @@ impl Inputs {
     }
 }
 
-/// Conservatively bounds wrappers allocated by slicing a batch, from its schema. This is an
-/// upper bound: each column and recursively sliced struct child contributes one array wrapper and
-/// each collected child/root reference contributes one slot; list values are not sliced.
+/// Upper bound for transient arrays allocated by slicing one aggregate-state row. It counts each
+/// schema node's concrete array object, two `usize` wrapper words, and one reference per child.
 fn state_slice_wrapper_bytes(
     schema: &datafusion::arrow::datatypes::Schema,
 ) -> DataFusionResult<usize> {
-    use datafusion::arrow::datatypes::DataType;
-    fn wrappers(data_type: &DataType) -> usize {
-        match data_type {
-            DataType::Struct(fields) => {
-                1 + fields
-                    .iter()
-                    .map(|f| wrappers(f.data_type()))
-                    .sum::<usize>()
-            }
-            _ => 1, // In particular, List::slice does not slice its values.
-        }
+    use datafusion::arrow::array::{
+        ArrayRef, BinaryArray, BooleanArray, ListArray, PrimitiveArray, StringArray, StructArray,
+    };
+    use datafusion::arrow::datatypes::{DataType, Float64Type, UInt64Type};
+    fn node(data_type: &DataType) -> DataFusionResult<usize> {
+        let children = match data_type {
+            DataType::Struct(fields) => fields
+                .iter()
+                .map(|field| node(field.data_type()))
+                .collect::<DataFusionResult<Vec<_>>>()?,
+            DataType::List(_) => Vec::new(),
+            _ => Vec::new(),
+        };
+        let object = match data_type {
+            DataType::Struct(_) => std::mem::size_of::<StructArray>(),
+            DataType::List(_) => std::mem::size_of::<ListArray>(),
+            DataType::Utf8 | DataType::LargeUtf8 => std::mem::size_of::<StringArray>(),
+            DataType::Binary | DataType::LargeBinary => std::mem::size_of::<BinaryArray>(),
+            DataType::Boolean => std::mem::size_of::<BooleanArray>(),
+            DataType::Float64 => std::mem::size_of::<PrimitiveArray<Float64Type>>(),
+            DataType::UInt64 => std::mem::size_of::<PrimitiveArray<UInt64Type>>(),
+            // Frame schema types outside this list are bounded by the largest enumerated object.
+            _ => [
+                std::mem::size_of::<StructArray>(),
+                std::mem::size_of::<ListArray>(),
+                std::mem::size_of::<StringArray>(),
+                std::mem::size_of::<BinaryArray>(),
+                std::mem::size_of::<BooleanArray>(),
+                std::mem::size_of::<PrimitiveArray<Float64Type>>(),
+                std::mem::size_of::<PrimitiveArray<UInt64Type>>(),
+            ]
+            .into_iter()
+            .max()
+            .unwrap(),
+        };
+        object
+            .checked_add(2 * std::mem::size_of::<usize>())
+            .and_then(|bytes| bytes.checked_add(children.len() * std::mem::size_of::<ArrayRef>()))
+            .and_then(|bytes| children.into_iter().try_fold(bytes, usize::checked_add))
+            .ok_or_else(|| {
+                DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+            })
     }
-    let roots = schema.fields().len();
-    let arrays = schema
-        .fields()
-        .iter()
-        .map(|field| wrappers(field.data_type()))
-        .sum::<usize>();
-    let child_refs = arrays - roots;
-    let slots = roots.checked_add(child_refs).ok_or_else(|| {
-        DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
-    })?;
-    arrays
-        .checked_mul(2 * std::mem::size_of::<usize>())
-        .and_then(|bytes| {
-            bytes.checked_add(slots * std::mem::size_of::<datafusion::arrow::array::ArrayRef>())
+    let arrays = schema.fields().iter().try_fold(0usize, |bytes, field| {
+        bytes.checked_add(node(field.data_type())?).ok_or_else(|| {
+            DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
         })
+    })?;
+    // `RecordBatch::slice` also allocates the vector it collects the sliced columns into.
+    arrays
+        .checked_add(
+            schema
+                .fields()
+                .len()
+                .checked_mul(std::mem::size_of::<ArrayRef>())
+                .ok_or_else(|| {
+                    DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+                })?,
+        )
         .ok_or_else(|| {
             DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
         })
@@ -1129,6 +1160,7 @@ async fn read_state_batches(
             }
         };
         let charge = Arc::new(charge);
+        let batch = Arc::new(batch);
         // Each queued row receives a reservation for the schema-based slice-wrapper upper bound.
         let slice_charge = match state_slice_wrapper_bytes(batch.schema().as_ref()) {
             Ok(bytes) => bytes,
@@ -1153,7 +1185,8 @@ async fn read_state_batches(
                 return Stop::Failed(Arc::new(error));
             }
             if let Err(error) = senders[output].send(Queued::StateBatch {
-                batch: batch.slice(index, 1),
+                batch: Arc::clone(&batch),
+                row: index,
                 _charge: Arc::clone(&charge),
                 _metadata: metadata,
             }) {
@@ -1697,7 +1730,8 @@ enum Queued {
         _metadata: MemoryReservation,
     },
     StateBatch {
-        batch: RecordBatch,
+        batch: Arc<RecordBatch>,
+        row: usize,
         _charge: Arc<MemoryReservation>,
         _metadata: MemoryReservation,
     },
@@ -1972,13 +2006,14 @@ impl Stream for StateBatchOutputStream {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Queued::StateBatch {
                     batch,
+                    row,
                     _charge,
                     _metadata,
                 })) => {
                     // Keep the router reservation through the next poll so Final can admit the
                     // returned batch's retained component arrays before releasing router charge.
                     self.retained = Some((_charge, _metadata));
-                    return Poll::Ready(Some(Ok(batch)));
+                    return Poll::Ready(Some(Ok(batch.slice(row, 1))));
                 }
                 Poll::Ready(Some(Queued::Eof { input, _metadata })) => {
                     // The shared Ending state and channel closure establish stream completion;

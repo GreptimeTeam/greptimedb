@@ -286,17 +286,12 @@ impl AggregateRuntime {
                         .state_schema
                         .clone()
                         .ok_or_else(|| no_fold(&self.describe()))?;
-                    let (partial, held_input_bytes) =
-                        accumulator.finish_partial_budgeted(|bytes| {
-                            buffer.resize(bytes.saturating_add(queue_bytes))
-                        })?;
-                    let chunk = state_chunk_from_partial(
-                        partial,
-                        &self.schema,
-                        state_schema,
-                        held_input_bytes,
-                        |bytes| buffer.resize(bytes.saturating_add(queue_bytes)),
-                    )?;
+                    // The fold builds the chunk's own representation, so handing it over costs no
+                    // second copy and no second charge: what was admitted for the groups is what
+                    // the chunk now holds.
+                    let partial = accumulator
+                        .finish_partial_budgeted(|bytes| buffer.resize(bytes + queue_bytes))?;
+                    let chunk = state_chunk_from_partial(partial, state_schema)?;
                     Ok(Some(AggregateOutput::State(chunk)))
                 }
                 AggregateStage::Final => Err(no_fold(&self.describe())),

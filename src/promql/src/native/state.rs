@@ -31,10 +31,9 @@ use datatypes::series::aggregate_state::{
     AggregateStateKind, AggregateStateValues, StateComponent, StateSeries,
 };
 use datatypes::series::frame::StateFrameRow;
-use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{GridSpan, TimeAxis};
 
-use crate::aggregate::{AggregateOp, PartialAggregate, PartialGroup};
+use crate::aggregate::{AggregateOp, PartialAggregate};
 use crate::native::plan::AggregateStateSchema;
 
 /// One partition's aggregate state, either in producer series form or as a decoded consumer row.
@@ -112,119 +111,21 @@ fn ensure_bound_state(op: AggregateOp, state_schema: &AggregateStateSchema) -> R
     Ok(())
 }
 
-/// Converts one partition's kernel state into the frame state a consumer decodes.
+/// Hands one partition's kernel state over as the frame state a consumer reads.
 ///
-/// Points arrive ascending and already sparse -- the kernel only records a point some field of
-/// which was folded -- so the axis is built from their runs and every field keeps its own holes.
+/// The fold already builds the frame's own representation - field-major states on sparse absolute
+/// grid positions - so this moves the groups and checks the binding. It copies nothing: the charge
+/// the fold reported for those groups is the charge the chunk keeps.
 pub(crate) fn state_chunk_from_partial(
     partial: PartialAggregate,
-    schema: &Arc<SeriesSchema>,
     state_schema: Arc<AggregateStateSchema>,
-    mut held_input_bytes: usize,
-    mut budget: impl FnMut(usize) -> Result<()>,
 ) -> Result<StateChunk> {
-    let grid = schema.eval_grid.as_ref().ok_or_else(|| {
-        DataFusionError::Execution("aggregate state is indexed on an evaluated grid".into())
-    })?;
     ensure_bound_state(partial.op, state_schema.as_ref())?;
-
-    let width = schema.fields.len();
-    let mut series = Vec::new();
-    let mut output_progress = partial
-        .groups
-        .len()
-        .saturating_mul(size_of::<StateSeries>());
-    budget(held_input_bytes.saturating_add(output_progress))?;
-    series.reserve_exact(partial.groups.len());
-
-    for group in partial.groups {
-        // What this group's own point and state vectors hold. They are consumed below, so the
-        // figure stops being charged once its labels and values have moved into the output; the
-        // labels themselves stay charged until the last call, because they now live in the output.
-        let released = crate::aggregate::state::group_point_bytes(&group);
-        let spans = state_spans(&group, grid.spec().len as usize, &mut |bytes| {
-            output_progress = output_progress.saturating_add(bytes);
-            budget(held_input_bytes.saturating_add(output_progress))
-        })?;
-        let time = TimeAxis::from_grid_spans(Arc::clone(grid), spans).map_err(|error| {
-            DataFusionError::Execution(format!("invalid aggregate state grid spans: {error}"))
-        })?;
-
-        output_progress = output_progress
-            .saturating_add(width.saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>()))
-            .saturating_add(
-                width
-                    .saturating_mul(group.points.len())
-                    .saturating_mul(size_of::<Option<AggregateStateValues>>()),
-            );
-        budget(held_input_bytes.saturating_add(output_progress))?;
-        let mut states = Vec::with_capacity(width);
-        states.resize_with(width, || Vec::with_capacity(group.points.len()));
-        for (_, values) in group.points {
-            if values.len() != width {
-                return Err(DataFusionError::Execution(format!(
-                    "aggregate state has {} fields, the grid describes {width}",
-                    values.len()
-                )));
-            }
-            for (field, value) in values.into_iter().enumerate() {
-                states[field].push(value.map(|state| AggregateStateValues {
-                    value: state.value,
-                    mean: state.mean,
-                    compensation: state.compensation,
-                    count: state.count,
-                    incremental_mean: state.incremental_mean,
-                }));
-            }
-        }
-        series.push(StateSeries {
-            metric: group.metric,
-            time,
-            states,
-        });
-        held_input_bytes = held_input_bytes.saturating_sub(released);
-    }
-
-    let chunk = StateChunk::Series {
-        series,
+    Ok(StateChunk::Series {
+        series: partial.groups,
         state_schema,
         reservation: None,
-    };
-    budget(state_bytes(&chunk))?;
-    Ok(chunk)
-}
-
-/// The grid runs a group's points occupy, coalescing adjacent positions into one span.
-fn state_spans(
-    group: &PartialGroup,
-    points: usize,
-    budget: &mut impl FnMut(usize) -> Result<()>,
-) -> Result<Vec<GridSpan>> {
-    let mut spans: Vec<GridSpan> = Vec::new();
-    let mut previous: Option<usize> = None;
-    for &(point, _) in &group.points {
-        if previous.is_some_and(|last| point <= last) {
-            return Err(DataFusionError::Execution(
-                "aggregate state points are not ascending".into(),
-            ));
-        }
-        previous = Some(point);
-        if point >= points {
-            return Err(DataFusionError::Execution(format!(
-                "aggregate state point {point} exceeds a grid of {points}"
-            )));
-        }
-        match spans.last_mut() {
-            Some(span) if span.start() + span.len() == point => {
-                *span = GridSpan::new(span.start(), span.len() + 1);
-            }
-            _ => {
-                budget(size_of::<GridSpan>())?;
-                spans.push(GridSpan::new(point, 1));
-            }
-        }
-    }
-    Ok(spans)
+    })
 }
 
 /// Builds the executor's Arrow-backed state row from one decoded frame row.

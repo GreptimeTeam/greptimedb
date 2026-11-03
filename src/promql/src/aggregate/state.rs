@@ -34,9 +34,11 @@ use std::sync::Arc;
 use datafusion::arrow::array::Array;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesLabels;
-use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent, StateFieldsBatch};
+use datatypes::series::aggregate_state::{
+    AggregateStateKind, AggregateStateValues, StateComponent, StateFieldsBatch, StateSeries,
+};
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
-use datatypes::series::time::TimeAxis;
+use datatypes::series::time::{GridSpan, TimeAxis};
 
 use crate::aggregate::{
     AggregateOp, BLOCK_POINTS, Counts, FloatAggregator, FloatState, Group, LabelKey,
@@ -78,28 +80,20 @@ impl AggregateOp {
 }
 
 /// The state of one field of one group at one grid point.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct AccumulatorState {
-    pub value: f64,
-    pub mean: f64,
-    pub compensation: f64,
-    pub count: f64,
-    pub incremental_mean: bool,
-}
-
-/// The state of one group: its points in ascending order, each with one state per field, `None`
-/// where no sample of that field was folded in.
-#[derive(Clone, Debug)]
-pub struct PartialGroup {
-    pub metric: SeriesLabels,
-    pub points: Vec<(usize, Vec<Option<AccumulatorState>>)>,
-}
+///
+/// The fold and the frame carry the same five components, so they share one type: the frame's own
+/// [`AggregateStateValues`] is the definition, and this is the name the aggregate side reads it by.
+pub use datatypes::series::aggregate_state::AggregateStateValues as AccumulatorState;
 
 /// The state of one execution partition, with its groups in the order they first appeared.
+///
+/// A group is the frame's own [`StateSeries`]: field-major states addressed on that group's sparse
+/// absolute grid positions. Exporting therefore hands the same representation over instead of
+/// transposing a second one into it.
 #[derive(Clone, Debug)]
 pub struct PartialAggregate {
     pub op: AggregateOp,
-    pub groups: Vec<PartialGroup>,
+    pub groups: Vec<StateSeries>,
 }
 
 /// One Arrow-backed aggregate state row, independent of executor plumbing.
@@ -113,63 +107,92 @@ pub(crate) struct StateRow {
 
 impl FloatAggregator {
     /// The state folded so far, for a merge with the state of other partitions.
-    pub fn finish_partial(self) -> PartialAggregate {
+    pub fn finish_partial(self) -> Result<PartialAggregate> {
         self.finish_partial_inner()
     }
 
-    /// [`Self::finish_partial`] that admits what it builds first: the fold state and the group,
-    /// point and state vectors, at the exact capacity [`Self::finish_partial_inner`] gives them. A
-    /// refusal consumes the aggregator, so the caller drops the execution.
+    /// [`Self::finish_partial`] that admits what it builds first: the fold state and the groups it
+    /// is exported as, at the exact capacity [`Self::finish_partial_inner`] gives them. A refusal
+    /// consumes the aggregator, so the caller drops the execution.
     pub(crate) fn finish_partial_budgeted(
         self,
         mut budget: impl FnMut(usize) -> Result<()>,
-    ) -> Result<(PartialAggregate, usize)> {
+    ) -> Result<PartialAggregate> {
         let width = self.schema.fields.len();
-        let mut partial_bytes = self.groups.len().saturating_mul(size_of::<PartialGroup>());
+        let mut partial_bytes = self.groups.len().saturating_mul(size_of::<StateSeries>());
         for group in &self.groups {
             let points = seen_points(group, width);
             partial_bytes = partial_bytes
-                .saturating_add(points.saturating_mul(size_of::<Point>()))
+                .saturating_add(size_of::<TimeAxis>())
+                .saturating_add(
+                    points.saturating_mul(size_of::<GridSpan>().saturating_add(size_of::<usize>())),
+                )
+                .saturating_add(
+                    width.saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>()),
+                )
                 .saturating_add(
                     points
                         .saturating_mul(width)
-                        .saturating_mul(size_of::<Option<AccumulatorState>>()),
+                        .saturating_mul(size_of::<Option<AggregateStateValues>>()),
                 );
         }
-        let charged_bytes = self.state_bytes().saturating_add(partial_bytes);
-        budget(charged_bytes)?;
-        Ok((self.finish_partial_inner(), charged_bytes))
+        budget(self.state_bytes().saturating_add(partial_bytes))?;
+        self.finish_partial_inner()
     }
 
-    fn finish_partial_inner(self) -> PartialAggregate {
+    /// Turns the fold into the frame's own groups: field-major states on sparse absolute positions.
+    ///
+    /// The blocks are walked once, in ascending position order, so a position's states are appended
+    /// to every field at the same time and adjacent positions coalesce into one span as they come.
+    /// What comes out is the representation the frame writes; no per-point vector is built.
+    fn finish_partial_inner(self) -> Result<PartialAggregate> {
         let width = self.schema.fields.len();
-        let mut groups: Vec<PartialGroup> = Vec::with_capacity(self.groups.len());
+        let grid = self.schema.eval_grid.as_ref().ok_or_else(|| {
+            DataFusionError::Execution("aggregate state is indexed on an evaluated grid".into())
+        })?;
+        let grid_len = grid.spec().len as usize;
+        let mut groups: Vec<StateSeries> = Vec::with_capacity(self.groups.len());
         for group in self.groups {
-            let mut points: Vec<Point> = Vec::with_capacity(seen_points(&group, width));
-            for (&block, states) in &group.blocks {
-                for (offset, point) in states.chunks_exact(width).enumerate() {
-                    if point.iter().any(|state| state.seen) {
-                        points.push((
-                            block * BLOCK_POINTS + offset,
-                            point.iter().map(|state| state.partial()).collect(),
-                        ));
+            let points = seen_points(&group, width);
+            let mut spans: Vec<GridSpan> = Vec::with_capacity(points.min(1));
+            let mut states: Vec<Vec<Option<AggregateStateValues>>> =
+                (0..width).map(|_| Vec::with_capacity(points)).collect();
+            for (&block, block_states) in &group.blocks {
+                for (offset, point) in block_states.chunks_exact(width).enumerate() {
+                    if !point.iter().any(|state| state.seen) {
+                        continue;
+                    }
+                    let position = block * BLOCK_POINTS + offset;
+                    if position >= grid_len {
+                        return Err(DataFusionError::Execution(format!(
+                            "aggregate state point {position} exceeds a grid of {grid_len}"
+                        )));
+                    }
+                    match spans.last_mut() {
+                        Some(span) if span.start() + span.len() == position => {
+                            *span = GridSpan::new(span.start(), span.len() + 1);
+                        }
+                        _ => spans.push(GridSpan::new(position, 1)),
+                    }
+                    for (field, state) in point.iter().enumerate() {
+                        states[field].push(state.partial());
                     }
                 }
             }
-            groups.push(PartialGroup {
+            let time = TimeAxis::from_grid_spans(Arc::clone(grid), spans)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+            groups.push(StateSeries {
                 metric: group.metric,
-                points,
+                time,
+                states,
             });
         }
-        PartialAggregate {
+        Ok(PartialAggregate {
             op: self.op,
             groups,
-        }
+        })
     }
 }
-
-/// One point of a partial group: its grid position and one state per field.
-type Point = (usize, Vec<Option<AccumulatorState>>);
 
 /// The points of `group` that carry a state: the ones a partial of it holds.
 fn seen_points(group: &Group, width: usize) -> usize {
@@ -183,26 +206,33 @@ fn seen_points(group: &Group, width: usize) -> usize {
     })
 }
 
-/// Bytes one partial group keeps: its labels and its point and state vectors at the capacity they
-/// were built with, so spare capacity is paid for rather than skipped.
-fn group_bytes(group: &PartialGroup) -> usize {
-    metric_bytes(&group.metric).saturating_add(group_point_bytes(group))
+/// Bytes one exported group keeps: its labels and the field vectors, at the capacity they were
+/// built with, so spare capacity is paid for rather than skipped.
+fn group_bytes(group: &StateSeries) -> usize {
+    metric_bytes(&group.metric).saturating_add(group_field_bytes(group))
 }
 
-/// Bytes a partial group's points and state vectors hold, without its labels.
-///
-/// A consumer that converts the group moves its labels into the output but drops these vectors, so
-/// this is the figure it can stop paying for; the labels stay charged until the conversion ends.
-pub(crate) fn group_point_bytes(group: &PartialGroup) -> usize {
-    group
-        .points
-        .capacity()
-        .saturating_mul(size_of::<Point>())
-        .saturating_add(group.points.iter().fold(0usize, |bytes, (_, states)| {
+/// Bytes a group's axis and field vectors hold, without its labels.
+pub(crate) fn group_field_bytes(group: &StateSeries) -> usize {
+    size_of::<TimeAxis>()
+        .saturating_add(
+            group
+                .time
+                .runs()
+                .count()
+                .saturating_mul(size_of::<GridSpan>().saturating_add(size_of::<usize>())),
+        )
+        .saturating_add(
+            group
+                .states
+                .capacity()
+                .saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>()),
+        )
+        .saturating_add(group.states.iter().fold(0usize, |bytes, field| {
             bytes.saturating_add(
-                states
+                field
                     .capacity()
-                    .saturating_mul(size_of::<Option<AccumulatorState>>()),
+                    .saturating_mul(size_of::<Option<AggregateStateValues>>()),
             )
         }))
 }
@@ -300,23 +330,33 @@ impl FloatMerger {
             )));
         }
         for group in &partial.groups {
-            for (point, states) in &group.points {
-                if *point >= points || states.len() != width {
-                    return Err(DataFusionError::Execution(
-                        "aggregate state does not match the grid or fields of the merge".into(),
-                    ));
-                }
+            let carried = group.time.len();
+            if group.states.len() != width
+                || group.states.iter().any(|field| field.len() != carried)
+            {
+                return Err(DataFusionError::Execution(
+                    "aggregate state does not match the grid or fields of the merge".into(),
+                ));
+            }
+            if group.time.positions().any(|(point, _)| point >= points) {
+                return Err(DataFusionError::Execution(
+                    "aggregate state does not match the grid or fields of the merge".into(),
+                ));
             }
         }
         let input_live = partial.groups.iter().fold(
             partial
                 .groups
                 .capacity()
-                .saturating_mul(size_of::<PartialGroup>()),
+                .saturating_mul(size_of::<StateSeries>()),
             |bytes, group| bytes.saturating_add(group_bytes(group)),
         );
         for group in partial.groups {
-            let metric = group.metric;
+            let StateSeries {
+                metric,
+                time,
+                states,
+            } = group;
             // `label_key` copies the metric name into its own `Arc`, so the copy is admitted
             // before it is made. A group that is already merged needs a key too, and its
             // admission comes before anything else this call can allocate.
@@ -331,7 +371,7 @@ impl FloatMerger {
                 Some(index) => index,
                 None => self.open_group(metric, key, live, &mut budget)?,
             };
-            self.merge_points(index, group.points, live, &mut budget)?;
+            self.merge_series(index, &time, &states, live, &mut budget)?;
         }
         Ok(())
     }
@@ -492,15 +532,19 @@ impl FloatMerger {
 
     /// Adds the points of one partial group to group `index`. A missing block is admitted with its
     /// states and B-tree node before either is allocated; an existing one only merges state.
-    fn merge_points(
+    fn merge_series(
         &mut self,
         index: usize,
-        points: Vec<Point>,
+        time: &TimeAxis,
+        states: &[Vec<Option<AggregateStateValues>>],
         live: usize,
         budget: &mut impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
-        for (point, states) in points {
-            self.write_point(index, point, states.into_iter(), live, budget)?
+        // The axis carries the absolute positions and the row each one sits at, so a group's states
+        // are read field by field at that row: this is the same order the point-major form had.
+        for (point, row) in time.positions() {
+            let point_states = states.iter().map(|field| field[row]);
+            self.write_point(index, point, point_states, live, budget)?;
         }
         Ok(())
     }
@@ -842,45 +886,37 @@ mod tests {
         from_partial
             .merge(PartialAggregate {
                 op: AggregateOp::Sum,
-                groups: vec![PartialGroup {
+                groups: vec![StateSeries {
                     metric,
-                    points: vec![
-                        (
-                            0,
-                            vec![
-                                Some(AccumulatorState {
-                                    value: 2.0,
-                                    ..Default::default()
-                                }),
-                                Some(AccumulatorState {
-                                    value: 5.0,
-                                    ..Default::default()
-                                }),
-                            ],
-                        ),
-                        (
-                            1,
-                            vec![
-                                Some(AccumulatorState {
-                                    value: 3.0,
-                                    ..Default::default()
-                                }),
-                                None,
-                            ],
-                        ),
-                        (
-                            2,
-                            vec![
-                                Some(AccumulatorState {
-                                    value: 4.0,
-                                    ..Default::default()
-                                }),
-                                Some(AccumulatorState {
-                                    value: 7.0,
-                                    ..Default::default()
-                                }),
-                            ],
-                        ),
+                    time: TimeAxis::Grid(
+                        GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 3).unwrap(),
+                    ),
+                    states: vec![
+                        vec![
+                            Some(AccumulatorState {
+                                value: 2.0,
+                                ..Default::default()
+                            }),
+                            Some(AccumulatorState {
+                                value: 3.0,
+                                ..Default::default()
+                            }),
+                            Some(AccumulatorState {
+                                value: 4.0,
+                                ..Default::default()
+                            }),
+                        ],
+                        vec![
+                            Some(AccumulatorState {
+                                value: 5.0,
+                                ..Default::default()
+                            }),
+                            None,
+                            Some(AccumulatorState {
+                                value: 7.0,
+                                ..Default::default()
+                            }),
+                        ],
                     ],
                 }],
             })

@@ -1117,12 +1117,18 @@ async fn aggregate_state_slice_wrappers_remain_charged_until_terminal_cleanup() 
     assert_eq!(ROWS, batch.num_rows());
     let backing_bytes = batch.get_array_memory_size();
     let slice_wrappers = state_slice_wrapper_bytes(batch.schema().as_ref()).unwrap();
-    // Hand-count the declared shape: six root columns; one child under the time struct;
-    // sixteen list children under the fields struct. Lists stop recursion. Thus there are
-    // 23 wrappers, 17 struct-child refs, and six root column refs.
-    let arc_header = 2 * std::mem::size_of::<usize>();
+    // Hand-count the declared shape: 23 sliced array nodes; list values are not collected.
+    // There are 17 struct-child refs and six root-column refs.
+    use datafusion::arrow::array::{
+        ArrayRef, BinaryArray, BooleanArray, ListArray, StringArray, StructArray,
+    };
+    let node_bytes = std::mem::size_of::<StructArray>() * 2
+        + std::mem::size_of::<ListArray>() * 18
+        + std::mem::size_of::<BinaryArray>()
+        + std::mem::size_of::<BooleanArray>()
+        + std::mem::size_of::<StringArray>();
     let expected_wrappers =
-        23 * arc_header + (17 + 6) * std::mem::size_of::<datafusion::arrow::array::ArrayRef>();
+        node_bytes + 23 * 2 * std::mem::size_of::<usize>() + 23 * std::mem::size_of::<ArrayRef>();
     assert_eq!(
         expected_wrappers, slice_wrappers,
         "schema-shape upper bound"
@@ -1160,11 +1166,32 @@ async fn aggregate_state_slice_wrappers_remain_charged_until_terminal_cleanup() 
         "queued state slices retain one shared backing charge plus {ROWS} recursive wrapper charges: reserved {}, expected at least {expected_payload_and_wrappers}",
         pool.reserved()
     );
+    // Inspect queued rows directly: all carry the same Arc parent, proving the producer does not
+    // allocate a RecordBatch slice per row. The normal stream path slices only when polled.
+    let mut batches = Vec::with_capacity(ROWS);
     for _ in 0..ROWS {
-        let result = output.next().await.expect("queued state row is emitted");
-        let returned = result.expect("state output succeeds");
-        assert_eq!(1, returned.num_rows());
+        let message = output.receiver.recv().await.expect("a queued state row");
+        let message = match message {
+            Queued::StateBatch {
+                batch,
+                row,
+                _charge,
+                _metadata,
+            } => {
+                assert!(row < ROWS);
+                assert_eq!(1, batch.slice(row, 1).num_rows());
+                batch
+            }
+            _ => panic!("expected aggregate-state row"),
+        };
+        batches.push(message);
     }
+    assert!(
+        batches
+            .windows(2)
+            .all(|pair| Arc::ptr_eq(&pair[0], &pair[1]))
+    );
+    drop(batches);
     assert!(
         output.next().await.is_none(),
         "state output drains to clean EOF"
