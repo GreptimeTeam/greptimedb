@@ -38,10 +38,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
-use datafusion::arrow::array::{
-    Array, BinaryArray, BooleanArray, Float64Array, ListArray, StringArray, StructArray,
-    UInt32Array,
-};
+use datafusion::arrow::array::{Array, Float64Array, ListArray, StructArray, UInt32Array};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::common::config::ConfigOptions;
 use datafusion::datasource::memory::MemorySourceConfig;
@@ -984,73 +981,6 @@ async fn raw_primary_key_still_groups_a_key_labelled_input_by_its_key() {
     );
 }
 
-#[test]
-fn aggregate_state_workspace_covers_many_fields_and_zero_component_group() {
-    let grid = grid();
-    let fields = (0..16)
-        .map(|index| FieldSpec {
-            name: Arc::from(format!("field_{index}")),
-        })
-        .collect::<Vec<_>>();
-    let series = Arc::new(SeriesSchema {
-        fields: fields.into(),
-        eval_grid: Some(Arc::clone(&grid)),
-    });
-    let avg = AggregateStateSchema::try_new(
-        AggregateStateKind::Avg,
-        vec![
-            StateComponent::Value,
-            StateComponent::Mean,
-            StateComponent::Compensation,
-            StateComponent::Count,
-            StateComponent::IncrementalMean,
-        ],
-    )
-    .unwrap();
-    let row = StateSeries {
-        metric: labels("workspace"),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(0, 1)]).unwrap(),
-        states: vec![vec![Some(AggregateStateValues::default())]; series.fields.len()],
-    };
-    let batch = futures::executor::block_on(
-        common_query::series_frame::pack_aggregate_state(
-            Box::pin(futures::stream::iter(vec![Ok((row, true))])),
-            Arc::new(avg.clone()),
-            Arc::clone(&series),
-        )
-        .unwrap()
-        .try_collect::<Vec<_>>(),
-    )
-    .unwrap()
-    .remove(0);
-    let workspace = state_decode_workspace_bytes(&batch, &avg, &series).unwrap();
-    assert!(workspace > 16 * std::mem::size_of::<datafusion::arrow::array::ArrayRef>());
-
-    let group = AggregateStateSchema::try_new(AggregateStateKind::Group, Vec::new()).unwrap();
-    let group_series = schema();
-    let group_row = StateSeries {
-        metric: labels("group"),
-        time: TimeAxis::from_grid_spans(
-            group_series.eval_grid.clone().unwrap(),
-            vec![GridSpan::new(0, 1)],
-        )
-        .unwrap(),
-        states: vec![vec![None]],
-    };
-    let batch = futures::executor::block_on(
-        common_query::series_frame::pack_aggregate_state(
-            Box::pin(futures::stream::iter(vec![Ok((group_row, true))])),
-            Arc::new(group.clone()),
-            Arc::clone(&group_series),
-        )
-        .unwrap()
-        .try_collect::<Vec<_>>(),
-    )
-    .unwrap()
-    .remove(0);
-    assert!(state_decode_workspace_bytes(&batch, &group, &group_series).unwrap() > 0);
-}
-
 #[tokio::test]
 async fn aggregate_state_router_slices_and_preserves_group_validity() {
     use futures::TryStreamExt;
@@ -1132,7 +1062,7 @@ async fn aggregate_state_router_slices_and_preserves_group_validity() {
 }
 
 #[tokio::test]
-async fn aggregate_state_slice_wrappers_remain_charged_after_decode_workspace_drops() {
+async fn aggregate_state_slice_wrappers_remain_charged_until_terminal_cleanup() {
     let grid = grid();
     let fields = (0..16)
         .map(|index| FieldSpec {
@@ -1186,33 +1116,22 @@ async fn aggregate_state_slice_wrappers_remain_charged_after_decode_workspace_dr
         .expect("state batch packs successfully");
     assert_eq!(ROWS, batch.num_rows());
     let backing_bytes = batch.get_array_memory_size();
-    let slice_wrappers = state_slice_wrapper_bytes(&batch).unwrap();
-    // Independent Arrow-59 layout calculation for this fixture: six root arrays (binary, bool,
-    // struct, struct, utf8, list), 17 list children in the two structs, and 17 struct child refs
-    // plus six RecordBatch column refs. Lists clone their values Arc but do not slice the values
-    // array, so label-entry/state-member nested structs are deliberately absent here.
+    let slice_wrappers = state_slice_wrapper_bytes(batch.schema().as_ref()).unwrap();
+    // Hand-count the declared shape: six root columns; one child under the time struct;
+    // sixteen list children under the fields struct. Lists stop recursion. Thus there are
+    // 23 wrappers, 17 struct-child refs, and six root column refs.
     let arc_header = 2 * std::mem::size_of::<usize>();
-    let wrapper = |size| size + arc_header;
-    let expected_wrappers = wrapper(std::mem::size_of::<BinaryArray>())
-        + wrapper(std::mem::size_of::<BooleanArray>())
-        + wrapper(std::mem::size_of::<StructArray>())
-        + wrapper(std::mem::size_of::<StructArray>())
-        + wrapper(std::mem::size_of::<StringArray>())
-        + wrapper(std::mem::size_of::<ListArray>())
-        + 17 * wrapper(std::mem::size_of::<ListArray>())
-        + (6 + 17) * std::mem::size_of::<datafusion::arrow::array::ArrayRef>();
+    let expected_wrappers =
+        23 * arc_header + (17 + 6) * std::mem::size_of::<datafusion::arrow::array::ArrayRef>();
     assert_eq!(
         expected_wrappers, slice_wrappers,
-        "fixture matches independent recursive slice-wrapper formula"
+        "schema-shape upper bound"
     );
-    let decode_workspace = state_decode_workspace_bytes(&batch, &wire, &series).unwrap();
     let child_schema = batch.schema();
     let child: Arc<dyn ExecutionPlan> =
         MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema.clone(), None).unwrap();
-    let budget = backing_bytes
-        + decode_workspace
-        + ROWS * (slice_wrappers + std::mem::size_of::<Queued>())
-        + (4 << 10);
+    let budget =
+        backing_bytes + ROWS * (slice_wrappers + std::mem::size_of::<Queued>()) + (4 << 10);
     let pool = Arc::new(GreedyMemoryPool::new(budget));
     let context = task_context(&pool);
     let shared = SharedExecution::start(

@@ -123,7 +123,7 @@ impl FloatAggregator {
     pub(crate) fn finish_partial_budgeted(
         self,
         mut budget: impl FnMut(usize) -> Result<()>,
-    ) -> Result<PartialAggregate> {
+    ) -> Result<(PartialAggregate, usize)> {
         let width = self.schema.fields.len();
         let mut partial_bytes = self.groups.len().saturating_mul(size_of::<PartialGroup>());
         for group in &self.groups {
@@ -136,8 +136,9 @@ impl FloatAggregator {
                         .saturating_mul(size_of::<Option<AccumulatorState>>()),
                 );
         }
-        budget(self.state_bytes().saturating_add(partial_bytes))?;
-        Ok(self.finish_partial_inner())
+        let charged_bytes = self.state_bytes().saturating_add(partial_bytes);
+        budget(charged_bytes)?;
+        Ok((self.finish_partial_inner(), charged_bytes))
     }
 
     fn finish_partial_inner(self) -> PartialAggregate {
@@ -185,8 +186,18 @@ fn seen_points(group: &Group, width: usize) -> usize {
 /// Bytes one partial group keeps: its labels and its point and state vectors at the capacity they
 /// were built with, so spare capacity is paid for rather than skipped.
 fn group_bytes(group: &PartialGroup) -> usize {
-    metric_bytes(&group.metric)
-        .saturating_add(group.points.capacity().saturating_mul(size_of::<Point>()))
+    metric_bytes(&group.metric).saturating_add(group_point_bytes(group))
+}
+
+/// Bytes a partial group's points and state vectors hold, without its labels.
+///
+/// A consumer that converts the group moves its labels into the output but drops these vectors, so
+/// this is the figure it can stop paying for; the labels stay charged until the conversion ends.
+pub(crate) fn group_point_bytes(group: &PartialGroup) -> usize {
+    group
+        .points
+        .capacity()
+        .saturating_mul(size_of::<Point>())
         .saturating_add(group.points.iter().fold(0usize, |bytes, (_, states)| {
             bytes.saturating_add(
                 states

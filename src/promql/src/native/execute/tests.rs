@@ -3549,7 +3549,7 @@ fn standalone_merge_keeps_queued_label_bytes_reserved_until_drain() {
     const SERIES: usize = 64;
     const LABEL_BYTES: usize = 4 * 1024;
 
-    let grid = grid(0, 1, 1);
+    let grid = grid(0, 1, 16);
     let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
     let schema = evaluated_schema(grid);
     let pool = pool();
@@ -11683,4 +11683,75 @@ fn partial_final_matches_complete_over_concatenated_input() {
             }
         }
     }
+}
+
+#[test]
+fn partial_conversion_releases_only_the_groups_it_has_consumed() {
+    use crate::aggregate::{AccumulatorState, AggregateOp, PartialAggregate, PartialGroup};
+
+    let grid = grid(0, 1, 16);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let (kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum).unwrap();
+    let state_schema = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([])),
+        kind,
+        components: components.into(),
+        accumulators: schema.fields.clone(),
+        grid,
+    });
+    let groups = || {
+        (0..8)
+            .map(|_| PartialGroup {
+                metric: metric(),
+                points: (0..16)
+                    .map(|point| (point, vec![Some(AccumulatorState::default())]))
+                    .collect(),
+            })
+            .collect::<Vec<_>>()
+    };
+    // What one group's own point and state vectors hold. Converting it releases that much and
+    // nothing more, so the charge may fall by at most this much at any single step.
+    let per_group = crate::aggregate::state::group_point_bytes(&groups()[0]);
+    assert!(per_group > 0, "a group keeps its points somewhere");
+
+    // The figure the fold says it holds for the whole aggregate. It is not the true storage of
+    // this hand-built aggregate, but it is what `finish_partial_budgeted` would have charged, and
+    // the conversion must start from it rather than from nothing.
+    let held_input_bytes = 8 * per_group + 4096;
+    let mut charges = Vec::new();
+    crate::native::state::state_chunk_from_partial(
+        PartialAggregate {
+            op: AggregateOp::Sum,
+            groups: groups(),
+        },
+        &schema,
+        state_schema,
+        held_input_bytes,
+        |bytes| {
+            charges.push(bytes);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert!(charges.len() > 1, "conversion reports intermediate budgets");
+    assert!(
+        charges[0] >= held_input_bytes,
+        "the first conversion step still holds the whole input: {charges:?}"
+    );
+    // Every step but the last still holds the input it has not consumed yet, so it may release at
+    // most the group it just took. The last call reports the finished output alone: by then the
+    // input is gone, including the labels it handed to the output.
+    for pair in charges.windows(2).take(charges.len() - 2) {
+        let (held, next) = (pair[0], pair[1]);
+        assert!(
+            next >= held || held - next <= per_group,
+            "a step may release at most the group it consumed ({per_group} bytes): {charges:?}"
+        );
+    }
+    assert!(
+        *charges.last().unwrap() < *charges.get(charges.len() - 2).unwrap(),
+        "the finished output is charged on its own, without the input it replaced: {charges:?}"
+    );
 }

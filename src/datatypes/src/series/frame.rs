@@ -2455,6 +2455,45 @@ impl SeriesFrameDecoder {
         })
     }
 
+    /// Reads only the explicit labels of each aggregate-state row.
+    ///
+    /// This validates the declared frame schema and label columns without inspecting time or state.
+    pub fn decode_aggregate_state_labels(&self, batch: &RecordBatch) -> Result<Vec<SeriesLabels>> {
+        if self.shape.labels != FrameLabelMode::Explicit {
+            return invalid_series("aggregate state routing requires explicit labels");
+        }
+        let cols = batch.columns();
+        let names = down::<StringArray>(&cols[4], "name")?;
+        let labels = down::<ListArray>(&cols[5], "labels")?;
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            if labels.is_null(row) {
+                return invalid_series("null required aggregate state label");
+            }
+            let values = labels.value(row);
+            let label_struct = down::<StructArray>(&values, "labels")?;
+            if label_struct.null_count() != 0 {
+                return invalid_series("null label struct element");
+            }
+            let label_names = down::<StringArray>(label_struct.column(0), "label names")?;
+            let label_values = down::<StringArray>(label_struct.column(1), "label values")?;
+            if label_names.null_count() != 0 || label_values.null_count() != 0 {
+                return invalid_series("null label element");
+            }
+            let tags = (0..label_names.len())
+                .map(|i| Label {
+                    name: Arc::from(label_names.value(i)),
+                    value: Arc::from(label_values.value(i)),
+                })
+                .collect();
+            // An aggregation drops the metric name, and the frame says so by leaving it null. That
+            // is an identity with no name, not a malformed row.
+            let name = (!names.is_null(row)).then(|| Arc::from(names.value(row)));
+            rows.push(SeriesLabels::try_new(name, tags)?);
+        }
+        Ok(rows)
+    }
+
     /// Decodes one aggregate-state row without materializing its accumulator values.
     pub fn decode_aggregate_state(&self, batch: &RecordBatch) -> Result<Vec<StateFrameRow>> {
         let state = self

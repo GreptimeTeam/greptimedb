@@ -1477,7 +1477,7 @@ fn finish_partial_reserves_one_slot_per_seen_point() {
         )
         .saturating_add(SEEN.saturating_mul(std::mem::size_of::<Option<AccumulatorState>>()));
     let mut peak = 0usize;
-    let partial = aggregator
+    let (partial, charged_bytes) = aggregator
         .finish_partial_budgeted(|bytes| {
             peak = peak.max(bytes);
             Ok(())
@@ -1487,6 +1487,7 @@ fn finish_partial_reserves_one_slot_per_seen_point() {
     assert_eq!(partial.groups[0].points.len(), SEEN);
     assert_eq!(partial.groups[0].points.capacity(), SEEN);
     assert_eq!(peak, expected);
+    assert_eq!(charged_bytes, expected);
 }
 
 #[test]
@@ -1672,7 +1673,7 @@ fn budgeted_partial_state_merges_to_the_public_numbers() {
         let expected = values_of(&serial, 0, 128);
         let mut aggregator = FloatAggregator::try_new(&schema, op, Grouping::By(&[])).unwrap();
         aggregator.update(&series).unwrap();
-        let partial = aggregator.finish_partial_budgeted(|_| Ok(())).unwrap();
+        let (partial, _) = aggregator.finish_partial_budgeted(|_| Ok(())).unwrap();
         let mut merger = FloatMerger::try_new(&schema, op).unwrap();
         merger.merge_budgeted(partial.clone(), |_| Ok(())).unwrap();
         let merged = merger.finish_budgeted(|_| Ok(())).unwrap();

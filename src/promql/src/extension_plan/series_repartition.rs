@@ -22,8 +22,8 @@
 //! Chains are transported intact to owners with their input-partition ID, followed by one charged
 //! normal-EOF message per live output from each completed input. Owners group exact identities and
 //! may publish an identity as soon as every input has contributed its final chain or normal EOF. The
-//! frame is the child's own: evaluated chunks are decoded only to read routing labels, and outputs
-//! publish the child's declared layout.
+//! frame is the child's own: evaluated chunks are decoded only to read routing labels; aggregate-state
+//! batches are schema-checked and read only for routing labels. Outputs publish the child's layout.
 //!
 //! # Routing
 //!
@@ -1041,303 +1041,42 @@ impl Inputs {
     }
 }
 
-/// Bounds the decoder's per-batch owned allocations from the input's actual row, span, and label
-/// counts. Decoder allocation sites are the rows vector and, per row, spans, grid-range prefix
-/// rows, label vector, and copied label strings.
-fn state_decode_workspace_bytes(
-    batch: &RecordBatch,
-    state: &AggregateStateSchema,
-    series: &SeriesSchema,
+/// Conservatively bounds wrappers allocated by slicing a batch, from its schema. This is an
+/// upper bound: each column and recursively sliced struct child contributes one array wrapper and
+/// each collected child/root reference contributes one slot; list values are not sliced.
+fn state_slice_wrapper_bytes(
+    schema: &datafusion::arrow::datatypes::Schema,
 ) -> DataFusionResult<usize> {
-    use datafusion::arrow::array::{
-        Array, BooleanArray, Float64Array, ListArray, StringArray, StructArray,
-    };
-
-    fn down<'a, T: Array + 'static>(
-        array: &'a dyn Array,
-        description: &str,
-    ) -> DataFusionResult<&'a T> {
-        array.as_any().downcast_ref().ok_or_else(|| {
-            DataFusionError::Execution(format!("aggregate-state {description} type mismatch"))
-        })
-    }
-    fn add(total: &mut usize, bytes: usize) -> DataFusionResult<()> {
-        *total = total.checked_add(bytes).ok_or_else(|| {
-            DataFusionError::Execution("aggregate-state workspace overflow".into())
-        })?;
-        Ok(())
-    }
-    fn product(count: usize, size: usize) -> DataFusionResult<usize> {
-        count
-            .checked_mul(size)
-            .ok_or_else(|| DataFusionError::Execution("aggregate-state workspace overflow".into()))
-    }
-
-    let columns = batch.columns();
-    let spans = down::<ListArray>(
-        down::<StructArray>(columns[2].as_ref(), "time")?
-            .column(0)
-            .as_ref(),
-        "spans",
-    )?;
-    let names = down::<StringArray>(columns[4].as_ref(), "metric names")?;
-    let labels = down::<ListArray>(columns[5].as_ref(), "labels")?;
-    let fields_per_row = series.fields.len();
-    let components_per_field = state.components.len();
-    let span_offsets = spans.value_offsets();
-    let label_offsets = labels.value_offsets();
-    let label_values = down::<StructArray>(labels.values().as_ref(), "label entries")?;
-    let label_names = down::<StringArray>(label_values.column(0).as_ref(), "label names")?;
-    let label_text = down::<StringArray>(label_values.column(1).as_ref(), "label values")?;
-    let name_offsets = label_names.value_offsets();
-    let text_offsets = label_text.value_offsets();
-    let mut bytes = product(
-        batch.num_rows(),
-        std::mem::size_of::<datatypes::series::frame::StateFrameRow>(),
-    )?;
-    let per_row_fields = product(
-        fields_per_row,
-        std::mem::size_of::<datafusion::arrow::array::StructArray>()
-            .checked_add(product(
-                components_per_field,
-                std::mem::size_of::<datafusion::arrow::array::ArrayRef>(),
-            )?)
-            .ok_or_else(|| {
-                DataFusionError::Execution("aggregate-state workspace overflow".into())
-            })?,
-    )?;
-    add(&mut bytes, product(batch.num_rows(), per_row_fields)?)?;
-    // row_fields and its validation clone, StateFieldsBatch, and its Vec<StructArray> coexist
-    // with the retained StateFrameRow. `try_from_arrow` also owns one StructArray clone per field.
-    let fields_wrapper_bytes = std::mem::size_of::<datafusion::arrow::array::StructArray>()
-        .checked_mul(2)
-        .and_then(|size| {
-            size.checked_add(std::mem::size_of::<
-                datatypes::series::aggregate_state::StateFieldsBatch,
-            >())
-        })
-        .and_then(|size| {
-            size.checked_add(
-                product(
-                    fields_per_row,
-                    std::mem::size_of::<datafusion::arrow::array::StructArray>(),
-                )
-                .ok()?,
-            )
-        })
-        .and_then(|size| {
-            size.checked_add(
-                product(
-                    fields_per_row,
-                    std::mem::size_of::<datafusion::arrow::array::ArrayRef>(),
-                )
-                .ok()?,
-            )
-        })
-        .ok_or_else(|| DataFusionError::Execution("aggregate-state workspace overflow".into()))?;
-    add(&mut bytes, product(batch.num_rows(), fields_wrapper_bytes)?)?;
-    // `.value(row)` creates one list-value StructArray wrapper for each spans and labels list.
-    add(
-        &mut bytes,
-        product(
-            batch.num_rows(),
-            product(
-                2,
-                std::mem::size_of::<datafusion::arrow::array::StructArray>(),
-            )?,
-        )?,
-    )?;
-    // Each decoded row retains the sliced list wrapper per field, plus a component-array wrapper
-    // per component during recursive StructArray::slice validation. Child refs and component
-    // wrappers coexist; Group's zero components correctly add no component wrappers.
-    let component_wrapper_size =
-        std::mem::size_of::<Float64Array>().max(std::mem::size_of::<BooleanArray>());
-    let per_field_wrappers = std::mem::size_of::<ListArray>()
-        .checked_add(product(components_per_field, component_wrapper_size)?)
-        .ok_or_else(|| DataFusionError::Execution("aggregate-state workspace overflow".into()))?;
-    add(
-        &mut bytes,
-        product(
-            product(batch.num_rows(), fields_per_row)?,
-            per_field_wrappers,
-        )?,
-    )?;
-    // Decoder stack locals retain one child ArrayRef per component of each state field.
-    add(
-        &mut bytes,
-        product(
-            product(batch.num_rows(), fields_per_row)?,
-            product(
-                components_per_field,
-                std::mem::size_of::<datafusion::arrow::array::ArrayRef>(),
-            )?,
-        )?,
-    )?;
-    for row in 0..batch.num_rows() {
-        if !spans.is_null(row) {
-            let span_start = usize::try_from(span_offsets[row]).map_err(|_| {
-                DataFusionError::Execution("aggregate-state span offset overflow".into())
-            })?;
-            let span_end = usize::try_from(span_offsets[row + 1]).map_err(|_| {
-                DataFusionError::Execution("aggregate-state span offset overflow".into())
-            })?;
-            let span_count = span_end.checked_sub(span_start).ok_or_else(|| {
-                DataFusionError::Execution("aggregate-state span offsets are invalid".into())
-            })?;
-            // `decode_aggregate_state` allocates a Vec<GridSpan>; TimeAxis::GridRanges then
-            // allocates Arc<[GridSpan]> and one usize prefix row for each span.
-            // The decoder's Vec<GridSpan> is converted to Arc<[GridSpan]> while the
-            // source vector is still alive, so account for both allocations.
-            add(
-                &mut bytes,
-                product(
-                    span_count,
-                    std::mem::size_of::<datatypes::series::time::GridSpan>(),
-                )?,
-            )?;
-            add(
-                &mut bytes,
-                product(
-                    span_count,
-                    std::mem::size_of::<datatypes::series::time::GridSpan>(),
-                )?,
-            )?;
-            add(
-                &mut bytes,
-                product(2, product(span_count, std::mem::size_of::<usize>())?)?,
-            )?;
-            if span_count > 0 {
-                add(
-                    &mut bytes,
-                    std::mem::size_of::<datatypes::series::time::TimeAxis>(),
-                )?;
+    use datafusion::arrow::datatypes::DataType;
+    fn wrappers(data_type: &DataType) -> usize {
+        match data_type {
+            DataType::Struct(fields) => {
+                1 + fields
+                    .iter()
+                    .map(|f| wrappers(f.data_type()))
+                    .sum::<usize>()
             }
-        }
-        if !names.is_null(row) {
-            add(&mut bytes, names.value(row).len())?;
-            add(&mut bytes, product(2, std::mem::size_of::<usize>())?)?;
-        }
-        if !labels.is_null(row) {
-            let label_start = usize::try_from(label_offsets[row]).map_err(|_| {
-                DataFusionError::Execution("aggregate-state label offset overflow".into())
-            })?;
-            let label_end = usize::try_from(label_offsets[row + 1]).map_err(|_| {
-                DataFusionError::Execution("aggregate-state label offset overflow".into())
-            })?;
-            let label_count = label_end.checked_sub(label_start).ok_or_else(|| {
-                DataFusionError::Execution("aggregate-state label offsets are invalid".into())
-            })?;
-            // The tag Vec is converted to Arc<[Label]> before it is dropped, briefly retaining
-            // both buffers; each copied Arc<str> also owns a separate allocation.
-            add(
-                &mut bytes,
-                product(label_count, std::mem::size_of::<datatypes::series::Label>())?,
-            )?;
-            add(
-                &mut bytes,
-                product(label_count, std::mem::size_of::<datatypes::series::Label>())?,
-            )?;
-            add(
-                &mut bytes,
-                product(label_count, product(2, std::mem::size_of::<usize>())?)?,
-            )?;
-            // Arc<str> copies exactly the byte ranges described by the StringArray offsets.
-            for index in label_start..label_end {
-                let name_len = usize::try_from(name_offsets[index + 1] - name_offsets[index])
-                    .map_err(|_| {
-                        DataFusionError::Execution(
-                            "aggregate-state label name length overflow".into(),
-                        )
-                    })?;
-                let text_len = usize::try_from(text_offsets[index + 1] - text_offsets[index])
-                    .map_err(|_| {
-                        DataFusionError::Execution(
-                            "aggregate-state label value length overflow".into(),
-                        )
-                    })?;
-                add(&mut bytes, name_len)?;
-                add(&mut bytes, text_len)?;
-            }
+            _ => 1, // In particular, List::slice does not slice its values.
         }
     }
-    Ok(bytes)
-}
-
-/// Bytes allocated by one zero-copy `RecordBatch::slice` for aggregate-state frames.
-///
-/// Arrow 59's RecordBatch allocates a fresh columns Vec, and each `StructArray::slice` allocates
-/// a fresh child ArrayRef Vec and recursively slices its children. `ListArray::slice` only clones
-/// its buffers and does not slice its values, so nested list values are intentionally not counted.
-/// Buffer payloads remain covered once by the shared source-batch reservation.
-fn state_slice_wrapper_bytes(batch: &RecordBatch) -> DataFusionResult<usize> {
-    use datafusion::arrow::array::{Array, StructArray};
-
-    fn add(total: &mut usize, bytes: usize) -> DataFusionResult<()> {
-        *total = total.checked_add(bytes).ok_or_else(|| {
+    let roots = schema.fields().len();
+    let arrays = schema
+        .fields()
+        .iter()
+        .map(|field| wrappers(field.data_type()))
+        .sum::<usize>();
+    let child_refs = arrays - roots;
+    let slots = roots.checked_add(child_refs).ok_or_else(|| {
+        DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+    })?;
+    arrays
+        .checked_mul(2 * std::mem::size_of::<usize>())
+        .and_then(|bytes| {
+            bytes.checked_add(slots * std::mem::size_of::<datafusion::arrow::array::ArrayRef>())
+        })
+        .ok_or_else(|| {
             DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
-        })?;
-        Ok(())
-    }
-    fn array_bytes(array: &dyn Array) -> DataFusionResult<usize> {
-        // Arrow's Arc-backed wrapper clones retain the Arc's two-word strong/weak header.
-        let mut bytes = std::mem::size_of_val(array)
-            .checked_add(
-                2usize
-                    .checked_mul(std::mem::size_of::<usize>())
-                    .ok_or_else(|| {
-                        DataFusionError::Execution(
-                            "aggregate-state slice wrapper size overflow".into(),
-                        )
-                    })?,
-            )
-            .ok_or_else(|| {
-                DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
-            })?;
-        // StructArray::slice collects one new ArrayRef per child before recursing.
-        if let Some(struct_array) = array.as_any().downcast_ref::<StructArray>() {
-            bytes = bytes
-                .checked_add(
-                    struct_array
-                        .num_columns()
-                        .checked_mul(std::mem::size_of::<datafusion::arrow::array::ArrayRef>())
-                        .ok_or_else(|| {
-                            DataFusionError::Execution(
-                                "aggregate-state slice wrapper size overflow".into(),
-                            )
-                        })?,
-                )
-                .ok_or_else(|| {
-                    DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
-                })?;
-            for child in struct_array.columns() {
-                bytes = bytes
-                    .checked_add(array_bytes(child.as_ref())?)
-                    .ok_or_else(|| {
-                        DataFusionError::Execution(
-                            "aggregate-state slice wrapper size overflow".into(),
-                        )
-                    })?;
-            }
-        }
-        Ok(bytes)
-    }
-
-    // RecordBatch itself is inline in Queued; only its newly allocated columns Vec is extra.
-    let mut bytes = 0;
-    add(
-        &mut bytes,
-        batch
-            .columns()
-            .len()
-            .checked_mul(std::mem::size_of::<datafusion::arrow::array::ArrayRef>())
-            .ok_or_else(|| {
-                DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
-            })?,
-    )?;
-    for column in batch.columns() {
-        add(&mut bytes, array_bytes(column.as_ref())?)?;
-    }
-    Ok(bytes)
+        })
 }
 
 /// Routes state rows without materializing Rust accumulator objects or rebuilding Arrow columns.
@@ -1383,29 +1122,15 @@ async fn read_state_batches(
         if let Err(error) = charge.try_grow(batch.get_array_memory_size()) {
             return Stop::Failed(Arc::new(error));
         }
-        let workspace = read_ahead.new_empty();
-        let workspace_bytes = match state_decode_workspace_bytes(&batch, state, series) {
-            Ok(bytes) => bytes,
-            Err(error) => return Stop::Failed(Arc::new(error)),
-        };
-        if let Err(error) = workspace.try_grow(workspace_bytes) {
-            return Stop::Failed(Arc::new(error));
-        }
-        let rows = match decoder.decode_aggregate_state(&batch) {
-            Ok(rows) => rows,
+        let labels = match decoder.decode_aggregate_state_labels(&batch) {
+            Ok(labels) => labels,
             Err(error) => {
                 return Stop::Failed(Arc::new(DataFusionError::Execution(error.to_string())));
             }
         };
-        if rows.len() != batch.num_rows() {
-            return Stop::Failed(Arc::new(DataFusionError::Execution(
-                "aggregate-state decoder row count differs from input batch".into(),
-            )));
-        }
         let charge = Arc::new(charge);
-        // The recursive array wrapper layout is invariant across row slices. Compute it once;
-        // each queued row receives its own reservation for that row's actual slice wrappers.
-        let slice_charge = match state_slice_wrapper_bytes(&batch) {
+        // Each queued row receives a reservation for the schema-based slice-wrapper upper bound.
+        let slice_charge = match state_slice_wrapper_bytes(batch.schema().as_ref()) {
             Ok(bytes) => bytes,
             Err(error) => return Stop::Failed(Arc::new(error)),
         };
@@ -1417,8 +1142,8 @@ async fn read_state_batches(
                 )));
             }
         };
-        for (index, row) in rows.iter().enumerate() {
-            let output = routing.output_labels(row.metric());
+        for (index, metric) in labels.iter().enumerate() {
+            let output = routing.output_labels(metric);
             if senders[output].is_closed() {
                 continue;
             }
@@ -1435,8 +1160,6 @@ async fn read_state_batches(
                 drop(error.0);
             }
         }
-        drop(rows);
-        drop(workspace);
         tokio::task::coop::consume_budget().await;
     }
     Stop::Ended

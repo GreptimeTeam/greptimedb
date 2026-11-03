@@ -120,6 +120,7 @@ pub(crate) fn state_chunk_from_partial(
     partial: PartialAggregate,
     schema: &Arc<SeriesSchema>,
     state_schema: Arc<AggregateStateSchema>,
+    mut held_input_bytes: usize,
     mut budget: impl FnMut(usize) -> Result<()>,
 ) -> Result<StateChunk> {
     let grid = schema.eval_grid.as_ref().ok_or_else(|| {
@@ -129,25 +130,34 @@ pub(crate) fn state_chunk_from_partial(
 
     let width = schema.fields.len();
     let mut series = Vec::new();
-    budget(
-        partial
-            .groups
-            .len()
-            .saturating_mul(size_of::<StateSeries>()),
-    )?;
+    let mut output_progress = partial
+        .groups
+        .len()
+        .saturating_mul(size_of::<StateSeries>());
+    budget(held_input_bytes.saturating_add(output_progress))?;
     series.reserve_exact(partial.groups.len());
 
     for group in partial.groups {
-        let spans = state_spans(&group, grid.spec().len as usize, &mut budget)?;
+        // What this group's own point and state vectors hold. They are consumed below, so the
+        // figure stops being charged once its labels and values have moved into the output; the
+        // labels themselves stay charged until the last call, because they now live in the output.
+        let released = crate::aggregate::state::group_point_bytes(&group);
+        let spans = state_spans(&group, grid.spec().len as usize, &mut |bytes| {
+            output_progress = output_progress.saturating_add(bytes);
+            budget(held_input_bytes.saturating_add(output_progress))
+        })?;
         let time = TimeAxis::from_grid_spans(Arc::clone(grid), spans).map_err(|error| {
             DataFusionError::Execution(format!("invalid aggregate state grid spans: {error}"))
         })?;
 
-        budget(
-            width
-                .saturating_mul(group.points.len())
-                .saturating_mul(size_of::<Option<AggregateStateValues>>()),
-        )?;
+        output_progress = output_progress
+            .saturating_add(width.saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>()))
+            .saturating_add(
+                width
+                    .saturating_mul(group.points.len())
+                    .saturating_mul(size_of::<Option<AggregateStateValues>>()),
+            );
+        budget(held_input_bytes.saturating_add(output_progress))?;
         let mut states = Vec::with_capacity(width);
         states.resize_with(width, || Vec::with_capacity(group.points.len()));
         for (_, values) in group.points {
@@ -172,6 +182,7 @@ pub(crate) fn state_chunk_from_partial(
             time,
             states,
         });
+        held_input_bytes = held_input_bytes.saturating_sub(released);
     }
 
     let chunk = StateChunk::Series {
