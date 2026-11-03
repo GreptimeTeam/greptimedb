@@ -20,6 +20,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
@@ -302,6 +303,8 @@ impl ColumnarPreparedSource {
         let _prepare_timer = crate::metrics::READ_STAGE_ELAPSED
             .with_label_values(&["columnar_prepare_wall"])
             .start_timer();
+        let mut preparation_metrics = crate::metrics::ColumnarReadMetrics::default();
+        let started = Instant::now();
         let input = &context.input;
         let metadata = input.region_metadata();
         let index = input
@@ -314,6 +317,8 @@ impl ColumnarPreparedSource {
                 "columnar series coverage changed after series preparation",
             ));
         };
+        preparation_metrics.add_elapsed("columnar_prepare_coverage", started.elapsed());
+        let started = Instant::now();
         let cache = input
             .cache_strategy
             .columnar_metadata(index.cache_namespace);
@@ -330,16 +335,26 @@ impl ColumnarPreparedSource {
             format::validate_sample_schema(&reader.schema(), metadata)?;
             samples.push(Arc::new(reader));
         }
+        preparation_metrics.add_elapsed("columnar_prepare_samples_open_wall", started.elapsed());
+        preparation_metrics
+            .counts
+            .insert("prepare_sample_readers", samples.len() as u64);
+        preparation_metrics
+            .counts
+            .insert("prepare_series_indexes", indexes.len() as u64);
         let reservation =
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
         let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
         for id in indexes {
+            let started = Instant::now();
             let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
                 index.store.clone(),
                 index.version.series_indexes[&id].clone(),
                 cache.clone(),
             )
             .await?;
+            preparation_metrics.add_elapsed("columnar_prepare_series_open_wall", started.elapsed());
+            let started = Instant::now();
             let schema = reader.schema();
             format::validate_series_schema(&schema, metadata)?;
             let mut tags = schema
@@ -378,12 +393,35 @@ impl ColumnarPreparedSource {
                     }
                 }
             }
+            preparation_metrics.add_elapsed("columnar_prepare_compile", started.elapsed());
             let mut batches = reader.read(request)?;
-            while let Some(mut batch) = batches.try_next().await? {
+            loop {
+                let started = Instant::now();
+                let batch = batches.try_next().await?;
+                preparation_metrics
+                    .add_elapsed("columnar_prepare_discovery_wall", started.elapsed());
+                let Some(mut batch) = batch else {
+                    break;
+                };
+                *preparation_metrics
+                    .counts
+                    .entry("prepare_discovered_rows")
+                    .or_default() += batch.num_rows() as u64;
+                *preparation_metrics
+                    .counts
+                    .entry("prepare_discovery_batches")
+                    .or_default() += 1;
+                let started = Instant::now();
                 for filter in &filters {
                     batch = common_recordbatch::filter::batch_filter(&batch, filter)
                         .map_err(|e| invalid(e.to_string()))?;
                 }
+                preparation_metrics.add_elapsed("columnar_prepare_residual", started.elapsed());
+                *preparation_metrics
+                    .counts
+                    .entry("prepare_selected_rows")
+                    .or_default() += batch.num_rows() as u64;
+                let started = Instant::now();
                 let table = batch
                     .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
                     .ok_or_else(|| invalid("missing table ID column"))?
@@ -442,7 +480,19 @@ impl ColumnarPreparedSource {
                             &mut key,
                         )
                         .map_err(|e| invalid(e.to_string()))?;
+                    *preparation_metrics
+                        .bytes
+                        .entry("prepare_encoded_keys")
+                        .or_default() += key.len() as u64;
+                    *preparation_metrics
+                        .counts
+                        .entry("prepare_tag_values")
+                        .or_default() += values.len() as u64;
                     if let Some(previous) = candidates.get(&id) {
+                        *preparation_metrics
+                            .counts
+                            .entry("prepare_duplicate_rows")
+                            .or_default() += 1;
                         if previous.key.as_slice() != key.as_slice() {
                             return Err(invalid(
                                 "conflicting labels for the same table ID and TSID",
@@ -470,12 +520,20 @@ impl ColumnarPreparedSource {
                         },
                     );
                 }
+                preparation_metrics.add_elapsed("columnar_prepare_candidates", started.elapsed());
             }
         }
+        let started = Instant::now();
+        preparation_metrics
+            .counts
+            .insert("prepare_unique_series", candidates.len() as u64);
         let mut candidates: Vec<_> = candidates.into_values().collect();
         candidates.sort_unstable_by(|a, b| a.key.as_slice().cmp(b.key.as_slice()));
+        preparation_metrics.add_elapsed("columnar_prepare_sort", started.elapsed());
+        let started = Instant::now();
         let mut raw = raw;
         let sample_schema = sample_merge_schema(&context, &mut raw)?;
+        preparation_metrics.add_elapsed("columnar_prepare_schema", started.elapsed());
         Ok(Self {
             context,
             labels,
