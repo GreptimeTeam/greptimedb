@@ -87,12 +87,14 @@ use super::{
     series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
+use crate::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+use crate::histogram_eval::HistogramFunction;
 use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
-    BoundMap, BoundScalar, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode,
-    NativeTree, NativeType,
+    BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr,
+    NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -5974,4 +5976,453 @@ async fn duplicate_evidence_allows_same_key_at_disjoint_steps_across_partitions(
     );
     let errors = partitioned_duplicate_verdict(exec).await;
     assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// The bound shape of `histogram_quantile(0.99, sum by (...) (rate(x[5m])))`.
+fn histogram_over_sum_tree(group: Grouping, function: HistogramFunction) -> NativeTree {
+    let rate = rate_tree();
+    let output = rate.root().output.clone();
+    let aggregate = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(rate.root().clone()),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group,
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: output.clone(),
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(aggregate),
+            op: BoundVectorOp::Histogram(function),
+        },
+        output,
+    })
+    .unwrap()
+}
+
+fn histogram_routing() -> SeriesRouting {
+    SeriesRouting::CanonicalLabelsExcept(
+        ["le", "__name__", "__type__", "__unit__"]
+            .into_iter()
+            .map(Arc::from)
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+#[test]
+fn histogram_over_sum_splits_and_declares_complete_bucket_routing() {
+    for function in [
+        HistogramFunction::Quantile(0.99),
+        HistogramFunction::Fraction {
+            lower: 0.0,
+            upper: 1.0,
+        },
+    ] {
+        for group in [
+            Grouping::By(Arc::from([Arc::from("le")])),
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            Grouping::Without(Arc::from([Arc::from(HOST)])),
+        ] {
+            let tree = histogram_over_sum_tree(group.clone(), function);
+            let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME)
+                .unwrap()
+                .expect("histogram over sum must split");
+            assert!(matches!(
+                &partial.root().expr,
+                NativeExpr::Aggregate { op, .. }
+                    if op.stage == AggregateStage::Partial && op.group == group
+            ));
+            assert!(matches!(
+                partial.root().output,
+                NativeType::AggregateState(_)
+            ));
+            let NativeExpr::Vector {
+                input,
+                op: BoundVectorOp::Histogram(actual),
+            } = &final_tree.root().expr
+            else {
+                panic!("the histogram must be above the Final aggregate");
+            };
+            assert_eq!(*actual, function);
+            assert!(matches!(
+                &input.expr,
+                NativeExpr::Aggregate { op, .. }
+                    if op.stage == AggregateStage::Final && op.group == group
+            ));
+            let node = FusedSeries::try_new_with_format(
+                Arc::from("histogram over sum"),
+                final_tree.clone(),
+                binding(&final_tree),
+                vec![input_plan(
+                    canonical_state_frame_schema(&partial).inner().clone(),
+                )],
+                canonical_frame_schema(&final_tree),
+                FusedOutputFormat::SeriesFrame,
+            )
+            .unwrap();
+            assert_eq!(node.state_routing_policy(), Some(histogram_routing()));
+            let logical = LogicalPlan::Extension(datafusion::logical_expr::Extension {
+                node: Arc::new(node),
+            });
+            let display = logical.display_indent().to_string();
+            assert!(
+                display.contains("state routing: canonical labels except"),
+                "{display}"
+            );
+        }
+    }
+}
+
+#[test]
+fn histogram_split_declines_only_rewrites_that_change_the_routing_key() {
+    let group = Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)]));
+    let base = histogram_over_sum_tree(group, HistogramFunction::Quantile(0.99));
+    for (dst, accepted) in [
+        ("le", true),
+        ("__type__", true),
+        ("zone", true),
+        (JOB, false),
+    ] {
+        let NativeExpr::Vector { input, op } = &base.root().expr else {
+            unreachable!()
+        };
+        let mapped = NativeNode {
+            expr: NativeExpr::Map {
+                input: input.clone(),
+                op: BoundMap {
+                    ops: vec![MapOp::Label(Arc::new(
+                        LabelRewrite::join(dst, "", &[HOST]).unwrap(),
+                    ))]
+                    .into(),
+                },
+            },
+            output: input.output.clone(),
+        };
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Vector {
+                input: Box::new(mapped),
+                op: op.clone(),
+            },
+            output: base.root().output.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            FusedSeries::split_aggregate(&tree, TIME).unwrap().is_some(),
+            accepted,
+            "{dst}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn histogram_split_routes_whole_state_batches_and_preserves_each_bound() {
+    for with_job in [false, true] {
+        let group: Arc<[Arc<str>]> = if with_job {
+            Arc::from([Arc::from("le"), Arc::from(JOB)])
+        } else {
+            Arc::from([Arc::from("le")])
+        };
+        let tree = histogram_over_sum_tree(Grouping::By(group), HistogramFunction::Quantile(0.5));
+        let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
+        let partitions = vec![
+            frames(&[
+                labelled_chunk(
+                    "a-1",
+                    &[("le", "1"), (JOB, "api")],
+                    &series_samples(1.0),
+                    true,
+                ),
+                labelled_chunk(
+                    "a-inf",
+                    &[("le", "+Inf"), (JOB, "api")],
+                    &series_samples(4.0),
+                    true,
+                ),
+            ]),
+            frames(&[
+                labelled_chunk(
+                    "b-1",
+                    &[("le", "1"), (JOB, "api")],
+                    &series_samples(2.0),
+                    true,
+                ),
+                labelled_chunk(
+                    "b-inf",
+                    &[("le", "+Inf"), (JOB, "api")],
+                    &series_samples(4.0),
+                    true,
+                ),
+            ]),
+        ];
+        let partial_node = FusedSeries::try_new_state_export(
+            Arc::from("partial"),
+            partial.clone(),
+            binding(&partial),
+            vec![input_plan(frame_schema())],
+        )
+        .unwrap();
+        let make_partial = || {
+            partial_node
+                .to_execution_plan(vec![(
+                    memory_exec_partitioned(partitions.clone()),
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous,
+                )])
+                .unwrap()
+        };
+        let partial_exec = make_partial();
+        for partition in 0..2 {
+            let states = decode_state_batches(state_batches(&partial_exec, partition).await).await;
+            let bounds: std::collections::BTreeMap<_, _> = states
+                .iter()
+                .map(|state| {
+                    (
+                        state.metric.get("le").unwrap().to_string(),
+                        state.states[0][0].unwrap().value,
+                    )
+                })
+                .collect();
+            let expected = if partition == 0 {
+                (1.0, 4.0)
+            } else {
+                (2.0, 4.0)
+            };
+            assert_eq!(
+                bounds,
+                std::collections::BTreeMap::from([
+                    ("1".to_string(), expected.0),
+                    ("+Inf".to_string(), expected.1),
+                ])
+            );
+        }
+        let final_node = FusedSeries::try_new_with_format(
+            Arc::from("final"),
+            final_tree.clone(),
+            binding(&final_tree),
+            vec![input_plan(
+                canonical_state_frame_schema(&partial).inner().clone(),
+            )],
+            canonical_frame_schema(&final_tree),
+            FusedOutputFormat::SeriesFrame,
+        )
+        .unwrap();
+        let execute = |width| {
+            // Region exit is a one-output state router, which forwards whole packed batches.
+            let region = Arc::new(SeriesRepartitionExec::try_new(make_partial(), 1).unwrap());
+            final_node
+                .to_execution_plan_with_parallelism(
+                    vec![(region, RawLabelSource::Explicit, SeriesOrdering::Contiguous)],
+                    width,
+                )
+                .unwrap()
+        };
+        let parallel = execute(8);
+        let child = parallel.children()[0];
+        if with_job {
+            let router = child.downcast_ref::<SeriesRepartitionExec>().unwrap();
+            assert_eq!(router.outputs(), 8);
+            assert_eq!(router.routing_policy(), &histogram_routing());
+        } else {
+            assert_eq!(
+                parallel
+                    .properties()
+                    .output_partitioning()
+                    .partition_count(),
+                1
+            );
+        }
+        let decode = |batches: Vec<RecordBatch>| async move {
+            let schema = batches[0].schema();
+            unpack_evaluated_series(
+                Box::pin(RecordBatchStreamAdapter::new(
+                    schema,
+                    futures::stream::iter(batches.into_iter().map(Ok)),
+                )),
+                None,
+            )
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+        };
+        let got = decode(
+            collect(parallel, SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let baseline = decode(
+            collect(execute(1), SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let values = |series: &[(Series, bool)]| {
+            series
+                .iter()
+                .flat_map(|(series, _)| {
+                    series
+                        .fields
+                        .get(0)
+                        .unwrap()
+                        .iter()
+                        .filter_map(|sample| match sample {
+                            datatypes::series::samples::SampleRef::Float(v) => Some(v),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&got), values(&baseline));
+        // Sum per bound is 3 and 8; 0.5 * 8 lies in the infinite bucket and yields the
+        // highest finite bound, 1. Pooling the bounds into one sum would have no histogram.
+        assert_eq!(values(&got), vec![1.0; GRID_LEN as usize]);
+    }
+}
+
+#[tokio::test]
+async fn histogram_split_colocates_metadata_distinct_results_before_their_merge() {
+    let grouping = Grouping::By(
+        ["le", JOB, "__type__", "__unit__"]
+            .into_iter()
+            .map(Arc::from)
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    let instant = instant_of(0, &grid());
+    let output = instant.output.clone();
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Aggregate {
+                    input: Box::new(instant),
+                    op: BoundAggregate {
+                        kind: AggregateKind::Sum,
+                        group: grouping,
+                        stage: AggregateStage::Complete,
+                    },
+                },
+                output: output.clone(),
+            }),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+        },
+        output,
+    })
+    .unwrap();
+    let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
+    let build = |overlap: bool| {
+        let mut partitions = vec![Vec::new(), Vec::new()];
+        for (partition, kind) in ["a", "b"].into_iter().enumerate() {
+            let timestamps = if overlap || partition == 0 {
+                vec![GRID_START]
+            } else {
+                vec![GRID_START + GRID_STEP]
+            };
+            for (le, value) in [("1", if partition == 0 { 1.0 } else { 3.0 }), ("+Inf", 4.0)] {
+                let key = format!("{kind}-{le}");
+                let item = chunk_of(
+                    &raw_schema(),
+                    &key,
+                    metric(
+                        &[
+                            ("le", le),
+                            (JOB, "api"),
+                            ("__type__", kind),
+                            ("__unit__", kind),
+                        ],
+                        Some(METRIC),
+                    ),
+                    &timestamps,
+                    vec![vec![Some(value)]],
+                    true,
+                );
+                partitions[partition].push(frame(&item));
+            }
+        }
+        let partial_node = FusedSeries::try_new_state_export(
+            Arc::from("partial"),
+            partial.clone(),
+            binding(&partial),
+            vec![input_plan(frame_schema())],
+        )
+        .unwrap();
+        let partial_exec = partial_node
+            .to_execution_plan(vec![(
+                memory_exec_partitioned(partitions),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            )])
+            .unwrap();
+        let final_node = FusedSeries::try_new_with_format(
+            Arc::from("final"),
+            final_tree.clone(),
+            binding(&final_tree),
+            vec![input_plan(
+                canonical_state_frame_schema(&partial).inner().clone(),
+            )],
+            canonical_frame_schema(&final_tree),
+            FusedOutputFormat::SeriesFrame,
+        )
+        .unwrap();
+        final_node
+            .to_execution_plan_with_parallelism(
+                vec![(
+                    partial_exec,
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous,
+                )],
+                8,
+            )
+            .unwrap()
+    };
+    let output = collect(build(false), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let schema = output[0].schema();
+    let series = unpack_evaluated_series(
+        Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::iter(output.into_iter().map(Ok)),
+        )),
+        None,
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    let mut values = series
+        .iter()
+        .flat_map(|(series, _)| {
+            assert_eq!(series.metric.get(JOB), Some("api"));
+            assert_eq!(series.metric.get("__type__"), None);
+            assert_eq!(series.metric.get("__unit__"), None);
+            series
+                .time
+                .positions()
+                .zip(series.fields.get(0).unwrap().iter())
+                .map(|((point, _), sample)| {
+                    let datatypes::series::samples::SampleRef::Float(value) = sample else {
+                        panic!("float expected")
+                    };
+                    (point, value)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    values.sort_by_key(|(point, _)| *point);
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0], (0, 1.0));
+    assert_eq!(values[1].0, 1);
+    assert!((values[1].1 - 2.0 / 3.0).abs() < 1e-12);
+    assert!(
+        collect(build(true), SessionContext::default().task_ctx())
+            .await
+            .is_err(),
+        "overlapping metadata-distinct histograms must collide, not mix buckets"
+    );
 }

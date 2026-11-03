@@ -46,18 +46,26 @@ pub(crate) struct Split {
     op: BoundAggregate,
     /// What that aggregate produces: the layout the exported state is indexed by.
     schema: Arc<SeriesSchema>,
+    /// The suffix reads whole histograms rather than individual groups.
+    histogram: bool,
+    /// The suffix rewrites at least one label of the histogram routing key.
+    label_rewrite: bool,
+}
+
+/// Whether every histogram-routing key of this aggregate is necessarily empty.
+pub(crate) fn histogram_group_is_single(group: &Grouping) -> bool {
+    matches!(group, Grouping::By(labels) if labels.iter().all(|label| {
+        crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS.contains(&label.as_ref())
+    }))
 }
 
 /// Splits the innermost aggregate out of `node`.
 ///
-/// `Ok(None)` is a subtree holding no aggregate. What may sit above the cut is only what answers
-/// each group on its own: a map and a binary operation with a constant on one side are point-wise,
-/// so a partition that owns a group computes that group's answer from its own rows. Every other
-/// operation is refused, because the groups a `Final` aggregate owns are split across partitions
-/// and such an operation would have to see all of them: `topk` ranks a whole vector, a second
-/// aggregate folds one, a vector-vector match pairs two, and a classic histogram function reads
-/// the bucket series that share a label set. Those shapes keep the plan the existing route builds
-/// until the boundary each of them needs is planned.
+/// `Ok(None)` is a subtree holding no aggregate. Point-wise operations can run where their groups
+/// are owned. Histogram functions can also run there when the state router co-locates every bucket
+/// and every histogram whose output labels collide. A label rewrite may change that key, so it is
+/// only admitted alongside a histogram when it cannot change a label in the cut's routing key.
+/// `topk`, a second aggregate and vector-vector matching still need a whole-vector boundary.
 ///
 /// An instant selection or window above the cut cannot be applied to the merged values under the
 /// tree's current binding: the cut output is evaluated, whereas these nodes consume raw samples.
@@ -72,6 +80,27 @@ pub(crate) fn split(
             let Some(mut inner) = split(input, fields, time_index)? else {
                 return Ok(None);
             };
+            let changes_key = op.ops.iter().any(|op| {
+                let MapOp::Label(rewrite) = op else {
+                    return false;
+                };
+                let destination = rewrite.destination();
+                !crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS.contains(&destination)
+                    && match &inner.op.group {
+                        Grouping::By(labels) => {
+                            labels.iter().any(|label| label.as_ref() == destination)
+                        }
+                        Grouping::Without(labels) => {
+                            !labels.iter().any(|label| label.as_ref() == destination)
+                        }
+                    }
+            });
+            if changes_key && inner.histogram {
+                return Err(declined(
+                    "a routing-label rewrite around a partitioned histogram",
+                ));
+            }
+            inner.label_rewrite |= changes_key;
             inner.suffix = NativeNode {
                 expr: NativeExpr::Map {
                     input: Box::new(inner.suffix),
@@ -113,14 +142,42 @@ pub(crate) fn split(
                         },
                         op: op.clone(),
                         schema: Arc::clone(schema),
+                        histogram: false,
+                        label_rewrite: false,
                     }))
                 }
             }
         }
-        // A vector operation reads the whole vector at a grid point, and the groups a `Final`
-        // aggregate owns are only part of it.
         NativeExpr::Vector {
-            op: BoundVectorOp::TopK { .. } | BoundVectorOp::Histogram(_),
+            input,
+            op: BoundVectorOp::Histogram(function),
+        } => {
+            let Some(mut inner) = split(input, fields, time_index)? else {
+                return Ok(None);
+            };
+            // Two histogram calls may drop different labels at successive levels (in particular,
+            // a native histogram retains `le`), so the first call's partition key is not enough.
+            if inner.histogram {
+                return Err(declined("nested histograms above a split aggregate"));
+            }
+            if inner.label_rewrite {
+                return Err(declined(
+                    "a routing-label rewrite around a partitioned histogram",
+                ));
+            }
+            inner.histogram = true;
+            inner.suffix = NativeNode {
+                expr: NativeExpr::Vector {
+                    input: Box::new(inner.suffix),
+                    op: BoundVectorOp::Histogram(*function),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
+        }
+        // TopK ranks the whole vector, not one histogram or aggregation group at a time.
+        NativeExpr::Vector {
+            op: BoundVectorOp::TopK { .. },
             ..
         } => Err(declined("a whole-vector operation above a split aggregate")),
         NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
@@ -367,6 +424,8 @@ impl Split {
             suffix,
             op,
             schema,
+            histogram: _,
+            label_rewrite: _,
         } = self;
         let Some((kind, components)) = aggregate_state_binding(op.kind) else {
             return Ok(None);
@@ -420,10 +479,9 @@ impl Split {
 
 /// Puts `merged` at the cut and returns the suffix above it.
 ///
-/// A suffix is the spine of point-wise maps and constant-sided binaries between the cut and the
-/// root, with scalar constants preserved. Aggregates above the cut and vector operations are
-/// refused by `split`, while binary operands admitted there must be scalar constants, so none of
-/// those other shapes can occur here.
+/// A suffix is the spine of point-wise maps, constant-sided binaries and at most one histogram
+/// operation between the cut and the root, with scalar constants preserved. Other whole-vector
+/// operations are refused by `split`.
 fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     let NativeNode { expr, output } = node;
     let rejected = || {
@@ -436,6 +494,13 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
             return Ok(NativeNode { expr, output });
         }
         NativeExpr::Map { input, op } => NativeExpr::Map {
+            input: Box::new(enter_suffix(*input, merged)?),
+            op,
+        },
+        NativeExpr::Vector {
+            input,
+            op: op @ BoundVectorOp::Histogram(_),
+        } => NativeExpr::Vector {
             input: Box::new(enter_suffix(*input, merged)?),
             op,
         },

@@ -78,7 +78,7 @@ use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::metrics::MetricValue;
 use datatypes::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
 use datatypes::arrow::compute::cast;
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::{DataType, TimeUnit};
 use datatypes::series::frame::{FrameContent, SeriesFrameDeclaration};
 use frontend::instance::Instance;
 use promql::extension_plan::{FusedSeriesExec, SeriesRepartitionExec, SeriesRouting};
@@ -1267,86 +1267,26 @@ fn assert_rows(actual: &[ResultRow], expected: &[ResultRow], context: &str) {
     }
 }
 
-/// Asserts both routes report the answer with the same columns.
-///
-/// Compare column names independent of schema order.
-fn assert_same_columns(native: &QueryResult, legacy: &QueryResult, query: &str) {
-    let sorted = |result: &QueryResult| {
-        let mut columns = result.columns.clone();
-        columns.sort();
-        columns
-    };
+/// Asserts the native boundary's ordered names and types, independently of legacy names.
+fn assert_native_columns(native: &QueryResult, tags: &[&str], query: &str) {
+    let mut expected = vec!["ts", "v"];
+    expected.extend_from_slice(tags);
     assert_eq!(
-        sorted(legacy),
-        sorted(native),
-        "`{query}`: native column names must match legacy"
+        expected, native.columns,
+        "`{query}`: native boundary columns"
     );
-}
-
-/// Compare complete name/type pairs independent of schema order.
-fn assert_same_name_types(native: &QueryResult, legacy: &QueryResult, query: &str) {
-    assert_same_name_types_except_count_value(native, legacy, query, false);
-}
-
-/// Compare ordinary native results with legacy, allowing only the documented count value type
-/// difference (legacy Int64 versus native Float64) when the case is an explicit count query.
-fn assert_same_name_types_except_count_value(
-    native: &QueryResult,
-    legacy: &QueryResult,
-    query: &str,
-    count_value_exception: bool,
-) {
-    let sorted = |result: &QueryResult| {
-        let mut columns = result
-            .columns
-            .iter()
-            .cloned()
-            .zip(result.column_types.iter().cloned())
-            .collect::<Vec<_>>();
-        columns.sort_by(|left, right| left.0.cmp(&right.0));
-        columns
-    };
-    if count_value_exception {
-        let value_type = |result: &QueryResult| {
-            result
-                .column_types
-                .iter()
-                .find(|ty| ty.is_numeric())
-                .cloned()
-                .unwrap()
-        };
-        assert_eq!(
-            DataType::Int64,
-            value_type(legacy),
-            "`{query}` legacy count type"
-        );
-        assert_eq!(
-            DataType::Float64,
-            value_type(native),
-            "`{query}` native count type"
-        );
-        let mut legacy_pairs = sorted(legacy);
-        let mut native_pairs = sorted(native);
-        let legacy_value = legacy_pairs
-            .iter()
-            .position(|(_, ty)| *ty == DataType::Int64)
-            .unwrap();
-        let native_value = native_pairs
-            .iter()
-            .position(|(_, ty)| *ty == DataType::Float64)
-            .unwrap();
-        legacy_pairs[legacy_value].1 = DataType::Null;
-        native_pairs[native_value].1 = DataType::Null;
-        assert_eq!(
-            legacy_pairs, native_pairs,
-            "`{query}`: all non-count name/type pairs must match"
-        );
-    } else {
-        assert_eq!(
-            sorted(legacy),
-            sorted(native),
-            "`{query}`: native name/type pairs must match legacy"
-        );
+    assert_eq!(
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+        native.column_types[0],
+        "`{query}`: native time type"
+    );
+    assert_eq!(
+        DataType::Float64,
+        native.column_types[1],
+        "`{query}`: native value type"
+    );
+    for ty in &native.column_types[2..] {
+        assert_eq!(DataType::Utf8, *ty, "`{query}`: native label type");
     }
 }
 
@@ -1721,10 +1661,6 @@ async fn check_two_source_segregation(
     assert_rows(&legacy.rows, expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, promql, true, observer).await;
-    // A segmented statement publishes the same names the existing plan does: the value column is
-    // named after the expression, not after the field the compiled tree calls it. The fused node
-    // itself keeps the compiled name internally, which is what its own output columns are
-    // classified by; only the boundary renames.
     assert_eq!(
         vec![
             "ts".to_string(),
@@ -1735,9 +1671,11 @@ async fn check_two_source_segregation(
         legacy.columns,
         "`{query}`: the legacy plan names the value column after its expression"
     );
-    assert_eq!(
-        legacy.columns, native.columns,
-        "`{query}`: a segmented boundary publishes the statement's names"
+    assert_native_columns(&native, &[], &query);
+    assert_rows(
+        &native.rows,
+        &legacy.rows,
+        &format!("native `{query}` vs legacy"),
     );
     assert_rows(&native.rows, expected, &format!("native `{query}`"));
     let parent_plan = capture
@@ -1832,7 +1770,12 @@ async fn check_nested_aggregate_case(
     assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, &case.promql, true, observer).await;
-    assert_same_name_types(&native, &legacy, &query);
+    assert_native_columns(&native, &[], &query);
+    assert_rows(
+        &native.rows,
+        &legacy.rows,
+        &format!("native `{query}` vs legacy"),
+    );
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
     assert!(
         !capture.fused.is_empty(),
@@ -1855,11 +1798,22 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, promql, true, observer).await;
-    assert_same_name_types_except_count_value(
-        &native,
-        &legacy,
-        &query,
-        promql.starts_with("count "),
+    let tags = case.expected[0]
+        .labels
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_native_columns(&native, &tags, &query);
+    if promql.starts_with("count ") {
+        assert!(
+            legacy.column_types.contains(&DataType::Int64),
+            "`{query}` legacy count type"
+        );
+    }
+    assert_rows(
+        &native.rows,
+        &legacy.rows,
+        &format!("native `{query}` vs legacy"),
     );
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
 
@@ -2350,17 +2304,10 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     }
 }
 
-/// A histogram function above the cut keeps the segmented route, and answers what one execution does.
-///
-/// The function needs every bucket group of one label set, and a `Final` partition owns only its own
-/// groups, so the split declines this shape: no `Partial` state is exported and no `Final` merge
-/// runs. The statement keeps the existing segmentation, where the aggregate runs `Complete` in one
-/// parent segment. The trade is measured in the PR description: the boundary then carries evaluated
-/// series (one per bucket series) instead of group state (one per distinct `le`). This test pins the
-/// route that is taken and the answer it produces, so a future boundary that restores group-state
-/// crossing has to change the assertion deliberately.
+/// Histogram functions above the cut merge Partial state before evaluating the complete buckets.
+/// Routing excludes `le` so each histogram's bucket groups meet on the same Final owner.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_histogram_quantile_over_the_cut_falls_back_to_the_segmented_route() {
+async fn native_histogram_over_the_cut_splits_and_matches_legacy() {
     common_telemetry::init_default_ut_logging();
 
     let observer = Arc::new(NativePlanObserver::default());
@@ -2379,19 +2326,36 @@ async fn native_histogram_quantile_over_the_cut_falls_back_to_the_segmented_rout
 
     // A histogram function above the cut is admitted because the merge has already folded every
     // partition's `(..., le)` group into one complete series, so the buckets it reads are the ones
-    // the statement's input would have produced in one execution. That claim is checked here on the
-    // rows two real executions report, not on a plan: the bucket series of [`HIST_SERIES`] are
-    // spread over several files and a memtable range, and both routes compute real rates over them.
+    // the statement's input would have produced in one execution. That claim is checked on the rows
+    // two real executions report, in addition to the split plans: the bucket series of [`HIST_SERIES`]
+    // are spread over several files and a memtable range, and both routes compute real rates over them.
     // The quantiles cover the two ends of the classic interpolation - 0.99's rank is above the last
     // finite bucket's, where the answer is that bucket's upper bound rather than an interpolation,
     // and 0.5 interpolates inside the first bucket - and the fraction reads the same buckets a third
     // way.
     let queries = [
-        format!("histogram_quantile(0.99, sum by (le) (rate({HIST_TABLE}[5m])))"),
-        format!("histogram_quantile(0.5, sum by (le) (rate({HIST_TABLE}[5m])))"),
-        format!("histogram_fraction(0.0, 1.0, sum by (le) (rate({HIST_TABLE}[5m])))"),
+        (
+            format!("histogram_quantile(0.99, sum by (le) (rate({HIST_TABLE}[5m])))"),
+            true,
+        ),
+        (
+            format!("histogram_quantile(0.5, sum by (le) (rate({HIST_TABLE}[5m])))"),
+            true,
+        ),
+        (
+            format!("histogram_fraction(0.0, 1.0, sum by (le) (rate({HIST_TABLE}[5m])))"),
+            true,
+        ),
+        (
+            format!("histogram_quantile(0.99, sum by (le, job) (rate({HIST_TABLE}[5m])))"),
+            false,
+        ),
+        (
+            format!("histogram_fraction(0.0, 1.0, sum by (le, job) (rate({HIST_TABLE}[5m])))"),
+            false,
+        ),
     ];
-    for promql in &queries {
+    for (promql, single_owner) in &queries {
         let query = tql_eval(promql);
         let (legacy, legacy_capture) = run_query(&instance, promql, false, &observer).await;
         assert!(
@@ -2408,27 +2372,37 @@ async fn native_histogram_quantile_over_the_cut_falls_back_to_the_segmented_rout
             "`{query}`: the fixture must produce a value on the complete input, otherwise the two \
              routes would agree on nothing"
         );
+        if !*single_owner {
+            assert_eq!(
+                vec![Some("a"), Some("b")],
+                legacy
+                    .rows
+                    .iter()
+                    .map(|row| row.labels.get("job").map(String::as_str))
+                    .collect::<Vec<_>>(),
+                "`{query}`: the grouped fixture must retain both histogram owners"
+            );
+        }
 
         let mark = observer.mark();
         let (native, capture) = run_query(&instance, promql, true, &observer).await;
-        // Declined on purpose: a `Final` partition owns only its own groups, so a histogram function
-        // that reads every bucket of a label set cannot run there. Nothing partial may be exported
-        // either, or the statement would be answering from incomplete state.
         assert!(
-            capture.finalize.is_empty(),
-            "`{query}`: a whole-vector suffix must not split, but the native run merged {} Final \
-             nodes over {} fused producers",
-            capture.finalize.len(),
-            capture.fused.len()
+            !capture.finalize.is_empty(),
+            "`{query}`: a histogram suffix must run above a Final aggregate"
         );
-        for fused in &capture.fused {
-            let plan = displayable(fused.as_ref()).indent(false).to_string();
-            assert!(
-                !plan.contains(" partial"),
-                "`{query}`: a declined suffix must not export aggregate state:\n{plan}"
-            );
-        }
-        assert_same_columns(&native, &legacy, &query);
+        let partial = capture
+            .fused
+            .iter()
+            .find(|fused| NodeDisplay(fused.as_ref()).to_string().contains(" partial"))
+            .unwrap_or_else(|| panic!("`{query}`: no Partial state producer found"));
+        assert_finalize_reads_region_state(
+            &capture.finalize[0],
+            partial,
+            *single_owner,
+            &format!("native `{query}`"),
+        );
+        let tags: &[&str] = if *single_owner { &[] } else { &["job"] };
+        assert_native_columns(&native, tags, &query);
         // The equivalence the admission rests on: the rows the same statement reports over the
         // complete input, labels included.
         assert_rows(
@@ -2647,7 +2621,7 @@ async fn native_bare_selector_aggregate_value_columns() {
     ];
     for (promql, expected, single_owner, expected_values) in cases {
         let query = tql_eval(&promql);
-        let (legacy_names, legacy_types, legacy_rows, legacy_capture) =
+        let (_legacy_names, legacy_types, legacy_rows, legacy_capture) =
             read(&instance, &observer, &promql, false).await;
         assert!(
             legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty(),
@@ -2661,22 +2635,35 @@ async fn native_bare_selector_aggregate_value_columns() {
         let mark = observer.mark();
         let (native_names, native_types, native_rows, capture) =
             read(&instance, &observer, &promql, true).await;
-        // Column order is not part of the answer the two routes must agree on; the existing
-        // harness compares the same way. Names must still pair with the same types.
-        let pairs = |names: &[String], types: &[DataType]| {
-            let mut pairs = names
-                .iter()
-                .cloned()
-                .zip(types.iter().cloned())
-                .collect::<Vec<_>>();
-            pairs.sort_by(|left, right| left.0.cmp(&right.0));
-            pairs
+        let expected_names = match (expected_values, single_owner) {
+            (1, true) => vec!["ts", "v"],
+            (1, false) => vec!["ts", "v", "job"],
+            (2, true) => vec!["ts", "a", "b"],
+            (2, false) => vec!["ts", "a", "b", "job"],
+            _ => unreachable!(),
         };
         assert_eq!(
-            pairs(&legacy_names, &legacy_types),
-            pairs(&native_names, &native_types),
-            "`{query}` column name/type pairs"
+            expected_names, native_names,
+            "`{query}` native boundary columns"
         );
+        assert_eq!(
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            native_types[0],
+            "`{query}` native time type"
+        );
+        assert!(
+            native_types[1..=expected_values]
+                .iter()
+                .all(|ty| *ty == DataType::Float64),
+            "`{query}` native value types"
+        );
+        if !single_owner {
+            assert_eq!(
+                DataType::Utf8,
+                native_types[expected_values + 1],
+                "`{query}` native label type"
+            );
+        }
         assert_eq!(
             expected_values,
             native_types.iter().filter(|t| t.is_numeric()).count(),

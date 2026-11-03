@@ -2494,23 +2494,19 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
             let legacy_rows = legacy.iter().map(|batch| batch.num_rows()).sum::<usize>();
             assert_eq!(native_rows, legacy_rows);
             assert!(native_rows >= 1, "histogram_quantile must produce data");
-            assert_eq!(native_columns.len(), legacy_columns.len());
-            assert_eq!(native_value_index, legacy_value_index);
-            for (index, (native_column, legacy_column)) in
-                native_columns.iter().zip(legacy_columns).enumerate()
-            {
-                if index == native_value_index {
-                    assert_ne!(native_column.name, legacy_column.name);
-                    assert_eq!(native_column.name, "val");
-                    assert_eq!(
-                        legacy_column.name,
-                        "prom_rate(ts_range,val,ts,Int64(20000))"
-                    );
-                } else {
-                    assert_eq!(native_column.name, legacy_column.name);
-                    assert_eq!(native_column.data_type, legacy_column.data_type);
-                }
-            }
+            assert_eq!(
+                vec!["ts", "val", "host"],
+                native_columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>(),
+                "{shape}: native boundary columns"
+            );
+            assert_eq!(native_value_index, 1, "{shape}: native value position");
+            assert_eq!(
+                legacy_columns[legacy_value_index].name,
+                "prom_rate(ts_range,val,ts,Int64(20000))"
+            );
             assert_eq!(
                 native_columns[native_value_index].data_type,
                 legacy_columns[legacy_value_index].data_type
@@ -2519,11 +2515,16 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
                 .iter()
                 .flat_map(|batch| {
                     let timestamps = batch
-                        .column(0)
+                        .column_by_name("ts")
+                        .unwrap()
                         .as_any()
                         .downcast_ref::<TimestampMillisecondArray>()
                         .unwrap();
-                    let labels = cast(batch.column(1).as_ref(), &DataType::Utf8).unwrap();
+                    let labels = cast(
+                        batch.column_by_name("host").unwrap().as_ref(),
+                        &DataType::Utf8,
+                    )
+                    .unwrap();
                     let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
                     let values = cast(
                         batch.column(native_value_index).as_ref(),
@@ -2546,11 +2547,16 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
                 .iter()
                 .flat_map(|batch| {
                     let timestamps = batch
-                        .column(0)
+                        .column_by_name("ts")
+                        .unwrap()
                         .as_any()
                         .downcast_ref::<TimestampMillisecondArray>()
                         .unwrap();
-                    let labels = cast(batch.column(1).as_ref(), &DataType::Utf8).unwrap();
+                    let labels = cast(
+                        batch.column_by_name("host").unwrap().as_ref(),
+                        &DataType::Utf8,
+                    )
+                    .unwrap();
                     let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
                     let values = cast(
                         batch.column(legacy_value_index).as_ref(),
@@ -5257,14 +5263,16 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
             value,
         )
     };
-    for (query, expected) in [
+    for (query, expected, expected_columns) in [
         (
             "sum(native_pair_demo) / sum(native_pair_other)",
             vec![(0, std::collections::BTreeMap::new(), 0.375)],
+            vec!["ts", "val"],
         ),
         (
             "sum by (host) (native_pair_demo) / sum by (host) (native_pair_other)",
             vec![grouped("a", 0.25), grouped("b", 0.5)],
+            vec!["ts", "val", "host"],
         ),
     ] {
         let sql = format!("TQL EVAL (0, 0, '1s') {query}");
@@ -5288,11 +5296,24 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // per region. Each segment binds its own source's metric, which is what makes the division
         // read two different metrics rather than one read twice.
         observer.clear();
-        let (native_columns, native_rows) =
-            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let native_output = native_tql_output(&instance, &sql, true).await;
+        // Check the actual output schema before the row reader sorts the columns.
+        let schema = match &native_output.data {
+            OutputData::Stream(stream) => stream.schema(),
+            OutputData::RecordBatches(batches) => batches.schema(),
+            _ => unreachable!("TQL EVAL returns record batches"),
+        };
+        let boundary_columns = schema
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected_columns, boundary_columns,
+            "{query}: native boundary columns"
+        );
+        let (native_columns, native_rows) = native_labelled_rows(native_output).await;
         let root = observer.root_plan();
-        // A segmented statement publishes the statement's own column names from one projection over
-        // the fused parent; anything else above the parent would be a different plan shape.
         let fused_parent = if root.name() == "ProjectionExec" {
             let children = root.children();
             assert_eq!(
@@ -5360,13 +5381,6 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         assert_eq!(native_rows, legacy_rows, "{query}: rows");
         assert_eq!(native_rows, expected, "{query}");
 
-        // The columns both routes report: the time index, one value column, and one column per
-        // label. The value column is named after the expression on both, because the boundary
-        // renames the field the node computes internally.
-        assert_eq!(
-            native_columns, legacy_columns,
-            "{query}: the boundary publishes the statement's column names"
-        );
         assert!(
             legacy_columns.iter().any(|column| column == "ts"),
             "{query}"

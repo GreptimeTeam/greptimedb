@@ -99,6 +99,13 @@ enum Change {
 }
 
 impl LabelRewrite {
+    /// The label this rewrite may change.
+    pub(crate) fn destination(&self) -> &str {
+        match &self.0 {
+            Change::Replace { dst, .. } | Change::Join { dst, .. } => dst,
+        }
+    }
+
     /// `label_replace`'s change, failing on an invalid expression or an empty destination.
     pub fn replace(dst: &str, replacement: &str, src: &str, regex: &str) -> Result<Self> {
         let compiled = Regex::new(&format!("^(?s:{regex})$")).map_err(|_| {

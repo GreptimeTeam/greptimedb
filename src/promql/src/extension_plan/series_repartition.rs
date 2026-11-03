@@ -156,6 +156,8 @@ use datatypes::series::samples::DenseSamplesRef;
 pub enum SeriesRouting {
     /// Hash the canonical label set.
     CanonicalLabels,
+    /// Hash the canonical label set without these labels, including an excluded metric name.
+    CanonicalLabelsExcept(Arc<[Arc<str>]>),
     /// Hash the exact PromQL matching key, so both sides of a vector operation meet.
     Matching(crate::vector_match::MatchingLabels),
     /// Route raw frames by their complete stored primary key.
@@ -303,14 +305,21 @@ impl SeriesRepartitionExec {
                     "SeriesRepartition evaluated frames cannot use RawPrimaryKey routing".into(),
                 ));
             }
-            (FrameContent::Raw, SeriesRouting::CanonicalLabels) => {
+            (
+                FrameContent::Raw,
+                SeriesRouting::CanonicalLabels | SeriesRouting::CanonicalLabelsExcept(_),
+            ) => {
                 return Err(DataFusionError::Plan(
                     "SeriesRepartition raw frames cannot use CanonicalLabels routing".into(),
                 ));
             }
-            (FrameContent::AggregateState, SeriesRouting::RawPrimaryKey) => {
+            (
+                FrameContent::AggregateState,
+                SeriesRouting::RawPrimaryKey | SeriesRouting::Matching(_),
+            ) => {
                 return Err(DataFusionError::Plan(
-                    "SeriesRepartition aggregate-state frames require canonical labels".into(),
+                    "SeriesRepartition aggregate-state frames require canonical-label routing"
+                        .into(),
                 ));
             }
             _ => {}
@@ -1150,10 +1159,16 @@ async fn read_state_batches(
             )));
         }
         let charge = read_ahead.new_empty();
-        // Charge what this batch's own rows need, not the buffers it borrows: a batch that is
-        // already a one-row slice of a router above would otherwise be charged for that whole
-        // parent, once per row.
-        if let Err(error) = charge.try_grow(crate::native::state::batch_slice_bytes(&batch)) {
+        // Charge the input batch's retained buffers once. List slices still reference their entire
+        // values array, so a slice-size estimate cannot safely charge each queued row instead.
+        let batch_bytes = std::mem::size_of::<RecordBatch>()
+            .saturating_add(
+                batch
+                    .num_columns()
+                    .saturating_mul(std::mem::size_of::<datafusion::arrow::array::ArrayRef>()),
+            )
+            .saturating_add(batch.get_array_memory_size());
+        if let Err(error) = charge.try_grow(batch_bytes) {
             return Stop::Failed(Arc::new(error));
         }
         let labels = match decoder.decode_aggregate_state_labels(&batch) {
@@ -1164,6 +1179,34 @@ async fn read_state_batches(
         };
         let charge = Arc::new(charge);
         let batch = Arc::new(batch);
+        if routing.outputs == 1 {
+            // Every row has the same owner. Keep the frame packed so a downstream router reads
+            // its shared payload once rather than receiving one parent-retaining slice per row.
+            if !labels.is_empty() && !senders[0].is_closed() {
+                let metadata = read_ahead.new_empty();
+                // Cloning the batch for the output allocates a new column-reference vector.
+                let wrapper_bytes = std::mem::size_of::<Queued>()
+                    .saturating_add(std::mem::size_of::<RecordBatch>())
+                    .saturating_add(
+                        batch.num_columns().saturating_mul(std::mem::size_of::<
+                            datafusion::arrow::array::ArrayRef,
+                        >()),
+                    );
+                if let Err(error) = metadata.try_grow(wrapper_bytes) {
+                    return Stop::Failed(Arc::new(error));
+                }
+                if let Err(error) = senders[0].send(Queued::StateBatch {
+                    batch,
+                    row: None,
+                    _charge: charge,
+                    _metadata: metadata,
+                }) {
+                    drop(error.0);
+                }
+            }
+            tokio::task::coop::consume_budget().await;
+            continue;
+        }
         // Each queued row receives a reservation for the schema-based slice-wrapper upper bound.
         let slice_charge = match state_slice_wrapper_bytes(batch.schema().as_ref()) {
             Ok(bytes) => bytes,
@@ -1189,7 +1232,7 @@ async fn read_state_batches(
             }
             if let Err(error) = senders[output].send(Queued::StateBatch {
                 batch: Arc::clone(&batch),
-                row: index,
+                row: Some(index),
                 _charge: Arc::clone(&charge),
                 _metadata: metadata,
             }) {
@@ -1734,7 +1777,8 @@ enum Queued {
     },
     StateBatch {
         batch: Arc<RecordBatch>,
-        row: usize,
+        // None forwards the entire parent; Some selects one row for multi-output routing.
+        row: Option<usize>,
         _charge: Arc<MemoryReservation>,
         _metadata: MemoryReservation,
     },
@@ -2016,7 +2060,11 @@ impl Stream for StateBatchOutputStream {
                     // Keep the router reservation through the next poll so Final can admit the
                     // returned batch's retained component arrays before releasing router charge.
                     self.retained = Some((_charge, _metadata));
-                    return Poll::Ready(Some(Ok(batch.slice(row, 1))));
+                    let batch = match row {
+                        Some(row) => batch.slice(row, 1),
+                        None => batch.as_ref().clone(),
+                    };
+                    return Poll::Ready(Some(Ok(batch)));
                 }
                 Poll::Ready(Some(Queued::Eof { input, _metadata })) => {
                     // The shared Ending state and channel closure establish stream completion;
@@ -2601,6 +2649,11 @@ impl Routing {
         let mut hasher = XxHash64::with_seed(self.seed);
         match &self.policy {
             SeriesRouting::CanonicalLabels => label_set(metric).hash(&mut hasher),
+            SeriesRouting::CanonicalLabelsExcept(excluded) => {
+                let mut labels = label_set(metric);
+                labels.retain(|(name, _)| !excluded.contains(name));
+                labels.hash(&mut hasher);
+            }
             SeriesRouting::Matching(policy) => {
                 crate::vector_match::group_key(metric, policy).hash(&mut hasher)
             }

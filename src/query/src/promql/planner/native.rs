@@ -74,7 +74,6 @@ use crate::promql::native_compile::{
     InfoInput, compile_selectors, compile_statement, constant_value, info_input, statement_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
-use crate::query_engine::QueryEngineState;
 
 /// The query-context key that turns the native fused-series route on for one query.
 ///
@@ -157,7 +156,6 @@ impl PromPlanner {
     pub(super) async fn try_plan_native_operand(
         &mut self,
         expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
         // This route hands the caller a selector's planner context, which is what its field
         // columns and tags are read from. An expression whose output layout is not that selector's
@@ -166,10 +164,7 @@ impl PromPlanner {
             return Ok(None);
         }
         let saved = self.ctx.clone();
-        let (plan, operand_ctx) = match self
-            .try_plan_native_fused_with_context(expr, query_engine_state)
-            .await?
-        {
+        let (plan, operand_ctx) = match self.try_plan_native_fused_with_context(expr).await? {
             Some((plan, Some(operand_ctx))) => (plan, operand_ctx),
             _ => {
                 self.ctx = saved;
@@ -225,10 +220,9 @@ impl PromPlanner {
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
         Ok(self
-            .try_plan_native_fused_with_context(prom_expr, query_engine_state)
+            .try_plan_native_fused_with_context(prom_expr)
             .await?
             .map(|(plan, _)| plan))
     }
@@ -236,7 +230,6 @@ impl PromPlanner {
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, Option<super::PromPlannerContext>)>> {
         if !self.native_fused {
             return Ok(None);
@@ -674,9 +667,8 @@ impl PromPlanner {
         if multi_input && depends_on_input_order(root) {
             return Ok(None);
         }
-        // The split names the columns its groups report from the existing planner. A grouping by the
-        // metric name keeps a label no column of the existing plan can name, so the schema the node
-        // declares would report one label set for groups the tree keeps apart.
+        // A grouping by the metric name keeps a label no output column can name, so the schema the
+        // node declares would report one label set for groups the tree keeps apart.
         if multi_input && groups_by_metric_name(root) {
             return Ok(None);
         }
@@ -714,36 +706,10 @@ impl PromPlanner {
                 None
             };
             if let Some((partial, final_tree)) = split {
-                let native_fields = match &final_tree.root().output {
-                    NativeType::Samples(schema) => schema
-                        .fields
-                        .iter()
-                        .map(|field| field.name.to_string())
-                        .collect::<Vec<_>>(),
-                    NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-                    NativeType::AggregateState(_) => return Ok(None),
-                };
-                let Some(native_tags) = fused_output_tags(final_tree.root(), &source_tags) else {
+                let Some(output_schema) = Self::fused_root_schema(&final_tree, &source_tags, &time)
+                else {
                     return Ok(None);
                 };
-                // Naming is optional for native-admitted expressions: unsupported legacy shapes
-                // keep their native root field names rather than losing native admission.
-                let output_fields = match self
-                    .legacy_output_columns(prom_expr, query_engine_state)
-                    .await
-                {
-                    Ok((legacy_fields, legacy_tags))
-                        if same_names(&native_tags, &legacy_tags)
-                            && legacy_fields.len() == native_fields.len() =>
-                    {
-                        legacy_fields
-                    }
-                    _ => native_fields.clone(),
-                };
-                // The Final node's row converter binds the native tree's field names. Alias only
-                // above it; declaring legacy names here makes the projection miss native fields
-                // and would also prevent the physical node from classifying its output.
-                let output_schema = fused_output_schema(&native_fields, &native_tags, &time)?;
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
@@ -763,15 +729,6 @@ impl PromPlanner {
                 let plan = LogicalPlan::Extension(Extension {
                     node: Arc::new(node),
                 });
-                let Some(plan) = native_naming_projection(
-                    &plan,
-                    &native_fields,
-                    &output_fields,
-                    &native_tags,
-                    &time,
-                ) else {
-                    return Ok(None);
-                };
                 return Ok(Some((plan, single_input_context)));
             }
             // Preserve the established refusal for repeated same-table operands unless
@@ -782,9 +739,7 @@ impl PromPlanner {
         }
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
-            let plan = Box::pin(segment_tree(
-                self,
-                query_engine_state,
+            let plan = segment_tree(
                 prom_expr,
                 &compiled.tree,
                 &children,
@@ -795,8 +750,7 @@ impl PromPlanner {
                 &time,
                 &tags,
                 &segment_metric,
-            ))
-            .await?;
+            )?;
             if let Some(plan) = plan {
                 return Ok(Some((plan, single_input_context)));
             }
@@ -875,33 +829,6 @@ impl PromPlanner {
         )))
     }
 
-    /// The field and tag columns the *existing* planner names for `prom_expr`.
-    ///
-    /// The names are read off the plan the existing path builds for the same statement, and that
-    /// plan is then dropped: it is never executed and never stored, so the batch that answers the
-    /// query is the native route's own. A statement the existing planner cannot plan fails here the
-    /// same way it fails there, because the existing plan is the answer for this statement: an error
-    /// planning it is the error the statement has, whichever route asked.
-    ///
-    /// Only the planner context is saved and restored: the table provider's resolved-table cache
-    /// keeps the entries this speculative planning resolved, exactly as the aggregate-split branch,
-    /// which planned the same way before this helper existed, always did.
-    async fn legacy_output_columns(
-        &mut self,
-        prom_expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
-    ) -> Result<(Vec<String>, Vec<String>)> {
-        let saved = self.ctx.clone();
-        let planned = self
-            .prom_root_expr_to_plan(prom_expr, query_engine_state)
-            .await;
-        let legacy_fields = self.ctx.field_columns.clone();
-        let legacy_tags = self.ctx.tag_columns.clone();
-        self.ctx = saved;
-        drop(planned?);
-        Ok((legacy_fields, legacy_tags))
-    }
-
     /// The columns a [`FusedSeries`] node over `tree` produces.
     ///
     /// Field and tag names are derived from the native tree. If this walk cannot derive a tag
@@ -919,6 +846,7 @@ impl PromPlanner {
             NativeType::Samples(_) => fused_output_tags(tree.root(), source_tags)?,
             NativeType::AggregateState(_) => return None,
         };
+        // Names come from the native tree; #10093 will supply expression-derived names.
         let root_fields = match &tree.root().output {
             NativeType::Samples(schema) => schema
                 .fields
@@ -1410,9 +1338,7 @@ fn build_inner_segment(
 /// The cut is the physical planner's own classification of the same subtrees, so a plan this
 /// produces is one the physical planner would otherwise have had to gather as a whole.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-async fn segment_tree(
-    planner: &mut PromPlanner,
-    query_engine_state: &QueryEngineState,
+fn segment_tree(
     prom_expr: &PromExpr,
     tree: &NativeTree,
     children: &[LogicalPlan],
@@ -1439,12 +1365,6 @@ async fn segment_tree(
     if children.len() > 1 && groups_by_metric_name(tree.root()) {
         return Ok(None);
     }
-    // A native-admitted statement remains answerable when the legacy planner cannot name it;
-    // only that statement falls back to the native root field names.
-    let legacy_names = planner
-        .legacy_output_columns(prom_expr, query_engine_state)
-        .await
-        .ok();
     let mut current_tree = tree.clone();
     let mut current_children = children.to_vec();
     let mut current_tags = source_tags.to_vec();
@@ -1543,107 +1463,13 @@ async fn segment_tree(
             metric_name: metric.clone(),
         },
         inputs,
-        Arc::clone(&output_schema),
+        output_schema,
     ) else {
         return Ok(None);
     };
-    let plan = LogicalPlan::Extension(Extension {
+    Ok(Some(LogicalPlan::Extension(Extension {
         node: Arc::new(plan),
-    });
-    let root_fields = match &tree.root().output {
-        NativeType::Samples(schema) => schema
-            .fields
-            .iter()
-            .map(|field| field.name.to_string())
-            .collect::<Vec<_>>(),
-        NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-        NativeType::AggregateState(_) => return Ok(Some(plan)),
-    };
-    // `fused_root_schema` publishes the time column, then the root fields, then the tags, so the
-    // tag names are what remains once those are removed.
-    let native_tags = output_schema
-        .fields()
-        .iter()
-        .map(|field| field.name())
-        .filter(|name| name.as_str() != time_index && !root_fields.iter().any(|f| f == *name))
-        .cloned()
-        .collect::<Vec<_>>();
-    let (output_fields, _output_tags) = match legacy_names {
-        Some((legacy_fields, legacy_tags))
-            if same_names(&native_tags, &legacy_tags)
-                && legacy_fields.len() == root_fields.len() =>
-        {
-            (legacy_fields, legacy_tags)
-        }
-        _ => (root_fields.clone(), native_tags.clone()),
-    };
-    let Some(projected) = native_naming_projection(
-        &plan,
-        &root_fields,
-        &output_fields,
-        &native_tags,
-        time_index,
-    ) else {
-        return Ok(None);
-    };
-    Ok(Some(projected))
-}
-
-fn same_names(left: &[String], right: &[String]) -> bool {
-    left.len() == right.len()
-        && left.iter().collect::<std::collections::HashSet<_>>().len() == left.len()
-        && right.iter().collect::<std::collections::HashSet<_>>().len() == right.len()
-        && left.iter().all(|name| right.contains(name))
-}
-
-/// Applies legacy value names to native root columns without changing tag identity.
-fn native_naming_projection(
-    plan: &LogicalPlan,
-    native_fields: &[String],
-    legacy_fields: &[String],
-    native_tags: &[String],
-    time_index: &str,
-) -> Option<LogicalPlan> {
-    if native_fields.len() != legacy_fields.len() {
-        return None;
-    }
-    let mut names = std::collections::HashSet::new();
-    if !std::iter::once(time_index)
-        .chain(native_fields.iter().map(String::as_str))
-        .chain(native_tags.iter().map(String::as_str))
-        .all(|name| names.insert(name))
-    {
-        return None;
-    }
-    let mut unique_legacy = std::collections::HashSet::new();
-    if !legacy_fields.iter().all(|name| {
-        unique_legacy.insert(name.as_str()) && name != time_index && !native_tags.contains(name)
-    }) {
-        return None;
-    }
-    let schema = plan.schema();
-    let mut projection = Vec::with_capacity(schema.fields().len());
-    for (qualifier, field) in schema.iter() {
-        let name = field.name();
-        let expr = if let Some(index) = native_fields.iter().position(|native| native == name) {
-            DfExpr::Column(datafusion::prelude::Column::new(qualifier.cloned(), name))
-                .alias(legacy_fields.get(index)?.clone())
-        } else {
-            DfExpr::Column(datafusion::prelude::Column::new(qualifier.cloned(), name))
-        };
-        projection.push(expr);
-    }
-    if native_fields
-        .iter()
-        .any(|name| schema.index_of_column_by_name(None, name).is_none())
-    {
-        return None;
-    }
-    LogicalPlanBuilder::from(plan.clone())
-        .project(projection)
-        .ok()?
-        .build()
-        .ok()
+    })))
 }
 
 /// The columns a [`FusedSeries`] node produces.

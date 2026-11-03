@@ -87,6 +87,7 @@ use table::table::scan::SeriesScanExec;
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
+use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateStage, Grouping, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -666,6 +667,11 @@ impl FusedSeries {
             .any(|input| matches!(input.output, NativeType::AggregateState(_)))
     }
 
+    /// The routing policy required by this node's Final aggregate, if it reads state.
+    pub fn state_routing_policy(&self) -> Option<SeriesRouting> {
+        state_routing(self.tree.root()).map(|(_, policy)| policy)
+    }
+
     /// The compiled tree this node runs.
     pub fn tree(&self) -> &NativeTree {
         &self.tree
@@ -775,30 +781,35 @@ impl FusedSeries {
                     ));
                 }
                 if declaration.content() == FrameContent::AggregateState {
-                    // State routing is its own path: a `Final` aggregate reads the rows of one group
-                    // in whatever order they arrive, so it needs every row of every group to reach
-                    // one owner, not the matching-key classes a label match co-locates.
-                    let group = state_group.ok_or_else(|| {
+                    // Final folds every row of each original group on one owner. A histogram suffix
+                    // additionally requires related groups on that same owner; the policy is
+                    // derived from the Final grouping and the suffix, not matching-key classes.
+                    let (group, policy) = state_group.as_ref().ok_or_else(|| {
                         DataFusionError::Plan(
                             "FusedSeries reads aggregate state but holds no Final aggregate".into(),
                         )
                     })?;
                     let count = input.properties().partitioning.partition_count();
-                    // One group has one owner: two would be two partial folds of one answer. More
-                    // than one group splits the work the way the session asks, and a caller that
-                    // names no width keeps the width the producers already have.
+                    // One routing key needs only one owner. Multiple keys split work the way the
+                    // session asks; an unspecified width preserves the producers' width.
                     let required = match group {
                         StateGroup::Single => 1,
                         StateGroup::Grouped => target_partitions.unwrap_or(count).max(1),
                     };
-                    let has_router = input
-                        .downcast_ref::<SeriesRepartitionExec>()
-                        .is_some_and(|router| router.outputs() == required);
+                    let has_router =
+                        input
+                            .downcast_ref::<SeriesRepartitionExec>()
+                            .is_some_and(|router| {
+                                router.outputs() == required && router.routing_policy() == policy
+                            });
                     if count == required && (has_router || required == 1) {
                         return Ok((input, label_source, ordering));
                     }
-                    let routed = Arc::new(SeriesRepartitionExec::try_new(input, required)?)
-                        as Arc<dyn ExecutionPlan>;
+                    let routed = Arc::new(SeriesRepartitionExec::try_new_with_routing(
+                        input,
+                        required,
+                        policy.clone(),
+                    )?) as Arc<dyn ExecutionPlan>;
                     let ordering = series_frame_ordering(routed.schema().as_ref())?;
                     return Ok((routed, RawLabelSource::Explicit, ordering));
                 }
@@ -957,10 +968,16 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
     fn fmt_for_explain(&self, f: &mut Formatter) -> fmt::Result {
         match self.format {
             FusedOutputFormat::SeriesFrame => {
-                write!(f, "FusedSeries: {} (output: series_frame)", self.promql)
+                write!(f, "FusedSeries: {} (output: series_frame)", self.promql)?
             }
-            FusedOutputFormat::PlainRows => write!(f, "FusedSeries: {}", self.promql),
+            FusedOutputFormat::PlainRows => write!(f, "FusedSeries: {}", self.promql)?,
         }
+        if let Some((_, SeriesRouting::CanonicalLabelsExcept(excluded))) =
+            state_routing(self.tree.root())
+        {
+            write!(f, " (state routing: canonical labels except {excluded:?})")?;
+        }
+        Ok(())
     }
 
     fn with_exprs_and_inputs(
@@ -1461,40 +1478,63 @@ fn tree_inputs_for_locality(root: &NativeNode) -> Vec<&crate::native::plan::Boun
     inputs
 }
 
-/// The grouping a `Final` aggregate over state routes by, and how many owners it needs.
+/// The owner count and routing policy required by a Final aggregate and its suffix.
 ///
-/// A tree whose input is aggregate state holds exactly one such aggregate: the `Final` the split
-/// put at the cut. Its grouping is the key a router sends the rows of a group by, and its own
-/// arity decides how many owners there are to have - a single group needs one, since two would be
-/// two partial folds of the same answer - so the width is fixed here at plan time rather than
-/// coalesced after the fact. The walk only answers the aggregate; whether this tree reads state at
-/// all is the input frame declaration's business.
-fn state_routing(root: &NativeNode) -> Option<StateGroup> {
-    fn find(node: &NativeNode) -> Option<&Grouping> {
+/// State rows already carry the cut's full group labels. Histogram suffixes need a coarser key:
+/// every bound of one histogram and every histogram whose metadata-free outputs collide must
+/// meet, while the Final kernel still folds separately by the original group labels.
+fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
+    fn find(node: &NativeNode, histogram: bool) -> Option<(&Grouping, bool)> {
         match &node.expr {
             NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final => {
-                Some(&op.group)
+                Some((&op.group, histogram))
             }
+            NativeExpr::Vector { input, op } => find(
+                input,
+                histogram || matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)),
+            ),
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
-            | NativeExpr::Vector { input, .. }
             | NativeExpr::VectorOf { input }
             | NativeExpr::ParameterizedMap { input, .. }
-            | NativeExpr::Aggregate { input, .. } => find(input),
+            | NativeExpr::Aggregate { input, .. } => find(input, histogram),
             NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-                find(left).or_else(|| find(right))
+                find(left, histogram).or_else(|| find(right, histogram))
             }
-            NativeExpr::Info { base, info, .. } => find(base).or_else(|| find(info)),
+            NativeExpr::Info { base, info, .. } => {
+                find(base, histogram).or_else(|| find(info, histogram))
+            }
             NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => None,
         }
     }
-    Some(match find(root)? {
-        Grouping::By(labels) if labels.is_empty() => StateGroup::Single,
-        _ => StateGroup::Grouped,
-    })
+    let (group, histogram) = find(root, false)?;
+    if histogram {
+        let owners = if crate::native::split::histogram_group_is_single(group) {
+            StateGroup::Single
+        } else {
+            StateGroup::Grouped
+        };
+        Some((
+            owners,
+            SeriesRouting::CanonicalLabelsExcept(
+                HISTOGRAM_ROUTING_EXCLUDED_LABELS
+                    .iter()
+                    .copied()
+                    .map(Arc::from)
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        ))
+    } else {
+        let owners = match group {
+            Grouping::By(labels) if labels.is_empty() => StateGroup::Single,
+            _ => StateGroup::Grouped,
+        };
+        Some((owners, SeriesRouting::CanonicalLabels))
+    }
 }
 
 /// How many owners the groups of a state input have to be split across.
@@ -2150,6 +2190,24 @@ impl FusedSeriesExec {
             // the `Final` aggregate folds that group's whole contribution where it arrives. Any
             // other global input has no such owner and has to be gathered.
             let state = source_kinds[index] == FusedInputKind::AggregateState;
+            if state && count > 1 {
+                let (owners, policy) = state_routing(tree.root()).ok_or_else(|| {
+                    DataFusionError::Plan(
+                        "FusedSeries reads aggregate state but holds no Final aggregate".into(),
+                    )
+                })?;
+                if owners == StateGroup::Single
+                    || input
+                        .downcast_ref::<SeriesRepartitionExec>()
+                        .is_none_or(|router| {
+                            router.outputs() != count || router.routing_policy() != &policy
+                        })
+                {
+                    return Err(DataFusionError::Plan(format!(
+                        "FusedSeries state input {index} requires a direct owner router with the Final routing policy"
+                    )));
+                }
+            }
             if matches!(locality, InputLocality::SinglePartition) && count != 1 && !state {
                 return Err(DataFusionError::Plan(format!(
                     "FusedSeries global evaluated input {index} must have one partition"
