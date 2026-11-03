@@ -3673,6 +3673,41 @@ fn duplicate_evidence_last_exit_clears_slots_and_abort_releases_claims() {
 }
 
 #[test]
+fn duplicate_evidence_abort_immediately_clears_unclaimed_partition_evidence() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 2);
+    evidence
+        .publish(0, 0, &[true; 3], &[true; 3], false)
+        .unwrap();
+    evidence
+        .record_candidate(
+            0,
+            0,
+            1,
+            Arc::new(vec![(Arc::from("host"), Arc::from("retained-label"))]),
+            "left",
+            1,
+        )
+        .unwrap();
+    assert!(pool.reserved() > 0);
+
+    evidence.abort();
+
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(evidence.slot_count(), 0);
+    evidence
+        .publish(1, 0, &[true; 3], &[true; 3], false)
+        .unwrap();
+    evidence
+        .record_candidate(1, 0, 1, Arc::new(vec![]), "left", 1)
+        .unwrap();
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(evidence.slot_count(), 0);
+    assert!(!evidence.complete());
+}
+
+#[test]
 fn duplicate_evidence_candidate_survives_false_gate_until_late_presence() {
     use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
     let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());

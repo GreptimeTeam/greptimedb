@@ -1675,10 +1675,19 @@ impl DuplicateEvidence {
         self.exit_claim(true);
     }
 
+    fn clear_slots(&self) {
+        self.slots.lock().unwrap().clear();
+        self.final_verdict.lock().unwrap().take();
+        let reservation = self.reservation.lock().unwrap();
+        let size = reservation.size();
+        reservation.shrink(size);
+    }
+
     fn exit_claim(&self, aborted: bool) -> bool {
         if aborted {
             self.aborted
                 .store(true, std::sync::atomic::Ordering::Release);
+            self.clear_slots();
         }
         let last = loop {
             let current = self.remaining.load(std::sync::atomic::Ordering::Acquire);
@@ -1749,6 +1758,9 @@ impl DuplicateEvidence {
         filling: bool,
     ) -> Result<()> {
         let mut slots = self.slots.lock().unwrap();
+        if self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
         let slot = slots.entry((node_index, field)).or_default();
         if let Some(existing_len) = slot.grid_len {
             if existing_len != lhs_present.len() || existing_len != rhs_present.len() {
@@ -1811,6 +1823,9 @@ impl DuplicateEvidence {
         timestamp: i64,
     ) -> Result<()> {
         let mut slots = self.slots.lock().unwrap();
+        if self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
         let slot = slots.entry((node_index, field)).or_default();
         if slot.grid_len.is_some_and(|len| point >= len) {
             return Err(DataFusionError::Internal(
