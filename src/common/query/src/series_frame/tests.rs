@@ -430,6 +430,108 @@ async fn contiguous_adapter_does_not_certify_nonadjacent_recurrence() {
     }
     assert!(decoded.next().await.is_none());
 }
+
+/// Raw Interleaved supports concatenated independently closed producer fragments, not a
+/// merge: identical identities may recur with overlapping timestamps and different labels.
+#[tokio::test]
+async fn interleaved_closed_fragment_roundtrips() {
+    type Row = (&'static [u8], i64, bool, Option<&'static str>);
+    let cases: &[(&str, &[Row])] = &[
+        ("empty", &[]),
+        (
+            "adjacent_same_key_equal_time",
+            &[(b"a", 5, true, None), (b"a", 5, true, None)],
+        ),
+        (
+            "adjacent_multichunk_reversed_time_and_labels",
+            &[
+                (b"a", 10, false, Some("x")),
+                (b"a", 12, true, Some("x")),
+                (b"a", 2, false, Some("y")),
+                (b"a", 3, true, Some("y")),
+            ],
+        ),
+        (
+            "nonadjacent_same_key_overlapping_time",
+            &[
+                (b"a", 5, true, None),
+                (b"b", 8, true, None),
+                (b"a", 4, true, None),
+            ],
+        ),
+    ];
+    for (name, rows) in cases {
+        // Pending forces a batch boundary inside the multichunk fragment, exercising state
+        // continuity both across batches and when several closed fragments share a batch.
+        let chunks = rows
+            .iter()
+            .map(|(key, time, last, host)| {
+                chunk_with(
+                    key,
+                    &[*time],
+                    vec![Some(*time as f64)],
+                    Some(host.map_or_else(metric, labeled_metric)),
+                    *last,
+                )
+            })
+            .collect();
+        let (input, _, _) = raw_pending(chunks, SeriesOrdering::Interleaved, 1);
+        let mut packed = pack_raw_series(input).unwrap();
+        let declared = packed.schema();
+        assert_eq!(
+            declared.metadata()["greptime.series.ordering"],
+            "interleaved",
+            "{name}"
+        );
+        let mut batches = Vec::new();
+        while let Some(batch) = packed.next().await {
+            let batch = batch.unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(batch.schema(), declared, "{name}");
+            batches.push(batch);
+        }
+        let (input, _, _) = df_source(batches, declared);
+        let mut output = unpack_raw_series(input, Some(schema())).unwrap();
+        assert_eq!(output.ordering(), SeriesOrdering::Interleaved, "{name}");
+        for (key, time, last, host) in *rows {
+            let chunk = output.next().await.unwrap().unwrap();
+            assert_chunk(&chunk, key, &[*time], &[Some(*time as f64)], *last);
+            assert_metric(&chunk, *host);
+        }
+        assert!(output.next().await.is_none(), "{name}");
+    }
+}
+
+/// The key-encoded form uses the same ordering and fragment-local finality as explicit labels.
+#[tokio::test]
+async fn interleaved_key_fragment_roundtrip() {
+    let binding = key_binding("cpu");
+    let chunks = vec![
+        chunk_with(b"key", &[4], vec![Some(4.0)], None, false),
+        chunk_with(b"key", &[5], vec![Some(5.0)], None, true),
+        chunk_with(b"key", &[1], vec![Some(1.0)], None, true),
+    ];
+    let (input, _, _) = raw_custom(chunks, SeriesOrdering::Interleaved, binding.clone());
+    let mut packed = pack_raw_series(input).unwrap();
+    let declared = packed.schema();
+    assert_eq!(
+        datatypes::series::frame::series_frame_label_decode(&declared).unwrap(),
+        label_decode_spec(&binding)
+    );
+    let mut batches = Vec::new();
+    while let Some(batch) = packed.next().await {
+        batches.push(batch.unwrap());
+    }
+    let (input, _, _) = df_source(batches, declared);
+    let mut output = unpack_raw_series(input, Some(schema())).unwrap();
+    assert_eq!(output.ordering(), SeriesOrdering::Interleaved);
+    for (time, last) in [(4, false), (5, true), (1, true)] {
+        let chunk = output.next().await.unwrap().unwrap();
+        assert_chunk(&chunk, b"key", &[time], &[Some(time as f64)], last);
+        assert!(chunk.metric.is_none());
+    }
+    assert!(output.next().await.is_none());
+}
+
 fn assert_metric(chunk: &RawSeriesChunk, host: Option<&str>) {
     let actual = chunk
         .metric
@@ -596,6 +698,12 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
             prefix: vec![(b"a", 1, true, None)],
         },
         Case {
+            name: "key_then_time_final_then_same_key",
+            items: vec![chunk(b"a", &[1], true), chunk(b"a", &[2], true)],
+            order: SeriesOrdering::KeyThenTime,
+            prefix: vec![(b"a", 1, true, None)],
+        },
+        Case {
             name: "unfinished_then_new_key",
             items: vec![chunk(b"a", &[1], false), chunk(b"b", &[2], true)],
             order: SeriesOrdering::Contiguous,
@@ -628,6 +736,53 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
             items: vec![chunk(b"a", &[3], false), chunk(b"a", &[2], true)],
             order: SeriesOrdering::Contiguous,
             prefix: vec![(b"a", 3, false, None)],
+        },
+        Case {
+            name: "interleaved_multiplexed_open_chains",
+            items: vec![
+                chunk(b"a", &[1], false),
+                chunk(b"b", &[2], true),
+                chunk(b"a", &[3], true),
+            ],
+            order: SeriesOrdering::Interleaved,
+            prefix: vec![(b"a", 1, false, None)],
+        },
+        Case {
+            name: "interleaved_changed_key_before_open_fragment_closes",
+            items: vec![
+                chunk(b"a", &[1], false),
+                chunk(b"b", &[2], false),
+                chunk(b"a", &[3], true),
+            ],
+            order: SeriesOrdering::Interleaved,
+            prefix: vec![(b"a", 1, false, None)],
+        },
+        Case {
+            name: "interleaved_timestamp_equal_within_open_chain",
+            items: vec![chunk(b"a", &[2], false), chunk(b"a", &[2], true)],
+            order: SeriesOrdering::Interleaved,
+            prefix: vec![(b"a", 2, false, None)],
+        },
+        Case {
+            name: "interleaved_timestamp_decreases_within_open_chain",
+            items: vec![chunk(b"a", &[3], false), chunk(b"a", &[2], true)],
+            order: SeriesOrdering::Interleaved,
+            prefix: vec![(b"a", 3, false, None)],
+        },
+        Case {
+            name: "interleaved_metric_changes_within_open_chain",
+            items: vec![
+                chunk_with(
+                    b"a",
+                    &[1],
+                    vec![Some(1.0)],
+                    Some(labeled_metric("x")),
+                    false,
+                ),
+                chunk_with(b"a", &[2], vec![Some(2.0)], Some(labeled_metric("y")), true),
+            ],
+            order: SeriesOrdering::Interleaved,
+            prefix: vec![(b"a", 1, false, Some("x"))],
         },
         Case {
             name: "metric_changes_within_key",
@@ -736,6 +891,59 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
         common_error::ext::ErrorExt::status_code(&decoded.next().await.unwrap().unwrap_err()),
         StatusCode::InvalidArguments
     );
+    assert!(decoded.next().await.is_none());
+}
+
+/// Once a closed fragment is followed by an open one, EOF must still report the latter on both
+/// paths; closing the previous fragment must not erase the new fragment's state.
+#[tokio::test]
+async fn interleaved_unfinished_fragment_at_eof_is_rejected() {
+    let rows = vec![chunk(b"a", &[10], true), chunk(b"a", &[1], false)];
+    let (input, _, _) = raw_pending(rows.clone(), SeriesOrdering::Interleaved, 1);
+    let mut packed = pack_raw_series(input).unwrap();
+    let prefix = packed.next().await.unwrap().unwrap();
+    assert_eq!(prefix.num_rows(), 1);
+    let error = packed.next().await.unwrap().unwrap_err();
+    assert_eq!(
+        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
+        StatusCode::InvalidArguments
+    );
+    assert!(error.to_string().contains("ended before key was final"));
+    assert!(packed.next().await.is_none());
+
+    let frame_schema = super::raw_series_frame_schema_with_ordering(
+        &schema(),
+        &RawLabelSource::Explicit,
+        SeriesOrdering::Interleaved,
+    )
+    .unwrap();
+    let mut frames = Vec::new();
+    for row in &rows {
+        for frame in datatypes::series::frame::pack_raw_series_chunk(
+            &schema(),
+            FrameLabelMode::Explicit,
+            None,
+            row,
+        )
+        .unwrap()
+        {
+            frames.push(
+                RecordBatch::try_new(frame_schema.clone(), frame.columns().to_vec()).unwrap(),
+            );
+        }
+    }
+    let (source, _, _) = df_source(frames, frame_schema);
+    let mut decoded = unpack_raw_series(source, Some(schema())).unwrap();
+    for (time, last) in [(10, true), (1, false)] {
+        let chunk = decoded.next().await.unwrap().unwrap();
+        assert_chunk(&chunk, b"a", &[time], &[Some(time as f64)], last);
+    }
+    let error = decoded.next().await.unwrap().unwrap_err();
+    assert_eq!(
+        common_error::ext::ErrorExt::status_code(&error),
+        StatusCode::InvalidArguments
+    );
+    assert!(error.to_string().contains("ended before key was final"));
     assert!(decoded.next().await.is_none());
 }
 
@@ -2364,60 +2572,34 @@ async fn public_chunk_with_empty_times_is_rejected_without_panic() {
     }
 }
 
-/// `Interleaved` is rejected by the constructor before any source poll, for a pack source and for
-/// an empty unpack stream; the wire-schema helper rejects it before assembling a schema, since the
-/// wire carries only the two representable spellings. No adjacent-only fallback is installed.
+/// An Interleaved declaration is available for raw streams without polling either source, including
+/// streams that ultimately contain no batches.
 #[tokio::test]
-async fn interleaved_ordering_is_rejected_before_any_poll() {
-    assert!(
-        super::raw_series_frame_schema_with_ordering(
-            &schema(),
-            &RawLabelSource::Explicit,
-            SeriesOrdering::Interleaved,
-        )
-        .is_err(),
-        "interleaved cannot be declared on the wire schema"
+async fn interleaved_constructors_accept_without_polling() {
+    let frame = super::raw_series_frame_schema_with_ordering(
+        &schema(),
+        &RawLabelSource::Explicit,
+        SeriesOrdering::Interleaved,
+    )
+    .unwrap();
+    assert_eq!(frame.metadata()["greptime.series.ordering"], "interleaved");
+    assert_eq!(
+        series_frame_ordering(&frame).unwrap(),
+        SeriesOrdering::Interleaved
     );
 
     let (source, polls, drops) = raw_never_polled(SeriesOrdering::Interleaved);
-    let error = match pack_raw_series(source) {
-        Ok(_) => panic!("interleaved pack stream must be rejected"),
-        Err(error) => error,
-    };
-    assert_eq!(
-        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
-        StatusCode::InvalidArguments
-    );
-    assert_eq!(
-        polls.load(Ordering::SeqCst),
-        0,
-        "a rejected source is never polled"
-    );
+    let packed = pack_raw_series(source).unwrap();
+    assert_eq!(packed.schema(), frame);
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    drop(packed);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 
-    // An unpack has no ordering argument, so the only way an `Interleaved` stream could reach it is
-    // a frame that declares one; that spelling has no wire representation and is rejected.
-    let frame = datatypes::series::frame::raw_series_frame_schema(
-        &schema(),
-        datatypes::series::frame::FrameLabelMode::Explicit,
-    )
-    .unwrap();
-    let mut metadata = frame.metadata().clone();
-    metadata.insert(
-        "greptime.series.ordering".to_string(),
-        "interleaved".to_string(),
-    );
-    let frame = Arc::new(Schema::new_with_metadata(frame.fields().clone(), metadata));
     let (source, polls, drops) = df_never_polled(frame);
-    let error = match unpack_raw_series(source, Some(schema())) {
-        Ok(_) => panic!("an interleaved declaration must be rejected"),
-        Err(error) => error,
-    };
-    assert_eq!(
-        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
-        StatusCode::InvalidArguments
-    );
+    let unpacked = unpack_raw_series(source, Some(schema())).unwrap();
+    assert_eq!(unpacked.ordering(), SeriesOrdering::Interleaved);
     assert_eq!(polls.load(Ordering::SeqCst), 0);
+    drop(unpacked);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
@@ -2449,8 +2631,10 @@ async fn unpack_rejects_unrelated_metadata_drift_and_empty_schema_changes() {
     reserved.insert("greptime.series.layout".into(), "v1".into());
     let mut renamed = base.metadata().clone();
     renamed.insert("app.renamed".into(), "y".into());
+    let mut different_ordering = base.metadata().clone();
+    different_ordering.insert("greptime.series.ordering".into(), "interleaved".into());
 
-    let cases: [(&str, Arc<datatypes::arrow::datatypes::Schema>, bool); 3] = [
+    let cases: [(&str, Arc<datatypes::arrow::datatypes::Schema>, bool); 4] = [
         (
             "unrelated metadata added",
             Arc::new((*base).clone().with_metadata(unrelated)),
@@ -2464,6 +2648,11 @@ async fn unpack_rejects_unrelated_metadata_drift_and_empty_schema_changes() {
         (
             "unrelated metadata on an empty batch",
             Arc::new((*base).clone().with_metadata(renamed)),
+            true,
+        ),
+        (
+            "ordering changed on an empty batch",
+            Arc::new((*base).clone().with_metadata(different_ordering)),
             true,
         ),
     ];
@@ -2568,7 +2757,11 @@ fn raw_series_ordering_metadata_fixture() {
 
 #[tokio::test]
 async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
-    for ordering in [SeriesOrdering::Contiguous, SeriesOrdering::KeyThenTime] {
+    for ordering in [
+        SeriesOrdering::Contiguous,
+        SeriesOrdering::KeyThenTime,
+        SeriesOrdering::Interleaved,
+    ] {
         for chunks in [
             vec![
                 chunk_with(b"a", &[1], vec![Some(1.0)], Some(metric()), false),
@@ -2589,12 +2782,7 @@ async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
                 match ordering {
                     SeriesOrdering::Contiguous => "contiguous",
                     SeriesOrdering::KeyThenTime => "read_key_then_time",
-                    // The wire carries exactly these two spellings, so the loop above
-                    // admits only the two representable modes; `Interleaved` is rejected
-                    // before any poll (see `interleaved_ordering_is_rejected_before_any_poll`).
-                    SeriesOrdering::Interleaved => {
-                        unreachable!("interleaved raw series ordering has no wire spelling")
-                    }
+                    SeriesOrdering::Interleaved => "interleaved",
                 }
                 .to_string(),
             );
@@ -2628,6 +2816,7 @@ async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
             assert!(ipc_batches.iter().all(|batch| batch.schema() == declared));
             let (source, _, _) = df_source(ipc_batches, declared);
             let mut decoded = unpack_raw_series(source, Some(schema())).unwrap();
+            assert_eq!(decoded.ordering(), ordering);
             if is_empty {
                 assert!(decoded.next().await.is_none());
             } else {
@@ -3224,7 +3413,7 @@ async fn unpack_pack_unpack_preserves_the_description_and_the_ordering() {
 /// Each typed schema entry point refuses the content it cannot describe.
 ///
 /// The raw entry point is handed an evaluated series schema and the shared builder is handed an
-/// evaluated schema with a key-then-time ordering. Both would otherwise produce a frame whose
+/// evaluated schema with a non-contiguous ordering. Both would otherwise produce a frame whose
 /// declaration contradicts its own columns, and the reader would be the first to notice — after the
 /// producer had already published it.
 #[test]
@@ -3247,6 +3436,16 @@ fn typed_schema_entry_points_refuse_the_content_they_cannot_describe() {
         )
         .is_err(),
         "an evaluated frame has no storage key to be ordered by"
+    );
+    assert!(
+        super::frame_schema_with(
+            &evaluated_schema(),
+            FrameLabelMode::Explicit,
+            None,
+            SeriesOrdering::Interleaved,
+        )
+        .is_err(),
+        "an evaluated frame cannot declare interleaved ordering"
     );
     assert!(
         super::frame_schema_with(

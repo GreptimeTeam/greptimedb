@@ -1800,7 +1800,8 @@ fn direct_decoder_validates_ordering_for_raw_and_evaluated_batches() {
         for (ordering, accepted) in [
             (None, false),
             (Some("future_value"), false),
-            (Some("interleaved"), false),
+            (Some("interleaved"), content == "raw"),
+            (Some("interv"), false),
             (Some("contiguous"), true),
             (Some("read_key_then_time"), content == "raw"),
         ] {
