@@ -1049,7 +1049,7 @@ mod tests {
 
         let answer = |tree: &NativeTree| {
             let mut execution = NativeExecutor::new(
-                NativeExecutionState::try_new(tree, Arc::new(UnboundedMemoryPool::default()))
+                NativeExecutionState::try_new(tree, Arc::new(UnboundedMemoryPool::default()), None)
                     .unwrap(),
             );
             // The fixture is a window over raw input, so the schema its samples are addressed on

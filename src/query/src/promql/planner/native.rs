@@ -692,6 +692,7 @@ impl PromPlanner {
             && NativeExecutionState::try_new(
                 &compiled.tree,
                 Arc::new(UnboundedMemoryPool::default()),
+                None,
             )
             .is_err()
         {
@@ -1228,7 +1229,8 @@ fn build_evaluated_segment(
     }
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
     let output_tags = fused_output_tags(tree.root(), &local_tags)?;
-    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default())).is_err() {
+    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
+    {
         return None;
     }
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
@@ -1312,7 +1314,8 @@ fn build_inner_segment(
         let time_index = per_source.get(*sources.first()?)?.1.clone();
         (children, None, time_index, output_tags.clone())
     };
-    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default())).is_err() {
+    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
+    {
         return None;
     }
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
@@ -1455,7 +1458,9 @@ async fn segment_tree(
     // Nothing below can fall back once physical planning starts, so every tree this route commits
     // to has to be one the runtime executes. A shape the runtime refuses - a grouping by a value
     // field, an operation with no kernel - therefore keeps the plan it had.
-    if NativeExecutionState::try_new(&parent, Arc::new(UnboundedMemoryPool::default())).is_err() {
+    if NativeExecutionState::try_new(&parent, Arc::new(UnboundedMemoryPool::default()), None)
+        .is_err()
+    {
         return Ok(None);
     }
     let Some(output_schema) = PromPlanner::fused_root_schema(&parent, &child_tags, time_index)
