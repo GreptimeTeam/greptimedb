@@ -83,6 +83,8 @@ use datatypes::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringA
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
+use promql::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+use promql::vector_match::MatchingLabels;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::dist_plan::MergeScanExec;
 use query::options::QueryOptions;
@@ -552,7 +554,9 @@ async fn native_hybrid_binary_05_06_08() {
     // query as coverage for the matching pair itself.
     let unpartitioned =
         format!("{HYBRID_MATCH_LEFT}{{job=\"api\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}");
+    let mark = observer.mark();
     let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, SCAN_PARTITIONS.to_string());
     query_ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
     let output = instance
         .do_query(&tql_eval(&unpartitioned), Arc::new(query_ctx))
@@ -570,6 +574,111 @@ async fn native_hybrid_binary_05_06_08() {
             "found duplicate series for the match group {job=\"other\"} on the right hand-side"
         ),
         "{unpartitioned}: {error}"
+    );
+
+    // Inspect the *failing query's* binary node, not a re-plan or a separate probe. Its operand
+    // counters count valid instant values after the matching routers and before duplicate checking.
+    let capture = NativeCapture::from_plans(&observer.since(mark));
+    let binary = capture
+        .fused
+        .iter()
+        .filter(|node| node.children().len() == 2)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        1,
+        binary.len(),
+        "{unpartitioned}: expected one native binary"
+    );
+    let binary = binary[0];
+    let plan = displayable(binary.as_ref()).indent(false).to_string();
+    assert_eq!(
+        SCAN_PARTITIONS,
+        binary.properties().output_partitioning().partition_count(),
+        "{unpartitioned}: binary partition count:\n{plan}"
+    );
+    for (side, child) in binary.children().iter().enumerate() {
+        let router = child
+            .downcast_ref::<SeriesRepartitionExec>()
+            .unwrap_or_else(|| panic!("{unpartitioned}: operand {side} has no router:\n{plan}"));
+        assert_eq!(SCAN_PARTITIONS, router.outputs(), "{unpartitioned}: {plan}");
+        assert_eq!(
+            &SeriesRouting::Matching(MatchingLabels::On(vec![Arc::from("job")])),
+            router.routing_policy(),
+            "{unpartitioned}: operand {side} routing policy:\n{plan}"
+        );
+    }
+    let left =
+        fused_node_count_per_partition(binary, "native.root.left.output_values", &unpartitioned);
+    let right =
+        fused_node_count_per_partition(binary, "native.root.right.output_values", &unpartitioned);
+    assert!(
+        left.iter().chain(&right).all(Option::is_some),
+        "{unpartitioned}: operand metrics must be registered for every partition: left={left:?}, right={right:?}"
+    );
+    // The fixture has one LHS api series, one RHS api series, and two RHS other series.
+    // The on(job) routers co-locate each group, so the only way to get these exact counts is
+    // api on the LHS partition and both other samples on a different matching partition.
+    let left_partition = left
+        .iter()
+        .position(|count| *count == Some(1))
+        .unwrap_or_else(|| panic!("{unpartitioned}: missing single left value: {left:?}"));
+    let other_partition = right
+        .iter()
+        .position(|count| *count == Some(2))
+        .unwrap_or_else(|| panic!("{unpartitioned}: missing duplicated right group: {right:?}"));
+    assert_ne!(
+        left_partition, other_partition,
+        "{unpartitioned}: left={left:?}, right={right:?}"
+    );
+    let mut expected_left = vec![Some(0); SCAN_PARTITIONS];
+    expected_left[left_partition] = Some(1);
+    let mut expected_right = vec![Some(0); SCAN_PARTITIONS];
+    expected_right[left_partition] = Some(1);
+    expected_right[other_partition] = Some(2);
+    // Exact vectors also fix totals at 1 and 3 and require every other partition to be empty.
+    assert_eq!(
+        expected_left, left,
+        "{unpartitioned}: LHS values per partition"
+    );
+    assert_eq!(
+        expected_right, right,
+        "{unpartitioned}: RHS values per partition"
+    );
+    common_telemetry::info!(
+        "`{unpartitioned}` operand values per matching partition: left={left:?}, right={right:?}"
+    );
+
+    // The identical RHS contains duplicates, but a globally empty LHS suppresses their error.
+    let empty_left = format!(
+        "{HYBRID_MATCH_LEFT}{{instance=\"missing\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}"
+    );
+    let (empty, capture) = run_query(&instance, &empty_left, true, &observer).await;
+    assert_rows(&empty.rows, &[], &format!("empty left `{empty_left}`"));
+    let binary = capture
+        .fused
+        .iter()
+        .filter(|node| node.children().len() == 2)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        1,
+        binary.len(),
+        "{empty_left}: expected native two-source binary"
+    );
+    let control_left =
+        fused_node_count_per_partition(binary[0], "native.root.left.output_values", &empty_left);
+    let control_right =
+        fused_node_count_per_partition(binary[0], "native.root.right.output_values", &empty_left);
+    assert_eq!(
+        vec![Some(0); SCAN_PARTITIONS],
+        control_left,
+        "{empty_left}: left must be globally empty"
+    );
+    assert_eq!(
+        expected_right, control_right,
+        "{empty_left}: the same duplicated RHS must reach the binary"
+    );
+    common_telemetry::info!(
+        "`{empty_left}` operand values per matching partition: left={control_left:?}, right={control_right:?}"
     );
 
     check_hybrid_binary_cases(&instance, &observer).await;
@@ -1152,6 +1261,15 @@ fn fused_node_output_values_per_partition(
     fused: &Arc<dyn ExecutionPlan>,
     context: &str,
 ) -> Vec<Option<usize>> {
+    fused_node_count_per_partition(fused, ROOT_OUTPUT_VALUES_METRIC, context)
+}
+
+/// Reads a named native count from the fused node's registered per-partition metrics.
+fn fused_node_count_per_partition(
+    fused: &Arc<dyn ExecutionPlan>,
+    metric_name: &str,
+    context: &str,
+) -> Vec<Option<usize>> {
     let mut per_partition = vec![None; SCAN_PARTITIONS];
     let plan = displayable(fused.as_ref()).indent(false).to_string();
     let metrics = fused
@@ -1161,11 +1279,11 @@ fn fused_node_output_values_per_partition(
         let MetricValue::Count { count, .. } = metric.value() else {
             continue;
         };
-        if metric.value().name() != ROOT_OUTPUT_VALUES_METRIC {
+        if metric.value().name() != metric_name {
             continue;
         }
         let partition = metric.partition().unwrap_or_else(|| {
-            panic!("{context}: `{ROOT_OUTPUT_VALUES_METRIC}` is not labelled with its partition")
+            panic!("{context}: `{metric_name}` is not labelled with its partition")
         });
         assert!(
             partition < SCAN_PARTITIONS,
