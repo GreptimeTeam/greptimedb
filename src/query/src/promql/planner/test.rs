@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use catalog::RegisterTableRequest;
@@ -2594,6 +2595,54 @@ async fn native_fused_whole_vector_operation_falls_back() {
             "`{query}` must keep the existing plan, not an approximation of it"
         );
     }
+}
+
+#[tokio::test]
+async fn native_fused_depth_limit_falls_back_to_legacy_plan() {
+    // At 63 selector terms the tree reaches depth 64; the 64th exceeds the limit.
+    let schema = Arc::new(datatypes::series::samples::SeriesSchema {
+        fields: Arc::from([datatypes::series::samples::FieldSpec { name: "v0".into() }]),
+        eval_grid: None,
+    });
+    let compile = |terms| {
+        let query = std::iter::repeat_n("some_metric", terms)
+            .collect::<Vec<_>>()
+            .join(" + ");
+        crate::promql::native_compile::compile_selectors(
+            &build_eval_stmt(&query),
+            &|_| Ok(Arc::clone(&schema)),
+            SeriesOrdering::KeyThenTime,
+        )
+    };
+    compile(63).expect("63 selector terms must fit native tree depth 64");
+    let error = compile(64).expect_err("64 selector terms must exceed native tree depth 64");
+    assert!(
+        matches!(
+            &error,
+            datafusion::error::DataFusionError::NotImplemented(_)
+        ),
+        "expected a NotImplemented depth-limit rejection, got: {error}"
+    );
+    assert!(
+        error.to_string().contains("native tree nesting exceeds 64"),
+        "unexpected compiler rejection: {error}"
+    );
+    let query = std::iter::repeat_n("some_metric", 64)
+        .collect::<Vec<_>>()
+        .join(" + ");
+
+    let native = build_native_fused_plan(&query, true).await;
+    let legacy = build_native_fused_plan(&query, false).await;
+    let display = native.display_indent().to_string();
+    assert!(
+        !display.contains("FusedSeries"),
+        "64 selector terms exceed the native tree depth cap: {display}"
+    );
+    assert_eq!(
+        display,
+        legacy.display_indent().to_string(),
+        "a native depth-limit rejection must preserve the legacy plan"
+    );
 }
 
 #[tokio::test]
