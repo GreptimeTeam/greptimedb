@@ -42,7 +42,7 @@ use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::{ColumnSchema, Schema, is_metric_name_field};
 use datatypes::series::SeriesOrdering;
 use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
@@ -3476,11 +3476,13 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
             "{query}"
         );
         // This pair route is not an aggregate route: it publishes the node's own field names.
-        assert_eq!(
-            vec!["field_0", "tag_0", "timestamp"],
-            sorted_column_names(&plan),
-            "{query}"
-        );
+        // `or` reports the series of both sides, so its rows say each one's own name.
+        let expected = if query.contains(" or ") {
+            vec!["__name__", "field_0", "tag_0", "timestamp"]
+        } else {
+            vec!["field_0", "tag_0", "timestamp"]
+        };
+        assert_eq!(expected, sorted_column_names(&plan), "{query}");
     }
 }
 
@@ -7378,6 +7380,54 @@ async fn or_operator_with_unknown_metric_does_not_require_tsid() {
             .iter()
             .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
     );
+}
+
+/// The native `or` reports the name of each side's rows through the `__name__` tag column, which
+/// its runtime resolves to the metric name of every series it reports.
+#[tokio::test]
+async fn native_or_declares_the_name_of_each_row() {
+    let plan = build_native_fused_plan_with_provider(
+        "alpha_total or beta_total",
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    assert!(find_fused_series(&plan).is_some(), "{plan:?}");
+    let name_field = plan
+        .schema()
+        .fields()
+        .iter()
+        .find(|field| is_metric_name_field(field))
+        .unwrap_or_else(|| panic!("no declared metric name column in {:?}", plan.schema()));
+    assert_eq!(name_field.name(), METRIC_NAME);
+    assert_eq!(name_field.data_type(), &ArrowDataType::Utf8);
+    assert!(name_field.is_nullable());
+}
+
+/// The native `and` and `unless` report the left side's series, whose name is the statement's.
+#[tokio::test]
+async fn native_and_and_unless_do_not_declare_a_per_row_name() {
+    for query in [
+        "alpha_total and beta_total",
+        "alpha_total unless beta_total",
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+        )
+        .await;
+        assert!(find_fused_series(&plan).is_some(), "{query}: {plan:?}");
+        assert!(
+            !plan
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| is_metric_name_field(field)),
+            "{query}: {:?}",
+            plan.schema()
+        );
+    }
 }
 
 #[tokio::test]

@@ -356,6 +356,11 @@ fn empty_data(result_type: ValueType) -> PrometheusResponse {
 /// The role of every column of a query result.
 struct ColumnLayout {
     timestamp_column_index: usize,
+    /// The column holding the metric name of each row, when the plan declares one.
+    ///
+    /// A set operator reports the series of both its operands, so it names each row with the name
+    /// of the side the row came from instead of the one name the statement derives.
+    name_column_index: Option<usize>,
     tag_column_indices: Vec<usize>,
     tag_names: Vec<String>,
     first_field_column_index: Option<usize>,
@@ -367,11 +372,35 @@ impl ColumnLayout {
     // TODO(ruihang): wish there is a better way to do this.
     fn infer(schema: &Schema) -> Result<Self> {
         let mut timestamp_column_index = None;
+        let mut name_column_index: Option<usize> = None;
         let mut tag_column_indices = Vec::new();
         let mut first_field_column_index = None;
         let mut native_histogram_column_index = None;
 
         for (i, column) in schema.column_schemas().iter().enumerate() {
+            // The declaration, not the column name, says a column holds metric names: an operation
+            // may name a column of values `__name__`, and those values are not names.
+            if column.is_metric_name() {
+                if !matches!(column.data_type, ConcreteDataType::String(_)) {
+                    return UnexpectedResultSnafu {
+                        reason: format!(
+                            "metric name column {} is not a string column",
+                            column.name
+                        ),
+                    }
+                    .fail();
+                }
+                if name_column_index.replace(i).is_some() {
+                    return UnexpectedResultSnafu {
+                        reason: format!(
+                            "result declares more than one metric name column, {} among them",
+                            column.name
+                        ),
+                    }
+                    .fail();
+                }
+                continue;
+            }
             match column.data_type {
                 ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(_))
                     if timestamp_column_index.is_none() =>
@@ -422,6 +451,7 @@ impl ColumnLayout {
 
         Ok(Self {
             timestamp_column_index,
+            name_column_index,
             tag_column_indices,
             tag_names,
             first_field_column_index,
@@ -470,6 +500,19 @@ fn merge_batch(
         .iter()
         .map(|i| batch.column(*i))
         .collect::<Vec<_>>();
+    // The plan's own name column replaces the one name derived from the statement, because the rows
+    // of one result may carry different names. It is a label of the series it names, so the runs of
+    // rows sharing their labels break where it changes.
+    let name_column = layout.name_column_index.map(|index| batch.column(index));
+    let run_columns = if let Some(name_column) = name_column {
+        tag_columns
+            .iter()
+            .copied()
+            .chain(std::iter::once(name_column))
+            .collect::<Vec<_>>()
+    } else {
+        tag_columns.clone()
+    };
     let timestamp_column = batch
         .column(layout.timestamp_column_index)
         .as_primitive::<TimestampMillisecondType>();
@@ -498,8 +541,8 @@ fn merge_batch(
     // Read the labels once per run of rows that share them instead of
     // once per row. `label_runs` finds every boundary, so the probe only
     // decides whether looking for runs is worth its cost.
-    let label_runs = if prefer_label_runs(&tag_columns, batch.num_rows()) {
-        Either::Left(label_runs(&tag_columns, batch.num_rows())?.into_iter())
+    let label_runs = if prefer_label_runs(&run_columns, batch.num_rows()) {
+        Either::Left(label_runs(&run_columns, batch.num_rows())?.into_iter())
     } else {
         Either::Right((0..batch.num_rows()).map(|row| row..row + 1))
     };
@@ -539,7 +582,17 @@ fn merge_batch(
                 None => {
                     // retrieve tags
                     tags.clear();
-                    if let Some(metric_name) = metric_name {
+                    if let Some(name_column) = name_column {
+                        // A plan that names its rows says so with a column: a row it names reports
+                        // its own name, and a row it leaves unnamed reports none. An empty name is
+                        // one it leaves unnamed - a label with no value is not a label, which is
+                        // how Prometheus reports it too.
+                        if let Some(row_name) = string_array_value_at_index(name_column, row_index)
+                            && !row_name.is_empty()
+                        {
+                            tags.push((METRIC_NAME, row_name));
+                        }
+                    } else if let Some(metric_name) = metric_name {
                         tags.push((METRIC_NAME, metric_name));
                     }
                     for (tag_column, tag_name) in tag_columns.iter().zip(layout.tag_names.iter()) {
@@ -1962,6 +2015,318 @@ mod tests {
 
         let json = serde_json::to_value(prometheus_native_histogram(&histogram).unwrap()).unwrap();
         assert_eq!(json["buckets"], serde_json::json!([[3, "-Inf", "1", "1"]]));
+    }
+
+    /// The rows of an `or` result, as the plan above them produces them: the time index, the
+    /// column declaring each row's metric name, the union of both sides' labels, and the value.
+    fn or_batches() -> RecordBatches {
+        let name = || {
+            ColumnSchema::new(
+                "__promql_or_name_0",
+                ConcreteDataType::string_datatype(),
+                true,
+            )
+            .with_metric_name(true)
+        };
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            name(),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("kind", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("site", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        // `left_metric{host="a",kind="x"}=10`, `left_metric{host="b",kind="y"}=20`,
+        // `right_metric{host="a",site="z1"}=2` and `right_metric{host="c",site="z2"}=4`. A side
+        // that does not carry a label of the other side leaves it null, and a null label is absent.
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1_000; 4])) as _,
+                Arc::new(StringVector::from(vec![
+                    Some("left_metric"),
+                    Some("left_metric"),
+                    Some("right_metric"),
+                    Some("right_metric"),
+                ])) as _,
+                Arc::new(StringVector::from(vec![
+                    Some("a"),
+                    Some("b"),
+                    Some("a"),
+                    Some("c"),
+                ])) as _,
+                Arc::new(StringVector::from(vec![Some("x"), Some("y"), None, None])) as _,
+                Arc::new(StringVector::from(vec![None, None, Some("z1"), Some("z2")])) as _,
+                Arc::new(Float64Vector::from(vec![
+                    Some(10.0),
+                    Some(20.0),
+                    Some(2.0),
+                    Some(4.0),
+                ])) as _,
+            ],
+        )
+        .unwrap();
+        RecordBatches::try_new(schema, vec![batch]).unwrap()
+    }
+
+    /// A result whose rows report different names keeps each row's own name.
+    ///
+    /// The statement's own name is passed in as the response layer derives it, and must not be used:
+    /// it can only describe one of the two sides.
+    #[test]
+    fn or_result_names_each_row_after_the_side_it_came_from() {
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            or_batches(),
+            Some("left_metric".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+
+        assert_eq!(
+            serde_json::to_value(&series).unwrap(),
+            serde_json::json!([
+                {
+                    "metric": {"__name__": "left_metric", "host": "a", "kind": "x"},
+                    "value": [1.0, "10.0"],
+                },
+                {
+                    "metric": {"__name__": "left_metric", "host": "b", "kind": "y"},
+                    "value": [1.0, "20.0"],
+                },
+                {
+                    "metric": {"__name__": "right_metric", "host": "a", "site": "z1"},
+                    "value": [1.0, "2.0"],
+                },
+                {
+                    "metric": {"__name__": "right_metric", "host": "c", "site": "z2"},
+                    "value": [1.0, "4.0"],
+                },
+            ])
+        );
+    }
+
+    /// A row a plan leaves unnamed reports no name at all.
+    ///
+    /// A declared name column says "this row has no name" with an empty value as well as with a
+    /// null, because a plan that carries the name of each row carries it as a string: Prometheus
+    /// drops an empty label value, so a row without a name carries no `__name__` label rather than
+    /// an empty one.
+    #[test]
+    fn an_empty_declared_name_reports_no_name() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "__promql_or_name_0",
+                ConcreteDataType::string_datatype(),
+                false,
+            )
+            .with_metric_name(true),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1_000, 1_000])) as _,
+                Arc::new(StringVector::from(vec![Some(""), Some("other_metric")])) as _,
+                Arc::new(StringVector::from(vec![Some("a"), Some("b")])) as _,
+                Arc::new(Float64Vector::from(vec![Some(1.0), Some(2.0)])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            batches,
+            Some("left_metric".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+
+        assert_eq!(
+            serde_json::to_value(&series).unwrap(),
+            serde_json::json!([
+                {"metric": {"host": "a"}, "value": [1.0, "1.0"]},
+                {"metric": {"__name__": "other_metric", "host": "b"}, "value": [1.0, "2.0"]},
+            ])
+        );
+    }
+
+    /// A result that declares no name column is named after the statement, as it always was.
+    #[test]
+    fn result_without_a_name_column_is_named_after_the_statement() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1_000])) as _,
+                Arc::new(StringVector::from(vec![Some("a")])) as _,
+                Arc::new(Float64Vector::from(vec![Some(1.5)])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            batches,
+            Some("some_metric".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+
+        assert_eq!(
+            serde_json::to_value(&series).unwrap(),
+            serde_json::json!([
+                {"metric": {"__name__": "some_metric", "host": "a"}, "value": [1.0, "1.5"]},
+            ])
+        );
+    }
+
+    /// A column that happens to be called `__name__` is an ordinary label.
+    ///
+    /// `count_values("__name__", metric)` generates such a column, and its values are counts rather
+    /// than metric names. The declaration is what says a column holds names, so this one keeps
+    /// naming the result after the statement and keeps its values as a label.
+    #[test]
+    fn a_column_called_name_that_is_not_declared_is_an_ordinary_label() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("__name__", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let layout = ColumnLayout::infer(&schema).unwrap();
+        assert!(
+            layout.name_column_index.is_none(),
+            "a column that is not declared is not read as the name"
+        );
+        assert_eq!(vec![1], layout.tag_column_indices);
+
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1_000])) as _,
+                Arc::new(StringVector::from(vec![Some("5")])) as _,
+                Arc::new(Float64Vector::from(vec![Some(5.0)])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            batches,
+            Some("some_metric".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+
+        // The generated label is an ordinary label, so it labels the series as it always has: the
+        // statement names the series and the label set carries the count.
+        assert_eq!(
+            serde_json::to_value(&series).unwrap(),
+            serde_json::json!([
+                {"metric": {"__name__": "5"}, "value": [1.0, "5.0"]},
+            ])
+        );
+    }
+
+    /// A result that declares more than one name column is an error rather than a guess.
+    #[test]
+    fn more_than_one_name_column_is_an_error() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("first_name", ConcreteDataType::string_datatype(), true)
+                .with_metric_name(true),
+            ColumnSchema::new("second_name", ConcreteDataType::string_datatype(), true)
+                .with_metric_name(true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+
+        let error = match ColumnLayout::infer(&schema) {
+            Ok(_) => panic!("a result that declares two name columns is an error"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("more than one metric name column"),
+            "{error}"
+        );
+    }
+
+    /// A declared name column that does not hold strings is an error rather than a guess.
+    #[test]
+    fn a_name_column_that_is_not_a_string_column_is_an_error() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("name", ConcreteDataType::float64_datatype(), true)
+                .with_metric_name(true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+
+        let error = match ColumnLayout::infer(&schema) {
+            Ok(_) => panic!("a name column that is not a string column is an error"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("is not a string column"),
+            "{error}"
+        );
     }
 
     #[test]
