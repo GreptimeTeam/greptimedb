@@ -1840,9 +1840,65 @@ async fn series_pushdown_skips_unrelated_table_payloads() {
     engine.stop().await.unwrap();
 }
 
+#[rstest::rstest]
+#[case::last_row(false)]
+#[case::last_non_null(true)]
 #[tokio::test]
-async fn identity_merge_preserves_tag_and_mixed_predicates() {
+async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null: bool) {
     let (_env, engine, region) = fixture().await;
+    if last_non_null {
+        // A newer null in the first field must recover the older value across SSTs.
+        let metadata = region.version().metadata.clone();
+        engine
+            .handle_request(
+                region.region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: vec![
+                            ColumnSchema {
+                                column_name: "__primary_key".into(),
+                                datatype: ColumnDataType::Binary as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "ts".into(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "field_0".into(),
+                                datatype: ColumnDataType::Float64 as i32,
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            },
+                        ],
+                        rows: vec![api::v1::Row {
+                            values: vec![
+                                api::v1::Value {
+                                    value_data: Some(ValueData::BinaryValue(
+                                        new_sparse_primary_key(&["a", "x"], &metadata, 10, 0),
+                                    )),
+                                },
+                                api::v1::Value {
+                                    value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                                },
+                                api::v1::Value { value_data: None },
+                            ],
+                        }],
+                    },
+                    skip_wal: false,
+                    hint: Some(api::v1::WriteHint {
+                        primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+                    }),
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        flush_region(&engine, region.region_id, None).await;
+    }
     build(&engine, &region).await;
     let cases = [
         (col("tag_0").eq(lit("a")), true),
@@ -1866,6 +1922,9 @@ async fn identity_merge_preserves_tag_and_mixed_predicates() {
                 format,
                 (0..region.version().metadata.column_metadatas.len()).collect(),
             );
+            if last_non_null {
+                input.merge_mode = crate::region::options::MergeMode::LastNonNull;
+            }
             input.predicate =
                 PredicateGroup::new(&region.version().metadata, std::slice::from_ref(&predicate))
                     .unwrap();
@@ -1883,7 +1942,12 @@ async fn identity_merge_preserves_tag_and_mixed_predicates() {
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
-            if let Some(prepared) = scanner.prepared.source.get() {
+            if format == SelectedFormat::Columnar {
+                let prepared = scanner
+                    .prepared
+                    .source
+                    .get()
+                    .expect("columnar source must be prepared");
                 assert_eq!(
                     identity_only,
                     prepared.as_ref().unwrap().sample_schema.is_some()
