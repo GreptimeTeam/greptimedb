@@ -6142,7 +6142,7 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     native_result_rows(native_tql_output(&instance, &instant, true).await).await;
     let instant_plan = observer.take();
     let fused = instant_plan
-        .downcast_ref::<promql::extension_plan::fused_series::FusedSeriesExec>()
+        .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
         .unwrap();
     assert!(fused.has_partition_disjoint_identities());
 }
