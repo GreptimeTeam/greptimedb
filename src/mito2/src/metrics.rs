@@ -677,7 +677,8 @@ impl StagerNotifier for StagerMetrics {
 }
 
 /// Stream-local counters avoid contended metric updates for every tiny sample block.
-/// Stage durations are elapsed time, not CPU time; stages ending in `_wall` include awaits.
+/// Stage durations sum elapsed work within a stream, not CPU time or query wall latency.
+/// Stages ending in `_wall` include awaits; concurrent streams can overlap.
 #[derive(Default)]
 pub(crate) struct ColumnarReadMetrics {
     pub(crate) counts: std::collections::BTreeMap<&'static str, u64>,

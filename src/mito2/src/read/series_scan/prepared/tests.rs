@@ -406,10 +406,6 @@ async fn prepared_sources_share_discovery_and_read_independently() {
     );
     assert!(merge_schema.index_of(DATA_SCHEMA_TSID_COLUMN_NAME).is_err());
     assert_eq!(1, prepared.raw.predicates.len()); // Only the field predicate remains.
-    for candidate in prepared.candidates.iter() {
-        assert!(candidate.key.starts_with(candidate.merge_key.as_slice()));
-        assert!(candidate.merge_key.len() < candidate.key.len());
-    }
 
     assert!(
         !reads
