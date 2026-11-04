@@ -311,6 +311,11 @@ fn build_struct(
                 // Safety check: Ensure under the `greptime` catalog for security
                 #user_path::ensure_greptime!(self.func_ctx);
 
+                #user_path::ensure_admin_privilege(
+                    &self.func_ctx,
+                    #display_name,
+                )?;
+
                 let columns_num = columns.len();
                 let rows_num = if columns.is_empty() {
                     1
