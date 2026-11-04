@@ -212,14 +212,19 @@ impl PartialFold {
         let mut components: [Vec<f64>; 4] = std::array::from_fn(|_| Vec::with_capacity(rows));
         let mut incremental_mean: Vec<bool> = Vec::with_capacity(rows);
         for group in &partial.groups {
+            // A group's labels are the same for every row it writes, so resolve each tag once
+            // instead of once per row. `SeriesLabels::get` binary-searches the group's tags, and
+            // this loop runs once per (point, field) of the group.
+            let resolved: Vec<Option<&str>> =
+                self.tags.iter().map(|tag| group.metric.get(tag)).collect();
             for (at, states) in &group.points {
                 for (index, state) in states.iter().enumerate() {
                     let Some(state) = state else {
                         continue;
                     };
                     metric_name.push(group.metric.name());
-                    for (column, tag) in tags.iter_mut().zip(self.tags.iter()) {
-                        column.push(group.metric.get(tag));
+                    for (column, value) in tags.iter_mut().zip(resolved.iter()) {
+                        column.push(*value);
                     }
                     point.push(*at as u64);
                     field.push(index as u32);
