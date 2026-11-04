@@ -2397,6 +2397,7 @@ enum InvalidPlan {
     TinyBudget,
     ZeroFileSize,
     ZeroWindow,
+    NegativeWindow,
     OversizedControl,
     NoTargets,
     WindowOverflow,
@@ -2409,10 +2410,14 @@ enum InvalidPlan {
 }
 
 #[rstest::rstest]
-#[case(InvalidPlan::NoSources, "Invalid sources or execution budgets")]
-#[case(InvalidPlan::TinyBudget, "Invalid sources or execution budgets")]
-#[case(InvalidPlan::ZeroFileSize, "Invalid sources or execution budgets")]
-#[case(InvalidPlan::ZeroWindow, "Invalid sources or execution budgets")]
+#[case(InvalidPlan::NoSources, "sources must not be empty")]
+#[case(InvalidPlan::TinyBudget, "memory_limit must be at least 1 MiB")]
+#[case(
+    InvalidPlan::ZeroFileSize,
+    "max_output_file_size must be greater than 0"
+)]
+#[case(InvalidPlan::ZeroWindow, "window_seconds must be greater than 0")]
+#[case(InvalidPlan::NegativeWindow, "window_seconds must be greater than 0")]
 #[case(InvalidPlan::OversizedControl, "control state exceeds the task budget")]
 #[case(InvalidPlan::NoTargets, "No routing targets")]
 #[case(InvalidPlan::WindowOverflow, "Task window overflow")]
@@ -2443,6 +2448,7 @@ async fn test_invalid_plan_is_rejected_before_creating_outputs(
         InvalidPlan::TinyBudget => plan.memory_limit = 1024 * 1024 - 1,
         InvalidPlan::ZeroFileSize => plan.max_output_file_size = 0,
         InvalidPlan::ZeroWindow => plan.window_seconds = 0,
+        InvalidPlan::NegativeWindow => plan.window_seconds = -1,
         InvalidPlan::OversizedControl => {
             plan.memory_limit = 1024 * 1024;
             let source = plan.sources[0].clone();

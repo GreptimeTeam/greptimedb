@@ -144,12 +144,27 @@ pub async fn compact_regions(
 
 fn validate_plan(plan: &MultiRegionCompactionPlan) -> Result<RegionMetadataRef> {
     ensure!(
-        !plan.sources.is_empty()
-            && plan.memory_limit >= 1024 * 1024
-            && plan.max_output_file_size > 0
-            && plan.window_seconds > 0,
+        !plan.sources.is_empty(),
         InvalidMultiRegionCompactionSnafu {
-            reason: "Invalid sources or execution budgets"
+            reason: "sources must not be empty"
+        }
+    );
+    ensure!(
+        plan.memory_limit >= 1024 * 1024,
+        InvalidMultiRegionCompactionSnafu {
+            reason: "memory_limit must be at least 1 MiB"
+        }
+    );
+    ensure!(
+        plan.max_output_file_size > 0,
+        InvalidMultiRegionCompactionSnafu {
+            reason: "max_output_file_size must be greater than 0"
+        }
+    );
+    ensure!(
+        plan.window_seconds > 0,
+        InvalidMultiRegionCompactionSnafu {
+            reason: "window_seconds must be greater than 0"
         }
     );
     let control_bytes = plan.targets.len().saturating_mul(8 * 1024).saturating_add(
