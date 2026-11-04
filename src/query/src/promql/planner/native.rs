@@ -1941,11 +1941,10 @@ async fn segment_tree(
     // such subtree inside it has nothing to cut, and cutting anything else - an aggregate's own
     // state, a constant - is either impossible or a plain recomputation of the same work in one
     // more node. Cutting on locality alone would accept one here.
-    // A grouping by `__name__` keeps that label, so the node has to publish it. A discovered
-    // source declares it; a named selector's source does not, because its table name is the metric
-    // name. With more than one source the node therefore cannot name the groups it folds, and they
-    // would be reported under one label set. A single source cannot merge distinct metric-name
-    // groups this way, which is why this restriction is specific to multi-source segmentation.
+    // A grouping by `__name__` keeps that label while the fused node's declared columns cannot
+    // name it. With multiple sources, groups differing only by metric name would therefore be
+    // reported under one label set. A single-source tree cannot merge distinct metric-name groups
+    // this way, so this restriction is specific to multi-source segmentation.
     if children.len() > 1 && groups_by_metric_name(tree.root()) {
         return Ok(None);
     }
