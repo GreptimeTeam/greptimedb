@@ -1082,14 +1082,58 @@ async fn test_cancelled_prepared_plan_preserves_resident_history() {
 }
 
 #[tokio::test]
-async fn test_pick_result_accepts_unrelated_concurrent_flush() {
+async fn test_pick_result_installs_history_after_unrelated_flush() {
+    use crate::compaction::scheduler::history::PickKey;
+    use crate::compaction::twcs::PickClass;
+
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
-    let version_control = compactable_version();
+    let mut builder = VersionControlBuilder::new();
+    for start in [0, 3_600_000] {
+        for offset in 0..4 {
+            builder.push_l0_file(start + offset, start + 1000);
+        }
+    }
+    let mut version = builder.build_version();
+    let crate::region::options::CompactionOptions::Twcs(options) = &mut version.options.compaction;
+    options.time_window = Some(Duration::from_secs(3600));
+    let version_control = Arc::new(crate::region::version::VersionControl::new(version));
+    let region_id = version_control.region_id();
+    scheduler.register_region(&version_control, &env.access_layer);
+    let selected_key = PickKey {
+        window: 0,
+        class: PickClass::L0Merge,
+    };
+    let waiting_key = PickKey {
+        window: 3600,
+        class: PickClass::L0Merge,
+    };
+    let obsolete_key = PickKey {
+        window: -999,
+        class: PickClass::FileReduction,
+    };
+    let start = std::time::Instant::now();
+    let old_age = start - Duration::from_secs(120);
+    let waiting_age = start - Duration::from_secs(90);
+    let history = &mut scheduler
+        .region_status
+        .get_mut(&region_id)
+        .unwrap()
+        .pick_history;
+    history.seed_for_test(selected_key, old_age);
+    history.seed_for_test(waiting_key, waiting_age);
+    history.seed_for_test(obsolete_key, old_age);
     let (finished, manifest_ctx, schema_metadata_manager) =
         begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
+    assert_eq!(
+        Some(old_age),
+        scheduler.region_status[&region_id]
+            .pick_history
+            .priority_for_test(selected_key, start)
+            .1
+    );
     let selected = selected_files(&finished);
     apply_edit(
         &version_control,
@@ -1104,6 +1148,14 @@ async fn test_pick_result_accepts_unrelated_concurrent_flush() {
 
     assert_eq!(job_scheduler.num_jobs(), 1);
     assert!(selected.iter().all(FileHandle::compacting));
+    let history = &scheduler.region_status[&region_id].pick_history;
+    let future = std::time::Instant::now() + Duration::from_secs(120);
+    assert!(history.priority_for_test(selected_key, future).1.unwrap() >= start);
+    assert_eq!(
+        Some(waiting_age),
+        history.priority_for_test(waiting_key, future).1
+    );
+    assert!(history.priority_for_test(obsolete_key, future).1.is_none());
 }
 
 #[tokio::test]
