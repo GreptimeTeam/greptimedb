@@ -606,6 +606,42 @@ pub trait PreparedSeriesSource: Send + Sync {
     ) -> Result<SendableRawSeriesStream, BoxedError>;
 }
 
+/// The conservative range of complete encoded primary keys a scan partition's selected candidates
+/// span.
+///
+/// Both ends are complete encoded keys, the same bytes [`SeriesInfo::primary_key`] reports and the
+/// same bytes a raw chunk carries. The range covers what the partition *may* emit, not only what it
+/// does emit: a candidate with no samples after filtering is still inside it. It is therefore
+/// sound to conclude that a key below `min` cannot come from this partition, and nothing may be
+/// concluded from a key between the ends or above `max`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawSeriesKeyRange {
+    /// Smallest complete key of the partition's selected candidates.
+    pub min: datatypes::arrow::buffer::Buffer,
+    /// Largest complete key of the partition's selected candidates.
+    pub max: datatypes::arrow::buffer::Buffer,
+}
+
+impl RawSeriesKeyRange {
+    /// Returns the bytes this range retains beyond its own in-place size.
+    pub fn retained_bytes(&self) -> usize {
+        self.min.len().saturating_add(self.max.len())
+    }
+}
+
+/// One initialized raw-series partition read and the key range its selected candidates cover.
+///
+/// Initialization resolves the scanner-wide preparation and the partition's candidate slice and
+/// creates the reader, so nothing about the preparation is left to happen after the first chunk.
+/// The range is a property of that same initialization.
+pub struct InitializedRawSeriesScan {
+    /// The partition's raw series, ready to be polled.
+    pub stream: SendableRawSeriesStream,
+    /// The range the partition's selected candidates span, or `None` when the slice covers no
+    /// candidate. `None` is not an absence claim about emitted keys and not an end of stream.
+    pub key_range: Option<RawSeriesKeyRange>,
+}
+
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
@@ -695,6 +731,32 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         _label_source: &RawLabelSource,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
         todo!()
+    }
+
+    /// Initializes one partition's raw series before its first chunk is packed.
+    ///
+    /// The optional entrypoint for a caller that must publish something derived from the partition's
+    /// finished initialization (its candidate key range) before any payload. The returned future
+    /// resolves the same scanner-wide preparation [`Self::prepare_series`] shares, creates the
+    /// reader, and reports the conservative range of the candidates that reader's slice covers. It
+    /// is owned and `'static`: it does not borrow the scanner, and awaiting it never holds a scanner
+    /// lock.
+    ///
+    /// `None` means this source offers no initialized form and the caller keeps
+    /// [`Self::scan_series_partition`] unchanged, carrying no range. `None` is not an absence claim
+    /// about keys, not an end of stream, and never an error; a source that starts work must report
+    /// through the future's result instead. A range a source reports describes the candidates its
+    /// own slice selected; ordinal order and the mapping from ordinals to scan partitions belong to
+    /// a concrete source and are not properties of [`PreparedSeriesSource`].
+    fn initialize_series_partition(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics_set: &ExecutionPlanMetricsSet,
+        _partition: usize,
+        _label_source: &RawLabelSource,
+    ) -> futures::future::BoxFuture<'static, Result<Option<InitializedRawSeriesScan>, BoxedError>>
+    {
+        Box::pin(async { Ok(None) })
     }
 
     /// Prepares scanner-wide candidates once for independent ordinal-range reads.

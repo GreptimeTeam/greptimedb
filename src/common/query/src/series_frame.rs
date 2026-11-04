@@ -55,13 +55,26 @@ use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures_util::Stream;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_engine::{
-    NO_BOUND_LABEL_SOURCE, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
+    NO_BOUND_LABEL_SOURCE, RawLabelSource, RawSeriesKeyRange, RawSeriesStream,
+    SendableRawSeriesStream,
 };
 
 #[cfg(test)]
 mod tests;
 
 const ORDERING_KEY: &str = "greptime.series.ordering";
+
+/// Execution-only annotation carrying the conservative candidate key range of one scan partition.
+///
+/// It is deliberately outside the reserved `greptime.series.*` namespace, which is the frame's wire
+/// contract and refuses unknown keys: this one describes how one *local execution* initialized its
+/// partition, not what the frame means on a wire. A reader that did not initialize the stream itself
+/// therefore treats the text as unverified and must not use it as evidence, and a frame that lacks
+/// it simply states no range.
+const RAW_SCAN_KEY_RANGE_KEY: &str = "greptime.raw_scan.key_range";
+
+/// The text prefix of [`RAW_SCAN_KEY_RANGE_KEY`]; a different revision is refused, never guessed.
+const RAW_SCAN_KEY_RANGE_VERSION: &str = "v1";
 
 /// A stream of evaluated series chunks and their finality.
 ///
@@ -221,13 +234,41 @@ pub fn series_frame_ordering(schema: &ArrowSchema) -> datafusion_common::Result<
 pub fn pack_raw_series(
     source: SendableRawSeriesStream,
 ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+    pack_raw_series_with_key_range(source, None)
+}
+
+/// Packs a raw-series stream and annotates its frames with the partition's candidate key range.
+///
+/// The range is fixed here, before the first batch exists and before any wrapping stream sees the
+/// schema, so every batch of the stream - and the stream's own schema, including for a stream that
+/// never produces a batch - declares the same range. It describes what the producer's initialization
+/// selected, so it must be the range of the exact reader being packed.
+///
+/// The annotation is execution metadata, not frame contract: it lives outside `greptime.series.*`,
+/// frames without it are ordinary frames, and a consumer may only use it when it initialized the
+/// stream itself. Malformed text is an error, never a silent "no range".
+pub fn pack_raw_series_with_key_range(
+    source: SendableRawSeriesStream,
+    key_range: Option<RawSeriesKeyRange>,
+) -> datafusion_common::Result<DfSendableRecordBatchStream> {
     let ordering = source.ordering();
     let schema = source.schema().clone();
     let decode = source.label_decode_spec().cloned();
     let labels = declared_label_mode(&decode);
     // The declared frame schema carries the producer ordering and the label decode description;
     // every ready batch is published under it, including when no row is ever produced.
-    let frame_schema = frame_schema_with(&schema, labels, decode.as_ref(), ordering)?;
+    let mut frame_schema = frame_schema_with(&schema, labels, decode.as_ref(), ordering)?;
+    if let Some(key_range) = &key_range {
+        let mut metadata = frame_schema.metadata().clone();
+        metadata.insert(
+            RAW_SCAN_KEY_RANGE_KEY.to_string(),
+            encode_key_range(key_range),
+        );
+        frame_schema = Arc::new(ArrowSchema::new_with_metadata(
+            frame_schema.fields().clone(),
+            metadata,
+        ));
+    }
     let builder = SeriesFrameBuilder::try_new(
         &schema,
         labels,
@@ -290,6 +331,93 @@ pub fn pack_evaluated_series(
         batches: PackBatches::new(builder, frame_schema),
         validator: EvaluatedSequenceValidator::new(),
     }))
+}
+
+/// Reads the execution-only candidate key range a locally initialized stream declares.
+///
+/// `None` means the stream declares no range, which is the ordinary case and proves nothing about
+/// emitted keys. Text that is present but unreadable, of another revision, or carrying a reversed
+/// range is an error: a stream that was initialized locally must not silently degrade into
+/// "no range" and let a consumer keep waiting on a partition it should have been able to reason
+/// about.
+///
+/// This reads an annotation, not provenance. Only a consumer that initialized the stream itself may
+/// treat the result as evidence; the same text on a stream from anywhere else, however it got
+/// there, is not a statement about that stream's keys.
+pub fn raw_series_scan_key_range(
+    schema: &ArrowSchema,
+) -> datafusion_common::Result<Option<RawSeriesKeyRange>> {
+    let Some(text) = schema.metadata().get(RAW_SCAN_KEY_RANGE_KEY) else {
+        return Ok(None);
+    };
+    decode_key_range(text).map(Some)
+}
+
+/// Encodes a key range as `<version>:<min hex>:<max hex>`.
+fn encode_key_range(key_range: &RawSeriesKeyRange) -> String {
+    format!(
+        "{RAW_SCAN_KEY_RANGE_VERSION}:{}:{}",
+        hex_encode(key_range.min.as_slice()),
+        hex_encode(key_range.max.as_slice())
+    )
+}
+
+/// Decodes [`encode_key_range`]'s text, refusing anything this revision did not write.
+fn decode_key_range(text: &str) -> datafusion_common::Result<RawSeriesKeyRange> {
+    let mut parts = text.split(':');
+    let (Some(version), Some(min), Some(max), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(invalid("malformed scan key range annotation"));
+    };
+    if version != RAW_SCAN_KEY_RANGE_VERSION {
+        return Err(invalid(format!(
+            "unknown scan key range annotation version {version}"
+        )));
+    }
+    let min = hex_decode(min)?;
+    let max = hex_decode(max)?;
+    if min > max {
+        return Err(invalid("scan key range annotation is reversed"));
+    }
+    Ok(RawSeriesKeyRange {
+        min: min.into(),
+        max: max.into(),
+    })
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        text.push(DIGITS[(byte >> 4) as usize] as char);
+        text.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    text
+}
+
+fn hex_decode(text: &str) -> datafusion_common::Result<Vec<u8>> {
+    fn digit(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = text.as_bytes();
+    let (pairs, remainder) = bytes.as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(invalid("malformed scan key range hex"));
+    }
+    let mut decoded = Vec::with_capacity(pairs.len());
+    for pair in pairs {
+        let (Some(high), Some(low)) = (digit(pair[0]), digit(pair[1])) else {
+            return Err(invalid("malformed scan key range hex"));
+        };
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
 }
 
 /// Packs aggregate-state chunks into bounded DataFusion record batches.
