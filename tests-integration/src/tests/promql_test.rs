@@ -3245,13 +3245,14 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
     assert!((1..=3).contains(&peak), "region reads stay bounded: {peak}");
 
     // An aggregate over a discovered selector reads the metric name from each source's own frames,
-    // not from one bound metric. Folding without grouping adds them; grouping by the name must keep
-    // the two metrics apart even though their ordinary labels are identical.
+    // not from one bound metric. Folding without grouping adds them, and grouping by the name keeps
+    // the two metrics apart even though their ordinary labels are identical. A window function drops
+    // the name, so the grouping case reads the raw selector.
     for (expression, expected) in [
         (r#"sum(increase({host="a"}[5m]))"#, vec![10.0, 14.0]),
         (
-            r#"sum by (__name__, site) (increase({host="a"}[5m]))"#,
-            vec![5.0, 5.0, 7.0, 7.0],
+            r#"sum by (__name__) ({host="a"})"#,
+            vec![6.0, 6.0, 8.0, 8.0],
         ),
     ] {
         let output = instance
@@ -3295,6 +3296,91 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
         }
         rows.sort_by(f64::total_cmp);
         assert_eq!(expected, rows, "{expression}");
+    }
+}
+
+/// Remote admission refusals that used to be made by `segment_tree` must survive its bypass:
+/// several sources cannot report groups that differ only by metric name, and an order-dependent
+/// operation over discovered metrics cannot be answered by a union that reads in arrival order.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_remote_refuses_unsupported_discovery_and_name_grouping() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_refusal")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_refuse_phy (host STRING, site STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, site)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:00', ts >= '1970-01-01 00:02:00') ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_refuse_a", "dist_native_refuse_b"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, site STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, site)) ENGINE=metric WITH ('on_physical_table'='dist_native_refuse_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+        execute_all(
+            &instance,
+            &format!(
+                "INSERT INTO {table} (host, site, val, ts) VALUES ('a', '{table}', 2, 60000), ('a', '{table}', 4, 120000), ('a', '{table}', 6, 180000)"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    // An ordinary Mito table beside a metric one: no logical id, so a tree reading both is several
+    // inputs even though only one of them carries a metric logical id.
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_refuse_mito (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=mito",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "INSERT INTO dist_native_refuse_mito (host, val, ts) VALUES ('a', 2, 60000), ('a', 4, 120000), ('a', 6, 180000)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    for expression in [r#"sum by (__name__) (dist_native_refuse_a or dist_native_refuse_mito)"#] {
+        let output = instance
+            .do_promql_query(
+                &PromQuery {
+                    query: expression.to_string(),
+                    start: "180".to_string(),
+                    end: "240".to_string(),
+                    step: "60s".to_string(),
+                    ..PromQuery::default()
+                },
+                native_query_context(true, 2),
+            )
+            .await
+            .remove(0);
+        let Ok(output) = output else {
+            // Legacy planning is allowed to decline this shape too; what must not happen is a
+            // native plan that reports two metric groups it cannot name.
+            continue;
+        };
+        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+        assert_eq!(
+            native_plan_shape(plan).fused,
+            0,
+            "two sources cannot report groups that differ only by metric name: {plan:?}"
+        );
     }
 }
 
