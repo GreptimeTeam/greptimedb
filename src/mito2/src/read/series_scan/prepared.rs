@@ -579,6 +579,7 @@ impl ColumnarPreparedSource {
                         .entry("prepare_tag_values")
                         .or_default() += values.len() as u64;
                     let bytes = key.len()
+                        + if direct_labels { size_of::<u64>() } else { 0 }
                         + values.values().flatten().map(String::len).sum::<usize>()
                         + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
                         + std::mem::size_of::<Candidate>()
@@ -586,7 +587,6 @@ impl ColumnarPreparedSource {
                     reservation
                         .try_grow(bytes)
                         .map_err(|e| invalid(e.to_string()))?;
-                    let merge_key = Buffer::from(key[..merge_key_len].to_vec());
                     let metric = if let Some(label_batch) = &label_batch {
                         *preparation_metrics
                             .counts
@@ -613,6 +613,10 @@ impl ColumnarPreparedSource {
                     } else {
                         Buffer::from(key)
                     };
+                    let merge_key = key.slice_with_length(
+                        if direct_labels { size_of::<u64>() } else { 0 },
+                        merge_key_len,
+                    );
                     candidates.insert(
                         id,
                         Candidate {

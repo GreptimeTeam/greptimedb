@@ -673,6 +673,12 @@ impl std::fmt::Debug for SeriesScanExec {
 }
 
 impl SeriesScanExec {
+    /// Returns the immutable label binding supplied to the storage scan.
+    pub fn scan_binding(&self) -> &RawLabelSource {
+        &self.scan_binding
+    }
+
+    /// Returns the label representation carried by output frames.
     pub fn label_source(&self) -> &RawLabelSource {
         &self.label_source
     }
