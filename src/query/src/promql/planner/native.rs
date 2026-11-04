@@ -1338,9 +1338,7 @@ fn canonical_boundary_stages(
     let NativeType::Samples(schema) = &tree.root().output else {
         return None;
     };
-    if schema.eval_grid.is_none() {
-        return None;
-    }
+    schema.eval_grid.as_ref()?;
     let fields = schema
         .fields
         .iter()
