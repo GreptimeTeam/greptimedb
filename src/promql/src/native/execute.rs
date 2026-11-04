@@ -2836,7 +2836,7 @@ impl RuntimeNode {
                 )
             }
             NativeExpr::Window { input, op } => {
-                let (child, child_shared) = Self::build(
+                let (child, _) = Self::build(
                     input,
                     pool,
                     inputs,
