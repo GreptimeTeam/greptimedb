@@ -2749,6 +2749,97 @@ fn two_series_onto_one_label_set_after_a_map_are_merged_into_one_series() {
     }
 }
 
+/// A dynamic `topk` hands on the label sets its input holds, so the window above it merges them as
+/// it does under a literal `topk`.
+///
+/// `topk` keeps whole input series and canonicalises nothing about their labels, so a `topk` over a
+/// map hands on what the map handed it: `a{job="x"}` and `b{job="x"}` become two pieces of one
+/// label set, and the two hold their values at different positions. The window above is the node
+/// that merges them, which it only does when the child says its output can hold two series of one
+/// label set. A window that streamed them instead answers once per piece, and the two answers
+/// overlap on the same label set at the same position, which is neither Prometheus' answer nor a
+/// result the node can hand out: merging first makes `sum_over_time` answer 4, once.
+#[test]
+fn two_series_onto_one_label_set_under_a_parameterized_topk_are_merged() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    // A `k` of two at every point, so the dynamic path keeps what a literal `topk(2, ...)` keeps.
+    let parameter = scalar_binary(
+        scalar_binary(
+            eval_time(None, Arc::clone(&inner_grid)),
+            scalar(0.0, Arc::clone(&inner_grid)),
+            binary_matching(BinaryOp::Mul),
+        ),
+        scalar(2.0, Arc::clone(&inner_grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(window_with(
+        NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(map(
+                    evaluated_input(Arc::clone(&inner_grid)),
+                    vec![MathOp::Abs],
+                )),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(parameter),
+            },
+            output: evaluated(Arc::clone(&inner_grid)),
+        },
+        RangeFunction::SumOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(1.0), None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("b", "x"),
+                0,
+                vec![None, Some(3.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    // Nothing settles while the pieces arrive: the merged series is what the window evaluates, and
+    // it does not exist before the input ends.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the window reported a piece it had not merged yet"
+    );
+    let out = execution.finish().expect("the merged series evaluates");
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(4.0))],
+        "the window did not answer over the merged label set"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the one merged label set closed more than once"
+    );
+}
+
 /// Two closed series that hold a value at the same position are still refused under one label set.
 ///
 /// The pair below maps into one label set and both hold a value at position 0 of the field, which
@@ -11558,6 +11649,44 @@ fn scalar_of_reserves_its_counts_while_it_reads_the_assembly() {
         }
         assert_eq!(pool.reserved(), 0);
     }
+}
+
+/// `scalar()` reports what it holds while it retains its input, not that memory twice.
+///
+/// The retention path sets the node's reservation to what it retains, so the figure it reports is a
+/// reading of that one reservation: adding the retained bytes to it again would report more than the
+/// pool granted, and a caller watching the pool would read a node holding more than it holds.
+#[test]
+fn scalar_of_reports_what_it_holds_while_its_input_is_retained() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                false,
+            ),
+        )
+        .unwrap();
+    // The input is unfinished, so the pull retains the chunk, answers nothing and holds it from
+    // here on.
+    assert!(execution.next_chunk().unwrap().is_none());
+    let held = execution.state().reserved_bytes();
+    assert!(held > 0, "the retained chunk was not charged for");
+    assert_eq!(
+        held,
+        pool.reserved(),
+        "the reported reservation is not what the node holds"
+    );
+    execution.state.close().unwrap();
+    assert_eq!(pool.reserved(), 0, "the reservation was not returned");
 }
 
 /// `limitk` takes series in the order its input hands them over, not in label order, and the two

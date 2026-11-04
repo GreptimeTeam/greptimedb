@@ -2160,6 +2160,107 @@ fn native_tree_depth_limit_checks_dynamic_children() {
     }
 }
 
+/// The index postcard writes for a [`NativeExpr`] variant is a wire contract, not an implementation
+/// detail: postcard encodes a variant as its index, and a version 3 `FusedSeries` envelope carries
+/// the whole tree rather than a prefix of it, so a variant inserted anywhere but the end renames
+/// every variant after it for a reader of an earlier build.
+///
+/// The numbers here are the ones already written to the wire. New variants are appended after
+/// `Info`; every variant above them keeps the index below.
+#[test]
+fn native_expr_variant_indices_are_a_wire_contract() {
+    use crate::histogram_eval::HistogramFunction;
+
+    // A node carries its expression first, so this is also the tag of any node or tree holding it.
+    fn tag(expr: &NativeExpr) -> u8 {
+        let encoded = postcard::to_stdvec(expr).expect("a native expression encodes");
+        *encoded.first().expect("a variant tag is the first byte")
+    }
+
+    let on_grid = || grid(0, 60_000, 1);
+    let vector = || map_over(input_on(on_grid()));
+    let scalar = || scalar_on(1.0, on_grid());
+    let cases = [
+        (
+            NativeExpr::Input(BoundInput {
+                source_index: 0,
+                output: raw(),
+                ordering: SeriesOrdering::KeyThenTime,
+            }),
+            0u8,
+            "Input",
+        ),
+        (NativeExpr::Scalar(BoundScalar { value: 1.0 }), 1, "Scalar"),
+        (NativeExpr::EvalTime { date: None }, 2, "EvalTime"),
+        (
+            NativeExpr::VectorOf {
+                input: Box::new(scalar()),
+            },
+            3,
+            "VectorOf",
+        ),
+        (
+            NativeExpr::Merge {
+                input: Box::new(vector()),
+            },
+            5,
+            "Merge",
+        ),
+        (
+            NativeExpr::Timestamp {
+                input: Box::new(vector()),
+            },
+            9,
+            "Timestamp",
+        ),
+        (
+            NativeExpr::Aggregate {
+                input: Box::new(vector()),
+                op: BoundAggregate {
+                    kind: AggregateKind::Sum,
+                    group: Grouping::By(Arc::new(["job".into()])),
+                    stage: AggregateStage::Complete,
+                },
+            },
+            10,
+            "Aggregate",
+        ),
+        // The dynamic forms are the last three, which is what keeps every index above them.
+        (
+            NativeExpr::ScalarOf {
+                input: Box::new(vector()),
+            },
+            15,
+            "ScalarOf",
+        ),
+        (
+            NativeExpr::ParameterizedTopK {
+                input: Box::new(vector()),
+                op: BoundVectorOp::TopK {
+                    k: 1.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(scalar()),
+            },
+            16,
+            "ParameterizedTopK",
+        ),
+        (
+            NativeExpr::ParameterizedHistogram {
+                input: Box::new(vector()),
+                op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.9)),
+                parameters: vec![scalar()],
+            },
+            17,
+            "ParameterizedHistogram",
+        ),
+    ];
+    for (expr, index, variant) in cases {
+        assert_eq!(index, tag(&expr), "{variant} changed the index it encodes");
+    }
+}
+
 #[test]
 fn native_tree_postcard_float_fidelity_round_trip() {
     for bits in [

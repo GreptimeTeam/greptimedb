@@ -3571,7 +3571,7 @@ impl RuntimeNode {
                     ));
                 }
                 let vector = VectorRuntime::try_new(op.clone(), schema)?;
-                let (child, _) = Self::build(
+                let (child, child_shared) = Self::build(
                     input,
                     pool,
                     inputs,
@@ -3599,7 +3599,10 @@ impl RuntimeNode {
                         vector: Some(vector),
                         state,
                     },
-                    false,
+                    // `topk` keeps whole input series and canonicalises no label set, so a dynamic
+                    // `k` changes what the node reads and not what it hands on: it shares its
+                    // input's label sets exactly as the literal `TopK` does.
+                    child_shared,
                 )
             }
             NativeExpr::ParameterizedHistogram {
@@ -3778,16 +3781,12 @@ impl RuntimeNode {
         match &self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => 0,
             RuntimeOp::EvalTime { state, .. } => state.buffer.reservation.size(),
-            RuntimeOp::ScalarOf {
-                input,
-                retained,
-                state,
-                ..
-            } => state
+            // The retention path resizes this reservation to what the node retains, so the figure is
+            // read off the one reservation rather than charging the retained bytes a second time.
+            RuntimeOp::ScalarOf { input, state, .. } => state
                 .buffer
                 .reservation
                 .size()
-                .saturating_add(retained.held)
                 .saturating_add(input.reserved_bytes()),
             RuntimeOp::Instant { input, state, .. }
             | RuntimeOp::Window { input, state, .. }

@@ -325,6 +325,12 @@ fn data_free_value_field(stmt: &EvalStmt) -> Arc<str> {
                         }
                     }
                 }
+                // An aggregate's parameter is an expression since `topk` and friends take one, and
+                // the grouping labels it binds are names the value field must not collide with:
+                // an aggregate refuses to group by the field it folds.
+                if let Some(param) = &aggregate.param {
+                    visit(param, targets);
+                }
                 visit(&aggregate.expr, targets);
             }
             PromExpr::Unary(unary) => visit(&unary.expr, targets),

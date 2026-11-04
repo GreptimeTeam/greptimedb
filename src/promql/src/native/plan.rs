@@ -795,6 +795,13 @@ pub struct BoundSetOp {
 }
 
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.
+///
+/// The variants are numbered by their position, and postcard writes that number, so these indices
+/// are a wire contract: a version 3 [`crate::extension_plan::FusedSeries`] envelope carries the
+/// whole [`NativeTree`] rather than a prefix of it, and a variant inserted anywhere but the end
+/// renames every variant after it for a reader of an earlier build. New variants are therefore
+/// appended after `Info`, and `native_expr_variant_indices_are_a_wire_contract` in the tests below
+/// pins the numbers.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum NativeExpr {
     /// A scan or an exchange boundary.
@@ -808,9 +815,6 @@ pub enum NativeExpr {
     /// the evaluation timestamp truncated to whole seconds, which the float `time()` does not carry
     /// exactly for every timestamp.
     EvalTime { date: Option<DateFunction> },
-    /// `scalar(v)`: at each grid point, the sole sample value or NaN when the vector has zero or
-    /// more than one sample.
-    ScalarOf { input: Box<NativeNode> },
     /// `vector(s)`: the scalar as one series without labels.
     VectorOf { input: Box<NativeNode> },
     /// An instant selection over its input.
@@ -835,21 +839,6 @@ pub enum NativeExpr {
     ParameterizedMap {
         input: Box<NativeNode>,
         op: ParameterizedOp,
-        parameters: Vec<NativeNode>,
-    },
-    /// `topk`/`bottomk` whose `k` is evaluated at every grid point instead of bound as a constant.
-    ///
-    /// `op` is still the `TopK` the constant path binds; its `k` is unused here, because the value
-    /// this node selects with is the parameter's, read once per point.
-    ParameterizedTopK {
-        input: Box<NativeNode>,
-        op: BoundVectorOp,
-        parameter: Box<NativeNode>,
-    },
-    /// A classic histogram vector operation whose arguments vary on the output grid.
-    ParameterizedHistogram {
-        input: Box<NativeNode>,
-        op: BoundVectorOp,
         parameters: Vec<NativeNode>,
     },
     /// The timestamp of an evaluated input, in seconds.
@@ -885,6 +874,24 @@ pub enum NativeExpr {
         base: Box<NativeNode>,
         info: Box<NativeNode>,
         selector: InfoSelector,
+    },
+    /// `scalar(v)`: at each grid point, the sole sample value or NaN when the vector has zero or
+    /// more than one sample.
+    ScalarOf { input: Box<NativeNode> },
+    /// `topk`/`bottomk` whose `k` is evaluated at every grid point instead of bound as a constant.
+    ///
+    /// `op` is still the `TopK` the constant path binds; its `k` is unused here, because the value
+    /// this node selects with is the parameter's, read once per point.
+    ParameterizedTopK {
+        input: Box<NativeNode>,
+        op: BoundVectorOp,
+        parameter: Box<NativeNode>,
+    },
+    /// A classic histogram vector operation whose arguments vary on the output grid.
+    ParameterizedHistogram {
+        input: Box<NativeNode>,
+        op: BoundVectorOp,
+        parameters: Vec<NativeNode>,
     },
 }
 

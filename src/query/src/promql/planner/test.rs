@@ -2601,6 +2601,52 @@ async fn native_fused_plans_dynamic_scalars() {
     }
 }
 
+/// An aggregate's parameter is part of the tree a data-free statement names its value field from.
+///
+/// `topk(scalar(sum by (value) (vector(1))), vector(2))` groups by a label called `value`, so the
+/// value field has to step aside for it: an aggregate refuses to group by the field it folds, and
+/// the parameter is where that label is bound. Left out of the walk over the tree, the statement
+/// keeps the field name `value` and fails when the node is built for execution instead of answering
+/// `2`.
+#[tokio::test]
+async fn native_fused_plans_a_dynamic_topk_parameter_grouped_by_the_value_field() {
+    let query = "topk(scalar(sum by (value) (vector(1))), vector(2))";
+    let plan = build_native_fused_plan(query, true).await;
+    {
+        let fused = find_fused_series(&plan).expect("a data-free topk uses the native route");
+        assert!(fused.children().is_empty(), "{query}");
+        assert_eq!(
+            vec!["native_value_0"],
+            fused
+                .tree()
+                .root()
+                .output
+                .samples()
+                .unwrap()
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            "{query} native value field"
+        );
+    }
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    let mut answers = Vec::new();
+    for batch in &batches {
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        answers.extend((0..batch.num_rows()).map(|row| values.value(row)));
+    }
+    assert!(!answers.is_empty(), "{query} answered nothing");
+    assert!(
+        answers.iter().all(|value| *value == 2.0),
+        "{query} answered {answers:?}"
+    );
+}
+
 /// A map whose parameter reads no data runs per partition over its scan.
 #[tokio::test]
 async fn native_fused_plans_varying_map_parameters() {
