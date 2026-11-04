@@ -275,6 +275,10 @@ fn canonical_evaluated_local_prefix(node: &NativeNode) -> bool {
     }
 }
 
+/// Experimental FusedSeries envelope version. The format is not persisted; any incompatible
+/// layout change may reset this rather than reserving numbers for unreleased revisions.
+const FUSED_SERIES_ENVELOPE_VERSION: u32 = 1;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FusedSeriesPayload {
     tree: NativeTree,
@@ -317,7 +321,7 @@ impl FusedSeries {
         let len = u32::try_from(encoded.len())
             .map_err(|_| DataFusionError::Plan("FusedSeries payload too large".into()))?;
         let mut out = Vec::with_capacity(8 + encoded.len());
-        out.extend(4u32.to_le_bytes());
+        out.extend(FUSED_SERIES_ENVELOPE_VERSION.to_le_bytes());
         out.extend(len.to_le_bytes());
         out.extend(encoded);
         Ok(out)
@@ -332,7 +336,7 @@ impl FusedSeries {
             ));
         }
         let version = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-        if version != 4 {
+        if version != FUSED_SERIES_ENVELOPE_VERSION {
             return Err(DataFusionError::Plan(format!(
                 "unsupported FusedSeries envelope version {version}"
             )));
