@@ -138,10 +138,10 @@ fn plans_over_remote_regions(query_engine_state: &QueryEngineState) -> bool {
 /// region reads one query-wide body budget cannot deadlock.
 ///
 /// That topology is a single [`FusedSeriesExec`]: it polls every input at once, so a region body
-/// holding a permit is always still being drained, whether it reads one source or several. Any
-/// other node with several inputs -- a join, or a union drained input by input -- can wait for one
-/// input while another holds a permit, which no permit count resolves, so such plans keep reading
-/// unbounded.
+/// holding a permit is always still being drained, whether it reads one source or several.
+/// Admission stops there: a plan with any other multi-input node (a join, or the union a
+/// discovered selector builds) keeps its per-scan bounds only and is not counted against the
+/// query-wide target until its own topology is checked against the budget.
 pub(crate) fn native_raw_plan_bounds_region_reads(plan: &Arc<dyn ExecutionPlan>) -> bool {
     fn walk(node: &dyn ExecutionPlan, fused: &mut usize) -> bool {
         let is_fused = node.is::<FusedSeriesExec>();

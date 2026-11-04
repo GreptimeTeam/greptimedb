@@ -1945,6 +1945,57 @@ async fn collect_error(output: Output) -> String {
     }
 }
 
+/// Like [`native_result_rows`], with both label columns of the discovery fixture.
+async fn native_site_rows(output: Output) -> Vec<(i64, String, String, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let timestamps = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let host = cast(
+                batch.column_by_name("host").unwrap().as_ref(),
+                &DataType::Utf8,
+            )
+            .unwrap();
+            let host = host.as_any().downcast_ref::<StringArray>().unwrap();
+            let site = cast(
+                batch.column_by_name("site").unwrap().as_ref(),
+                &DataType::Utf8,
+            )
+            .unwrap();
+            let site = site.as_any().downcast_ref::<StringArray>().unwrap();
+            let values = batch
+                .columns()
+                .iter()
+                .filter(|column| column.data_type() == &DataType::Float64)
+                .collect::<Vec<_>>();
+            assert_eq!(values.len(), 1, "expected one Float64 value column");
+            let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        timestamps.value(row),
+                        host.value(row).to_string(),
+                        site.value(row).to_string(),
+                        values.value(row),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    rows
+}
+
 async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
     let batches = match output.data {
         OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
@@ -3072,6 +3123,126 @@ async fn distributed_native_promql_disjoint_regions_do_not_repartition() {
         "disjoint region streams stay within the target-partition bound: {expression}: {peak}"
     );
     assert_eq!(control_rows, rows, "{expression}");
+}
+
+/// A nameless selector discovers every metric table it matches and reads them as one `Union`.
+/// `UnionExec` reports the frame metadata of its last child, so a time-partitioned metric named
+/// before a host-partitioned one must still be reconciled: otherwise the union claims contiguous
+/// order and `increase` folds each region fragment as its own series.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_discovery")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    // The names sort so the contiguous (host-partitioned) metric is the union's last child, which
+    // is exactly the ordering a union would otherwise claim for the whole input.
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_disc_a_frag_phy (host STRING, site STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, site)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:00', ts >= '1970-01-01 00:02:00' AND ts < '1970-01-01 00:04:00', ts >= '1970-01-01 00:04:00') ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_disc_z_wide_phy (host STRING, site STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, site)) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm') ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    // Both metrics carry the same samples under their own `site`, so each contributes the same
+    // increase and the two rows stay distinct after the metric name is folded away.
+    for (table, physical, site) in [
+        (
+            "dist_native_disc_a_frag",
+            "dist_native_disc_a_frag_phy",
+            "left",
+        ),
+        (
+            "dist_native_disc_z_wide",
+            "dist_native_disc_z_wide_phy",
+            "right",
+        ),
+    ] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, site STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, site)) ENGINE=metric WITH ('on_physical_table'='{physical}')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+        execute_all(
+            &instance,
+            &format!(
+                "INSERT INTO {table} (host, site, val, ts) VALUES ('a', '{site}', 2, 60000), ('a', '{site}', 4, 120000), ('a', '{site}', 6, 180000), ('a', '{site}', 8, 240000)"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+
+    let query = PromQuery {
+        query: r#"sum by (host, site) (increase({host="a"}[5m]))"#.to_string(),
+        start: "180".to_string(),
+        end: "240".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    cluster.reset_network_do_get_peak();
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .unwrap();
+    let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+    let shape = native_plan_shape(plan);
+    assert_eq!(shape.fused, 1, "discovery stays native: {plan:?}");
+    assert_eq!(
+        shape.routers_below_fused, 1,
+        "the fused node reconciles the lowered union exactly once: {plan:?}"
+    );
+    assert!(
+        shape
+            .scan_orderings
+            .iter()
+            .any(|ordering| ordering.as_deref() == Some("interleaved")),
+        "the time-partitioned scan declares fragments: {:?}: {plan:?}",
+        shape.scan_orderings
+    );
+    assert!(
+        shape
+            .scan_orderings
+            .iter()
+            .any(|ordering| ordering.as_deref() == Some("contiguous")),
+        "the host-partitioned scan declares complete series: {:?}: {plan:?}",
+        shape.scan_orderings
+    );
+    let rows = native_site_rows(output).await;
+    // `increase` extrapolates the 2,4,6 window to the 5m boundary, as the cross-region fixture
+    // also expects: each metric contributes 5 at 180s and 7 at 240s, under its own `site`.
+    let expected = vec![
+        (180_000, "a".to_string(), "left".to_string(), 5.0),
+        (180_000, "a".to_string(), "right".to_string(), 5.0),
+        (240_000, "a".to_string(), "left".to_string(), 7.0),
+        (240_000, "a".to_string(), "right".to_string(), 7.0),
+    ];
+    assert_eq!(expected, rows);
+    assert_eq!(cluster.network_do_get_active(), 0, "every body is drained");
+    // The discovered union feeds one reader per member partition: two from the time-partitioned
+    // metric and one from the host-partitioned metric. That is the per-scan bound summed: the
+    // query-wide budget is installed only for the single-fused plan, and a plan with a union is
+    // not counted against it.
+    let peak = cluster.network_do_get_peak_active();
+    assert!((1..=3).contains(&peak), "region reads stay bounded: {peak}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
