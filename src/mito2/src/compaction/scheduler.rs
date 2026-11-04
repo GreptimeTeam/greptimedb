@@ -564,6 +564,9 @@ impl CompactionScheduler {
         // Publish the picking phase before dispatching background planning.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking_with_trigger(plan_id, trigger);
+        let pick_history = (trigger == CompactionTrigger::Automatic
+            && matches!(compact_options, compact_request::Options::Regular(_)))
+        .then(|| status.pick_history.clone());
         let request = status.new_compaction_request(
             self.request_sender.clone(),
             self.engine_config.clone(),
@@ -572,6 +575,7 @@ impl CompactionScheduler {
             self.listener.clone(),
             schema_metadata_manager,
             max_parallelism,
+            pick_history,
         );
         status.merge_waiter(waiter);
         self.dispatch_compaction_planning(plan_id, request, compact_options, time_range, trigger);
@@ -613,6 +617,7 @@ impl CompactionScheduler {
             self.listener.clone(),
             schema_metadata_manager,
             max_parallelism,
+            None,
         );
         status.merge_waiter(waiter);
         // Bump the counter through a disjoint field borrow so the `status`
@@ -697,6 +702,7 @@ impl CompactionScheduler {
             self.listener.clone(),
             schema_metadata_manager,
             MAX_PARALLEL_COMPACTION,
+            Some(status.pick_history.clone()),
         );
         // Bump the counter through a disjoint field borrow so the `status`
         // borrow stays alive; nothing could have removed the status since it

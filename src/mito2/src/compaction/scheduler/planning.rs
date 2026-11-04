@@ -57,8 +57,8 @@ use crate::worker::WorkerListener;
 
 /// Region compaction request.
 pub struct CompactionRequest {
-    /// Private snapshot for automatic planning; never mutates resident history.
-    pub(crate) pick_history: PickHistory,
+    /// Private snapshot for automatic regular planning; manual requests carry none.
+    pub(crate) pick_history: Option<PickHistory>,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) current_version: CompactionVersion,
     pub(crate) access_layer: AccessLayerRef,
@@ -299,9 +299,7 @@ impl CompactionScheduler {
         let _pick_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["pick"])
             .start_timer();
-        let mut history = (trigger == CompactionTrigger::Automatic
-            && matches!(options, compact_request::Options::Regular(_)))
-        .then_some(pick_history);
+        let mut history = pick_history;
         let picked = if let Some(history) = &mut history {
             pick_automatic(
                 &compaction_region,

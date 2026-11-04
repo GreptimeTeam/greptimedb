@@ -465,11 +465,11 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
         scheduler.listener.clone(),
         schemas,
         1,
+        Some(scheduler.region_status[&id].pick_history.clone()),
     );
-    assert_eq!(priority, request.pick_history.priority_for_test(key, later));
-    request
-        .pick_history
-        .observe_for_test(std::iter::empty(), later);
+    let history = request.pick_history.as_mut().unwrap();
+    assert_eq!(priority, history.priority_for_test(key, later));
+    history.observe_for_test(std::iter::empty(), later);
     assert_eq!(
         priority,
         scheduler.region_status[&id]

@@ -528,12 +528,13 @@ impl CompactionStatus {
         listener: WorkerListener,
         schema_metadata_manager: SchemaMetadataManagerRef,
         max_parallelism: usize,
+        pick_history: Option<PickHistory>,
     ) -> CompactionRequest {
         let current_version = CompactionVersion::from(self.version_control.current().version);
         let start_time = Instant::now();
 
         CompactionRequest {
-            pick_history: self.pick_history.clone(),
+            pick_history,
             engine_config,
             current_version,
             access_layer: self.access_layer.clone(),
