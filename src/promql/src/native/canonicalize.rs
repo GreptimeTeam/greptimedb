@@ -49,8 +49,8 @@
 //! than only at the statement root.
 //!
 //! What this pass does *not* decide is placement: whether the merge can be answered inside one
-//! execution is the lowering's question (see `PromPlanner::canonical_boundary`). A merge may need
-//! a boundary with a producer, a canonical router and a receiver.
+//! execution is the lowering's question. A merge that spans partitions uses a producer and the
+//! existing canonical router; downstream consumers read ordinary evaluated frames.
 
 use datafusion::error::Result as DfResult;
 
