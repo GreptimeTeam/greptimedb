@@ -16,12 +16,11 @@
 //! `bottomk`, `limitk`, `limit_ratio`, `scalar`, `absent` and the instant-result sorts.
 //!
 //! Semantics follow Prometheus (`aggregationK`, `HashRatioSampler`, `funcScalar`, `funcAbsent`,
-//! `createLabelsForAbsentFunction`, `funcSort*`), except that `limitk` uses deterministic label
-//! order rather than input order. A scalar is a grid series without labels that has a value at
-//! every point, so `vector(s)` is `s` itself and has no kernel.
+//! `createLabelsForAbsentFunction`, `funcSort*`). A scalar is a grid series without labels that
+//! has a value at every point, so `vector(s)` is `s` itself and has no kernel.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
@@ -30,7 +29,7 @@ use datatypes::series::time::union_positions;
 use datatypes::series::{Label, SeriesLabels};
 
 use crate::go_sort;
-use crate::grid_series::{GridSeriesBuilder, LabelSet, external, label_set, owned};
+use crate::grid_series::{GridSeriesBuilder, external, owned};
 
 #[cfg(test)]
 mod tests;
@@ -143,14 +142,11 @@ pub fn topk(
 
 /// `limitk(k, ...)` with a constant `k`.
 ///
-/// At every point each group keeps the `k` smallest distinct logical label sets among series holding
-/// a sample there, float or histogram, with their labels and values. Empty-valued labels are absent
-/// from a key, a nonempty `__name__` is included, and pairs are sorted by name. Keys compare
-/// pairwise by name then value, bytewise, with a shorter prefix first. Every series with a selected
-/// key is kept: distinct input series differing only in empty-valued labels can therefore return
-/// more than `k` series. Unlike Prometheus' first-`k` selection, the chosen label sets do not depend
-/// on input order; the output order still follows the input. The caller merges pieces of identical
-/// logical series where the input may contain them.
+/// At every point each group keeps the first `k` series in input order that hold a sample there,
+/// float or histogram, with their labels and values. Prometheus takes them in the order its
+/// storage returns series: label order once a query reads several queriers (the head and a
+/// block), creation order when the TSDB head alone answers it. A caller that wants Prometheus'
+/// result over persisted data passes the series in label order.
 pub fn limitk(
     k: f64,
     grouping: &Grouping,
@@ -170,57 +166,28 @@ pub fn limitk(
             .push(index);
     }
     let mut selected: Vec<Vec<(usize, usize)>> = vec![Vec::new(); series.len()];
-    let mut candidates: BinaryHeap<Arc<LabelSet>> = BinaryHeap::new();
-    let mut candidate_keys: HashSet<Arc<LabelSet>> = HashSet::new();
     for members in groups.values() {
         let mut cursors: Vec<RowCursor<'_>> = members
             .iter()
             .map(|&member| series[member].fields.as_slice()[0].cursor())
             .collect();
-        // Row cursors only move forward, so remember the samples present at this point until the
-        // k distinct selected keys are known. Multiple members may share any one of those keys.
-        let mut present = Vec::with_capacity(members.len());
         for point in union_positions(members.iter().map(|&member| &series[member].time)) {
-            candidates.clear();
-            candidate_keys.clear();
-            present.clear();
+            let mut taken = 0;
             for (slot, &member) in members.iter().enumerate() {
+                if taken == k {
+                    break;
+                }
                 let Some(row) = series[member].time.row_of(point) else {
                     continue;
                 };
-                if matches!(
+                if !matches!(
                     cursors[slot]
                         .at(row)
                         .expect("the axis and the fields are aligned"),
                     SampleRef::Missing
                 ) {
-                    continue;
-                }
-                present.push((member, row));
-                let mut labels = label_set(&series[member].metric);
-                labels.sort();
-                if candidate_keys.contains(&labels) {
-                    continue;
-                }
-                if candidates.len() == k {
-                    if candidates
-                        .peek()
-                        .is_some_and(|largest| labels.as_slice() >= largest.as_slice())
-                    {
-                        continue;
-                    }
-                    let largest = candidates.pop().expect("the heap is not empty");
-                    candidate_keys.remove(&largest);
-                }
-                let labels = Arc::new(labels);
-                candidate_keys.insert(Arc::clone(&labels));
-                candidates.push(labels);
-            }
-            for &(member, row) in &present {
-                let mut labels = label_set(&series[member].metric);
-                labels.sort();
-                if candidate_keys.contains(&labels) {
                     selected[member].push((point, row));
+                    taken += 1;
                 }
             }
         }

@@ -325,10 +325,7 @@ pub struct BoundAggregate {
 pub enum BoundVectorOp {
     /// `topk` (`top`) or `bottomk`: the `k` largest or smallest values of each group.
     TopK { k: f64, top: bool, group: Grouping },
-    /// `limitk`: the series of each group whose canonical label sets are among the `k` smallest
-    /// distinct sets, so the choice does not depend on the order the input arrives in. Every
-    /// series at a selected set is kept, which can exceed `k` when the input holds series that
-    /// differ only by empty-valued labels.
+    /// `limitk`: the first `k` series of each group that hold a sample, in input order.
     LimitK { k: f64, group: Grouping },
     /// `limit_ratio`: the series whose label hash falls in the ratio; it keeps whole series, so it
     /// has no grouping.

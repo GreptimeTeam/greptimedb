@@ -359,9 +359,8 @@ struct Split {
 /// are exactly the ones this statement's input would have produced in one execution: reading `le`
 /// off those merged series is the same computation, not an approximation. TopK is already accepted
 /// for that reason: it runs once over the fully merged series. This admits a second operation of
-/// that kind, not a new mechanism. LimitK is still not admitted by this split: its selection no
-/// longer depends on the storage input order ([`crate::select::limitk`] takes the smallest complete
-/// label sets), but admitting it above the merge has not been verified. A map is point-wise and an
+/// that kind, not a new mechanism. LimitK stays declined because it depends on the storage input
+/// order, which the merge does not preserve ([`crate::select::limitk`]). A map is point-wise and an
 /// aggregate runs over the complete merge. Other vector operations have not yet been
 /// verified/supported by this split.
 ///

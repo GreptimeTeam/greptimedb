@@ -1790,9 +1790,11 @@ impl VectorRuntime {
                 return Err(error);
             }
         };
-        // `limitk` selects by complete label set, independently of input order. When its child
-        // can produce pieces of one logical series, merge them before selection so its samples are
-        // combined and conflicting samples are detected, as for other label-rewriting operations.
+        // `limitk` keeps the first series in the order its input hands them over, as Prometheus
+        // takes the order of the vector it is given -- a sort below it decides that order. Pieces
+        // of one label set are one series there, placed where the label set first arrived, so
+        // they are merged first; ranked apart, a later piece would be counted after the series
+        // that arrived between them.
         let assembled = if self.merge_input {
             let rows = assembled.iter().map(|series| series.time.len()).sum();
             buffer.grow(merge_workspace_bytes(
@@ -1877,9 +1879,7 @@ fn vector_series(
 ///   recorded as, the candidate it is ranked as and the value each field rebuilds it into; per
 ///   series: its place in the label order and its group, its label pairs in the group key, its
 ///   cursor and the series and field descriptors of its result; and the histograms `limitk` and
-///   `limit_ratio` copy into their results, at the widest histogram of each field. `limitk` also
-///   holds a heap and set entry and a complete label key per candidate, the current point's present
-///   members, and a temporary candidate key.
+///   `limit_ratio` copy into their results, at the widest histogram of each field.
 /// - A sort: the value each series is keyed by, and the floats `sort` and `sort_desc` rebuild a
 ///   series into when it holds histograms; the label sorts move the series they were given.
 /// - `absent`: a presence flag and a result value per grid point and field.
@@ -1961,32 +1961,9 @@ fn vector_workspace_bytes(op: &BoundVectorOp, schema: &SeriesSchema, series: &[S
         + std::mem::size_of::<Series>()
         + fields * std::mem::size_of::<Samples>();
     let label = std::mem::size_of::<(Arc<str>, Arc<str>)>();
-    let is_limitk = matches!(op, BoundVectorOp::LimitK { .. });
-    // One heap and set entry and complete key per input series covers any group and k; one
-    // present-member slot covers each member at the current point. A further largest key covers
-    // the candidate being compared while the heap is full.
-    let temporary_key = if is_limitk {
-        series
-            .iter()
-            .map(|item| item.metric.tags().len() + usize::from(item.metric.name().is_some()))
-            .max()
-            .unwrap_or(0)
-            .saturating_mul(label)
-    } else {
-        0
-    };
-    series.iter().fold(temporary_key, |total, item| {
+    series.iter().fold(0usize, |total, item| {
         let rows = item.time.len();
         let labels = item.metric.tags().len() + 1;
-        let limitk_heap = if is_limitk {
-            (2 * std::mem::size_of::<Arc<LabelSet>>()
-                + std::mem::size_of::<LabelSet>()
-                + 2 * std::mem::size_of::<usize>()
-                + std::mem::size_of::<(usize, usize)>())
-            .saturating_add(labels.saturating_mul(label))
-        } else {
-            0
-        };
         let histograms = item
             .fields
             .iter()
@@ -1998,7 +1975,6 @@ fn vector_workspace_bytes(op: &BoundVectorOp, schema: &SeriesSchema, series: &[S
             .saturating_add(rows.saturating_mul(row))
             .saturating_add(per_series)
             .saturating_add(labels.saturating_mul(label))
-            .saturating_add(limitk_heap)
             .saturating_add(histograms)
     })
 }
