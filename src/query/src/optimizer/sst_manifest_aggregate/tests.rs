@@ -19,6 +19,7 @@ use common_meta::cluster::NodeInfo;
 use common_meta::datanode::RegionStat;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_procedure::ProcedureInfo;
+use common_query::logical_plan::SubstraitPlanDecoder;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::{MemTable, provider_as_source};
@@ -29,11 +30,14 @@ use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
 use datafusion::physical_planner::DefaultPhysicalPlanner;
 use datafusion::prelude::SessionContext;
 use datafusion_optimizer::Analyzer;
+use session::context::QueryContext;
 use store_api::data_source::DataSource;
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder};
 use table::table::Table;
 
 use super::*;
+use crate::query_engine::{DefaultPlanDecoder, DefaultSerializer};
 
 struct PlanningOnlySource;
 
@@ -148,7 +152,21 @@ impl PartitionStream for StatePartition {
             async_stream::try_stream! {
                 for batch in nodes.batches {
                     let ctx = SessionContext::new();
-                    let plan = replace_source(remote.clone(), vec![batch]);
+                    let table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
+                    ctx.register_table(
+                        ManifestSstEntry::reserved_table_name_for_inspection(),
+                        Arc::new(table),
+                    )?;
+                    // Exercise the same bytes and decoder as frontend -> datanode inspection.
+                    let encoded = DFLogicalSubstraitConvertor
+                        .encode(&remote, DefaultSerializer)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                    let decoder = DefaultPlanDecoder::new(ctx.state(), &QueryContext::arc())
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                    let plan = decoder
+                        .decode(encoded, ctx.state().catalog_list().clone(), false)
+                        .await
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
                     for state in datafusion::dataframe::DataFrame::new(ctx.state(), plan).collect().await? {
                         nodes.states.fetch_add(state.num_rows(), Ordering::SeqCst);
                         yield state;
@@ -242,6 +260,8 @@ async fn test_manifest_aggregate_states_match_baseline() {
             "SELECT SUM(CAST(file_size AS DOUBLE)), SUM(CAST(index_file_size AS DECIMAL(20, 0))) FROM ssts_manifest",
             "SELECT COUNT(file_id), COUNT(index_file_size), COUNT(node_id), COUNT(visible), COUNT(min_ts), COUNT(primary_key_min), SUM(node_id), SUM(index_file_size), SUM(num_rows), SUM(level), SUM(table_id) FROM ssts_manifest",
             "SELECT COUNT(file_id) FILTER (WHERE visible AND level = 0), SUM(num_rows) FILTER (WHERE min_ts >= CAST(1 AS TIMESTAMP)), SUM(index_file_size) FILTER (WHERE index_file_size IS NOT NULL), COUNT(*) FILTER (WHERE file_size % 2 = 0) FROM ssts_manifest",
+            "SELECT COUNT(*) FILTER (WHERE min_ts < arrow_cast('1970-01-02T00:00:00', 'Timestamp(Nanosecond, None)')), SUM(file_size) FILTER (WHERE TRY_CAST(file_size AS BIGINT) > 0) FROM ssts_manifest",
+            "SELECT COUNT(*) FROM ssts_manifest WHERE CAST(file_size AS DECIMAL(20, 0)) > CAST(0 AS DECIMAL(20, 0))",
             "SELECT COUNT(*) AS files, SUM(m.file_size) AS bytes FROM ssts_manifest m WHERE m.file_size >= 2",
             "SELECT COUNT(*), SUM(file_size), COUNT(*) FILTER (WHERE file_size < 5), SUM(file_size) FILTER (WHERE file_size < 5) FROM ssts_manifest",
             "SELECT COUNT(*), SUM(file_size) FROM ssts_manifest WHERE file_size > 100",
@@ -394,4 +414,92 @@ async fn test_manifest_aggregate_real_catalog_timestamp_cast() {
     .unwrap();
     assert_eq!(actual, expected);
     assert_eq!(nodes.states.load(Ordering::SeqCst), nodes.batches.len());
+}
+
+#[tokio::test]
+async fn test_manifest_aggregate_predicate_transport_fallbacks() {
+    for predicate in [
+        "min_ts < arrow_cast('1970-01-01T04:00:00', 'Timestamp(Nanosecond, Some(\"+08:00\"))')",
+        "arrow_cast(1, 'Decimal32(9, 0)') > arrow_cast(0, 'Decimal32(9, 0)')",
+    ] {
+        for sql in [
+            format!(
+                "SELECT COUNT(*) FILTER (WHERE {predicate}), SUM(file_size) FILTER (WHERE {predicate}) FROM ssts_manifest"
+            ),
+            format!("SELECT COUNT(*), SUM(file_size) FROM ssts_manifest WHERE {predicate}"),
+        ] {
+            let plan = analyzed(&sql, consts::INFORMATION_SCHEMA_SSTS_MANIFEST_TABLE_ID).await;
+            let rewritten = SstManifestAggregateRule
+                .analyze(plan.clone(), &ConfigOptions::default())
+                .unwrap();
+            assert_eq!(rewritten, plan, "{sql}");
+            let context = SessionContext::new();
+            let actual = datafusion::dataframe::DataFrame::new(
+                context.state(),
+                replace_source(rewritten, vec![batch(vec![2, 3])]),
+            )
+            .collect()
+            .await
+            .unwrap();
+            assert_eq!(actual.len(), 1, "{sql}");
+            assert_eq!(actual[0].num_rows(), 1, "{sql}");
+            assert_eq!(
+                actual[0].columns(),
+                &[
+                    Arc::new(arrow::array::Int64Array::from(vec![2])) as arrow::array::ArrayRef,
+                    Arc::new(arrow::array::UInt64Array::from(vec![5])) as arrow::array::ArrayRef,
+                ],
+                "{sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_manifest_aggregate_predicate_intermediate_types() {
+    use arrow_schema::TimeUnit;
+    use datafusion_expr::expr::{Cast, TryCast};
+
+    let schema = DFSchema::empty();
+    for (data_type, supported) in [
+        (DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+        (DataType::Decimal128(20, 0), true),
+        (
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("+08:00".into())),
+            false,
+        ),
+        (
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            false,
+        ),
+        (DataType::Decimal32(9, 0), false),
+        (DataType::Decimal64(18, 0), false),
+        (DataType::Decimal256(39, 0), false),
+    ] {
+        let literal = Expr::Literal(ScalarValue::try_from(&data_type).unwrap(), None);
+        if !supported {
+            let cast = datafusion::functions::core::arrow_cast().call(vec![
+                literal.clone(),
+                datafusion_expr::lit("Timestamp(Nanosecond, None)"),
+            ]);
+            assert!(!is_supported_predicate(
+                &Expr::IsNull(Box::new(cast)),
+                &schema
+            ));
+        }
+        let input = Box::new(Expr::Literal(ScalarValue::Utf8(Some("0".into())), None));
+        for expr in [
+            literal,
+            Expr::Cast(Cast::new(input.clone(), data_type.clone())),
+            Expr::TryCast(TryCast::new(input, data_type.clone())),
+        ] {
+            // The outer predicate returns Boolean even when its child cannot cross the wire.
+            let predicate = Expr::IsNull(Box::new(expr));
+            assert_eq!(
+                is_supported_predicate(&predicate, &schema),
+                supported,
+                "{predicate:?}"
+            );
+        }
+    }
 }

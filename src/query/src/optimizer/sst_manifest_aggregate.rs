@@ -20,9 +20,11 @@ mod tests;
 use std::fmt;
 use std::sync::Arc;
 
+use arrow_schema::DataType;
 use catalog::information_schema::{InformationExtensionRef, SSTS_MANIFEST};
 use common_catalog::consts;
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, get_aggr_func};
+use common_query::logical_plan::is_lossless_substrait_type;
 use datafusion::catalog::Session;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::{count::count_udaf, sum::sum_udaf};
@@ -180,7 +182,7 @@ fn is_supported_aggregate(expr: &Expr, schema: &DFSchema) -> bool {
     if params
         .filter
         .as_deref()
-        .is_some_and(|filter| !is_supported_predicate(filter))
+        .is_some_and(|filter| !is_supported_predicate(filter, schema))
     {
         return false;
     }
@@ -217,19 +219,30 @@ fn is_numeric_column(expr: &Expr, schema: &DFSchema) -> bool {
     }
 }
 
-fn is_supported_predicate(expr: &Expr) -> bool {
+fn is_supported_predicate(expr: &Expr, schema: &DFSchema) -> bool {
     let mut supported = true;
     let visited = expr.apply(|expr| {
+        // Aggregate state types do not cover intermediate predicate types. In particular,
+        // Substrait loses timestamp timezones even when encoding succeeds.
+        let Ok(data_type) = expr.get_type(schema) else {
+            supported = false;
+            return Ok(TreeNodeRecursion::Stop);
+        };
+        if !is_lossless_substrait_type(&data_type) {
+            supported = false;
+            return Ok(TreeNodeRecursion::Stop);
+        }
         // The SQL parser represents TIMESTAMP_NS literals as arrow_cast calls.
-        // Only this builtin with constant arguments is a supported scalar call.
+        // Limit this exception to timezone-free timestamps and still check the arguments.
         if let Expr::ScalarFunction(function) = expr
             && function.func == datafusion::functions::core::arrow_cast()
+            && matches!(data_type, DataType::Timestamp(_, None))
             && function
                 .args
                 .iter()
                 .all(|arg| matches!(arg, Expr::Literal(_, _)))
         {
-            return Ok(TreeNodeRecursion::Jump);
+            return Ok(TreeNodeRecursion::Continue);
         }
         if !matches!(
             expr,
@@ -255,7 +268,8 @@ fn is_supported_predicate(expr: &Expr) -> bool {
 fn is_supported_input(plan: &LogicalPlan) -> bool {
     match plan {
         LogicalPlan::Filter(filter) => {
-            is_supported_predicate(&filter.predicate) && is_supported_input(&filter.input)
+            is_supported_predicate(&filter.predicate, filter.input.schema())
+                && is_supported_input(&filter.input)
         }
         LogicalPlan::SubqueryAlias(alias) => is_supported_input(&alias.input),
         LogicalPlan::TableScan(scan) => {
