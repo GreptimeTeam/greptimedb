@@ -38,15 +38,24 @@ use crate::schedule::scheduler::{Job, LocalScheduler, SchedulerRef};
 /// Already prepared work. Its task owns the existing execution ID, cancellation
 /// state and input leases; no second grant message can outlive that ownership.
 pub(crate) struct ReadyUnit {
+    /// Time the unit became ready; feeds `COMPACTION_ADMISSION_WAIT`.
     queued_at: Instant,
+    /// Cancellation state shared with the unit's task and the region worker.
     state: CancellableTaskState,
     /// Immutable merge-work estimate; zero for metadata-only expiration.
     input_bytes: u64,
+    /// Execution future that owns the reserved input leases.
     job: Job,
+    /// Runs only after `job` and its resources are dropped, on every path:
+    /// admission, withdrawal, executor rejection, panic and shutdown.
     completion: Job,
 }
 
 impl ReadyUnit {
+    /// Creates ready work.
+    ///
+    /// `job` owns the reserved inputs and must be dropped before `completion`
+    /// runs; callers must not poll or drop the two in the opposite order.
     pub(crate) fn new(
         state: CancellableTaskState,
         input_bytes: u64,
