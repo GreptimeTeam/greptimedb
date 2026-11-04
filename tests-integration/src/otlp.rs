@@ -1604,6 +1604,85 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_existing_ordinary_tables() {
+        use common_memory_manager::OnExhaustedPolicy;
+        use servers::request_memory_limiter::ServerMemoryLimiter;
+
+        for (batching, count) in [(false, 1), (true, 1), (false, 64), (true, 64)] {
+            let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_ordinary")
+                .with_logical_batcher(BatcherOptions {
+                    protocols: vec![BatchingProtocol::Otlp],
+                    pending_rows_flush_interval: Duration::from_millis(5),
+                    ..Default::default()
+                })
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let request = exemplar_metric_request(count);
+            let mut seed = request.clone();
+            for metric in &mut seed.resource_metrics[0].scope_metrics[0].metrics {
+                let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                    unreachable!()
+                };
+                gauge.data_points[0].exemplars.clear();
+            }
+            // Ordinary tables can already exist when metric-engine ingestion is enabled.
+            instance
+                .metrics(seed, QueryContext::arc(), None)
+                .await
+                .unwrap();
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_logical_batching_enabled(batching);
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+            let limiter = ServerMemoryLimiter::new(64 * 1024, OnExhaustedPolicy::Fail);
+            let dropped = servers::metrics::EXEMPLARS_DROPPED_TOTAL.with_label_values(&["otlp"]);
+            for round in 0..3 {
+                let mut request = request.clone();
+                let metrics = &mut request.resource_metrics[0].scope_metrics[0].metrics;
+                if round > 0 {
+                    let mut sibling = metrics[0].clone();
+                    sibling.name = "logical_sibling".into();
+                    metrics.push(sibling);
+                }
+                for metric in metrics {
+                    let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                        unreachable!()
+                    };
+                    gauge.data_points[0].time_unix_nano += (round + 1) * 60_000_000_000;
+                }
+                let before = dropped.get();
+                let outcome = instance
+                    .metrics(request, ctx.clone(), Some((limiter.clone(), 0)))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    outcome.accepted_data_points,
+                    count as i64 + i64::from(round > 0)
+                );
+                assert_eq!(outcome.rejected_data_points, 0);
+                assert_eq!(dropped.get() - before, count as u64);
+                assert_eq!(limiter.used_bytes(), 0);
+                if round == 0 {
+                    assert_trace_v2_query(instance, "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='metrics_exemplars'", ctx.clone()).await.unwrap();
+                }
+            }
+            for sql in [
+                "SELECT COUNT(*)=4 FROM exemplar_memory_0",
+                "SELECT COUNT(*)=2 FROM logical_sibling",
+                "SELECT COUNT(*)=2 AND MIN(greptime_metric)='logical_sibling' FROM metrics_exemplars",
+            ] {
+                assert_trace_v2_query(instance, sql, ctx.clone())
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_exemplar_otlp_without_metric_engine() {
         use axum::body::Body;
         use common_memory_manager::OnExhaustedPolicy;
@@ -3354,15 +3433,16 @@ WITH(
             with_metric_engine: true,
             ..Default::default()
         }));
+        let metric_ctx = Arc::new(metric_ctx);
         let request = metric_request(vec![metric]);
         let err = instance
-            .metrics(request.clone(), Arc::new(metric_ctx), None)
+            .metrics(request.clone(), metric_ctx.clone(), None)
             .await
             .unwrap_err();
         assert_eq!(err.status_code(), StatusCode::PermissionDenied);
         assert_eq!(
             std::mem::take(&mut *checker.calls.lock().unwrap()),
-            vec![vec!["allowed_metric", "metrics_exemplars"]]
+            vec![vec!["allowed_metric"], vec!["metrics_exemplars"]]
         );
         assert_trace_v2_query(
             instance,
@@ -3373,7 +3453,20 @@ WITH(
         .unwrap();
         assert_eq!(
             instance
-                .metrics(request, ctx.clone(), None)
+                .metrics(request.clone(), ctx.clone(), None)
+                .await
+                .unwrap()
+                .accepted_data_points,
+            1
+        );
+        assert_eq!(
+            std::mem::take(&mut *checker.calls.lock().unwrap()),
+            vec![vec!["allowed_metric"]]
+        );
+        // Enabling metric-engine ingestion leaves this ordinary destination unchanged.
+        assert_eq!(
+            instance
+                .metrics(request, metric_ctx, None)
                 .await
                 .unwrap()
                 .accepted_data_points,

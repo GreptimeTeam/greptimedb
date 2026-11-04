@@ -122,25 +122,17 @@ impl OpenTelemetryProtocolHandler for Instance {
         metric_ctx.resource_info = self.otlp_resource_info;
 
         let mut prepared = otlp::metrics::prepare_metrics(request, &mut metric_ctx)?;
-        // Check all destinations before preflight can expose schemas or discard points.
+        // Authorize source tables before preflight can expose schemas or discard points.
         let targets = {
             let catalog = ctx.current_catalog();
             let schema = ctx.current_schema();
             let mut table_names = HashSet::new();
-            let mut targets = prepared
+            prepared
                 .requests
                 .iter()
                 .filter(|request| table_names.insert(request.table_name.as_str()))
                 .map(|request| PermissionTableTarget::new(catalog, &schema, &request.table_name))
-                .collect::<Vec<_>>();
-            if prepared.has_exemplars() && table_names.insert(METRICS_EXEMPLARS_TABLE) {
-                targets.push(PermissionTableTarget::new(
-                    catalog,
-                    &schema,
-                    METRICS_EXEMPLARS_TABLE,
-                ));
-            }
-            targets
+                .collect::<Vec<_>>()
         };
         self.check_table_permission(
             &ctx,
@@ -165,7 +157,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         let otlp::metrics::MetricsConversion {
             requests,
             rows,
-            exemplars,
+            mut exemplars,
             semantic_index,
             resource_info,
             mut outcome,
@@ -179,6 +171,29 @@ impl OpenTelemetryProtocolHandler for Instance {
         }
         if outcome.accepted_data_points == 0 {
             return Ok(outcome);
+        }
+
+        // The engine option only controls new tables; existing ordinary sources cannot bind exemplars.
+        let before = exemplars.len();
+        exemplars.retain(|exemplar| {
+            preflight
+                .physical_tables
+                .contains_key(exemplar.metric.as_ref())
+        });
+        servers::metrics::EXEMPLARS_DROPPED_TOTAL
+            .with_label_values(&["otlp"])
+            .inc_by((before - exemplars.len()) as u64);
+        if !exemplars.is_empty() {
+            self.check_table_permission(
+                &ctx,
+                PermissionReq::Action(OTLP_WRITE),
+                PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                    ctx.current_catalog(),
+                    ctx.current_schema(),
+                    METRICS_EXEMPLARS_TABLE,
+                )]),
+            )
+            .context(AuthSnafu)?;
         }
 
         let ctx = if !exemplars.is_empty()

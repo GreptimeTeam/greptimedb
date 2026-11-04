@@ -347,11 +347,6 @@ impl PreparedMetrics {
         self.points.len()
     }
 
-    /// Whether any prepared point emits rows to the shared exemplar table.
-    pub fn has_exemplars(&self) -> bool {
-        self.points.iter().any(|point| !point.exemplars.is_empty())
-    }
-
     fn validate_batches(&self) -> Result<()> {
         let mut counts = vec![0; self.requests.len()];
         for &(batch, row) in &self.row_locations {

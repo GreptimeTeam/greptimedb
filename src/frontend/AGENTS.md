@@ -74,10 +74,11 @@ including caches owned by pipeline and protocol handlers.
   These tables are ingestion-managed; manual mutation requires restarting
   serving frontends.
 
-- **OTLP metrics** (`instance/otlp.rs`): authorize all emitted destinations before
-  schema preflight can reject points or expose destination schemas.
-  Without metric-engine ingestion, conversion skips and counts exemplars while
-  retaining metric rows.
+- **OTLP metrics** (`instance/otlp.rs`): authorize source tables before schema
+  preflight can reject points or expose their schemas. Skip and count exemplars
+  when metric-engine ingestion is disabled or the source is an ordinary table,
+  retaining metric rows. Authorize retained exemplar writes before accessing
+  the exemplar destination or reserving expansion memory.
   Reserve exemplar expansion with the transport's memory limiter before building
   rows; retain the permit through `WriteProgress` until writes complete.
 

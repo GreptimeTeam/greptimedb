@@ -1636,7 +1636,6 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(prepared.has_exemplars());
         for request in &mut prepared.requests {
             let rows = request.rows.as_mut().unwrap();
             rows.schema.push(ColumnSchema {
