@@ -2224,20 +2224,19 @@ async fn native_metric_discovery_under_an_aggregate_keeps_the_split_in_process()
     );
 }
 
-/// A selector that discovers more than one metric plans as the split aggregate's series input, but
-/// the distributed planner cannot carry that input into a region.
+/// A selector that discovers more than one metric keeps the split aggregate's in-process plan, and
+/// its metric-name proof crosses the region boundaries that plan draws.
 ///
 /// The producer reads one `RawSeriesSource` per discovered metric inside one `Union`, each naming its
-/// own metric - the shape the state exception admits. `FusedSeries::validate_binding` refuses the
-/// next step: a node that declares `__name__` without binding one name has to keep children that
-/// name their own metric, and an expanded child (`MergeScan`) names none. The plan is therefore
-/// refused with `FusedSeries declares "__name__" but binds no metric name` before any region
-/// boundary is drawn, which is the remaining blocker for a multi-metric discovery under an
-/// aggregate. This test pins that blocker; the single-metric case above is the shape the exception
-/// covers today.
+/// own metric - the shape the state exception admits. The distributed planner then answers each
+/// branch with its own region, so the union's children become merge scans that carry the sources to
+/// their regions and hide them: `MergeScanLogicalPlan::inputs` reports nothing, because a boundary
+/// that let an optimizer through would duplicate the region's work. A producer that declares
+/// `__name__` without binding one name has to keep children that name their own metric, so the proof
+/// asks each boundary what it runs - one boundary per branch, here the branch's own source - and the
+/// multi-metric discovery plans like the single-metric one.
 #[tokio::test]
-async fn native_metric_discovery_over_two_metrics_under_an_aggregate_is_refused_by_binding_validation()
- {
+async fn native_metric_discovery_over_two_metrics_under_an_aggregate_keeps_the_split_in_process() {
     let query = "sum({tag_0=\"x\"})";
     let metrics = &["alpha_total", "beta_total"][..];
     let plan = build_native_fused_plan_with_provider(
@@ -2282,16 +2281,63 @@ async fn native_metric_discovery_over_two_metrics_under_an_aggregate_is_refused_
         "each discovered metric names itself: {display}"
     );
 
-    let error = crate::dist_plan::DistPlannerAnalyzer::new(true)
+    // The plan the planner builds: the producer reads one union of discovered sources.
+    let analyzed = match crate::dist_plan::DistPlannerAnalyzer::new(true)
         .analyze(plan, &datafusion_common::config::ConfigOptions::default())
-        .expect_err("a multi-metric discovery under an aggregate is not placed yet");
+    {
+        Ok(analyzed) => analyzed,
+        Err(error) => panic!("`{query}` over {metrics:?}: analyze failed: {error}\n{display}"),
+    };
+    let analyzed_display = analyzed.display_indent().to_string();
+    let final_node = find_final_split(&analyzed).unwrap_or_else(|| {
+        panic!(
+            "`{query}` over {metrics:?}: the final half stays on the frontend: {analyzed_display}"
+        )
+    });
+    let partial = partial_below(final_node).unwrap_or_else(|| {
+        panic!("`{query}` over {metrics:?}: the final half keeps its partial producer: {analyzed_display}")
+    });
     assert!(
-        error
-            .to_string()
-            .contains("declares \"__name__\" but binds no metric name"),
-        "{error}"
+        !partial.reads_aggregate_state(),
+        "`{query}` over {metrics:?}: {analyzed_display}"
+    );
+    assert_no_raw_source_above_merge_scan(&analyzed);
+
+    // Each branch of the discovery union is one region's answer, and each region input still names
+    // the metric it discovered, which is what the producer's proof reads through the boundary.
+    let region_inputs = remote_inputs(&analyzed);
+    assert_eq!(
+        metrics.len(),
+        region_inputs.len(),
+        "`{query}` over {metrics:?}: one region input per discovered metric: {analyzed_display}"
+    );
+    let mut region_metrics = region_inputs
+        .iter()
+        .map(|input| {
+            let source = as_raw_series_source(input).unwrap_or_else(|| {
+                panic!("`{query}` over {metrics:?}: the region input is the discovered source: {analyzed_display}")
+            });
+            assert!(
+                matches!(
+                    UserDefinedLogicalNodeCore::inputs(source).as_slice(),
+                    [LogicalPlan::TableScan(_)]
+                ),
+                "`{query}` over {metrics:?}: the source binds its own scan: {analyzed_display}"
+            );
+            source.metric_name().to_string()
+        })
+        .collect::<Vec<_>>();
+    region_metrics.sort();
+    assert_eq!(
+        metrics
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>(),
+        region_metrics,
+        "`{query}` over {metrics:?}: {analyzed_display}"
     );
 }
+
 /// The `RawSeriesSource` `plan` is, if it is one.
 fn as_raw_series_source(plan: &LogicalPlan) -> Option<&RawSeriesSource> {
     match plan {

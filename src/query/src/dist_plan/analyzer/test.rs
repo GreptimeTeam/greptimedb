@@ -793,6 +793,22 @@ fn split_aggregate_over(input: LogicalPlan) -> LogicalPlan {
     }))
 }
 
+/// The `Partial` producer of a nameless selector's split over `input`, as one region answers with it.
+///
+/// Its binding declares `__name__` without binding one name - the shape a selector that names no
+/// metric plans - so the metric each series came from has to come from the sources below `input`.
+fn discovery_producer_over(input: LogicalPlan) -> DfResult<FusedSeries> {
+    let (partial_tree, _, mut binding) = split_trees();
+    binding.metric_name = None;
+    binding.tags = vec!["__name__".to_string()];
+    FusedSeries::try_new_state_export(
+        Arc::from("sum({tag_0=\"x\"})"),
+        partial_tree,
+        binding,
+        vec![input],
+    )
+}
+
 /// A `SeriesFrame` producer that publishes values rather than aggregate state: its root is the
 /// whole `sum(some_metric)` fold, not the `Partial` stage of a split.
 fn values_producer_over(input: LogicalPlan) -> LogicalPlan {
@@ -962,6 +978,109 @@ fn the_state_exception_admits_the_producer_series_input_only() {
     assert!(
         !is_in_process_plan(&final_over(values_producer_over(scan()))),
         "a values-producing producer exports no state"
+    );
+}
+
+/// A boundary names a metric only when the plan it hides does.
+///
+/// A producer that declares `__name__` without binding one name leans on its sources to name the
+/// metric each series came from, and a discovered selector's sources arrive behind one region
+/// boundary per branch. The proof therefore asks each boundary what its region runs and applies the
+/// same rules there: a source behind the boundary names its metric, a bare scan behind it does not,
+/// and a boundary behind a boundary is not a shape the planner produces.
+#[test]
+fn a_region_boundary_names_a_metric_only_when_the_plan_behind_it_does() {
+    let alpha = || {
+        raw_series_source(
+            "alpha_total",
+            scan_of(TestTable::table_with_name(0, "alpha_total".to_string())),
+        )
+    };
+    let beta = || {
+        raw_series_source(
+            "beta_total",
+            scan_of(TestTable::table_with_name(1, "beta_total".to_string())),
+        )
+    };
+
+    // One discovered metric: its source is what the region runs.
+    assert!(
+        discovery_producer_over(merge_scan_over(alpha())).is_ok(),
+        "a source behind one boundary names its metric"
+    );
+    // Several: one boundary per branch, each branch still its own source.
+    assert!(
+        discovery_producer_over(LogicalPlan::Union(
+            datafusion_expr::Union::try_new_with_loose_types(vec![
+                Arc::new(merge_scan_over(alpha())),
+                Arc::new(merge_scan_over(beta())),
+            ])
+            .unwrap()
+        ))
+        .is_ok(),
+        "every branch of a discovered union names its metric through its own boundary"
+    );
+
+    // A bare scan behind a boundary names nothing: no metric is bound to the region's series.
+    let error = discovery_producer_over(merge_scan_over(scan_of(TestTable::table_with_name(
+        0,
+        "t".to_string(),
+    ))))
+    .expect_err("a boundary over a nameless scan keeps no name proof");
+    assert!(
+        error
+            .to_string()
+            .contains("declares \"__name__\" but binds no metric name"),
+        "{error}"
+    );
+    // A union is only as good as its worst branch: a source bound to no metric leaves it out.
+    assert!(
+        discovery_producer_over(LogicalPlan::Union(
+            datafusion_expr::Union::try_new_with_loose_types(vec![
+                Arc::new(merge_scan_over(alpha())),
+                Arc::new(merge_scan_over(raw_series_source(
+                    "",
+                    scan_of(TestTable::table_with_name(1, "u".to_string()))
+                ))),
+            ])
+            .unwrap()
+        ))
+        .is_err(),
+        "a branch that names no metric leaves the producer nameless"
+    );
+    // The projection a region's answer travels under republishes the frame's own columns, so it
+    // renames nothing and names what the frame below it names. A computed one keeps no proof.
+    let answers = merge_scan_over(alpha());
+    let republished = LogicalPlanBuilder::from(answers.clone())
+        .project(
+            answers
+                .schema()
+                .columns()
+                .iter()
+                .map(|column| Expr::Column(column.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        discovery_producer_over(republished).is_ok(),
+        "a republishing projection names what the frame below it names"
+    );
+    let computed = LogicalPlanBuilder::from(answers)
+        .project(vec![lit(1i64).alias("one")])
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        discovery_producer_over(computed).is_err(),
+        "a projection that publishes its own column keeps no name proof"
+    );
+    // A boundary behind a boundary is not a shape the planner produces, so it is refused rather
+    // than followed.
+    assert!(
+        discovery_producer_over(merge_scan_over(merge_scan_over(alpha()))).is_err(),
+        "the proof crosses one boundary, not two"
     );
 }
 
