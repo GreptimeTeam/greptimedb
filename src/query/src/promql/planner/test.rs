@@ -7697,6 +7697,54 @@ async fn native_histogram_plan(query: &str) -> String {
 
 /// A native histogram statement runs on the native route: the producer exports the canonical
 /// histogram struct column, not a float column, and the plan names no legacy histogram fold.
+/// A segmented parent is typed by the kind the statement's own root answers.
+///
+/// Segmentation replaces every cut prefix with an input leaf that carries already-evaluated
+/// samples. Re-deriving the parent's kind by walking that rewritten tree reads each leaf as the
+/// kind its scan carried, so a float-producing histogram prefix declares a histogram column while
+/// its values are floats: `count_over_time(h[5m]) + on (__name__) count_over_time(h[5m])` announced
+/// the canonical histogram struct, and the row conversion then refused the floats it was handed.
+/// The kind therefore comes from the uncut root, which is what these two statements pin - both
+/// answer floats, and `on (__name__)` is what makes them segment.
+#[tokio::test]
+async fn a_segmented_parent_answers_the_kind_of_the_uncut_root() {
+    for (query, histogram) in [
+        (
+            "count_over_time(some_metric[5m]) + on (__name__) count_over_time(some_metric[5m])",
+            false,
+        ),
+        (
+            "histogram_count(some_metric) + on (__name__) histogram_count(some_metric)",
+            false,
+        ),
+        // The same segmentation over a tree that does answer histograms keeps the histogram
+        // column, which is what tells the two derivations apart: a kind forced to `Float` would
+        // pass the two cases above and fail this one.
+        ("some_metric * 2 + on (__name__) some_metric * 2", true),
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| {
+            panic!("{query} left the native route instead of segmenting: {display}")
+        });
+        let field = fused
+            .schema()
+            .field_with_unqualified_name(greptime_native_histogram())
+            .unwrap_or_else(|_| panic!("{query} published no field column: {display}"));
+        let expected = if histogram {
+            native_histogram_value_type().as_arrow_type()
+        } else {
+            ArrowDataType::Float64
+        };
+        assert_eq!(
+            &expected,
+            field.data_type(),
+            "{query} declared the wrong column kind: {display}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn native_histogram_selector_plans_a_native_producer() {
     let table_provider = build_test_native_histogram_table_provider("some_metric").await;

@@ -61,8 +61,7 @@ use promql::extension_plan::{
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
     BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series,
-    uniform_field_kind,
+    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series, uniform_field_kind,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
@@ -1286,7 +1285,8 @@ impl PromPlanner {
         // The kind is the one the statement's own root answers, derived before segmentation cut
         // anything. It cannot be recomputed here: a cut prefix is replaced by an input leaf whose
         // samples are already evaluated, so walking this tree would read every such leaf as the
-        // kind its scan carried.
+        // kind its scan carried. `count_over_time(h[5m]) + on (__name__) ...` answers floats, and
+        // its replaced leaf carries floats, while the scan below was a histogram.
         fused_output_schema(&root_fields, &output_tags, time, root_kind).ok()
     }
 
@@ -3081,8 +3081,8 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        ArrowDataType, ArrowTimeUnit, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY, NativeType,
-        collect_selectors, cut_segments, fused_output_schema, hybrid_binary_admitted,
+        ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
+        NativeType, collect_selectors, cut_segments, fused_output_schema, hybrid_binary_admitted,
         independent_scan_pair, native_output_tags, native_promql_requested, scan_time_filter,
     };
 
@@ -3562,6 +3562,7 @@ mod tests {
             &["v0".to_string(), "v1".to_string()],
             &["zone".to_string(), "host".to_string()],
             "ts",
+            FieldKind::Float,
         )
         .unwrap();
         assert_eq!(
