@@ -103,6 +103,7 @@ pub struct QueryEngineState {
     experimental_native_promql: bool,
     /// Whether this engine plans distributed statements.
     with_dist_planner: bool,
+    experimental_native_split_reduce: bool,
     /// Whether this engine's regions are reached in process, which is what lets a region take a
     /// `LogicalPlan` instead of Substrait bytes.
     in_process_region_transport: bool,
@@ -341,6 +342,7 @@ impl QueryEngineState {
             plugins,
             experimental_native_promql: options.experimental_native_promql,
             with_dist_planner,
+            experimental_native_split_reduce: options.experimental_native_split_reduce,
             in_process_region_transport,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -497,6 +499,11 @@ impl QueryEngineState {
     /// Whether this engine plans distributed statements.
     pub(crate) fn with_dist_planner(&self) -> bool {
         self.with_dist_planner
+    }
+
+    /// Whether the split may run a second state hop when a query asks for one.
+    pub(crate) fn experimental_native_split_reduce(&self) -> bool {
+        self.experimental_native_split_reduce
     }
 
     /// Whether a region read is served in this process, so a region can take a `LogicalPlan`.

@@ -650,6 +650,15 @@ impl DfLogicalPlanner {
             && !allow_query_fallback
             && self.engine_state.experimental_native_promql()
             && crate::promql::planner::native::native_promql_requested(&query_ctx);
+        // The second state hop is opt-in, and only ever inside the in-process region transport:
+        // a remote read ships every region's raw series to the frontend, so the split's reducer has
+        // no region to fold in and the remote raw route keeps the plan it has always built. Both
+        // its engine-wide option and its per-query extension have to be on, and with the native
+        // route off nothing reads it.
+        let native_split_reduce = native_requested
+            && self.engine_state.in_process_region_transport()
+            && self.engine_state.experimental_native_split_reduce()
+            && crate::promql::planner::native::native_split_reduce_requested(&query_ctx);
         let plan = PromPlanner::stmt_to_plan_with_annotations(
             table_provider(),
             stmt,
@@ -657,6 +666,7 @@ impl DfLogicalPlanner {
             promql_annotations.clone(),
             // A fallback rewriter can wrap a native region scan in an unusable MergeScan.
             native_requested,
+            native_split_reduce,
         )
         .await
         .map_err(BoxedError::new)
@@ -674,6 +684,9 @@ impl DfLogicalPlanner {
                 stmt,
                 &self.engine_state,
                 promql_annotations,
+                // The fallback plan is the legacy one: it is not offered to the native route, so it
+                // asks for no state hop either.
+                false,
                 false,
             )
             .await

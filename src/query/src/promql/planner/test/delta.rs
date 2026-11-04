@@ -412,6 +412,7 @@ async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
                 ctx: PromPlannerContext::default(),
                 promql_annotations: Some(collector.clone()),
                 native_fused: false,
+                native_split_reduce: false,
             };
             let left_context = direct_or_context("lhs", &["job", marker], "v");
             let right_context = direct_or_context("rhs", &["job", marker], "v");
@@ -714,6 +715,7 @@ async fn binary_joins_align_only_the_temporality_marker() {
             ctx: PromPlannerContext::default(),
             promql_annotations: None,
             native_fused: false,
+            native_split_reduce: false,
         };
         let joined = planner
             .join_on_non_field_columns(
@@ -754,6 +756,7 @@ async fn binary_joins_align_only_the_temporality_marker() {
             ctx: PromPlannerContext::default(),
             promql_annotations: None,
             native_fused: false,
+            native_split_reduce: false,
         };
         let set = planner
             .set_op_on_non_field_columns(
@@ -810,6 +813,7 @@ async fn binary_joins_align_only_the_temporality_marker() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_split_reduce: false,
     };
     let set = planner
         .set_op_on_non_field_columns(
@@ -923,6 +927,7 @@ async fn binary_joins_align_dictionary_temporality_marker_with_tagless_vector() 
             ctx: PromPlannerContext::default(),
             promql_annotations: None,
             native_fused: false,
+            native_split_reduce: false,
         };
         let scan = |name, table: Arc<MemTable>| {
             LogicalPlanBuilder::scan(name, provider_as_source(table), None)

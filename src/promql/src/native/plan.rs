@@ -895,8 +895,26 @@ pub enum AggregateStage {
     Complete,
     /// Only this execution's contributions were seen, so the output is state for a later merge.
     Partial,
+    /// Some of the contributions were seen, and the state of the others is merged with theirs.
+    ///
+    /// This is the one stage that is state in *and* state out: it folds the states it is handed
+    /// into one state per group, grid position and field, and hands that on without finishing it.
+    /// Only a [`Self::Final`] above it turns accumulator state into a query value, so a reduce is a
+    /// hop between two state transports rather than a place a value appears.
+    PartialReduce,
     /// The state was collected from every contributing execution, so the output is complete.
     Final,
+}
+
+impl AggregateStage {
+    /// Whether this stage's output is aggregate state rather than a query value.
+    ///
+    /// A [`Self::Partial`] producer and a [`Self::PartialReduce`] reducer both hand state on; what
+    /// separates them is that a producer folds values into state and a reducer folds state into
+    /// state, which is a difference between their inputs and not their outputs.
+    pub fn produces_state(self) -> bool {
+        matches!(self, Self::Partial | Self::PartialReduce)
+    }
 }
 
 /// How an aggregate's groups are identified, in the binding's own terms.
@@ -1702,6 +1720,60 @@ impl NativeNode {
                             return Err(invalid(
                                 "aggregate state groups differ from the binding: state built for \
                                  one `by` or `without` cannot be merged into another",
+                            ));
+                        }
+                    }
+                    AggregateStage::PartialReduce => {
+                        // State in, state out: the reduce merges the states it is handed and hands
+                        // the merged state on, so its input and its output are one and the same
+                        // binding. A reduce is not a place a value appears or disappears, which is
+                        // why neither side may hold samples.
+                        let NativeType::AggregateState(input_state) = &input.output else {
+                            return Err(invalid(&format!(
+                                "a partial reduce consumes aggregate state, not {}",
+                                input.output.describe()
+                            )));
+                        };
+                        let NativeType::AggregateState(state) = &self.output else {
+                            return Err(invalid(&format!(
+                                "a partial reduce produces aggregate state, not {}",
+                                self.output.describe()
+                            )));
+                        };
+                        let Some((expected_kind, expected_components)) =
+                            aggregate_state_binding(op.kind)
+                        else {
+                            return Err(DataFusionError::NotImplemented(format!(
+                                "aggregate state is not defined for {:?}",
+                                op.kind
+                            )));
+                        };
+                        if state.kind != expected_kind
+                            || state.components.as_ref() != expected_components
+                        {
+                            return Err(DataFusionError::NotImplemented(format!(
+                                "a partial reduce {:?} aggregate requires state kind {:?} with components {:?}, found {:?} with {:?}",
+                                op.kind,
+                                expected_kind,
+                                expected_components,
+                                state.kind,
+                                state.components
+                            )));
+                        }
+                        if state.group != op.group {
+                            return Err(invalid(
+                                "aggregate state groups differ from the binding: state built for \
+                                 one `by` or `without` cannot be merged into another",
+                            ));
+                        }
+                        // A reduce adds nothing to the states it folds: the groups they are indexed
+                        // by, the accumulators they carry and the grid they sit on are the state's
+                        // own, so what it hands on is exactly what it was handed.
+                        if **input_state != **state {
+                            return Err(invalid(
+                                "a partial reduce hands on the state it is handed, but its input \
+                                 state is a different layout: kind, groups, accumulators and grid \
+                                 all have to be the ones the reduce declares",
                             ));
                         }
                     }

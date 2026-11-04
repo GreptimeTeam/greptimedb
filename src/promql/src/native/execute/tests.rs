@@ -15032,6 +15032,711 @@ fn partial_final_matches_complete_over_concatenated_input() {
     }
 }
 
+/// The state binding a `Partial` of `kind` over `schema` declares, which is the one a
+/// `PartialReduce` hands on unchanged.
+fn state_binding(
+    kind: AggregateKind,
+    group: Grouping,
+    schema: &SeriesSchema,
+) -> Arc<AggregateStateSchema> {
+    let (state_kind, components) =
+        crate::native::plan::aggregate_state_binding(kind).expect("a mergeable kind keeps a state");
+    Arc::new(AggregateStateSchema {
+        group,
+        kind: state_kind,
+        components: components.into(),
+        accumulators: schema.fields.clone(),
+        grid: schema
+            .eval_grid
+            .clone()
+            .expect("aggregate state is indexed on an evaluated grid"),
+    })
+}
+
+/// A leaf bound to aggregate state, which is what an exchange hands a state consumer.
+fn state_input(binding: &Arc<AggregateStateSchema>) -> NativeNode {
+    let output = NativeType::AggregateState(Arc::clone(binding));
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output,
+    }
+}
+
+/// `requests` with the `job` and `instance` labels these tests group and split by.
+fn state_series(job: &str, instance: &str) -> SeriesLabels {
+    job_instance_metric("requests", job, instance)
+}
+
+/// One aggregate over `input` at `stage`.
+fn state_stage(
+    kind: AggregateKind,
+    group: &Grouping,
+    stage: AggregateStage,
+    input: NativeNode,
+    output: NativeType,
+) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(input),
+            op: BoundAggregate {
+                kind,
+                group: group.clone(),
+                stage,
+            },
+        },
+        output,
+    }
+}
+
+/// A tree whose root is a `PartialReduce` over a state leaf: state in, state out.
+fn reduce_tree(
+    kind: AggregateKind,
+    group: &Grouping,
+    binding: &Arc<AggregateStateSchema>,
+) -> NativeTree {
+    NativeTree::try_new(state_stage(
+        kind,
+        group,
+        AggregateStage::PartialReduce,
+        state_input(binding),
+        NativeType::AggregateState(Arc::clone(binding)),
+    ))
+    .unwrap()
+}
+
+/// A tree whose root is a `Final` over a state leaf: the one-level merge.
+fn final_tree(
+    kind: AggregateKind,
+    group: &Grouping,
+    binding: &Arc<AggregateStateSchema>,
+    grid: Arc<EvalGrid>,
+) -> NativeTree {
+    NativeTree::try_new(state_stage(
+        kind,
+        group,
+        AggregateStage::Final,
+        state_input(binding),
+        evaluated(grid),
+    ))
+    .unwrap()
+}
+
+/// What one `Partial` partition of `series` exports: the state of the series it folded.
+fn partial_export(
+    kind: AggregateKind,
+    group: &Grouping,
+    binding: &Arc<AggregateStateSchema>,
+    schema: &Arc<SeriesSchema>,
+    series: &[(SeriesLabels, Vec<Option<f64>>)],
+) -> Vec<crate::native::state::StateChunk> {
+    let grid = schema
+        .eval_grid
+        .clone()
+        .expect("a state producer reads an evaluated grid");
+    let tree = NativeTree::try_new(state_stage(
+        kind,
+        group,
+        AggregateStage::Partial,
+        evaluated_input(grid),
+        NativeType::AggregateState(Arc::clone(binding)),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    for (metric, values) in series {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(schema, metric.clone(), 0, values.clone(), true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_state().unwrap() {
+        chunks.push(chunk);
+    }
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "a finished producer holds nothing"
+    );
+    chunks
+}
+
+/// The decoded state rows one `Partial` partition of `series` hands on.
+///
+/// The producer runs as its own execution, and what it exported is read back the way the real route
+/// reads it: through a state frame, so the rows a reduce folds are the rows an execution above an
+/// exchange would fold.
+fn partial_rows(
+    kind: AggregateKind,
+    group: &Grouping,
+    binding: &Arc<AggregateStateSchema>,
+    schema: &Arc<SeriesSchema>,
+    series: &[(SeriesLabels, Vec<Option<f64>>)],
+) -> Vec<crate::native::state::StateChunk> {
+    state_rows(
+        partial_export(kind, group, binding, schema, series),
+        binding,
+        schema,
+    )
+}
+
+/// The decoded rows a state consumer reads from the state `chunks` a producer exported.
+fn state_rows(
+    chunks: Vec<crate::native::state::StateChunk>,
+    binding: &Arc<AggregateStateSchema>,
+    schema: &Arc<SeriesSchema>,
+) -> Vec<crate::native::state::StateChunk> {
+    use futures::StreamExt;
+    let series = chunks.into_iter().flat_map(|chunk| {
+        let crate::native::state::StateChunk::Series { series, .. } = chunk else {
+            panic!("a producer exports series state, not a decoded row")
+        };
+        series
+    });
+    let source = Box::pin(futures::stream::iter(
+        series.map(|series| Ok((series, true))),
+    ));
+    let frame_state = Arc::new(
+        datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+            binding.kind,
+            binding.components.to_vec(),
+        )
+        .unwrap(),
+    );
+    let frames = common_query::series_frame::pack_aggregate_state(
+        source,
+        frame_state.clone(),
+        Arc::clone(schema),
+    )
+    .unwrap();
+    let decoded = common_query::series_frame::unpack_aggregate_state(
+        frames,
+        Some(frame_state),
+        Some(Arc::clone(schema)),
+    )
+    .unwrap();
+    futures::executor::block_on(decoded.collect::<Vec<_>>())
+        .into_iter()
+        .map(|row| {
+            crate::native::state::StateChunk::Row(
+                crate::native::state::state_row_from_frame_row(row.unwrap(), binding).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// The state a reduce exports, read back as the rows the stage above it is handed.
+///
+/// This is the hop a state router makes: the exported groups travel as frames and are decoded into
+/// rows, so what the `Final` folds is what the reduce exported rather than the same fold replayed.
+fn reduce_rows(
+    kind: AggregateKind,
+    group: &Grouping,
+    binding: &Arc<AggregateStateSchema>,
+    schema: &Arc<SeriesSchema>,
+    rows: Vec<crate::native::state::StateChunk>,
+) -> Vec<crate::native::state::StateChunk> {
+    state_rows(
+        run_state(&reduce_tree(kind, group, binding), rows),
+        binding,
+        schema,
+    )
+}
+
+/// The eight aggregates whose kernels keep a mergeable state.
+fn eight_kinds() -> [AggregateKind; 8] {
+    [
+        AggregateKind::Sum,
+        AggregateKind::Count,
+        AggregateKind::Avg,
+        AggregateKind::Min,
+        AggregateKind::Max,
+        AggregateKind::Group,
+        AggregateKind::Stddev,
+        AggregateKind::Stdvar,
+    ]
+}
+
+/// Three partitions of one metric, grouped by `job`, over four grid points.
+///
+/// The third is the uneven one: it carries every group and every point, while the first two each
+/// hold a single point range and the second holds a single group. A group therefore arrives in more
+/// than one partition, which is what a reduce exists to merge.
+fn three_partitions() -> Vec<Vec<(SeriesLabels, Vec<Option<f64>>)>> {
+    vec![
+        vec![
+            (
+                state_series("a", "1"),
+                vec![Some(1.0), Some(2.0), None, Some(4.0)],
+            ),
+            (state_series("b", "1"), vec![Some(10.0), None, None, None]),
+        ],
+        vec![(
+            state_series("a", "2"),
+            vec![None, None, Some(3.0), Some(1.0)],
+        )],
+        vec![
+            (
+                state_series("a", "3"),
+                vec![Some(1.0), Some(1.0), Some(1.0), Some(1.0)],
+            ),
+            (state_series("b", "2"), vec![None, Some(2.0), None, None]),
+            (
+                state_series("c", "1"),
+                vec![Some(5.0), Some(5.0), Some(5.0), Some(5.0)],
+            ),
+        ],
+    ]
+}
+
+/// The rows a reduce of `kind` is handed: every partition's state, decoded.
+fn partition_rows(
+    kind: AggregateKind,
+    group: &Grouping,
+    binding: &Arc<AggregateStateSchema>,
+    schema: &Arc<SeriesSchema>,
+) -> Vec<crate::native::state::StateChunk> {
+    three_partitions()
+        .iter()
+        .flat_map(|series| partial_rows(kind, group, binding, schema, series))
+        .collect()
+}
+
+/// Runs a state tree over `rows` and collects the state it exports.
+fn run_state(
+    tree: &NativeTree,
+    rows: Vec<crate::native::state::StateChunk>,
+) -> Vec<crate::native::state::StateChunk> {
+    let mut execution = executor(tree, pool());
+    for row in rows {
+        execution.push_state(InputId::new(0), row).unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_state().unwrap() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
+/// Runs a value tree over `rows` and collects what its root produced.
+fn run_values(
+    tree: &NativeTree,
+    rows: Vec<crate::native::state::StateChunk>,
+) -> Vec<EvaluatedChunk> {
+    let mut execution = executor(tree, pool());
+    for row in rows {
+        execution.push_state(InputId::new(0), row).unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
+/// One exported group's state: its label key, then the accumulator state of every field at each
+/// absolute grid position it carries.
+type ExportedGroup = (
+    String,
+    Vec<(
+        usize,
+        Vec<Option<datatypes::series::aggregate_state::AggregateStateValues>>,
+    )>,
+);
+
+/// An exported state normalised for comparison: groups in label order, positions as exported.
+fn exported_state(chunks: Vec<crate::native::state::StateChunk>) -> Vec<ExportedGroup> {
+    let mut groups = Vec::new();
+    for chunk in chunks {
+        let crate::native::state::StateChunk::Series { series, .. } = chunk else {
+            panic!("a state stage exports series state, not a decoded row")
+        };
+        for series in series {
+            let mut tags: Vec<String> = series
+                .metric
+                .tags()
+                .iter()
+                .map(|tag| format!("{}={}", tag.name, tag.value))
+                .collect();
+            tags.sort();
+            let key = format!("{}[{}]", series.metric.name().unwrap_or(""), tags.join(","));
+            let points = series
+                .time
+                .positions()
+                .map(|(position, row)| {
+                    (
+                        position,
+                        (0..series.states.len())
+                            .map(|field| series.states[field][row])
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            groups.push((key, points));
+        }
+    }
+    groups.sort_by(|left, right| left.0.cmp(&right.0));
+    groups
+}
+
+/// Whether merging `kind` is exact: these keep a count, a presence or an extremum, so the state a
+/// merge exports does not depend on how the contributions were grouped.
+fn merging_is_exact(kind: AggregateKind) -> bool {
+    matches!(
+        kind,
+        AggregateKind::Count | AggregateKind::Group | AggregateKind::Min | AggregateKind::Max
+    )
+}
+
+/// The accumulator components `kind`'s state carries, which are the only ones a merge reads and so
+/// the only ones two states of that kind can be compared on.
+fn state_components(
+    kind: AggregateKind,
+) -> Vec<datatypes::series::aggregate_state::StateComponent> {
+    crate::native::plan::aggregate_state_binding(kind)
+        .expect("a mergeable kind keeps a state")
+        .1
+}
+
+/// Asserts that two exported states hold the same groups, positions and accumulator state.
+///
+/// Only the components the kind declares are compared: a folding kernel keeps its first sample in
+/// the components it does not use, and a merge never reads them, so a difference there is not a
+/// difference in state.
+///
+/// `sum`, `avg`, `stddev` and `stdvar` reassociate floating-point work, so their components are
+/// compared within a tolerance: merging the same contributions is numerically equivalent, which is
+/// what the kernel promises, and not bitwise identical. Their `compensation` is a rounding artefact
+/// of the order the contributions were folded in, so it is not compared at all; `incremental_mean`
+/// is, because it says which representation the mean is in.
+fn assert_same_state(kind: AggregateKind, actual: &[ExportedGroup], expected: &[ExportedGroup]) {
+    assert_eq!(actual.len(), expected.len(), "{kind:?}: number of groups");
+    for ((actual_key, actual_points), (expected_key, expected_points)) in
+        actual.iter().zip(expected)
+    {
+        assert_eq!(actual_key, expected_key, "{kind:?}: group identity");
+        assert_eq!(
+            actual_points.len(),
+            expected_points.len(),
+            "{kind:?} {actual_key}: number of points"
+        );
+        for ((actual_position, actual_states), (expected_position, expected_states)) in
+            actual_points.iter().zip(expected_points)
+        {
+            assert_eq!(
+                actual_position, expected_position,
+                "{kind:?} {actual_key}: position"
+            );
+            assert_eq!(
+                actual_states.len(),
+                expected_states.len(),
+                "{kind:?} {actual_key} at {actual_position}: number of fields"
+            );
+            for (field, (actual_state, expected_state)) in
+                actual_states.iter().zip(expected_states).enumerate()
+            {
+                let (Some(actual_state), Some(expected_state)) = (actual_state, expected_state)
+                else {
+                    assert_eq!(
+                        actual_state.is_some(),
+                        expected_state.is_some(),
+                        "{kind:?} {actual_key} at {actual_position} field {field}: presence"
+                    );
+                    continue;
+                };
+                for component in state_components(kind) {
+                    let (name, actual, expected) = match component {
+                        datatypes::series::aggregate_state::StateComponent::Value => {
+                            ("value", actual_state.value, expected_state.value)
+                        }
+                        datatypes::series::aggregate_state::StateComponent::Mean => {
+                            ("mean", actual_state.mean, expected_state.mean)
+                        }
+                        datatypes::series::aggregate_state::StateComponent::Count => {
+                            ("count", actual_state.count, expected_state.count)
+                        }
+                        datatypes::series::aggregate_state::StateComponent::Compensation
+                            if !merging_is_exact(kind) =>
+                        {
+                            continue;
+                        }
+                        datatypes::series::aggregate_state::StateComponent::Compensation => (
+                            "compensation",
+                            actual_state.compensation,
+                            expected_state.compensation,
+                        ),
+                        datatypes::series::aggregate_state::StateComponent::IncrementalMean => {
+                            assert_eq!(
+                                actual_state.incremental_mean, expected_state.incremental_mean,
+                                "{kind:?} {actual_key} at {actual_position} field {field}: \
+                                 mean form"
+                            );
+                            continue;
+                        }
+                    };
+                    if merging_is_exact(kind) {
+                        assert_eq!(
+                            actual, expected,
+                            "{kind:?} {actual_key} at {actual_position} field {field}: {name}"
+                        );
+                        continue;
+                    }
+                    assert!(
+                        (actual - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+                        "{kind:?} {actual_key} at {actual_position} field {field}: \
+                         {name} {actual} != {expected}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Reducing the states of several partitions is the state of folding every contribution once.
+///
+/// The comparison is over the exported state rather than over finished values, because that is what
+/// the stage produces: a reduce that finished anything, or that dropped a partition's contribution,
+/// would show up here even when a `Final` above it happened to compensate.
+#[test]
+fn a_reduce_of_three_partial_states_equals_folding_every_contribution_once() {
+    for kind in eight_kinds() {
+        let schema = evaluated_schema(grid(0, 60_000, 4));
+        let group = Grouping::By(Arc::new(["job".into()]));
+        let binding = state_binding(kind, group.clone(), &schema);
+
+        let reduced = exported_state(run_state(
+            &reduce_tree(kind, &group, &binding),
+            partition_rows(kind, &group, &binding, &schema),
+        ));
+        let all: Vec<(SeriesLabels, Vec<Option<f64>>)> =
+            three_partitions().into_iter().flatten().collect();
+        let once = exported_state(partial_export(kind, &group, &binding, &schema, &all));
+
+        assert_same_state(kind, &reduced, &once);
+        let mut groups: Vec<&str> = reduced.iter().map(|(key, _)| key.as_str()).collect();
+        groups.sort();
+        assert_eq!(
+            groups,
+            vec!["[job=a]", "[job=b]", "[job=c]"],
+            "{kind:?}: the reduce exports every group its partitions named"
+        );
+
+        // Exactly once: group `a` is contributed to at position 3 by all three partitions, so the
+        // merge counts three contributions there - not one, and not nine.
+        if kind == AggregateKind::Count {
+            let (_, points) = reduced
+                .iter()
+                .find(|(key, _)| key == "[job=a]")
+                .expect("group a is exported");
+            let count = points
+                .iter()
+                .find(|(position, _)| *position == 3)
+                .map(|(_, states)| states[0].expect("a state at position 3").count)
+                .expect("group a carries position 3");
+            assert_eq!(count, 3.0, "each partition's contribution is folded once");
+        }
+    }
+}
+
+/// A `Final` over a reduce answers what a `Final` over the one-level merge answers.
+///
+/// The reduce only moves where the merging happens, so the finished values it finalizes to are the
+/// ones the single-level merge finalizes to.
+#[test]
+fn a_final_over_a_reduce_equals_a_final_over_the_one_level_merge() {
+    for kind in eight_kinds() {
+        let grid = grid(0, 60_000, 4);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let group = Grouping::By(Arc::new(["job".into()]));
+        let binding = state_binding(kind, group.clone(), &schema);
+
+        let merged = groups_of(&run_values(
+            &final_tree(kind, &group, &binding, Arc::clone(&grid)),
+            partition_rows(kind, &group, &binding, &schema),
+        ));
+        let two_level = groups_of(&run_values(
+            &final_tree(kind, &group, &binding, Arc::clone(&grid)),
+            reduce_rows(
+                kind,
+                &group,
+                &binding,
+                &schema,
+                partition_rows(kind, &group, &binding, &schema),
+            ),
+        ));
+
+        assert_eq!(merged.len(), two_level.len(), "{kind:?}: number of groups");
+        for ((name, tags, points), (two_name, two_tags, two_points)) in
+            merged.iter().zip(two_level.iter())
+        {
+            assert_eq!(
+                (name, tags),
+                (two_name, two_tags),
+                "{kind:?}: group identity"
+            );
+            assert_eq!(points.len(), two_points.len(), "{kind:?} {tags:?}: points");
+            for ((position, value), (two_position, two_value)) in points.iter().zip(two_points) {
+                assert_eq!(position, two_position, "{kind:?} {tags:?}: position");
+                match (value, two_value) {
+                    (None, None) => {}
+                    (Some(value), Some(two_value)) if merging_is_exact(kind) => {
+                        assert_eq!(value, two_value, "{kind:?} {tags:?} at {position}");
+                    }
+                    (Some(value), Some(two_value)) => {
+                        assert!(
+                            (value - two_value).abs() <= 1e-9 * two_value.abs().max(1.0),
+                            "{kind:?} {tags:?} at {position}: {value} != {two_value}"
+                        );
+                    }
+                    (value, two_value) => {
+                        panic!("{kind:?} {tags:?} at {position}: {value:?} != {two_value:?}")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A reduce hands its state over charged and gives every byte back.
+///
+/// The rows it is handed are its input, its fold retains the groups they name, and the export it
+/// builds is a second representation that exists while the fold does: all three are admitted by the
+/// pool, the handover moves what the chunk is worth to the chunk rather than dropping the charge,
+/// and dropping the pipeline returns whatever it still held.
+#[test]
+fn a_reduce_hands_its_state_over_charged_and_releases_it() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let group = Grouping::By(Arc::new(["job".into()]));
+    let kind = AggregateKind::Sum;
+    let binding = state_binding(kind, group.clone(), &schema);
+    let tree = reduce_tree(kind, &group, &binding);
+
+    let memory_pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&memory_pool));
+    for row in partition_rows(kind, &group, &binding, &schema) {
+        execution.push_state(InputId::new(0), row).unwrap();
+    }
+    assert!(
+        execution.state().reserved_bytes() > 0,
+        "the rows a reduce was handed are charged to it until it folds them"
+    );
+    execution.end_of_input().unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_state().unwrap() {
+        chunks.push(chunk);
+    }
+    assert_eq!(
+        chunks.len(),
+        1,
+        "a reduce hands its whole partition on once"
+    );
+    let chunk = chunks.pop().unwrap();
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "a reduce that answered holds nothing of its own"
+    );
+    let crate::native::state::StateChunk::Series { reservation, .. } = &chunk else {
+        panic!("a reduce exports series state, not a decoded row")
+    };
+    let carried = reservation
+        .as_ref()
+        .expect("the handed-over state carries the charge the queue released")
+        .size();
+    assert!(carried > 0, "exported state is worth more than no bytes");
+    assert_eq!(
+        crate::native::state::state_bytes(&chunk),
+        carried,
+        "the chunk carries exactly what it is worth, so nothing is left behind"
+    );
+    assert!(
+        memory_pool.reserved() >= carried,
+        "the pool still holds the handed-over bytes: reserved {}, carried {carried}",
+        memory_pool.reserved()
+    );
+
+    drop(chunk);
+    assert_eq!(
+        memory_pool.reserved(),
+        0,
+        "dropping the exported state gives its charge back"
+    );
+    drop(execution);
+    assert_eq!(
+        memory_pool.reserved(),
+        0,
+        "a finished pipeline released its own"
+    );
+
+    // Dropping a pipeline that never answered gives back the rows it still held.
+    let held_pool = bounded_pool(1 << 20);
+    let mut dropped = executor(&tree, Arc::clone(&held_pool));
+    for row in partition_rows(kind, &group, &binding, &schema) {
+        dropped.push_state(InputId::new(0), row).unwrap();
+    }
+    assert!(dropped.state().reserved_bytes() > 0);
+    drop(dropped);
+    assert_eq!(
+        held_pool.reserved(),
+        0,
+        "a dropped pipeline gives back what it held"
+    );
+}
+
+/// The fold and the export a reduce builds are admitted on top of the rows it was handed.
+///
+/// A pool sized for exactly those rows is refused: the reduce has to ask for the groups it is about
+/// to retain and the state it is about to build, rather than fold them uncharged.
+#[test]
+fn a_reduce_admits_its_fold_and_export_on_top_of_its_input() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let group = Grouping::By(Arc::new(["job".into()]));
+    let kind = AggregateKind::Sum;
+    let binding = state_binding(kind, group.clone(), &schema);
+    let tree = reduce_tree(kind, &group, &binding);
+
+    let measure_pool = pool();
+    let mut measurement = executor(&tree, Arc::clone(&measure_pool));
+    for row in partition_rows(kind, &group, &binding, &schema) {
+        measurement.push_state(InputId::new(0), row).unwrap();
+    }
+    let rows_bytes = measurement.state().reserved_bytes();
+    assert!(
+        rows_bytes > 0,
+        "the queued rows are worth more than nothing"
+    );
+    drop(measurement);
+    assert_eq!(measure_pool.reserved(), 0);
+
+    let small_pool = bounded_pool(rows_bytes);
+    let mut execution = executor(&tree, Arc::clone(&small_pool));
+    for row in partition_rows(kind, &group, &binding, &schema) {
+        execution
+            .push_state(InputId::new(0), row)
+            .expect("the pool covers exactly the rows");
+    }
+    execution.end_of_input().unwrap();
+    let error = execution
+        .next_state()
+        .expect_err("a pool sized for the rows alone cannot admit the fold");
+    assert!(
+        is_resources_exhausted(&error),
+        "the refusal names the pool: {error}"
+    );
+    drop(execution);
+    assert_eq!(small_pool.reserved(), 0);
+}
+
 #[test]
 fn exporting_a_partial_charges_the_fold_and_the_groups_it_builds() {
     use crate::aggregate::{AggregateOp, FloatAggregator};
