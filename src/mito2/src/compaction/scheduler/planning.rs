@@ -128,7 +128,7 @@ async fn pick_automatic(
     time_range: Option<TimestampRange>,
 ) -> Result<Option<PickerOutput>> {
     let picker = new_twcs_picker(&region.region_options, max_outputs, time_range, false);
-    let (mut candidates, mut output) = picker.discover(region).await?;
+    let mut candidates = picker.discover(region).await?;
     let last_non_null = region.region_options.merge_mode() == MergeMode::LastNonNull;
     let now = Instant::now();
     candidates.candidates = history.rank_candidates(candidates.candidates, now);
@@ -145,7 +145,7 @@ async fn pick_automatic(
         .rev()
         .map(PickKey::from)
         .collect();
-    output.outputs = candidates.finish().await?;
+    let output = candidates.finish().await?;
     if last_non_null {
         let (output, attempted_seeds) =
             last_non_null::close_outputs(region, output, max_outputs).await?;

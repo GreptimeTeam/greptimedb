@@ -90,6 +90,8 @@ pub(crate) struct WindowCandidate {
 /// Only selected candidates incur tombstone checks and pick-result logging.
 pub(crate) struct TwcsCandidates {
     pub(crate) candidates: Vec<WindowCandidate>,
+    expired_ssts: Vec<FileHandle>,
+    time_window_size: i64,
     windows: Arc<BTreeMap<i64, Window>>,
     active_window: Option<i64>,
     primary_key_mapper: Arc<PrimaryKeyRangeMapper>,
@@ -101,9 +103,10 @@ pub(crate) struct TwcsCandidates {
 impl TwcsCandidates {
     /// Materializes the selected candidates off the async runtime. The snapshot
     /// supplies unselected peers for tombstone safety, even after truncation.
-    pub(crate) async fn finish(self) -> Result<Vec<CompactionOutput>> {
+    pub(crate) async fn finish(self) -> Result<PickerOutput> {
         common_runtime::spawn_blocking_compact(move || {
-            self.candidates
+            let outputs = self
+                .candidates
                 .into_iter()
                 .rev()
                 .map(|candidate| {
@@ -134,7 +137,17 @@ impl TwcsCandidates {
                         output_time_range: None,
                     }
                 })
-                .collect()
+                .collect();
+            PickerOutput {
+                outputs,
+                expired_ssts: self.expired_ssts,
+                time_window_size: self.time_window_size,
+                // The picker treats zero as unlimited; the writer must not split every batch.
+                max_file_size: self
+                    .max_output_file_size
+                    .filter(|size| *size > 0)
+                    .map(|size| size as usize),
+            }
         })
         .await
         .context(JoinSnafu)
@@ -153,6 +166,7 @@ struct WindowPickContext<'a> {
 
 struct WindowOutputContext {
     all_candidates: bool,
+    expired_ssts: Vec<FileHandle>,
     active_window: Option<i64>,
     time_window_size: Option<i64>,
     max_outputs: Option<usize>,
@@ -234,6 +248,7 @@ impl TwcsPicker {
         let scanned_windows = TWCS_SCANNED_WINDOWS.with_label_values(&[mode]);
         let WindowOutputContext {
             all_candidates: _,
+            expired_ssts,
             active_window,
             time_window_size,
             max_outputs,
@@ -324,6 +339,10 @@ impl TwcsPicker {
         }
         Ok(TwcsCandidates {
             candidates: picks,
+            expired_ssts,
+            // Snapshot discovery always supplies the width; direct window tests
+            // may omit it to disable settling-window behavior.
+            time_window_size: time_window_size.unwrap_or_default(),
             windows: time_windows,
             active_window,
             primary_key_mapper,
@@ -1042,18 +1061,15 @@ impl TwcsPicker {
         compaction_region: &CompactionRegion,
         max_outputs: Option<usize>,
     ) -> Result<Option<PickerOutput>> {
-        let (candidates, mut output) = self
+        let candidates = self
             .discover_with_limit(compaction_region, max_outputs, false)
             .await?;
-        output.outputs = candidates.finish().await?;
+        let output = candidates.finish().await?;
         Ok((!output.outputs.is_empty() || !output.expired_ssts.is_empty()).then_some(output))
     }
 
     /// Enumerates all eligible classes/windows without applying scheduling policy.
-    pub(crate) async fn discover(
-        &self,
-        region: &CompactionRegion,
-    ) -> Result<(TwcsCandidates, PickerOutput)> {
+    pub(crate) async fn discover(&self, region: &CompactionRegion) -> Result<TwcsCandidates> {
         self.discover_with_limit(region, None, true).await
     }
 
@@ -1062,7 +1078,7 @@ impl TwcsPicker {
         compaction_region: &CompactionRegion,
         max_outputs: Option<usize>,
         all_candidates: bool,
-    ) -> Result<(TwcsCandidates, PickerOutput)> {
+    ) -> Result<TwcsCandidates> {
         let region_id = compaction_region.region_id;
         let picker = self.clone();
         let compaction_region = compaction_region.clone();
@@ -1128,34 +1144,19 @@ impl TwcsPicker {
             .await
             .context(JoinSnafu)?;
 
-        let candidates = self
-            .build_candidates(
-                region_id,
-                windows,
-                WindowOutputContext {
-                    all_candidates,
-                    active_window,
-                    time_window_size: Some(time_window_size),
-                    max_outputs,
-                    primary_key_mapper,
-                },
-            )
-            .await?;
-
-        // The picker treats zero as unlimited, but the SST writer would split every batch.
-        let max_file_size = self
-            .max_output_file_size
-            .filter(|size| *size > 0)
-            .map(|size| size as usize);
-        Ok((
-            candidates,
-            PickerOutput {
-                outputs: Vec::new(),
+        self.build_candidates(
+            region_id,
+            windows,
+            WindowOutputContext {
+                all_candidates,
                 expired_ssts,
-                time_window_size,
-                max_file_size,
+                active_window,
+                time_window_size: Some(time_window_size),
+                max_outputs,
+                primary_key_mapper,
             },
-        ))
+        )
+        .await
     }
 }
 
@@ -1434,6 +1435,7 @@ mod tests {
                 time_windows,
                 WindowOutputContext {
                     all_candidates: false,
+                    expired_ssts: Vec::new(),
                     active_window,
                     time_window_size,
                     max_outputs: self.max_background_tasks,
@@ -1443,6 +1445,7 @@ mod tests {
             .await?
             .finish()
             .await
+            .map(|output| output.outputs)
         }
 
         async fn build_output_with_history(
@@ -1457,6 +1460,7 @@ mod tests {
                     time_windows,
                     WindowOutputContext {
                         all_candidates: true,
+                        expired_ssts: Vec::new(),
                         active_window,
                         time_window_size: None,
                         max_outputs: None,
@@ -1470,7 +1474,7 @@ mod tests {
                 .candidates
                 .truncate(self.max_background_tasks.unwrap_or(usize::MAX));
             history.acknowledge(candidates.candidates.iter().map(PickKey::from), now);
-            candidates.finish().await
+            candidates.finish().await.map(|output| output.outputs)
         }
     }
 
