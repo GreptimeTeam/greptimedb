@@ -850,7 +850,9 @@ mod tests {
         assert!(!debug.contains("cli-secret"));
         assert!(debug.contains("[REDACTED]"));
 
-        let fe_opts = command.load_options(&Default::default()).unwrap().component;
+        let mut fe_opts = command.load_options(&Default::default()).unwrap().component;
+        // Downstream frontend plugins require a meta client outside standalone mode.
+        fe_opts.meta_client = Some(MetaClientOptions::default());
 
         let mut plugins = Plugins::new();
         plugins::setup_frontend_plugins_pre_build(&mut plugins, &[], &fe_opts, None)
