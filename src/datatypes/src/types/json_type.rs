@@ -397,7 +397,7 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
         Ok(jsonb_value) => {
             let mut serialized = String::new();
             write_jsonb_value(&jsonb_value, &mut serialized)?;
-            fix_unicode_point(&serialized)
+            Ok(serialized)
         }
         Err(e) => InvalidJsonbSnafu { error: e }.fail(),
     }
@@ -408,7 +408,9 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
 /// `jsonb::Value`'s `Display` writes object keys verbatim between double quotes,
 /// so a key containing `"`, `\` or a control character yields invalid JSON.
 /// Containers are therefore walked here so that keys are escaped, while scalars
-/// still use the `Display` implementation of the value.
+/// still use the `Display` implementation of the value. Unicode normalization
+/// (`fix_unicode_point`) is applied to scalar output only, so that an already
+/// escaped key such as a literal `\\u{1f600}` is never rewritten.
 fn write_jsonb_value(value: &jsonb::Value<'_>, out: &mut String) -> Result<()> {
     use std::fmt::Write;
 
@@ -442,8 +444,10 @@ fn write_jsonb_value(value: &jsonb::Value<'_>, out: &mut String) -> Result<()> {
             out.push('}');
         }
         scalar => {
+            let mut text = String::new();
             // Writing into a `String` never fails.
-            let _ = write!(out, "{scalar}");
+            let _ = write!(text, "{scalar}");
+            out.push_str(&fix_unicode_point(&text)?);
         }
     }
     Ok(())
@@ -549,6 +553,23 @@ mod tests {
         assert_eq!(serde_json::from_str::<serde_json::Value>(&text)?, expected);
         assert!(text.contains(r#""a\"b":"#), "{text}");
         Ok(())
+    }
+
+    #[test]
+    fn test_jsonb_to_string_preserves_literal_unicode_escape_key() {
+        let input = r#"{"\\u{1f600}":"value"}"#;
+        let bytes = parse_string_to_jsonb(input).unwrap();
+        let text = jsonb_to_string(&bytes).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            serde_json::from_str::<serde_json::Value>(input).unwrap(),
+        );
+
+        // A BMP literal key round-trips unchanged as well.
+        let input = r#"{"\\u{41}":"value"}"#;
+        let bytes = parse_string_to_jsonb(input).unwrap();
+        let text = jsonb_to_string(&bytes).unwrap();
+        assert_eq!(text, input);
     }
 
     #[test]
