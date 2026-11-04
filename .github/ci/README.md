@@ -1,9 +1,10 @@
 # Integration CI admission gate
 
-`integration.yml` runs its expensive jobs — fuzz, export/import E2E, the sqlness
-KvBackend legs — on every non-draft pull request. Most pull requests cannot
-affect any of them. This directory decides which of those jobs start, using only
-the diff.
+`integration.yml` filters its expensive jobs — fuzz, export/import E2E, and the
+sqlness KvBackend legs — by the diff. Fuzz additionally follows the event policy
+in [Heavy CI scheduling](../heavy-ci.md): PR opening or ready-for-review events,
+scheduled runs, and explicit manual profiles. A scope verdict cannot override
+that event policy.
 
 The gate can only *skip* work, never add it, and it fails open: when the verdict
 is missing or uncertain, every gated job runs.
@@ -53,7 +54,8 @@ three minutes, less than the cost of getting its verdict wrong.
 First match wins:
 
 1. **Forced** — `merge_group`, `schedule`, `workflow_dispatch`, the `ci:full`
-   label or `CI_SCOPE_FORCE_ALL`. Everything runs.
+   label or `CI_SCOPE_FORCE_ALL`. All scope outputs allow execution; job event
+   conditions and manual profile selection still apply.
 2. **Too large to judge** — more than 300 changed files. Everything runs.
 3. **Always-run file changed** — `Cargo.toml`, `Cargo.lock`, `tests-fuzz/**`,
    this directory, or anything else that changes what the suites build or how

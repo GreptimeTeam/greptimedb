@@ -26,7 +26,7 @@ const checked = '- [x] Merge during the nightly window <!-- nightly-merge -->';
 
 async function run({ sync = false, body = checked, labels = ['merge nightly'],
   detail = {}, current = {}, threads = [[true]], count = 1, dryRun = false,
-  failFirst = false } = {}) {
+  failFirst = false, enqueueError = Error('head changed') } = {}) {
   const calls = [];
   let page = 0;
   const github = {
@@ -43,7 +43,7 @@ async function run({ sync = false, body = checked, labels = ['merge nightly'],
     graphql: async (query, args) => {
       if (query.includes('mutation')) {
         calls.push(['enqueue', args]);
-        if (failFirst && calls.filter(call => call[0] === 'enqueue').length === 1) throw Error('head changed');
+        if (failFirst && calls.filter(call => call[0] === 'enqueue').length === 1) throw enqueueError;
         return {};
       }
       if (query.includes('reviewThreads')) {
@@ -61,16 +61,22 @@ async function run({ sync = false, body = checked, labels = ['merge nightly'],
   const summary = { addHeading() { return this; }, addTable(rows) { calls.push(['summary', rows]); return this; }, async write() {} };
   await scripts[sync ? 0 : 1](github,
     { repo: { owner: 'GreptimeTeam', repo: 'greptimedb' }, payload: { pull_request: { number: 1 } } },
-    { summary, warning() {}, setFailed: message => calls.push(['failed', message]) },
+    { summary, info() {}, warning() {}, setFailed: message => calls.push(['failed', message]) },
     { env: { DRY_RUN: String(dryRun) } });
   return calls;
 }
+
+test('label sync grants PR label write permission without checking out PR code', () => {
+  const syncJob = workflow.split('  sync-label:\n')[1].split('  enqueue:\n')[0];
+  assert.match(syncJob, /^      pull-requests: write$/m);
+  assert.doesNotMatch(syncJob, /uses: actions\/checkout/);
+});
 
 test('template opts in and checkbox edits reconcile only the nightly label', async () => {
   assert.ok(readFileSync(resolve(__dirname, '../../pull_request_template.md'), 'utf8').includes(checked));
   assert.deepEqual(await run({ sync: true, labels: ['bug'] }), [['add', ['merge nightly']]]);
   assert.deepEqual(await run({ sync: true }), []);
-  for (const body of [checked.replace('[x]', '[ ]'), '', null, `> ${checked}`]) {
+  for (const body of [checked.replace('[x]', '[ ]')]) {
     assert.deepEqual(await run({ sync: true, body }), [['remove', 'merge nightly']]);
   }
   assert.deepEqual(await run({ sync: true, body: checked.replace('[x]', '[X]'), labels: [] }), [['add', ['merge nightly']]]);
@@ -83,7 +89,7 @@ test('eligible PR is enqueued with its checked head; dry run performs no mutatio
 
 test('each eligibility gate independently prevents enqueueing', async () => {
   for (const options of [
-    { body: checked.replace('[x]', '[ ]') }, { labels: [] },
+    { labels: [] },
     { current: { draft: true } }, { current: { state: 'closed' } }, { current: { base: { ref: 'release/v1.3' } } },
     { detail: { reviewDecision: 'REVIEW_REQUIRED' } }, { detail: { reviewDecision: 'CHANGES_REQUESTED' } },
     { detail: { mergeStateStatus: 'BLOCKED' } }, { detail: { mergeStateStatus: 'UNKNOWN' } },
@@ -105,4 +111,43 @@ test('per-run cap and individual failures do not prevent later candidates', asyn
   const calls = await run({ count: 2, failFirst: true });
   assert.equal(calls.filter(c => c[0] === 'enqueue').length, 2);
   assert.equal(calls.filter(c => c[0] === 'failed').length, 1);
+});
+
+test('label-only opt-in survives PRs without a template and does not require a checkbox', async () => {
+  for (const body of ['', null, 'Existing PR description', `> ${checked}`]) {
+    assert.deepEqual(await run({ sync: true, body }), []);
+    assert.deepEqual(await run({ sync: true, body, labels: [] }), []);
+    assert.equal((await run({ body })).filter(call => call[0] === 'enqueue').length, 1);
+    assert.equal((await run({ body, labels: [] })).some(call => call[0] === 'enqueue'), false);
+  }
+  // The label is authoritative for admission, even before checkbox synchronization.
+  assert.equal((await run({ body: checked.replace('[x]', '[ ]') })).some(call => call[0] === 'enqueue'), true);
+});
+
+const stackMessage = 'This pull request is part of a stack and must be enqueued using the asynchronous merge REST API. For more information, see https://docs.github.com/rest/pulls/pulls#merge-a-pull-request-asynchronously';
+
+test('stacked PR rejection is skipped without consuming the successful enqueue cap', async () => {
+  const calls = await run({ count: 7, failFirst: true,
+    enqueueError: Object.assign(Error('GraphQL request failed'), { errors: [{ message: stackMessage }] }) });
+  assert.equal(calls.some(c => c[0] === 'failed'), false);
+  assert.deepEqual(calls.find(c => c[0] === 'summary')[1], [
+    ['PR', 'Result'], ['1', 'Skipped: stacked PR'],
+    ...[2, 3, 4, 5, 6].map(number => [String(number), 'Enqueued'])
+  ]);
+  assert.deepEqual(calls.filter(c => c[0] === 'enqueue').map(c => c[1].id),
+    ['PR_1', 'PR_2', 'PR_3', 'PR_4', 'PR_5', 'PR_6']);
+});
+
+test('mixed or unstructured errors are not mistaken for a stacked PR rejection', async () => {
+  for (const enqueueError of [
+    Error(stackMessage),
+    Object.assign(Error('GraphQL request failed'), { errors: [] }),
+    Object.assign(Error('GraphQL request failed'), { errors: [{ message: stackMessage }, { message: 'Forbidden' }] })
+  ]) {
+    const calls = await run({ count: 2, failFirst: true, enqueueError });
+    assert.equal(calls.filter(c => c[0] === 'failed').length, 1);
+    assert.deepEqual(calls.find(c => c[0] === 'summary')[1], [
+      ['PR', 'Result'], ['1', 'Failed: see workflow logs'], ['2', 'Enqueued']
+    ]);
+  }
 });

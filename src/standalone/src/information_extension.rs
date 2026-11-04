@@ -138,6 +138,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
                     metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
                     written_bytes: region_stat.written_bytes,
+                    flushed_parquet_bytes: region_stat.flushed_parquet_bytes,
                     query_cpu_time: region_stat.query_cpu_time,
                     query_scanned_bytes: region_stat.query_scanned_bytes,
                     min_timestamp: region_stat.min_timestamp,

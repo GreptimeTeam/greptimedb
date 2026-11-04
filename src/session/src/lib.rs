@@ -19,6 +19,7 @@ pub mod query_id;
 pub mod query_options;
 pub mod session_config;
 pub mod table_name;
+pub mod write_progress;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;

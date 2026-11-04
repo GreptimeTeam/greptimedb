@@ -74,6 +74,271 @@ use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_wit
 use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
 
 #[tokio::test]
+async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::ColumnMetadata;
+    use store_api::region_request::AddColumn;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let mut request = CreateRequestBuilder::new()
+        .tag_num(1)
+        .field_num(1)
+        .insert_option("primary_key_encoding", "sparse")
+        .build();
+    let reserved = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    request
+        .column_metadatas
+        .extend(reserved.column_metadatas.into_iter().take(2));
+    request
+        .primary_key
+        .splice(0..0, reserved.primary_key.into_iter().take(2));
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    let mut rows = Rows {
+        schema,
+        rows: vec![row(vec![
+            ValueData::StringValue("api".into()),
+            ValueData::F64Value(1.0),
+            ValueData::TimestampMillisecondValue(1000),
+            ValueData::U32Value(42),
+            ValueData::U64Value(7),
+        ])],
+    };
+    test_util::put_rows(&engine, region_id, rows.clone()).await;
+    test_util::flush_region(&engine, region_id, None).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "zone",
+                                ConcreteDataType::string_datatype(),
+                                true,
+                            ),
+                            semantic_type: SemanticType::Tag,
+                            column_id: 3,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await?;
+
+    // The old SST and the new write must still identify the same series before compaction.
+    rows.rows[0].values[1].value_data = Some(ValueData::F64Value(2.0));
+    test_util::put_rows(&engine, region_id, rows).await;
+    for flush in [false, true] {
+        if flush {
+            test_util::flush_region(&engine, region_id, None).await;
+        }
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    projection: Some(vec![0, 1, 2, 5]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let batches = RecordBatches::try_collect(stream).await?;
+        let expected = "\
++-------+---------+---------------------+------+
+| tag_0 | field_0 | ts                  | zone |
++-------+---------+---------------------+------+
+| api   | 2.0     | 1970-01-01T00:00:01 |      |
++-------+---------+---------------------+------+";
+        assert_eq!(batches.pretty_print()?, expected);
+    }
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::ColumnMetadata;
+    use store_api::region_request::AddColumn;
+    use store_api::storage::consts::ReservedColumnId;
+
+    for default_flat_format in [false, true] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1024, 0);
+        let mut request = CreateRequestBuilder::new()
+            .tag_num(2)
+            .field_num(2)
+            .insert_option("primary_key_encoding", "sparse")
+            .insert_option("append_mode", "true")
+            .insert_option("sst_format", "primary_key")
+            .build();
+        request.column_metadatas[3].column_schema.data_type =
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
+        request.column_metadatas[3]
+            .column_schema
+            .with_extension_type(&Json2ExtensionType::default());
+        for (name, column_id, data_type) in [
+            (
+                "__table_id",
+                ReservedColumnId::table_id(),
+                ConcreteDataType::uint32_datatype(),
+            ),
+            (
+                "__tsid",
+                ReservedColumnId::tsid(),
+                ConcreteDataType::uint64_datatype(),
+            ),
+        ] {
+            request.column_metadatas.push(ColumnMetadata {
+                column_schema: ColumnSchema::new(name, data_type, false),
+                semantic_type: SemanticType::Tag,
+                column_id,
+            });
+        }
+        request.primary_key.splice(
+            0..0,
+            [ReservedColumnId::table_id(), ReservedColumnId::tsid()],
+        );
+        let table_dir = request.table_dir.clone();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await?;
+        let mut rows = Rows {
+            schema: schema.clone(),
+            rows: vec![row(vec![
+                ValueData::StringValue("metric".into()),
+                ValueData::StringValue("api".into()),
+                ValueData::F64Value(1.5),
+                ValueData::JsonValue(encode_json_value(JsonValue::from(
+                    json!({"trace_id":"abc"}),
+                ))),
+                ValueData::TimestampMillisecondValue(1),
+            ])],
+        };
+        rows.rows[0].values.extend([
+            ValueData::U32Value(42).into(),
+            ValueData::U64Value(7).into(),
+        ]);
+        // Equal series/timestamp observations are preserved in append mode.
+        rows.rows.push(rows.rows[0].clone());
+        let mut null_row = rows.rows[0].clone();
+        null_row.values[0].value_data = None;
+        null_row.values[1].value_data = None;
+        // Different source metrics can have the same TSID.
+        null_row.values[5] = ValueData::U32Value(43).into();
+        rows.rows.push(null_row);
+        test_util::put_rows(&engine, region_id, rows.clone()).await;
+
+        // Reopen without encoding options, replaying raw rows from WAL.
+        reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+        assert_eq!(
+            engine.get_primary_key_encoding(region_id).unwrap(),
+            PrimaryKeyEncoding::Sparse
+        );
+        test_util::flush_region(&engine, region_id, None).await;
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::AddColumns {
+                        columns: vec![AddColumn {
+                            column_metadata: ColumnMetadata {
+                                column_schema: ColumnSchema::new(
+                                    "new_tag",
+                                    ConcreteDataType::string_datatype(),
+                                    true,
+                                ),
+                                semantic_type: SemanticType::Tag,
+                                column_id: 5,
+                            },
+                            location: None,
+                        }],
+                    },
+                }),
+            )
+            .await?;
+        // A stale writer omits the newly added nullable tag.
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: compact_request::Options::StrictWindow(StrictWindow {
+                        window_seconds: 86400,
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        reopen_region(
+            &engine,
+            region_id,
+            table_dir.clone(),
+            true,
+            HashMap::from([
+                ("primary_key_encoding".into(), "dense".into()),
+                ("sst_format".into(), "primary_key".into()),
+            ]),
+        )
+        .await;
+        reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+        assert_eq!(
+            engine.get_primary_key_encoding(region_id).unwrap(),
+            PrimaryKeyEncoding::Sparse
+        );
+        let mut cases = vec![
+            (vec![], 6),
+            (vec![col("tag_0").eq(lit("metric"))], 4),
+            (vec![col("tag_0").is_null()], 2),
+        ];
+        cases.extend([
+            (vec![col("__table_id").eq(lit(42u32))], 4),
+            (vec![col("__table_id").eq(lit(43u32))], 2),
+            (vec![col("__tsid").eq(lit(7u64))], 6),
+        ]);
+        for (filters, expected) in cases {
+            let scanner = engine
+                .scanner(
+                    region_id,
+                    ScanRequest {
+                        filters,
+                        json_type_hint: HashMap::from([(
+                            "field_1".into(),
+                            JsonNativeType::Variant,
+                        )]),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let batches = RecordBatches::try_collect(scanner.scan().await?).await?;
+            assert_eq!(
+                batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+                expected
+            );
+            for batch in batches.iter() {
+                let label_index = batch.schema.column_index_by_name("new_tag").unwrap();
+                assert_eq!(batch.column(label_index).null_count(), batch.num_rows());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_nullable_label_filters_in_memtables_and_ssts() {
     use datafusion_expr::{BinaryExpr as LogicalBinaryExpr, Cast, Expr};
 
@@ -4651,18 +4916,21 @@ async fn test_two_phase_sparse_metric_exact_sequence_cases() {
     }
 }
 
-/// A warmed two-phase exact scan must hit the existing range-result cache; a
+/// A warmed exact series scan must hit the existing range-result cache; a
 /// second upper bound over the same files and an unbounded scan must not reuse
 /// its rows.
+#[rstest::rstest]
+#[case(true)]
+#[case(false)]
 #[tokio::test]
-async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
+async fn test_sparse_metric_exact_sequence_cache_isolation(#[case] two_phase: bool) {
     let (_env, engine, region_id) = build_sparse_exact_metric_engine(
-        "test_two_phase_sparse_metric_exact_sequence_cache_isolation",
-        true,
+        "test_sparse_metric_exact_sequence_cache_isolation",
+        two_phase,
         ReadableSize::mb(64),
     )
     .await;
-    // Make the fixture file-only so the two-phase candidate and data ranges are cacheable.
+    // Make the fixture file-only so both series scan modes can cache their ranges.
     test_util::flush_region(&engine, region_id, None).await;
 
     let restrictive = ScanRequest {
@@ -4678,7 +4946,10 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
         let Scanner::Series(scanner) = scanner else {
             panic!("sparse metric scan must use SeriesScan");
         };
-        assert_eq!("two_phase", scanner.mode());
+        assert_eq!(
+            if two_phase { "two_phase" } else { "legacy" },
+            scanner.mode()
+        );
         assert_eq!(1, scanner.properties().num_partitions());
         let batches = RecordBatches::try_collect(scanner.build_stream().await.unwrap())
             .await
@@ -4691,18 +4962,20 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
 
     let (cold, _) = scan(restrictive.clone()).await;
     // Cache insertion is performed by the range stream's async concat task.
-    // Wait for the SeriesReader's data-stage entry, rather than treating a
-    // candidate-stage cache hit as evidence that the reader replayed its data.
+    // The data reader uses partition 0 in two-phase mode and partition 1 in legacy mode.
     let warm = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let (rows, verbose) = scan(restrictive.clone()).await;
-            // The single output partition is 0; the candidate distributor uses
-            // synthetic partition 1. Only a partition-0 hit proves data replay.
+            // Inspect the data reader rather than candidate-stage cache hits.
             let data_metrics = verbose
-                .split("\"partition\":0, \"metrics\":")
+                .split(if two_phase {
+                    "\"partition\":0, \"metrics\":"
+                } else {
+                    "\"partition\":1, \"metrics\":"
+                })
                 .nth(1)
                 .and_then(|metrics| metrics.split("\"partition\":").next())
-                .expect("missing two-phase data-reader metrics");
+                .expect("missing output-partition metrics");
             if data_metrics.contains("\"range_cache_hit\":") {
                 return rows;
             }

@@ -66,12 +66,7 @@ CREATE TABLE json2_inverted_invalid (
     attrs JSON2 (event_time TIMESTAMP INVERTED INDEX)
 );
 
--- JSON hints support only inverted indexes.
-CREATE TABLE json2_inverted_invalid (
-    ts TIMESTAMP TIME INDEX,
-    attrs JSON2 (message STRING SKIPPING INDEX)
-);
-
+-- JSON hints do not support fulltext indexes.
 CREATE TABLE json2_inverted_invalid (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (message STRING FULLTEXT INDEX)

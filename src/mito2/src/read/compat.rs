@@ -113,7 +113,7 @@ impl FlatCompatBatch {
 
         if actual.primary_key_encoding == PrimaryKeyEncoding::Sparse && compaction {
             // Special handling for sparse encoding in compaction.
-            return FlatCompatBatch::try_new_compact_sparse(mapper, actual);
+            return FlatCompatBatch::try_new_compact_sparse(mapper, actual, &actual_schema);
         }
 
         let (index_or_defaults, fields) = Self::compute_index_and_fields(
@@ -225,33 +225,49 @@ impl FlatCompatBatch {
     fn try_new_compact_sparse(
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
+        actual_schema: &[(ColumnId, ConcreteDataType)],
     ) -> Result<Option<Self>> {
         // Currently, we don't support converting sparse encoding back to dense encoding in
         // flat format.
         ensure!(
-            mapper.metadata().primary_key_encoding == PrimaryKeyEncoding::Sparse,
+            mapper.metadata().primary_key_encoding == actual.primary_key_encoding,
             UnsupportedOperationSnafu {
                 err_msg: "Flat format doesn't support converting sparse encoding back to dense encoding"
             }
         );
 
-        // For sparse encoding, we don't need to check the primary keys.
-        // Since this is for compaction, we always read all columns.
-        let actual_schema: Vec<_> = actual
-            .field_columns()
-            .chain([actual.time_index_column()])
-            .map(|col| (col.column_id, col.column_schema.data_type.clone()))
-            .collect();
-        let expect_schema: Vec<_> = mapper
-            .metadata()
-            .field_columns()
-            .chain([mapper.metadata().time_index_column()])
-            .map(|col| (col.column_id, col.column_schema.data_type.clone()))
-            .collect();
+        // Encoded sparse tags are not materialized during compaction. Preserve
+        // the projected JSON2 types: metadata only describes their logical shape.
+        let mut actual_fields = Vec::with_capacity(actual_schema.len());
+        for (id, data_type) in actual_schema {
+            let column = actual
+                .column_by_id(*id)
+                .with_context(|| CompatReaderSnafu {
+                    region_id: actual.region_id,
+                    reason: format!("column {id} is absent from region metadata"),
+                })?;
+            if column.semantic_type != SemanticType::Tag {
+                actual_fields.push((*id, data_type.clone()));
+            }
+        }
+        let mut expect_fields = Vec::with_capacity(mapper.batch_schema().len());
+        for (id, data_type) in mapper.batch_schema() {
+            let column =
+                mapper
+                    .metadata()
+                    .column_by_id(*id)
+                    .with_context(|| CompatReaderSnafu {
+                        region_id: mapper.metadata().region_id,
+                        reason: format!("column {id} is absent from region metadata"),
+                    })?;
+            if column.semantic_type != SemanticType::Tag {
+                expect_fields.push((*id, data_type.clone()));
+            }
+        }
 
         let (index_or_defaults, fields) = Self::compute_index_and_fields(
-            &actual_schema,
-            &expect_schema,
+            &actual_fields,
+            &expect_fields,
             mapper.metadata(),
             mapper.input_arrow_schema(true).fields(),
         )?;
@@ -552,14 +568,12 @@ impl FlatCompatPrimaryKey {
         debug_assert!(!fields.is_empty());
 
         // Create converter to append values.
-        let converter = Some(build_primary_key_codec_with_fields(
-            expect.primary_key_encoding,
-            fields.into_iter(),
-        ));
+        let converter =
+            build_primary_key_codec_with_fields(expect.primary_key_encoding, fields.into_iter());
 
         Ok(Self {
             rewriter,
-            converter,
+            converter: Some(converter),
             values,
         })
     }
@@ -675,6 +689,7 @@ mod tests {
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
+    use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
@@ -683,6 +698,7 @@ mod tests {
     use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util;
+    use crate::test_util::sst_util::sst_region_metadata_with_encoding;
 
     /// Creates a new [RegionMetadata].
     fn new_metadata(
@@ -691,7 +707,7 @@ mod tests {
     ) -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         for (id, semantic_type, data_type) in semantic_types {
-            let column_schema = match semantic_type {
+            let mut column_schema = match semantic_type {
                 SemanticType::Tag => {
                     ColumnSchema::new(format!("tag_{id}"), data_type.clone(), true)
                 }
@@ -700,6 +716,11 @@ mod tests {
                 }
                 SemanticType::Timestamp => ColumnSchema::new("ts", data_type.clone(), false),
             };
+            if data_type.is_json2() {
+                column_schema.with_extension_type(
+                    &datatypes::extension::json::Json2ExtensionType::default(),
+                );
+            }
 
             builder.push_column_metadata(ColumnMetadata {
                 column_schema,
@@ -708,6 +729,24 @@ mod tests {
             });
         }
         builder.primary_key(primary_key.to_vec());
+        builder.build().unwrap()
+    }
+
+    fn with_sparse_encoding(metadata: RegionMetadata) -> RegionMetadata {
+        let reserved = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+        let primary_key = reserved
+            .primary_key
+            .into_iter()
+            .take(2)
+            .chain(metadata.primary_key.iter().copied())
+            .collect();
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        for column in reserved.column_metadatas.into_iter().take(2) {
+            builder.push_column_metadata(column);
+        }
+        builder
+            .primary_key(primary_key)
+            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
         builder.build().unwrap()
     }
 
@@ -727,10 +766,7 @@ mod tests {
 
     /// Encode sparse primary key.
     fn encode_sparse_key(keys: &[(ColumnId, Option<&str>)]) -> Vec<u8> {
-        let fields = (0..keys.len())
-            .map(|_| (1, SortField::new(ConcreteDataType::string_datatype())))
-            .collect();
-        let converter = SparsePrimaryKeyCodec::with_fields(fields);
+        let converter = SparsePrimaryKeyCodec::schemaless();
         let row = keys
             .iter()
             .map(|(id, str_opt)| match str_opt {
@@ -739,6 +775,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut buffer = vec![];
+        converter.encode_internal(42, 7, &mut buffer).unwrap();
         converter.encode_value_refs(&row, &mut buffer).unwrap();
         buffer
     }
@@ -839,10 +876,15 @@ mod tests {
         assert_eq!(expected_batch, result);
     }
 
-    #[test]
-    fn test_flat_compat_batch_uses_projected_json2_type() -> Result<()> {
+    #[rstest::rstest]
+    #[case(PrimaryKeyEncoding::Dense, false)]
+    #[case(PrimaryKeyEncoding::Sparse, true)]
+    fn test_flat_compat_batch_uses_projected_json2_type(
+        #[case] encoding: PrimaryKeyEncoding,
+        #[case] compaction: bool,
+    ) -> Result<()> {
         let json2 = ConcreteDataType::json2(JsonNativeType::object());
-        let actual_metadata = Arc::new(new_metadata(
+        let mut actual_metadata = Arc::new(new_metadata(
             &[
                 (
                     0,
@@ -853,7 +895,7 @@ mod tests {
             ],
             &[],
         ));
-        let expected_metadata = Arc::new(new_metadata(
+        let mut expected_metadata = Arc::new(new_metadata(
             &[
                 (
                     0,
@@ -865,6 +907,10 @@ mod tests {
             ],
             &[],
         ));
+        if encoding == PrimaryKeyEncoding::Sparse {
+            actual_metadata = Arc::new(with_sparse_encoding((*actual_metadata).clone()));
+            expected_metadata = Arc::new(with_sparse_encoding((*expected_metadata).clone()));
+        }
         let read_columns = ReadColumns::new([0, 1, 2])
             .with_json_target_types(BTreeMap::from([(1, JsonNativeType::Variant)]));
         let mapper = FlatProjectionMapper::new_with_read_columns(
@@ -874,7 +920,7 @@ mod tests {
         )?;
         let read_format = FlatReadFormat::new(actual_metadata, read_columns, None, "test", false)?;
 
-        let compat = FlatCompatBatch::try_new(&mapper, &read_format, false)?.unwrap();
+        let compat = FlatCompatBatch::try_new(&mapper, &read_format, compaction)?.unwrap();
         let json_index = mapper
             .batch_schema()
             .iter()
@@ -887,6 +933,10 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            compat.arrow_schema.field(json_index).data_type(),
+            &datatypes::arrow::datatypes::DataType::Binary
+        );
         Ok(())
     }
 
@@ -995,6 +1045,7 @@ mod tests {
             ],
             &[1],
         );
+        actual_metadata = with_sparse_encoding(actual_metadata);
         actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Dense;
         let actual_metadata = Arc::new(actual_metadata);
 
@@ -1011,13 +1062,20 @@ mod tests {
             ],
             &[1, 3],
         );
-        expected_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        expected_metadata = with_sparse_encoding(expected_metadata);
         let expected_metadata = Arc::new(expected_metadata);
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            ReadColumns::new([0, 1, 2, 3]),
+            ReadColumns::new([
+                0,
+                1,
+                2,
+                3,
+                ReservedColumnId::table_id(),
+                ReservedColumnId::tsid(),
+            ]),
             None,
             "test",
             false,
@@ -1034,8 +1092,20 @@ mod tests {
         tag1_builder.append_value("tag1");
         let tag1_dict_array = Arc::new(tag1_builder.finish());
 
-        let k1 = encode_key(&[Some("tag1")]);
+        let mut k1 = Vec::new();
+        build_primary_key_codec(&actual_metadata)
+            .encode_values(
+                &[
+                    (ReservedColumnId::table_id(), Value::UInt32(42)),
+                    (ReservedColumnId::tsid(), Value::UInt64(7)),
+                    (1, Value::from("tag1")),
+                ],
+                &mut k1,
+            )
+            .unwrap();
         let input_columns: Vec<ArrayRef> = vec![
+            Arc::new(datatypes::arrow::array::UInt32Array::from(vec![42, 42])),
+            Arc::new(UInt64Array::from(vec![7, 7])),
             tag1_dict_array.clone(),
             Arc::new(Int64Array::from(vec![100, 200])),
             Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
@@ -1057,6 +1127,8 @@ mod tests {
         null_tag_builder.append_nulls(2);
         let null_tag_dict_array = Arc::new(null_tag_builder.finish());
         let expected_columns: Vec<ArrayRef> = vec![
+            Arc::new(datatypes::arrow::array::UInt32Array::from(vec![42, 42])),
+            Arc::new(UInt64Array::from(vec![7, 7])),
             tag1_dict_array.clone(),
             null_tag_dict_array,
             Arc::new(Int64Array::from(vec![100, 200])),
@@ -1076,6 +1148,52 @@ mod tests {
     }
 
     #[test]
+    fn test_compat_sparse_primary_key_with_new_nullable_tag() {
+        let actual = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let mut builder = RegionMetadataBuilder::from_existing((*actual).clone());
+        let mut primary_key = actual.primary_key.clone();
+        primary_key.push(4);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "new_tag",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 4,
+            })
+            .primary_key(primary_key);
+        let expected = Arc::new(builder.build().unwrap());
+        let compat = FlatCompatPrimaryKey::new(&expected, &actual).unwrap();
+
+        let values = vec![
+            (ReservedColumnId::table_id(), Value::UInt32(23)),
+            (ReservedColumnId::tsid(), Value::UInt64(42)),
+            (0, Value::from("api")),
+            (1, Value::Null),
+        ];
+        let mut key = Vec::new();
+        build_primary_key_codec(&actual)
+            .encode_values(&values, &mut key)
+            .unwrap();
+
+        // Adding a NULL sparse tag must preserve the existing key, including metric IDs.
+        let dictionary_key = build_flat_test_pk_array(&[&key, &key]);
+        let binary_key: ArrayRef = Arc::new(BinaryArray::from(vec![
+            Some(key.as_slice()),
+            None,
+            Some(key.as_slice()),
+        ]));
+        for input in [dictionary_key, binary_key] {
+            let result = compat.compat(&input).unwrap();
+            assert_eq!(result.as_ref(), input.as_ref());
+        }
+    }
+
+    #[test]
     fn test_compat_primary_key_with_different_encoding_only() {
         let mut actual_metadata = new_metadata(
             &[
@@ -1089,6 +1207,7 @@ mod tests {
             ],
             &[1],
         );
+        actual_metadata = with_sparse_encoding(actual_metadata);
         actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Dense;
         let actual_metadata = Arc::new(actual_metadata);
 
@@ -1098,8 +1217,14 @@ mod tests {
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
-            actual_metadata,
-            ReadColumns::new([0, 1, 2]),
+            actual_metadata.clone(),
+            ReadColumns::new([
+                0,
+                1,
+                2,
+                ReservedColumnId::table_id(),
+                ReservedColumnId::tsid(),
+            ]),
             None,
             "test",
             false,
@@ -1109,7 +1234,17 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let dense_key = encode_key(&[Some("tag1")]);
+        let mut dense_key = Vec::new();
+        build_primary_key_codec(&actual_metadata)
+            .encode_values(
+                &[
+                    (ReservedColumnId::table_id(), Value::UInt32(42)),
+                    (ReservedColumnId::tsid(), Value::UInt64(7)),
+                    (1, Value::from("tag1")),
+                ],
+                &mut dense_key,
+            )
+            .unwrap();
         let sparse_key = encode_sparse_key(&[(1, Some("tag1"))]);
 
         let dictionary_key = build_flat_test_pk_array(&[&dense_key, &dense_key]);
@@ -1344,7 +1479,7 @@ mod tests {
             ],
             &[],
         );
-        actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        actual_metadata = with_sparse_encoding(actual_metadata);
         let actual_metadata = Arc::new(actual_metadata);
 
         let mut expected_metadata = (*actual_metadata).clone();
@@ -1373,7 +1508,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let sparse_k1 = encode_sparse_key(&[]);
+        let mut sparse_k1 = Vec::new();
+        SparsePrimaryKeyCodec::schemaless()
+            .encode_internal(42, 7, &mut sparse_k1)
+            .unwrap();
         let input_columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![100, 200])),
             Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
@@ -1384,8 +1522,10 @@ mod tests {
                 OpType::Put as u8,
             ])),
         ];
-        let input_schema =
-            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_schema = to_flat_sst_arrow_schema(
+            &actual_metadata,
+            &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+        );
         let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
 
         let result = compat_batch.compat(input_batch).unwrap();
@@ -1402,8 +1542,10 @@ mod tests {
                 OpType::Put as u8,
             ])),
         ];
-        let output_schema =
-            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let output_schema = to_flat_sst_arrow_schema(
+            &expected_metadata,
+            &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+        );
         let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
 
         assert_eq!(expected_batch, result);
@@ -1422,7 +1564,7 @@ mod tests {
             ],
             &[],
         );
-        actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        actual_metadata = with_sparse_encoding(actual_metadata);
         let actual_metadata = Arc::new(actual_metadata);
 
         let mut expected_metadata = new_metadata(
@@ -1437,7 +1579,7 @@ mod tests {
             ],
             &[],
         );
-        expected_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        expected_metadata = with_sparse_encoding(expected_metadata);
         let expected_metadata = Arc::new(expected_metadata);
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
@@ -1465,8 +1607,10 @@ mod tests {
                 OpType::Put as u8,
             ])),
         ];
-        let input_schema =
-            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_schema = to_flat_sst_arrow_schema(
+            &actual_metadata,
+            &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+        );
         let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
 
         let result = compat_batch.compat(input_batch).unwrap();
@@ -1482,8 +1626,10 @@ mod tests {
                 OpType::Put as u8,
             ])),
         ];
-        let output_schema =
-            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let output_schema = to_flat_sst_arrow_schema(
+            &expected_metadata,
+            &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+        );
         let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
 
         assert_eq!(expected_batch, result);
@@ -1520,6 +1666,16 @@ mod tests {
         columns[0] = json;
         let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?;
         for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
+            let batch = if encoding == PrimaryKeyEncoding::Sparse {
+                let mut key = Vec::new();
+                SparsePrimaryKeyCodec::schemaless().encode_internal(42, 7, &mut key)?;
+                let mut columns = batch.columns().to_vec();
+                columns[primary_key_column_index(batch.num_columns())] =
+                    build_flat_test_pk_array(&[&key, &key]);
+                RecordBatch::try_new(batch.schema(), columns)?
+            } else {
+                batch.clone()
+            };
             for missing_json in [false, true] {
                 let source = if missing_json {
                     new_metadata(
@@ -1533,11 +1689,17 @@ mod tests {
                 } else {
                     metadata.as_ref().clone()
                 };
-                let mut builder = RegionMetadataBuilder::from_existing(source);
-                builder.primary_key_encoding(encoding);
-                let actual = Arc::new(builder.build()?);
-                let mut builder = RegionMetadataBuilder::from_existing(metadata.as_ref().clone());
-                builder.primary_key_encoding(encoding);
+                let actual = Arc::new(if encoding == PrimaryKeyEncoding::Sparse {
+                    with_sparse_encoding(source)
+                } else {
+                    source
+                });
+                let expected = if encoding == PrimaryKeyEncoding::Sparse {
+                    with_sparse_encoding(metadata.as_ref().clone())
+                } else {
+                    metadata.as_ref().clone()
+                };
+                let mut builder = RegionMetadataBuilder::from_existing(expected);
                 builder.push_column_metadata(ColumnMetadata {
                     column_schema: ColumnSchema::new(
                         "added",
@@ -1554,7 +1716,7 @@ mod tests {
                 let read_columns = ReadColumns::new([0, 1, 2]);
                 let mapper = FlatProjectionMapper::new_with_json2_rewrite_targets(
                     &expected,
-                    vec![0, 1, 2],
+                    vec![0, 1, expected.column_index_by_id(2).unwrap()],
                     read_columns.clone(),
                     &targets,
                 )?;

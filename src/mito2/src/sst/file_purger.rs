@@ -432,10 +432,7 @@ mod tests {
         let cache_key = crate::cache::test_util::range_cache_key(&[sst_file_id.file_id()]);
         cache.put_range_result(
             cache_key.clone(),
-            Arc::new(crate::read::range_cache::RangeScanCacheValue::new(
-                vec![],
-                0,
-            )),
+            Arc::new(crate::cache::range_cache::RangeScanCacheValue::empty()),
         );
         let file_purger = create_file_purger(
             gc_enabled,

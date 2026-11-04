@@ -14,11 +14,14 @@
 
 //! object storage utilities
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use common_telemetry::{info, warn};
+use futures::TryStreamExt;
 use object_store::factory::new_raw_object_store;
 use object_store::util::{clean_temp_dir, join_dir, with_instrument_layers, with_retry_layers};
-use object_store::{ATOMIC_WRITE_DIR, ObjectStore};
-use snafu::prelude::*;
+use object_store::{ATOMIC_WRITE_DIR, Error as ObjectStoreError, ErrorKind, ObjectStore};
+use snafu::{IntoError, prelude::*};
 
 use crate::config::ObjectStoreConfig;
 use crate::error::{self, Result};
@@ -83,4 +86,218 @@ pub async fn new_object_store(store: ObjectStoreConfig, data_home: &str) -> Resu
 
     let object_store = with_instrument_layers(object_store, true);
     Ok(object_store)
+}
+
+/// The content written by [`probe_object_store`].
+const PROBE_CONTENT: &[u8] = b"greptimedb object store probe";
+
+/// The content appended by [`probe_object_store`] to exercise read-modify-write.
+const PROBE_SUFFIX: &[u8] = b" - read-modify-write";
+
+/// The directory that holds the objects created by [`probe_object_store`].
+const PROBE_DIR: &str = ".greptime_probe";
+
+/// The budget of one [`probe_object_store`] call, including the retries an object
+/// store makes on top of its 30s request timeout.
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The maximum random delay before a probe starts. It is short enough that startup
+/// waits at most this delay, and it spreads out the probes of providers that share
+/// an object storage.
+const PROBE_STAGGER: Duration = Duration::from_millis(500);
+
+/// The budget of the best-effort cleanup after a timed-out probe, kept short so an
+/// unresponsive store cannot block startup a second time.
+const PROBE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Returns a random delay in `[0, PROBE_STAGGER)`.
+pub(crate) fn probe_start_delay() -> Duration {
+    Duration::from_nanos(rand::random_range(0..PROBE_STAGGER.as_nanos() as u64))
+}
+
+/// Returns a unique key prefix for [`probe_object_store`], so datanodes sharing
+/// the same bucket and root do not collide.
+pub(crate) fn probe_key_prefix(node_id: u64) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{PROBE_DIR}/{node_id}-{}-{nanos}", std::process::id())
+}
+
+/// Returns the object key [`probe_object_store`] probes under `prefix`.
+fn probe_object_key(prefix: &str) -> String {
+    format!("{prefix}/probe")
+}
+
+/// Checks that `store` supports the operations the storage engines rely on: write,
+/// read, overwrite, list and delete.
+///
+/// The probe object is removed before returning, after a failed step too. A caller
+/// that abandons the check early must call [`remove_probe_object`].
+pub(crate) async fn probe_object_store(
+    store: &ObjectStore,
+    name: &str,
+    prefix: &str,
+) -> Result<()> {
+    let key = probe_object_key(prefix);
+
+    let check = async {
+        store
+            .write(&key, PROBE_CONTENT)
+            .await
+            .context(error::ObjectStoreProbeSnafu {
+                name,
+                step: "write",
+            })?;
+        verify_content(store, name, &key, PROBE_CONTENT).await?;
+
+        // Object stores cannot append in place, so this reads the object, appends to
+        // it and overwrites it, exercising an overwrite of an existing object.
+        let mut content = store
+            .read(&key)
+            .await
+            .context(error::ObjectStoreProbeSnafu { name, step: "read" })?
+            .to_vec();
+        content.extend_from_slice(PROBE_SUFFIX);
+        store
+            .write(&key, content.clone())
+            .await
+            .context(error::ObjectStoreProbeSnafu {
+                name,
+                step: "overwrite",
+            })?;
+        verify_content(store, name, &key, &content).await?;
+
+        let mut lister = store
+            .lister_with(&format!("{prefix}/"))
+            .await
+            .context(error::ObjectStoreProbeSnafu { name, step: "list" })?;
+        while let Some(entry) = lister
+            .try_next()
+            .await
+            .context(error::ObjectStoreProbeSnafu { name, step: "list" })?
+        {
+            if entry.path() == key {
+                return Ok(());
+            }
+        }
+
+        Err(
+            error::ObjectStoreProbeSnafu { name, step: "list" }.into_error(ObjectStoreError::new(
+                ErrorKind::Unexpected,
+                format!("'{key}' is not visible in the listing"),
+            )),
+        )
+    }
+    .await;
+
+    match store.delete(&key).await {
+        Ok(()) => check,
+        Err(err) if check.is_err() => {
+            warn!(
+                err;
+                "Failed to remove the object storage probe object '{}' of provider '{}'",
+                key,
+                name
+            );
+            check
+        }
+        Err(err) => Err(err).context(error::ObjectStoreProbeSnafu {
+            name,
+            step: "delete",
+        }),
+    }
+}
+
+async fn verify_content(store: &ObjectStore, name: &str, key: &str, expected: &[u8]) -> Result<()> {
+    let got = store
+        .read(key)
+        .await
+        .context(error::ObjectStoreProbeSnafu { name, step: "read" })?;
+    if got.to_vec() != expected {
+        return Err(
+            error::ObjectStoreProbeSnafu { name, step: "read" }.into_error(ObjectStoreError::new(
+                ErrorKind::Unexpected,
+                format!("content of '{key}' differs from what was written"),
+            )),
+        );
+    }
+    Ok(())
+}
+
+/// Removes the probe object of a probe that did not finish.
+///
+/// It has its own short budget, and failures only log: the caller reports the timeout.
+pub(crate) async fn remove_probe_object(store: &ObjectStore, prefix: &str) {
+    let key = probe_object_key(prefix);
+    match tokio::time::timeout(PROBE_CLEANUP_TIMEOUT, store.delete(&key)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!(
+            err;
+            "Failed to remove the object storage probe object '{}'", key
+        ),
+        Err(_) => warn!(
+            "Timed out removing the object storage probe object '{}'",
+            key
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_test_util::temp_dir::create_temp_dir;
+    use object_store::services::Fs;
+
+    use super::*;
+
+    fn new_fs_store(root: &str) -> ObjectStore {
+        ObjectStore::new(Fs::default().root(root)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_probe_object_store() {
+        let dir = create_temp_dir("object-store-probe");
+        let store = new_fs_store(dir.path().to_str().unwrap());
+        let prefix = probe_key_prefix(1);
+
+        probe_object_store(&store, "fs", &prefix).await.unwrap();
+
+        // The lister also returns the listed directory itself, so only check that the
+        // probe object is gone.
+        let key = format!("{prefix}/probe");
+        let mut lister = store.lister_with(&format!("{prefix}/")).await.unwrap();
+        while let Some(entry) = lister.try_next().await.unwrap() {
+            assert_ne!(entry.path(), key);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_probe_object_store_write_failure() {
+        let dir = create_temp_dir("object-store-probe-write-failure");
+        let root = dir.path().join("not-a-directory");
+        std::fs::write(&root, b"").unwrap();
+        let store = new_fs_store(root.to_str().unwrap());
+
+        let err = probe_object_store(&store, "broken", &probe_key_prefix(1))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("probe for provider 'broken' at step 'write'")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_probe_object() {
+        let dir = create_temp_dir("object-store-probe-cleanup");
+        let store = new_fs_store(dir.path().to_str().unwrap());
+        let prefix = probe_key_prefix(1);
+        let key = probe_object_key(&prefix);
+        store.write(&key, PROBE_CONTENT).await.unwrap();
+
+        remove_probe_object(&store, &prefix).await;
+
+        assert!(store.read(&key).await.is_err());
+    }
 }
