@@ -453,6 +453,9 @@ impl ColumnarPreparedSource {
                         Ok((*id, strings))
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let mut encoded_key_bytes = 0_u64;
+                let mut tag_values = 0_u64;
+                let mut duplicate_rows = 0_u64;
                 for row in 0..batch.num_rows() {
                     let id = MetricSeriesId {
                         table_id: table.value(row),
@@ -487,19 +490,10 @@ impl ColumnarPreparedSource {
                             &mut key,
                         )
                         .map_err(|e| invalid(e.to_string()))?;
-                    *preparation_metrics
-                        .bytes
-                        .entry("prepare_encoded_keys")
-                        .or_default() += key.len() as u64;
-                    *preparation_metrics
-                        .counts
-                        .entry("prepare_tag_values")
-                        .or_default() += values.len() as u64;
+                    encoded_key_bytes += key.len() as u64;
+                    tag_values += values.len() as u64;
                     if let Some(previous) = candidates.get(&id) {
-                        *preparation_metrics
-                            .counts
-                            .entry("prepare_duplicate_rows")
-                            .or_default() += 1;
+                        duplicate_rows += 1;
                         if previous.key.as_slice() != key.as_slice() {
                             return Err(invalid(
                                 "conflicting labels for the same table ID and TSID",
@@ -527,6 +521,18 @@ impl ColumnarPreparedSource {
                         },
                     );
                 }
+                *preparation_metrics
+                    .bytes
+                    .entry("prepare_encoded_keys")
+                    .or_default() += encoded_key_bytes;
+                *preparation_metrics
+                    .counts
+                    .entry("prepare_tag_values")
+                    .or_default() += tag_values;
+                *preparation_metrics
+                    .counts
+                    .entry("prepare_duplicate_rows")
+                    .or_default() += duplicate_rows;
                 preparation_metrics.add_elapsed("columnar_prepare_candidates", started.elapsed());
             }
         }
