@@ -101,13 +101,20 @@ impl SchedulerEnv {
         request_sender: Sender<WorkerRequestWithTime>,
         config: MitoConfig,
     ) -> CompactionScheduler {
-        let scheduler = self.get_scheduler();
-
-        CompactionScheduler::new(
-            Arc::new(CompactionCoordinator::new(
-                scheduler,
+        // Admission capacity and runner count must agree; derive both from the
+        // configured compaction concurrency unless a test injects an executor.
+        let coordinator = match &self.scheduler {
+            Some(scheduler) => Arc::new(CompactionCoordinator::new(
+                scheduler.clone(),
                 config.max_background_compactions,
             )),
+            None => Arc::new(CompactionCoordinator::new_local(
+                config.max_background_compactions,
+            )),
+        };
+
+        CompactionScheduler::new(
+            coordinator,
             request_sender,
             Arc::new(CacheManager::default()),
             Arc::new(config),
@@ -167,6 +174,12 @@ impl SchedulerEnv {
     }
 }
 
+/// Collects scheduled jobs without polling or dropping them.
+///
+/// It counts submissions for scheduling assertions only. A retained job is never
+/// run or released, so any shutdown path that waits for admitted work to drain
+/// cannot make progress; use a real [`LocalScheduler`] for drain and shutdown
+/// coverage.
 #[derive(Default)]
 pub struct VecScheduler {
     jobs: Mutex<Vec<Job>>,

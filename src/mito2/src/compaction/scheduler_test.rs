@@ -2101,6 +2101,31 @@ async fn test_automatic_planning_prepares_independent_windows_up_to_global_capac
 }
 
 #[tokio::test]
+async fn test_scheduler_env_compaction_executor_matches_configured_capacity() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let config = MitoConfig {
+        max_background_compactions: 4,
+        ..Default::default()
+    };
+    let scheduler = env.mock_compaction_scheduler_with_config(tx, config);
+
+    // The default harness derives the coordinator and its executor from the
+    // same value, so admitted units cannot queue behind a smaller runner set.
+    assert_eq!(4, scheduler.coordinator.capacity());
+
+    let injected = Arc::new(VecScheduler::default());
+    let env = SchedulerEnv::new().await.scheduler(injected);
+    let (tx, _rx) = mpsc::channel(4);
+    let config = MitoConfig {
+        max_background_compactions: 2,
+        ..Default::default()
+    };
+    let scheduler = env.mock_compaction_scheduler_with_config(tx, config);
+    assert_eq!(2, scheduler.coordinator.capacity());
+}
+
+#[tokio::test]
 async fn test_compaction_bypass_in_staging_mode() {
     let env = SchedulerEnv::new().await;
     let (tx, _rx) = mpsc::channel(4);
