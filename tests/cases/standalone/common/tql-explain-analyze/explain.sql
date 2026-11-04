@@ -20,6 +20,8 @@ TQL EXPLAIN (0, 10, '1s', '2s') test;
 TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '5s') test;
 
 -- explain verbose at 0s, 5s and 10s. No point at 0s.
+-- The distributed-only SST analyzer is a no-op for TQL; omit its unchanged-plan row.
+-- SQLNESS REPLACE (?m)^\|\s*logical_plan\s+after\s+sst_manifest_aggregate\s*\|\s*SAME\s+TEXT\s+AS\s+ABOVE\s*\|\n
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
@@ -29,6 +31,7 @@ TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 
 -- explain verbose at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (?m)^\|\s*logical_plan\s+after\s+sst_manifest_aggregate\s*\|\s*SAME\s+TEXT\s+AS\s+ABOVE\s*\|\n
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
@@ -48,6 +51,7 @@ INSERT INTO test_nano VALUES (1, 1000000, "a"), (1, 1000000, "b"), (2, 2000000, 
 TQL EXPLAIN (0, 10, '5s') test_nano;
 
 -- explain verbose at 0s, 5s and 10s for a nanosecond time index.
+-- SQLNESS REPLACE (?m)^\|\s*logical_plan\s+after\s+sst_manifest_aggregate\s*\|\s*SAME\s+TEXT\s+AS\s+ABOVE\s*\|\n
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
