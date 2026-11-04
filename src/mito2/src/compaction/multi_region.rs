@@ -16,19 +16,19 @@
 //! does not select files, change persisted levels, publish manifests, or fold row
 //! versions. Output protection and eventual publication belong to its caller.
 
+mod memory;
 mod source;
-mod spill;
 #[cfg(test)]
 mod tests;
 mod worker;
 mod writer;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use common_base::cancellation::{CancellableFuture, CancellationHandle};
+use common_time::Timestamp;
 use partition::PartitionRuleRef;
 use snafu::{OptionExt, ensure};
 use store_api::metadata::RegionMetadataRef;
@@ -56,27 +56,24 @@ pub struct MultiRegionTarget {
 pub struct MultiRegionCompactionPlan {
     /// Captured table routing rule; the executor never fetches mutable routing metadata.
     pub partition_rule: PartitionRuleRef,
-    /// Unique sources in stable tie-breaking order. The caller retains their GC protection.
+    /// Unique sources. The caller retains their GC protection.
     pub sources: Vec<FileMeta>,
     /// Metadata and routing must belong to the same physical-table snapshot.
     pub targets: BTreeMap<RegionId, MultiRegionTarget>,
-    /// Shared byte budget for queued/cached runs and working batches, not a process RSS cap.
-    /// Reader page decoding and SST/index writer memory also depend on the supplied MitoConfig.
+    /// Working-set admission budget, including all resident writers and their finish workspace.
+    /// This bounds managed buffers and estimates codec/index allocations, not process RSS.
     pub memory_limit: usize,
-    /// One or two simultaneous run operations or SST writers. The upper bound limits
-    /// uncharged working batches; idle region workers hold no slot.
-    pub max_active_workers: usize,
-    pub spill_limit: u64,
     pub max_output_file_size: usize,
+    /// Aligned start of the only task window, in seconds since the epoch.
+    pub window_start: i64,
     pub window_seconds: i64,
 }
 
-/// Shared storage services and attempt-owned output/spill resources.
+/// Shared storage services and attempt-owned output resources.
 pub struct MultiRegionCompactionContext {
     pub access_layer: AccessLayerRef,
     pub cache: CacheManagerRef,
     pub config: Arc<MitoConfig>,
-    pub spill_directory: PathBuf,
     pub protection: Arc<dyn SstWriteGuard>,
     pub cancellation: Arc<CancellationHandle>,
 }
@@ -90,9 +87,10 @@ pub struct MultiRegionCompactionStats {
     pub source_store_page_bytes: u64,
     pub output_rows: u64,
     pub output_bytes: u64,
-    pub spilled_bytes: u64,
-    /// Peak bytes reserved by queued and cached Arrow batches, including batch metadata.
-    pub peak_buffered_bytes: u64,
+    /// Conservative admission estimate, including reader pages, writers, indexes and finish.
+    pub estimated_memory_bytes: u64,
+    /// Peak retained equal-key group storage (including shared buffer capacities).
+    pub peak_group_bytes: u64,
 }
 
 /// Complete per-target outputs, including explicit empty partitions.
@@ -112,6 +110,7 @@ struct SourceCounters {
 
 /// Computes a complete result or an error. Any already-written outputs remain
 /// owned by the attempt's durable protection; this function never purges sources.
+/// Outputs that legacy reading would reinterpret as newly admitted versions are rejected.
 pub async fn compact_regions(
     plan: MultiRegionCompactionPlan,
     context: MultiRegionCompactionContext,
@@ -136,13 +135,21 @@ fn validate_plan(plan: &MultiRegionCompactionPlan) -> Result<RegionMetadataRef> 
     ensure!(
         !plan.sources.is_empty()
             && plan.memory_limit >= 1024 * 1024
-            && plan.max_active_workers > 0
-            && plan.max_active_workers <= 2
-            && plan.spill_limit > 0
             && plan.max_output_file_size > 0
             && plan.window_seconds > 0,
         InvalidMultiRegionCompactionSnafu {
             reason: "Invalid sources or execution budgets"
+        }
+    );
+    let control_bytes = plan.targets.len().saturating_mul(8 * 1024).saturating_add(
+        plan.sources
+            .len()
+            .saturating_mul(std::mem::size_of::<FileMeta>()),
+    );
+    ensure!(
+        control_bytes <= plan.memory_limit,
+        crate::error::MultiRegionCompactionResourceSnafu {
+            reason: "Input/target control state exceeds the task budget",
         }
     );
     let first = plan
@@ -152,8 +159,29 @@ fn validate_plan(plan: &MultiRegionCompactionPlan) -> Result<RegionMetadataRef> 
         .context(InvalidMultiRegionCompactionSnafu {
             reason: "No routing targets",
         })?;
+    let window_end = plan.window_start.checked_add(plan.window_seconds).context(
+        InvalidMultiRegionCompactionSnafu {
+            reason: "Task window overflow",
+        },
+    )?;
+    ensure!(
+        plan.window_start.rem_euclid(plan.window_seconds) == 0,
+        InvalidMultiRegionCompactionSnafu {
+            reason: "Task window start is not aligned"
+        }
+    );
+    let start = Timestamp::new_second(plan.window_start);
+    let end = Timestamp::new_second(window_end);
     let mut sources = HashSet::new();
     for file in &plan.sources {
+        ensure!(
+            file.time_range.0 >= start
+                && file.time_range.1 < end
+                && file.time_range.0 <= file.time_range.1,
+            InvalidMultiRegionCompactionSnafu {
+                reason: "Source is not wholly inside the task window"
+            }
+        );
         ensure!(
             file.region_id.table_id() == first.metadata.region_id.table_id()
                 && sources.insert(file.file_id()),
@@ -163,6 +191,7 @@ fn validate_plan(plan: &MultiRegionCompactionPlan) -> Result<RegionMetadataRef> 
         );
     }
     for (id, target) in &plan.targets {
+        target.options.validate()?;
         ensure!(
             *id == target.metadata.region_id
                 && id.table_id() == first.metadata.region_id.table_id()

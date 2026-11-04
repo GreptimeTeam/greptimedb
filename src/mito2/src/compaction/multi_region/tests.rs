@@ -191,6 +191,7 @@ impl Fixture {
             .remove(0);
         FileMeta {
             file_id: info.file_id,
+            time_range: info.time_range,
             file_size: info.file_size,
             num_rows: info.num_rows as u64,
             num_row_groups: info.num_row_groups,
@@ -252,10 +253,11 @@ impl Fixture {
             partition_rule,
             sources: vec![self.source.clone()],
             targets,
-            memory_limit: 16 * 1024 * 1024,
-            max_active_workers: 2,
-            spill_limit: 64 * 1024 * 1024,
+            // Includes the fixed Parquet encoder allocations of every resident
+            // target, unlike the old run-cache-only budget.
+            memory_limit: (128 + regions as usize * 32) * 1024 * 1024,
             max_output_file_size: 1024 * 1024,
+            window_start: 0,
             window_seconds: 3600,
         }
     }
@@ -275,7 +277,6 @@ impl Fixture {
                 access_layer: self.layer.clone(),
                 cache: Arc::new(CacheManager::default()),
                 config: self.config.clone(),
-                spill_directory: self.env.path.path().join("spill"),
                 protection: protection.clone(),
                 cancellation: Arc::new(CancellationHandle::default()),
             },
@@ -356,7 +357,7 @@ fn source_batch(metadata: &RegionMetadataRef, series: u32, sequence: u64) -> Rec
     let batch = new_record_batch_with_custom_sequence(&[&tag, "series"], 0, 4, sequence);
     let mut arrays = batch.columns().to_vec();
     arrays[2] = Arc::new(UInt64Array::from(vec![Some(10), Some(20), None, Some(30)]));
-    arrays[3] = Arc::new(TimestampMillisecondArray::from(vec![0, 0, 0, 3_600_000]));
+    arrays[3] = Arc::new(TimestampMillisecondArray::from(vec![0, 0, 0, 1_000]));
     arrays[6] = Arc::new(UInt8Array::from(vec![
         OpType::Put as u8,
         OpType::Put as u8,
@@ -401,7 +402,10 @@ async fn single_scan_routes_all_versions_without_folding(
     let fixture = Fixture::new(encoding, format, sequence).await;
     let mut fetched_bytes = None;
     for regions in [1, 8, 32] {
-        let plan = fixture.plan(regions);
+        let mut plan = fixture.plan(regions);
+        for target in plan.targets.values_mut() {
+            target.options.sst_format = Some(format);
+        }
         let targets = plan.targets.clone();
         let (context, protected) = fixture.context(None);
         let output = compact_regions(plan, context).await.unwrap();
@@ -525,7 +529,7 @@ async fn single_scan_routes_all_versions_without_folding(
                     (series, 0, expected_sequence, OpType::Delete as u8, None),
                     (
                         series,
-                        3_600_000,
+                        1_000,
                         expected_sequence,
                         OpType::Put as u8,
                         Some(30),
@@ -579,7 +583,7 @@ async fn table_stage_does_not_apply_target_merge_mode(
 }
 
 #[tokio::test]
-async fn routed_runs_spill_and_exhaustion_fails_without_outputs() {
+async fn long_tag_stream_is_lossless_and_insufficient_admission_creates_no_output() {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         (0..200)
             .map(|series| {
@@ -594,7 +598,6 @@ async fn routed_runs_spill_and_exhaustion_fails_without_outputs() {
     })
     .await;
     let mut plan = fixture.plan(1);
-    plan.memory_limit = 2 * 1024 * 1024;
     for target in plan.targets.values_mut() {
         Arc::make_mut(&mut target.metadata).set_partition_expr(None);
     }
@@ -602,9 +605,9 @@ async fn routed_runs_spill_and_exhaustion_fails_without_outputs() {
         .await
         .unwrap();
     assert_eq!(102400, output.stats.output_rows);
-    assert!(output.stats.spilled_bytes > 0);
-    // Regression: IPC column buffers can share an allocation. Reusing spilled
-    // long-tag batches must not exhaust the budget through duplicate charges.
+    assert!(output.stats.estimated_memory_bytes <= 128 * 1024 * 1024);
+    // The long-tag regression still checks every physical row. There is no
+    // intermediate IPC path or repeated materialization of all destinations.
     let mut ordinal = 0;
     for file in output.files.into_values().flatten() {
         for batch in fixture.read_output(file, fixture.metadata.clone()).await {
@@ -628,8 +631,7 @@ async fn routed_runs_spill_and_exhaustion_fails_without_outputs() {
     }
     assert_eq!(102400, ordinal);
     let mut plan = fixture.plan(1);
-    plan.memory_limit = 2 * 1024 * 1024;
-    plan.spill_limit = 1;
+    plan.memory_limit = 1024 * 1024;
     for target in plan.targets.values_mut() {
         Arc::make_mut(&mut target.metadata).set_partition_expr(None);
     }
@@ -638,8 +640,7 @@ async fn routed_runs_spill_and_exhaustion_fails_without_outputs() {
     assert!(
         matches!(
             &error,
-            crate::error::Error::MultiRegionCompactionResource { reason, .. }
-                if reason == "Multi-region temporary disk quota exhausted"
+            crate::error::Error::MultiRegionCompactionResource { .. }
         ),
         "{error:?}"
     );
@@ -690,8 +691,13 @@ async fn schema_defaults_are_materialized_without_losing_old_versions() {
     }
 }
 
+#[rstest::rstest]
+#[case::known_bounds(false)]
+#[case::unknown_bound(true)]
 #[tokio::test]
-async fn multiple_sources_merge_versions_in_each_target_sequence_domain() {
+async fn multiple_sources_merge_versions_in_each_target_sequence_domain(
+    #[case] unknown_bound: bool,
+) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 3).await;
     let batches = (0..31)
         .map(|series| source_batch(&fixture.metadata, series, 7))
@@ -701,7 +707,11 @@ async fn multiple_sources_merge_versions_in_each_target_sequence_domain() {
     plan.sources.push(second.clone());
     for (id, target) in &mut plan.targets {
         let mut input = second.clone();
-        input.sequence = NonZeroU64::new(200 + id.region_sequence() as u64);
+        input.sequence = if unknown_bound && id.region_sequence() == 1 {
+            None
+        } else {
+            NonZeroU64::new(200 + id.region_sequence() as u64)
+        };
         target.inputs.insert(input.file_id(), input);
     }
     let targets = plan.targets.clone();
@@ -715,10 +725,22 @@ async fn multiple_sources_merge_versions_in_each_target_sequence_domain() {
         let expected = if id.region_sequence() == 0 {
             [3, 7]
         } else {
-            [101, 201]
+            [101, if unknown_bound { 7 } else { 201 }]
         };
         let mut observed = HashSet::new();
         for file in files {
+            assert_eq!(
+                if unknown_bound && id.region_sequence() == 1 {
+                    None
+                } else {
+                    NonZeroU64::new(200 + id.region_sequence() as u64)
+                },
+                file.sequence
+            );
+            assert_eq!(
+                id.region_sequence() != 0 && !unknown_bound,
+                file.preserve_row_sequence
+            );
             for batch in fixture
                 .read_output(file, targets[&id].metadata.clone())
                 .await
@@ -859,9 +881,8 @@ async fn unknown_partition_target_fails_before_creating_output() {
     assert!(protection.files.lock().unwrap().is_empty());
 }
 
-/// One decoded batch fans out into 1024 windows, with 32 extra columns
-/// materialized by schema compatibility before routing.
-async fn wide_window_fixture() -> (Fixture, MultiRegionCompactionPlan) {
+/// A version group crossing reader batches with 32 schema-default columns.
+async fn wide_source_fixture() -> (Fixture, MultiRegionCompactionPlan) {
     use api::v1::SemanticType;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
@@ -870,15 +891,25 @@ async fn wide_window_fixture() -> (Fixture, MultiRegionCompactionPlan) {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 1024, 5);
         let mut columns = batch.columns().to_vec();
-        columns[3] = Arc::new(TimestampMillisecondArray::from_iter_values(
-            (0..1024).map(|row| (row - 512) * 3_600_000),
-        ));
+        columns[3] = Arc::new(TimestampMillisecondArray::from(vec![0; 1024]));
         vec![RecordBatch::try_new(batch.schema(), columns).unwrap()]
     })
     .await;
-    let mut plan = fixture.plan(1);
-    plan.memory_limit = 4 * 1024 * 1024;
-    for target in plan.targets.values_mut() {
+    let mut plan = fixture.plan(2);
+    let expressions = vec![
+        col("field_0").lt(Value::UInt64(512)),
+        col("field_0").gt_eq(Value::UInt64(512)),
+    ];
+    plan.partition_rule = Arc::new(
+        MultiDimPartitionRule::try_new(
+            vec!["field_0".into()],
+            vec![0, 1],
+            expressions.clone(),
+            false,
+        )
+        .unwrap(),
+    );
+    for (id, target) in &mut plan.targets {
         let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
         for column in 0..32 {
             builder.push_column_metadata(ColumnMetadata {
@@ -895,14 +926,20 @@ async fn wide_window_fixture() -> (Fixture, MultiRegionCompactionPlan) {
                 .unwrap(),
             });
         }
-        target.metadata = Arc::new(builder.build().unwrap());
+        let mut metadata = builder.build().unwrap();
+        metadata.set_partition_expr(Some(
+            expressions[id.region_sequence() as usize]
+                .as_json_str()
+                .unwrap(),
+        ));
+        target.metadata = Arc::new(metadata);
     }
     (fixture, plan)
 }
 
 #[tokio::test]
-async fn wide_source_routes_windows_without_retaining_future_fragments() {
-    let (fixture, plan) = wide_window_fixture().await;
+async fn wide_version_group_routes_lazily_without_retaining_fragment_dictionaries() {
+    let (fixture, plan) = wide_source_fixture().await;
     let (context, _) = fixture.context(None);
     let counters = Arc::new(SourceCounters::default());
     let source = source::SharedSource::build(
@@ -914,59 +951,40 @@ async fn wide_source_routes_windows_without_retaining_future_fragments() {
     .await
     .unwrap();
     let mut stream = source.batches();
-    for row in 0..1024 {
-        let Some(source::SourceEvent::Batch {
-            region_id,
-            window,
-            batch,
-        }) = stream.try_next().await.unwrap()
-        else {
-            panic!("source ended before all windows were routed");
-        };
-        assert_eq!(RegionId::new(1, 0), region_id);
-        assert_eq!(row - 512, window);
-        assert_eq!(1, batch.num_rows());
+    let mut next_row = 0;
+    while let Some(source::SourceEvent { region_id, batch }) = stream.try_next().await.unwrap() {
         assert_eq!(39, batch.num_columns());
         let keys = batch
             .column(primary_key_column_index(batch.num_columns()))
             .as_any()
             .downcast_ref::<DictionaryArray<UInt32Type>>()
             .unwrap();
-        // Each eagerly filtered fragment retains the shared dictionary. This
-        // checks live ownership while the consumer is paused, not a cache-only
-        // counter or process RSS. Allow fixed reader/cursor ownership overhead,
-        // but not one reference per future window (1024 in the regression).
-        assert!(
-            Arc::strong_count(keys.values()) < 16,
-            "future fragments retained {} dictionary references",
-            Arc::strong_count(keys.values())
-        );
-        assert_eq!(
-            row as u64,
-            batch
-                .column_by_name("field_0")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .unwrap()
-                .value(0)
-        );
-        for column in 0..32 {
-            let values = batch
-                .column_by_name(&format!("wide_{column}"))
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .unwrap();
-            assert_eq!(0, values.null_count());
-            assert_eq!(1000 + column as u64, values.value(0));
+        // Regression R1-C1: a paused consumer must not retain one dictionary
+        // reference per future fragment. This is ownership, not an RSS metric.
+        assert!(Arc::strong_count(keys.values()) < 16);
+        let values = batch
+            .column_by_name("field_0")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            assert_eq!(next_row, values.value(row));
+            assert_eq!((next_row / 512) as u32, region_id.region_sequence());
+            for column in 0..32 {
+                let defaults = batch
+                    .column_by_name(&format!("wide_{column}"))
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap();
+                assert_eq!(0, defaults.null_count());
+                assert_eq!(1000 + column as u64, defaults.value(row));
+            }
+            next_row += 1;
         }
     }
-    assert!(matches!(
-        stream.try_next().await.unwrap(),
-        Some(source::SourceEvent::SourceEnd)
-    ));
-    assert!(stream.try_next().await.unwrap().is_none());
+    assert_eq!(1024, next_row);
     assert_eq!(1, counters.files.load(std::sync::atomic::Ordering::Relaxed));
     assert_eq!(
         1024,
@@ -976,7 +994,7 @@ async fn wide_source_routes_windows_without_retaining_future_fragments() {
 
 #[tokio::test]
 async fn cancelling_between_routed_fragments_stops_the_source() {
-    let (fixture, plan) = wide_window_fixture().await;
+    let (fixture, plan) = wide_source_fixture().await;
     let (context, _) = fixture.context(None);
     let source = source::SharedSource::build(
         &plan,
@@ -987,45 +1005,40 @@ async fn cancelling_between_routed_fragments_stops_the_source() {
     .await
     .unwrap();
     let mut stream = source.batches();
-    assert!(matches!(
-        stream.try_next().await.unwrap(),
-        Some(source::SourceEvent::Batch { .. })
-    ));
+    assert!(stream.try_next().await.unwrap().is_some());
     context.cancellation.cancel();
-    let error = stream
-        .try_next()
-        .await
-        .err()
-        .expect("cancelled source yielded another fragment");
     assert!(matches!(
-        error,
-        crate::error::Error::CompactionCancelled { .. }
+        stream.try_next().await,
+        Err(crate::error::Error::CompactionCancelled { .. })
     ));
 }
 
 #[rstest::rstest]
-#[case(1)]
-#[case(2)]
+#[case::metadata(false)]
+#[case::actual_rows(true)]
 #[tokio::test]
-async fn many_windows_exhaust_metadata_without_outputs(#[case] workers: usize) {
-    let (fixture, mut plan) = wide_window_fixture().await;
-    plan.max_active_workers = workers;
-    let (context, protected) = fixture.context(None);
-    let error = tokio::time::timeout(Duration::from_secs(60), compact_regions(plan, context))
-        .await
-        .expect("window admission failure stalled the pipeline")
-        .err()
-        .unwrap();
+async fn cross_window_source_is_rejected_without_filtering_away_rows(#[case] stale_metadata: bool) {
+    let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
+        let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 2, 0);
+        let mut columns = batch.columns().to_vec();
+        columns[3] = Arc::new(TimestampMillisecondArray::from(vec![0, 3_600_000]));
+        vec![RecordBatch::try_new(batch.schema(), columns).unwrap()]
+    })
+    .await;
+    let mut plan = fixture.plan(1);
+    if stale_metadata {
+        plan.sources[0].time_range.1 = plan.sources[0].time_range.0;
+    }
+    let (context, protection) = fixture.context(None);
+    let error = compact_regions(plan, context).await.err().unwrap();
     assert!(
         matches!(
-            &error,
-            crate::error::Error::MultiRegionCompactionResource { reason, .. }
-                if reason == "Too many regions or time windows"
+            error,
+            crate::error::Error::InvalidMultiRegionCompaction { .. }
         ),
         "{error:?}"
     );
-    assert!(protected.files.lock().unwrap().is_empty());
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
+    assert!(protection.files.lock().unwrap().is_empty());
     let path = crate::sst::location::sst_file_path(
         fixture.layer.table_dir(),
         fixture.source.file_id(),
@@ -1034,44 +1047,136 @@ async fn many_windows_exhaust_metadata_without_outputs(#[case] workers: usize) {
     assert!(fixture.layer.object_store().exists(&path).await.unwrap());
 }
 
-#[test]
-fn stable_merge_keeps_tied_source_order_across_empty_batches_and_refills() {
-    fn tied_batch(start: usize, end: usize) -> RecordBatch {
-        let batch = new_record_batch_with_custom_sequence(&["000", "series"], start, end, 7);
+#[tokio::test]
+async fn negative_subsecond_timestamp_stays_in_its_half_open_window() {
+    let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
+        let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 2, 0);
         let mut columns = batch.columns().to_vec();
-        columns[3] = Arc::new(TimestampMillisecondArray::from(vec![0; end - start]));
-        RecordBatch::try_new(batch.schema(), columns).unwrap()
+        columns[3] = Arc::new(TimestampMillisecondArray::from(vec![-3_600_000, -1]));
+        vec![RecordBatch::try_new(batch.schema(), columns).unwrap()]
+    })
+    .await;
+    let mut plan = fixture.plan(1);
+    plan.window_start = -3600;
+    let output = compact_regions(plan, fixture.context(None).0)
+        .await
+        .unwrap();
+    assert_eq!(2, output.stats.output_rows);
+    let mut times = Vec::new();
+    for file in output.files.into_values().flatten() {
+        for batch in fixture.read_output(file, fixture.metadata.clone()).await {
+            times.extend_from_slice(crate::read::timestamp_array_to_i64_slice(
+                batch.column(time_index_column_index(batch.num_columns())),
+            ));
+        }
     }
-    let schema = tied_batch(0, 1).schema();
-    let inputs: Vec<crate::memtable::BoxedRecordBatchIterator> = vec![
-        Box::new(
-            vec![tied_batch(0, 0), tied_batch(0, 2), tied_batch(2, 5)]
-                .into_iter()
-                .map(Ok),
-        ),
-        Box::new(
-            vec![tied_batch(100, 102), tied_batch(102, 105)]
-                .into_iter()
-                .map(Ok),
-        ),
-    ];
-    let merge = crate::read::flat_merge::FlatMergeIterator::new_stable(schema, inputs, 3).unwrap();
-    let mut payloads = Vec::new();
-    for batch in merge {
-        let batch = batch.unwrap();
-        let values = batch
-            .column_by_name("field_0")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        payloads.extend(values.values().iter().copied());
-    }
-    assert_eq!(vec![0, 1, 2, 3, 4, 100, 101, 102, 103, 104], payloads);
+    assert_eq!(vec![-3_600_000, -1], times);
 }
 
-/// Five overlapping sources exercise both binary carries and the final merge
-/// of unequal levels. Every timestamp has tied puts and a tombstone.
+#[tokio::test]
+async fn equal_key_group_crosses_batches_and_preserves_opposite_target_admission_orders() {
+    fn versions(start: usize) -> Vec<RecordBatch> {
+        let batch =
+            new_record_batch_with_custom_sequence(&["000", "series"], start, start + 256, 0);
+        let mut columns = batch.columns().to_vec();
+        columns[3] = Arc::new(TimestampMillisecondArray::from(vec![0; 256]));
+        vec![RecordBatch::try_new(batch.schema(), columns).unwrap()]
+    }
+    let fixture =
+        Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| versions(0)).await;
+    let second = fixture.write_additional_source(versions(256)).await;
+    let mut plan = fixture.plan(2);
+    plan.sources.push(second.clone());
+    // Both files put the same PK/time into both targets. Source order is not
+    // a valid version order: R0 installs F1 then F2, R1 installs F2 then F1.
+    let expressions = vec![
+        partition::expr::PartitionExpr::new(
+            partition::expr::Operand::Expr(col("field_0").lt(Value::UInt64(128))),
+            partition::expr::RestrictedOp::Or,
+            partition::expr::Operand::Expr(col("field_0").gt_eq(Value::UInt64(384))),
+        ),
+        col("field_0")
+            .gt_eq(Value::UInt64(128))
+            .and(col("field_0").lt(Value::UInt64(384))),
+    ];
+    plan.partition_rule = Arc::new(
+        MultiDimPartitionRule::try_new(
+            vec!["field_0".into()],
+            vec![0, 1],
+            expressions.clone(),
+            false,
+        )
+        .unwrap(),
+    );
+    for (id, target) in &mut plan.targets {
+        let first_sequence = if id.region_sequence() == 0 { 11 } else { 22 };
+        target
+            .inputs
+            .get_mut(&fixture.source.file_id())
+            .unwrap()
+            .sequence = NonZeroU64::new(first_sequence);
+        let mut input = second.clone();
+        input.sequence = NonZeroU64::new(33 - first_sequence);
+        target.inputs.insert(input.file_id(), input);
+        Arc::make_mut(&mut target.metadata).set_partition_expr(Some(
+            expressions[id.region_sequence() as usize]
+                .as_json_str()
+                .unwrap(),
+        ));
+    }
+    let targets = plan.targets.clone();
+    let output = compact_regions(plan, fixture.context(None).0)
+        .await
+        .unwrap();
+    assert_eq!(512, output.stats.output_rows);
+    for (id, files) in output.files {
+        let mut rows = Vec::new();
+        for file in files {
+            assert_eq!(NonZeroU64::new(22), file.sequence);
+            for batch in fixture
+                .read_output(file, targets[&id].metadata.clone())
+                .await
+            {
+                let values = batch
+                    .column_by_name("field_0")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap();
+                let seq = batch
+                    .column(sequence_column_index(batch.num_columns()))
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap();
+                for row in 0..batch.num_rows() {
+                    let payload = values.value(row);
+                    let expected = match (id.region_sequence(), payload < 256) {
+                        (0, true) | (1, false) => 11,
+                        _ => 22,
+                    };
+                    assert_eq!(expected, seq.value(row));
+                    rows.push((seq.value(row), payload));
+                }
+            }
+        }
+        assert!(rows.windows(2).all(|pair| pair[0].0 >= pair[1].0));
+        let mut payloads = rows.into_iter().map(|row| row.1).collect::<Vec<_>>();
+        payloads.sort();
+        let expected = (0..512)
+            .filter(|value| {
+                if id.region_sequence() == 0 {
+                    *value < 128 || *value >= 384
+                } else {
+                    (128..384).contains(value)
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expected, payloads);
+    }
+}
+
+/// Five overlapping sources share one window. Every timestamp has tied puts
+/// and a tombstone; source-order tie breaking is deliberately not required.
 fn overlapping_batches(source: u64) -> Vec<RecordBatch> {
     (0..31)
         .map(|series| {
@@ -1088,9 +1193,7 @@ fn overlapping_batches(source: u64) -> Vec<RecordBatch> {
                     .collect::<Vec<_>>(),
             ));
             columns[3] = Arc::new(TimestampMillisecondArray::from(
-                (0..512)
-                    .map(|row| row / 128 * 3_600_000 + row % 128 / 4)
-                    .collect::<Vec<i64>>(),
+                (0..512).map(|row| row / 4).collect::<Vec<i64>>(),
             ));
             columns[6] = Arc::new(UInt8Array::from(
                 (0..512)
@@ -1114,8 +1217,8 @@ async fn overlapping_fixture() -> (Fixture, MultiRegionCompactionPlan) {
     })
     .await;
     let mut plan = fixture.plan(3);
-    plan.memory_limit = 2 * 1024 * 1024;
-    plan.max_output_file_size = 16 * 1024;
+    // Force rolling inside one window; a series must still stay in one SST.
+    plan.max_output_file_size = 1;
     for source in 1..5 {
         let file = fixture
             .write_additional_source(overlapping_batches(source))
@@ -1134,17 +1237,13 @@ async fn overlapping_fixture() -> (Fixture, MultiRegionCompactionPlan) {
 }
 
 #[rstest::rstest]
-#[case::range_single_work_slot(1, false)]
-#[case::range_parallel_workers(2, false)]
-#[case::multi_column_single_work_slot(1, true)]
-#[case::multi_column_parallel_workers(2, true)]
+#[case::range(false)]
+#[case::multi_column(true)]
 #[tokio::test]
-async fn bounded_workers_merge_overlapping_sources_without_deadlock_or_reordering(
-    #[case] workers: usize,
+async fn streaming_merge_preserves_overlapping_versions_and_field_routing(
     #[case] multi_column: bool,
 ) {
     let (fixture, mut plan) = overlapping_fixture().await;
-    plan.max_active_workers = workers;
     if multi_column {
         // A single primary key can route to different targets across sources
         // and versions. Unmatched rows, including tombstones, go to region 0.
@@ -1196,23 +1295,24 @@ async fn bounded_workers_merge_overlapping_sources_without_deadlock_or_reorderin
     assert_eq!(5, output.stats.source_files);
     assert_eq!(5 * 31 * 512, output.stats.source_rows);
     assert_eq!(output.stats.source_rows, output.stats.output_rows);
-    assert!(output.stats.spilled_bytes > 0);
-    assert!(output.stats.peak_buffered_bytes <= (memory_limit / 2) as u64);
+    assert!(output.stats.estimated_memory_bytes <= memory_limit as u64);
+    assert!(output.stats.peak_group_bytes <= (memory_limit / 16) as u64);
     assert_eq!(
         targets.keys().collect::<Vec<_>>(),
         output.files.keys().collect::<Vec<_>>()
     );
-    common_telemetry::info!(
-        "workers={workers}, multi_column={multi_column}, stats={:?}",
-        output.stats
-    );
+    common_telemetry::info!("multi_column={multi_column}, stats={:?}", output.stats);
     let mut output_paths = HashSet::new();
     for (id, files) in output.files {
         assert_eq!(files.len(), output.sst_infos[&id].len());
-        assert!(
-            files.len() >= 4,
-            "each target must produce all four windows"
-        );
+        assert!(files.len() > 1, "expected single-window SST rollover");
+        for pair in files.windows(2) {
+            assert!(
+                pair[0].primary_key_max.as_ref().unwrap()
+                    < pair[1].primary_key_min.as_ref().unwrap(),
+                "SST rollover split a series or reordered primary-key ranges"
+            );
+        }
         let file_count = files.len();
         let mut windows = BTreeMap::<i64, Vec<_>>::new();
         for (file, info) in files.into_iter().zip(&output.sst_infos[&id]) {
@@ -1280,13 +1380,13 @@ async fn bounded_workers_merge_overlapping_sources_without_deadlock_or_reorderin
             }
         }
         let mut expected = BTreeMap::new();
-        for window in 0..4 {
+        for window in 0..1 {
             let mut rows = Vec::new();
             for series in 0..31 {
-                for tick in 0..32 {
+                for tick in 0..128 {
                     for source in 0..5 {
                         for version in 0..4 {
-                            let ordinal = window * 128 + tick * 4 + version;
+                            let ordinal = tick * 4 + version;
                             let payload = (version != 2).then_some(source * 1000 + ordinal as u64);
                             // Independent oracle: do not reuse PartitionRule to
                             // compute the expected routing of the physical rows.
@@ -1326,9 +1426,23 @@ async fn bounded_workers_merge_overlapping_sources_without_deadlock_or_reorderin
             }
             expected.insert(window, rows);
         }
-        // Do not sort actual rows: this checks stability across input batches,
-        // merge passes, output batches and SST file boundaries, not just a multiset.
-        assert_eq!(expected, windows, "incorrect rows or ordering for {id}");
+        // Check the actual order before comparing multisets. Equal full keys
+        // can interleave sources; unequal keys must remain ordered across SSTs.
+        for rows in windows.values() {
+            for pair in rows.windows(2) {
+                let key = |row: &(u32, i64, u64, u8, Option<u64>)| {
+                    (row.0, row.1, std::cmp::Reverse(row.2))
+                };
+                assert!(key(&pair[0]) <= key(&pair[1]), "unordered output for {id}");
+            }
+        }
+        for rows in windows.values_mut() {
+            rows.sort();
+        }
+        for rows in expected.values_mut() {
+            rows.sort();
+        }
+        assert_eq!(expected, windows, "missing or changed rows for {id}");
         common_telemetry::info!(
             "verified region={id}, files={file_count}, rows={}",
             windows.values().map(Vec::len).sum::<usize>()
@@ -1341,22 +1455,11 @@ async fn bounded_workers_merge_overlapping_sources_without_deadlock_or_reorderin
 }
 
 async fn assert_spill_cleaned(path: &std::path::Path) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match tokio::fs::read_dir(path).await {
-                Ok(mut entries) => {
-                    if entries.next_entry().await.unwrap().is_none() {
-                        return;
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-                Err(error) => panic!("cannot inspect spill cleanup: {error}"),
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("attempt spill resources leaked");
+    // Stronger than cleanup: the streaming merge must never create this directory.
+    assert!(
+        !tokio::fs::try_exists(path).await.unwrap(),
+        "merge spill directory was created"
+    );
 }
 
 struct BlockIndexedSstWrite {
@@ -1377,6 +1480,37 @@ impl oio::Write for BlockIndexedSstWrite {
 
     async fn abort(&mut self) -> mock::Result<()> {
         self.inner.abort().await
+    }
+}
+
+fn add_fulltext_column(plan: &mut MultiRegionCompactionPlan) {
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{
+        ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions,
+    };
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    let column = ColumnMetadata {
+        column_id: 10,
+        semantic_type: api::v1::SemanticType::Field,
+        column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), false)
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::String(
+                "indexed text".into(),
+            ))))
+            .unwrap()
+            .with_fulltext_options(FulltextOptions::new_unchecked(
+                true,
+                FulltextAnalyzer::English,
+                false,
+                FulltextBackend::Tantivy,
+                1,
+                0.01,
+            ))
+            .unwrap(),
+    };
+    for target in plan.targets.values_mut() {
+        let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
+        builder.push_column_metadata(column.clone());
+        target.metadata = Arc::new(builder.build().unwrap());
     }
 }
 
@@ -1404,17 +1538,11 @@ impl SstWriteGuard for FailIndexSibling {
 #[case::sibling_failure(true)]
 #[tokio::test]
 async fn interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibling: bool) {
-    use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{
-        ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions,
-    };
-    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-
     let mut fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         ["000", "020"]
             .into_iter()
             .map(|tag| {
-                let rows = if tag == "000" { 262_144 } else { 1 };
+                let rows = if tag == "000" { 1 } else { 262_144 };
                 let batch = new_record_batch_with_custom_sequence(&[tag, "series"], 0, rows, 5);
                 let mut columns = batch.columns().to_vec();
                 // Exceed both the Arrow writer's internal buffer and the object
@@ -1454,29 +1582,31 @@ async fn interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibling: b
         fixture.layer.intermediate_manager().clone(),
     ));
     let mut plan = fixture.plan(2);
-    plan.memory_limit = 1024 * 1024;
-    for target in plan.targets.values_mut() {
-        let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
-        builder.push_column_metadata(ColumnMetadata {
-            column_id: 10,
-            semantic_type: api::v1::SemanticType::Field,
-            column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), false)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::String(
-                    "indexed text".into(),
-                ))))
-                .unwrap()
-                .with_fulltext_options(FulltextOptions::new_unchecked(
-                    true,
-                    FulltextAnalyzer::English,
-                    false,
-                    FulltextBackend::Tantivy,
-                    1,
-                    0.01,
-                ))
+    // R1 receives its first row before R0 blocks in object storage. This lets
+    // the sibling fail independently even though input is now consumed online.
+    let expressions = vec![
+        col("tag_0").gt_eq(Value::String("010".into())),
+        col("tag_0").lt(Value::String("010".into())),
+    ];
+    plan.partition_rule = Arc::new(
+        MultiDimPartitionRule::try_new(
+            vec!["tag_0".into()],
+            vec![0, 1],
+            expressions.clone(),
+            false,
+        )
+        .unwrap(),
+    );
+    for (id, target) in &mut plan.targets {
+        Arc::make_mut(&mut target.metadata).set_partition_expr(Some(
+            expressions[id.region_sequence() as usize]
+                .as_json_str()
                 .unwrap(),
-        });
-        target.metadata = Arc::new(builder.build().unwrap());
+        ));
     }
+    // Admission now includes both resident Tantivy writers and finish space.
+    plan.memory_limit = 256 * 1024 * 1024;
+    add_fulltext_column(&mut plan);
     let (mut context, protection) = fixture.context(None);
     let cancellation = context.cancellation.clone();
     let fail = Arc::new(tokio::sync::Notify::new());
@@ -1579,9 +1709,8 @@ impl SstWriteGuard for CancelBeforeCreate {
 }
 
 #[tokio::test]
-async fn cancelling_a_blocked_writer_cleans_spills_and_preserves_sources() {
-    let (fixture, mut plan) = overlapping_fixture().await;
-    plan.max_active_workers = 1;
+async fn cancelling_a_blocked_writer_preserves_sources_without_merge_spill() {
+    let (fixture, plan) = overlapping_fixture().await;
     let sources = plan.sources.clone();
     let (mut context, _) = fixture.context(None);
     context.protection = Arc::new(CancelBeforeCreate(context.cancellation.clone()));
@@ -1603,6 +1732,286 @@ async fn cancelling_a_blocked_writer_cleans_spills_and_preserves_sources() {
         );
         assert!(fixture.layer.object_store().exists(&path).await.unwrap());
     }
+}
+
+#[tokio::test]
+async fn private_routing_annotations_do_not_shadow_user_columns() {
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let mut plan = fixture.plan(2);
+    let expressions = vec![
+        col("__compaction_region").lt(Value::UInt64(40)),
+        col("__compaction_region").gt_eq(Value::UInt64(40)),
+    ];
+    plan.partition_rule = Arc::new(
+        MultiDimPartitionRule::try_new(
+            vec!["__compaction_region".into()],
+            vec![0, 1],
+            expressions.clone(),
+            false,
+        )
+        .unwrap(),
+    );
+    for (id, target) in &mut plan.targets {
+        let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
+        builder.push_column_metadata(ColumnMetadata {
+            column_id: 10,
+            semantic_type: api::v1::SemanticType::Field,
+            column_schema: ColumnSchema::new(
+                "__compaction_region",
+                ConcreteDataType::uint64_datatype(),
+                false,
+            )
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::UInt64(42))))
+            .unwrap(),
+        });
+        let mut metadata = builder.build().unwrap();
+        metadata.set_partition_expr(Some(
+            expressions[id.region_sequence() as usize]
+                .as_json_str()
+                .unwrap(),
+        ));
+        target.metadata = Arc::new(metadata);
+    }
+    let target = plan.targets[&RegionId::new(1, 1)].metadata.clone();
+    let output = compact_regions(plan, fixture.context(None).0)
+        .await
+        .unwrap();
+    assert!(output.files[&RegionId::new(1, 0)].is_empty());
+    assert_eq!(124, output.stats.output_rows);
+    for file in output.files[&RegionId::new(1, 1)].iter().cloned() {
+        for batch in fixture.read_output(file, target.clone()).await {
+            let values = batch
+                .column_by_name("__compaction_region")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            assert!(values.values().iter().all(|value| *value == 42));
+        }
+    }
+}
+
+#[tokio::test]
+async fn zero_versions_are_not_published_with_a_legacy_sequence_override() {
+    let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
+        vec![
+            new_record_batch_with_custom_sequence(&["000", "series"], 0, 1, 0),
+            new_record_batch_with_custom_sequence(&["020", "series"], 0, 1, 7),
+        ]
+    })
+    .await;
+    let plan = fixture.plan(2);
+    let target = &plan.targets[&RegionId::new(1, 0)];
+    let input = target.inputs[&fixture.source.file_id()].clone();
+    let mut original = fixture
+        .layer
+        .read_sst(FileHandle::new(input, Arc::new(NoopFilePurger)))
+        .expected_metadata(Some(target.metadata.clone()))
+        .cache(CacheStrategy::Disabled)
+        .build()
+        .await
+        .unwrap()
+        .unwrap();
+    let batch = original.next_record_batch().await.unwrap().unwrap();
+    let sequences = batch
+        .column(sequence_column_index(batch.num_columns()))
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    assert_eq!(
+        0,
+        sequences.value(0),
+        "the original target really observes version zero"
+    );
+    let error = compact_regions(plan, fixture.context(None).0)
+        .await
+        .err()
+        .expect("must not publish an output that reads version zero as version100");
+    assert!(
+        matches!(&error, crate::error::Error::InvalidMultiRegionCompaction { reason, .. } if reason.contains("zero output versions")),
+        "{error:?}"
+    );
+    let path = crate::sst::location::sst_file_path(
+        fixture.layer.table_dir(),
+        fixture.source.file_id(),
+        fixture.layer.path_type(),
+    );
+    assert!(fixture.layer.object_store().exists(&path).await.unwrap());
+}
+
+struct ObserveOnlineOutput {
+    protection: Arc<Protection>,
+    counters: Arc<SourceCounters>,
+    expected_rows: u64,
+    observed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl SstWriteGuard for ObserveOnlineOutput {
+    async fn before_create(&self, file: RegionFileId) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        if !self.observed.swap(true, Ordering::Relaxed) {
+            assert_eq!(0, self.counters.files.load(Ordering::Relaxed));
+            assert!(self.counters.rows.load(Ordering::Relaxed) < self.expected_rows);
+        }
+        self.protection.before_create(file).await
+    }
+}
+
+#[tokio::test]
+async fn output_starts_before_the_shared_source_is_exhausted() {
+    let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
+        vec![new_record_batch_with_custom_sequence(
+            &["000", "series"],
+            0,
+            4096,
+            0,
+        )]
+    })
+    .await;
+    let plan = fixture.plan(1);
+    let (mut context, protection) = fixture.context(None);
+    let counters = Arc::new(SourceCounters::default());
+    let observer = Arc::new(ObserveOnlineOutput {
+        protection,
+        counters: counters.clone(),
+        expected_rows: fixture.source.num_rows,
+        observed: std::sync::atomic::AtomicBool::new(false),
+    });
+    context.protection = observer.clone();
+    let source = source::SharedSource::build(
+        &plan,
+        &context,
+        validate_plan(&plan).unwrap(),
+        counters.clone(),
+    )
+    .await
+    .unwrap();
+    let output = worker::execute(plan, context, source, counters)
+        .await
+        .unwrap();
+    assert_eq!(4096, output.stats.output_rows);
+    assert!(observer.observed.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn invalid_target_options_are_rejected_before_creating_outputs() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let mut plan = fixture.plan(2);
+    plan.targets
+        .get_mut(&RegionId::new(1, 1))
+        .unwrap()
+        .options
+        .max_row_group_row_count = Some(0);
+    let (context, protection) = fixture.context(None);
+    let error = compact_regions(plan, context).await.err().unwrap();
+    assert!(
+        matches!(error, crate::error::Error::InvalidRegionOptions { .. }),
+        "{error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn all_resident_writers_are_admitted_before_creating_outputs() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let mut plan = fixture.plan(32);
+    plan.memory_limit = 128 * 1024 * 1024;
+    let (context, protection) = fixture.context(None);
+    let error = compact_regions(plan, context).await.err().unwrap();
+    assert!(
+        matches!(&error, crate::error::Error::MultiRegionCompactionResource { reason, .. } if reason.contains("minimum working set")),
+        "{error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+}
+
+#[rstest::rstest]
+#[case::sync(crate::config::IndexBuildMode::Sync)]
+#[case::async_mode(crate::config::IndexBuildMode::Async)]
+#[tokio::test]
+async fn admission_includes_each_tantivy_creator_even_in_async_mode(
+    #[case] mode: crate::config::IndexBuildMode,
+) {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let mut baseline = fixture.plan(2);
+    baseline.memory_limit = 64 * 1024 * 1024;
+    assert_eq!(
+        124,
+        compact_regions(baseline, fixture.context(None).0)
+            .await
+            .unwrap()
+            .stats
+            .output_rows
+    );
+    let mut plan = fixture.plan(2);
+    plan.memory_limit = 64 * 1024 * 1024;
+    add_fulltext_column(&mut plan);
+    let (mut context, protection) = fixture.context(None);
+    Arc::make_mut(&mut context.config).index.build_mode = mode;
+    let error = compact_regions(plan, context).await.err().unwrap();
+    assert!(
+        matches!(&error, crate::error::Error::MultiRegionCompactionResource { reason, .. } if reason.contains("minimum working set")),
+        "{error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn oversized_equal_key_group_fails_without_partial_outputs_or_spill() {
+    let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
+        let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 262_144, 0);
+        let mut columns = batch.columns().to_vec();
+        columns[3] = Arc::new(TimestampMillisecondArray::from(vec![0; 262_144]));
+        vec![RecordBatch::try_new(batch.schema(), columns).unwrap()]
+    })
+    .await;
+    let (context, protection) = fixture.context(None);
+    let error = compact_regions(fixture.plan(1), context)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, crate::error::Error::MultiRegionCompactionResource { reason, .. } if reason.contains("Equal-key version group")),
+        "{error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
+}
+
+#[rstest::rstest]
+#[case::encoder("encoder")]
+#[case::metadata("metadata")]
+#[tokio::test]
+async fn limited_writer_fails_instead_of_publishing_over_budget(#[case] kind: &'static str) {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let plan = fixture.plan(1);
+    let (context, protection) = fixture.context(None);
+    let source = new_flat_source_from_record_batches(vec![source_batch(&fixture.metadata, 0, 100)]);
+    let mut limits = memory::MemoryLimits::new(&plan, source.schema()).unwrap();
+    match kind {
+        "encoder" => limits.writer.working_bytes = 1,
+        "metadata" => limits.writer.metadata_bytes = 1,
+        _ => unreachable!(),
+    }
+    let error = writer::TargetWriter::new(
+        &plan.targets[&RegionId::new(1, 0)],
+        &context,
+        &limits,
+        plan.max_output_file_size,
+    )
+    .write(source)
+    .await
+    .err()
+    .unwrap();
+    assert!(
+        matches!(&error, crate::error::Error::SstWriteMemoryExceeded { kind: actual, .. } if *actual == kind),
+        "{error:?}"
+    );
+    assert_eq!(1, protection.files.lock().unwrap().len());
 }
 
 #[tokio::test]

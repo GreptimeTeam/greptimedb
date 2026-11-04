@@ -180,7 +180,8 @@ impl TantivyFulltextIndexCreator {
         completed.context(JoinSnafu)?
     }
 
-    fn sanitize_memory_limit(memory_limit: usize) -> usize {
+    /// Effective per-column allocation, also used by compaction admission.
+    pub fn sanitize_memory_limit(memory_limit: usize) -> usize {
         // Port from tantivy::indexer::index_writer::{MEMORY_BUDGET_NUM_BYTES_MIN, MEMORY_BUDGET_NUM_BYTES_MAX}
         const MARGIN_IN_BYTES: usize = 1_000_000;
         const MEMORY_BUDGET_NUM_BYTES_MIN: usize = ((MARGIN_IN_BYTES as u32) * 15u32) as usize;

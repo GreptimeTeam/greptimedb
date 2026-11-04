@@ -68,11 +68,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "enterprise")]
-    #[snafu(display("Multi-region compaction temporary run I/O failed"))]
-    MultiRegionCompactionSpill {
-        #[snafu(source)]
-        error: std::io::Error,
+    #[snafu(display("SST writer {kind} needs {bytes} bytes, budget is {limit}"))]
+    SstWriteMemoryExceeded {
+        kind: &'static str,
+        bytes: usize,
+        limit: usize,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1550,8 +1550,7 @@ impl ErrorExt for Error {
             InvalidMultiRegionCompaction { .. } => StatusCode::InvalidArguments,
             #[cfg(feature = "enterprise")]
             MultiRegionCompactionResource { .. } => StatusCode::RuntimeResourcesExhausted,
-            #[cfg(feature = "enterprise")]
-            MultiRegionCompactionSpill { .. } => StatusCode::Internal,
+            SstWriteMemoryExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             DataTypeMismatch { source, .. } => source.status_code(),
             OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
                 StatusCode::StorageUnavailable

@@ -38,10 +38,10 @@ use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
-use parquet::file::metadata::{KeyValue, ParquetMetaData};
+use parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData};
 use parquet::file::properties::WriterProperties;
 use smallvec::smallvec;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, SequenceNumber};
 use tokio::io::AsyncWrite;
@@ -193,6 +193,39 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
     }
 }
 
+/// Optional limits used by multi-output compaction. A batch may temporarily
+/// exceed the working threshold before its check; callers reserve that workspace.
+#[derive(Clone, Copy)]
+pub(crate) struct SstWriteLimits {
+    pub(crate) working_bytes: usize,
+    pub(crate) metadata_bytes: usize,
+}
+
+/// Tracks retained footer memory across rolled files as well as the current file.
+#[derive(Default)]
+struct WriteMemory {
+    limits: Option<SstWriteLimits>,
+    completed: usize,
+    current: usize,
+    row_groups: usize,
+}
+
+impl WriteMemory {
+    fn check(&self, bytes: usize) -> Result<()> {
+        if let Some(limits) = self.limits {
+            ensure!(
+                bytes <= limits.metadata_bytes,
+                crate::error::SstWriteMemoryExceededSnafu {
+                    kind: "metadata",
+                    bytes,
+                    limit: limits.metadata_bytes,
+                }
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Parquet SST writer.
 pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
     /// Path provider that creates SST and index file paths according to file id.
@@ -215,12 +248,19 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     /// Write metrics
     metrics: &'a mut Metrics,
     write_guard: Option<Arc<dyn SstWriteGuard>>,
+    memory: WriteMemory,
 }
 
 /// Registers durable ownership before either an SST or its index is published to storage.
 #[async_trait::async_trait]
 pub trait SstWriteGuard: Send + Sync {
     async fn before_create(&self, file_id: RegionFileId) -> Result<()>;
+}
+
+/// Protection and resource limits travel together for table-compaction output.
+pub(crate) struct SstWriteContext {
+    pub(crate) guard: Arc<dyn SstWriteGuard>,
+    pub(crate) limits: SstWriteLimits,
 }
 
 pub trait WriterFactory {
@@ -316,6 +356,7 @@ where
             indexer_builder,
             // Build lazily with the actual row-group size, after the write guard.
             current_indexer: None,
+            memory: WriteMemory::default(),
             bytes_written: Arc::new(AtomicUsize::new(0)),
             file_cleaner: None,
             metrics,
@@ -326,6 +367,40 @@ where
     pub(crate) fn with_write_guard(mut self, guard: Option<Arc<dyn SstWriteGuard>>) -> Self {
         self.write_guard = guard;
         self
+    }
+
+    pub(crate) fn with_memory_limits(mut self, limits: Option<SstWriteLimits>) -> Self {
+        self.memory.limits = limits;
+        self
+    }
+
+    /// Checks encoding state without flushing a partial row group: readers and
+    /// index row IDs require uniform row-group lengths except for the final one.
+    /// Only new footer entries are measured, avoiding quadratic footer walks.
+    async fn check_memory(&mut self) -> Result<()> {
+        let Some(limits) = self.memory.limits else {
+            return Ok(());
+        };
+        if let Some(SstArrowWriter::Serial(writer)) = &mut self.writer {
+            ensure!(
+                writer.memory_size() <= limits.working_bytes,
+                crate::error::SstWriteMemoryExceededSnafu {
+                    kind: "encoder",
+                    bytes: writer.memory_size(),
+                    limit: limits.working_bytes,
+                }
+            );
+            for group in &writer.flushed_row_groups()[self.memory.row_groups..] {
+                let file = FileMetaData::new(1, 0, None, None, group.schema_descr_ptr(), None);
+                // Reuse Parquet's heap estimator; counting the schema per group
+                // is conservative, including variable-length min/max statistics.
+                let metadata = ParquetMetaData::new(file, vec![group.clone()]);
+                self.memory.current = self.memory.current.saturating_add(metadata.memory_size());
+            }
+            self.memory.row_groups = writer.flushed_row_groups().len();
+        }
+        self.memory
+            .check(self.memory.completed.saturating_add(self.memory.current))
     }
 
     /// Finishes current SST file and index file.
@@ -365,6 +440,15 @@ where
 
             let parquet_metadata = current_writer.close().await.context(WriteParquetSnafu)?;
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
+            if self.memory.limits.is_some() {
+                self.memory.completed = self.memory.completed.saturating_add(
+                    parquet_metadata.memory_size().saturating_mul(2)
+                        + std::mem::size_of::<SstInfo>(),
+                );
+                self.memory.check(self.memory.completed)?;
+                self.memory.current = 0;
+                self.memory.row_groups = 0;
+            }
 
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
@@ -562,6 +646,10 @@ where
         }
         .await;
 
+        let result = match result {
+            Ok(()) => self.check_memory().await,
+            Err(error) => Err(error),
+        };
         if result.is_err() {
             self.abort_current_indexer().await;
         }
@@ -636,7 +724,8 @@ where
                 self.bytes_written.clone(),
             );
             let schema = maybe_wrap_schema(schema)?;
-            let arrow_writer = if opts.encode_parallelism > 1
+            let arrow_writer = if self.memory.limits.is_none()
+                && opts.encode_parallelism > 1
                 && ParallelArrowWriter::<SizeAwareWriter<F::Writer>>::supports(&writer_props)
             {
                 SstArrowWriter::Parallel(
