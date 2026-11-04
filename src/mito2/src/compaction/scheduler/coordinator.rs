@@ -33,7 +33,7 @@ use crate::metrics::{
     COMPACTION_ADMISSION_WAIT, COMPACTION_ADMITTED_UNITS, COMPACTION_READY_UNITS,
 };
 use crate::schedule::CancellableTaskState;
-use crate::schedule::scheduler::{Job, SchedulerRef};
+use crate::schedule::scheduler::{Job, LocalScheduler, SchedulerRef};
 
 /// Already prepared work. Its task owns the existing execution ID, cancellation
 /// state and input leases; no second grant message can outlive that ownership.
@@ -123,6 +123,11 @@ impl std::fmt::Debug for CompactionCoordinator {
 }
 
 impl CompactionCoordinator {
+    /// Builds a coordinator over `executor` with an independent capacity.
+    ///
+    /// Production code should prefer [`Self::new_local`], which derives both
+    /// numbers from one value; the admission premise only holds while fewer
+    /// units are admitted than the executor can run at once.
     pub(crate) fn new(executor: SchedulerRef, capacity: usize) -> Self {
         Self {
             executor,
@@ -130,6 +135,15 @@ impl CompactionCoordinator {
             state: Mutex::new(CoordinatorState::default()),
             drained: Notify::new(),
         }
+    }
+
+    /// Builds a coordinator whose executor runs at most `concurrency` units.
+    ///
+    /// Capacity and runner count come from the same value, so admitted work can
+    /// never wait in the executor's FIFO behind already-admitted contenders.
+    pub(crate) fn new_local(concurrency: usize) -> Self {
+        let concurrency = concurrency.max(1);
+        Self::new(Arc::new(LocalScheduler::new(concurrency)), concurrency)
     }
 
     fn lock(&self) -> MutexGuard<'_, CoordinatorState> {

@@ -205,8 +205,7 @@ impl WorkerGroup {
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
         let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
-        let compact_job_pool = Arc::new(CompactionCoordinator::new(
-            Arc::new(LocalScheduler::new(config.max_background_compactions)),
+        let compact_job_pool = Arc::new(CompactionCoordinator::new_local(
             config.max_background_compactions,
         ));
         let memtable_compact_dispatcher =
@@ -477,10 +476,8 @@ impl WorkerGroup {
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
-        let compact_job_pool = Arc::new(CompactionCoordinator::new(
-            Arc::new(LocalScheduler::new(config.max_background_compactions)),
-            config.max_background_compactions,
-        ));
+        let compact_job_pool =
+            Arc::new(CompactionCoordinator::new_local(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(

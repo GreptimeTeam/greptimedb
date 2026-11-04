@@ -75,10 +75,7 @@ async fn recv<T>(rx: &mut mpsc::UnboundedReceiver<T>) -> T {
 
 #[tokio::test]
 async fn test_single_region_borrows_all_slots_without_exceeding_global_capacity() {
-    let coordinator = Arc::new(CompactionCoordinator::new(
-        Arc::new(LocalScheduler::new(4)),
-        4,
-    ));
+    let coordinator = Arc::new(CompactionCoordinator::new_local(4));
     let running = Arc::new(AtomicUsize::new(0));
     let permits = Arc::new(Semaphore::new(0));
     let (started, mut rx) = mpsc::unbounded_channel();
