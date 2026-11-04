@@ -141,11 +141,19 @@ jobs:
             --result-extension result \
             --env-filter '^standalone$' \
             --preserve-state 2>&1 | tee "$RUNNER_TEMP/sqlness-native.log"
-      - name: Report which route answered each planned statement
+      - name: Check that every planned statement ran natively
         if: always()
+        # A sqlness log quotes a case's output only when it disagrees with the expectation, so a run
+        # that passed reports no plan at all. The staged expectations are this run's own output -
+        # sqlness replaces the file it compared against with what the case produced - so the route
+        # is read from them.
         run: |
-          python3 .github/scripts/narthex-native-route.py \
-            --input "$RUNNER_TEMP/sqlness-native.log" || true
+          files=$(find "$RUNNER_TEMP/narthex-cases" -name '*.result' 2>/dev/null || true)
+          if [ -z "$files" ]; then
+            echo "no staged expectation to read: the staging step did not run"
+            exit 0
+          fi
+          python3 .github/scripts/narthex-native-route.py --require-native --input $files
       - name: Report every rewritten expectation as a diff
         if: always()
         # sqlness rewrites the expectation it compared against, so the staged copy alone cannot say

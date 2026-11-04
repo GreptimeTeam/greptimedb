@@ -16,8 +16,8 @@
 """Checks, per statement, which route actually answered a sqlness run.
 
 A run that sets the native switch still falls back for a statement the native planner declines, and a
-`.native.result` that passed says nothing about which route produced it. This reads the run's own
-output and classifies each PromQL statement by the plan text it reports:
+`.result` that passed says nothing about which route produced it. This reads the run's own output and
+classifies each PromQL statement by the plan text it reports:
 
 - `native`: the statement's plan holds `FusedSeries` (the fused native node);
 - `legacy`: it holds a legacy evaluator (`PromInstantManipulateExec`, `PromRangeManipulateExec`, ...)
@@ -27,8 +27,9 @@ The classification is text from `TQL EXPLAIN`/`TQL ANALYZE`, which is the only e
 evidence that a statement used the native node; an ordinary PromQL statement reports no route marker
 at all, and this tool reports that as `unreported` rather than guessing.
 
-The input is a run log or a sqlness `.native.result`. Both quote plan text, so the same extraction
-serves either.
+The input is the expectation files a run wrote. sqlness replaces the file it compared against with
+what the case produced, so each `.result` of a staged run is that run's own output. A run log works
+too, but only a failing case quotes its output there, so a green run tells this tool nothing.
 """
 
 import argparse
@@ -83,7 +84,9 @@ def classify(text: str) -> list[tuple[str, str]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, help="run log or .native.result")
+    parser.add_argument(
+        "--input", required=True, nargs="+", help="expectation files the run wrote, or a run log"
+    )
     parser.add_argument(
         "--require-native",
         action="store_true",
@@ -95,12 +98,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    text = Path(args.input).read_text(encoding="utf-8", errors="replace")
-    results = classify(text)
+    results = []
+    for path in args.input:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        results.extend(classify(text))
     if not results:
         print(
-            f"{args.input}: no statement reported its route."
-            " A run only reports one through TQL EXPLAIN or TQL ANALYZE.",
+            f"{len(args.input)} input(s), none reporting a route."
+            " A statement only reports one through TQL EXPLAIN or TQL ANALYZE.",
             file=sys.stderr,
         )
         return 1
