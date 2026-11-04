@@ -10794,6 +10794,70 @@ fn parameterized_topk_reserves_the_values_of_its_parameter() {
     }
 }
 
+/// A parameterized `topk` released before it computes gives back everything it holds: the input it
+/// retained, and with it the samples and the label allocations those chunks keep alive.
+///
+/// The node's payload is the whole vector runtime, not the parameter values alone: a release that
+/// cleared only those would hand the pool its bytes back while the retained chunks -- and the
+/// executor a caller keeps alive -- still hold what it released.
+#[test]
+fn a_parameterized_topk_released_before_it_computes_drops_its_retained_input() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input.clone()),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(eval_time(None, Arc::clone(&grid))),
+        },
+        output: input.output,
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // The label value is the only thing a test can follow into the retained chunk: it is one
+    // allocation, shared with the series the node holds and freed with it.
+    let job: Arc<str> = Arc::from("a");
+    let metric = SeriesLabels::try_new(
+        Some("m".into()),
+        vec![Label {
+            name: "job".into(),
+            value: Arc::clone(&job),
+        }],
+    )
+    .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0), Some(2.0)], true),
+        )
+        .unwrap();
+    // A pull that finds the input unfinished installs the parameter and retains the chunk without
+    // computing: the kernel only reads a whole input.
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        Arc::strong_count(&job),
+        2,
+        "the node did not retain the chunk it was handed"
+    );
+    assert!(
+        pool.reserved() > 0,
+        "the retained chunk was not charged for"
+    );
+    execution.state.close().unwrap();
+    assert_eq!(pool.reserved(), 0, "the reservation was not returned");
+    assert_eq!(
+        Arc::strong_count(&job),
+        1,
+        "the retained chunk outlived the release"
+    );
+}
+
 /// A parameterized histogram function reads each parameter whole before it reads its input, so the
 /// values it reads them into are held beside the input for as long as the node lives: a pool that
 /// admits the parameter series but not the values refuses the query rather than running it over the
@@ -10831,6 +10895,83 @@ fn parameterized_histogram_reserves_the_values_of_its_parameters() {
         }
         assert_eq!(pool.reserved(), 0);
     }
+}
+
+/// A parameterized histogram decides every result on the pull that finds its input ended, and hands
+/// them over from its own queue one result a pull: each pull after the first settles on what the
+/// node still holds, the results still queued beside the values it reads its parameters into.
+///
+/// Settling over the state as the kernel left it would drop the queued results' bytes: the handover
+/// that follows would take them from a reservation that no longer holds them, and the query would
+/// fail on results it had already computed.
+#[test]
+fn parameterized_histogram_hands_over_its_results_from_its_own_queue() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(evaluated_input(Arc::clone(&grid))),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
+            parameters: vec![scalar(0.5, Arc::clone(&grid))],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    // Two label sets of buckets over two points, so the kernel decides two series and the queue
+    // holds a result the pull after the first has to hand over. The pool is sized for the run as it
+    // is accounted for: 16 KiB, which covers the chunks, their assembly and the kernel's workspace,
+    // is not enough -- what the node holds at its peak is a little over 20 KB.
+    let pool = bounded_pool(64 << 10);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for host in ["a", "b"] {
+        for (le, counts) in [
+            ("1", vec![Some(1.0), Some(1.0)]),
+            ("2", vec![Some(9.0), Some(9.0)]),
+            ("+Inf", vec![Some(10.0), Some(10.0)]),
+        ] {
+            let metric = SeriesLabels::try_new(
+                Some("m".into()),
+                vec![
+                    Label {
+                        name: "host".into(),
+                        value: host.into(),
+                    },
+                    Label {
+                        name: "le".into(),
+                        value: le.into(),
+                    },
+                ],
+            )
+            .unwrap();
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(&schema, metric, 0, counts, true),
+                )
+                .unwrap();
+        }
+    }
+    execution.end_of_input().unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        // The parameter is one `Option<f64>` per grid point and it stays charged on every pull,
+        // over whatever the queue still holds: a pull that dropped it gave back what it reads.
+        assert!(
+            execution.state.reserved_bytes() >= 2 * std::mem::size_of::<Option<f64>>(),
+            "a pull gave the parameter values back while the node still reads them"
+        );
+        chunks.push(chunk);
+    }
+    assert_eq!(
+        decided_by_label_set(&chunks),
+        vec![
+            ("host=a".to_string(), vec![(0, Some(1.5)), (1, Some(1.5))]),
+            ("host=b".to_string(), vec![(0, Some(1.5)), (1, Some(1.5))]),
+        ]
+    );
+    // The queue is drained, so what is left is the values the parameters were read into.
+    execution.state.close().unwrap();
+    assert_eq!(pool.reserved(), 0);
 }
 
 #[test]

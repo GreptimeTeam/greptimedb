@@ -4573,19 +4573,25 @@ impl RuntimeNode {
                         };
                         values[index] = Some(collected);
                         // What the node holds for this parameter is its values, not the series they
-                        // were read from.
+                        // were read from, so the one replaces the other as soon as the series is
+                        // gone: the reservation is settled here, before the next parameter is read,
+                        // so a later conversion is admitted against what the node keeps rather than
+                        // against a series it no longer holds.
                         parameter_bytes[index] = bytes;
                         drop(series);
+                        operation.parameter_bytes = parameter_bytes
+                            .iter()
+                            .copied()
+                            .fold(0usize, usize::saturating_add);
+                        state.settle_vector(operation)?;
                         parameters[index].release();
                     }
                 }
-                // The series the parameters arrived as are gone, so what is left beside the input
-                // is the values they were read into.
-                operation.parameter_bytes = parameter_bytes
-                    .iter()
-                    .copied()
-                    .fold(0usize, usize::saturating_add);
-                state.settle_vector(operation)?;
+                // Nothing is settled here: what this node holds changes as a parameter is converted
+                // above and as a chunk is retained below, and each of those changes settles the
+                // reservation. A settle over the state as it stands would drop the charge for the
+                // results an earlier pull has computed and queued, which their handover then takes
+                // back from.
                 while let Some(chunk) = input.pull(inputs, inputs_finished)? {
                     state.retain_vector(operation, chunk)?;
                 }
@@ -5078,8 +5084,11 @@ impl RuntimeNode {
                 vector,
                 state,
             } => {
-                if let Some(v) = vector {
-                    v.parameter = None;
+                // What the node holds is the input it retained and the values it read the parameter
+                // into, whether or not the kernel ran; both go before the reservation does, as the
+                // ordinary vector branch drops its assembled result.
+                if let Some(mut v) = vector.take() {
+                    v.input.release();
                 }
                 state.release();
                 input.release();
@@ -5093,7 +5102,7 @@ impl RuntimeNode {
                 values,
                 ..
             } => {
-                if let Some(v) = vector {
+                if let Some(mut v) = vector.take() {
                     v.input.release();
                 }
                 for parameter in parameters {

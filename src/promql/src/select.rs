@@ -554,30 +554,35 @@ pub(crate) fn k_param(k: f64, series: usize) -> Result<Option<usize>> {
 }
 
 /// Validates the complete parameter series for Prometheus topk/bottomk/limitk semantics.
+///
+/// The values are read where the node holds them, in one pass. The caller keeps both the series the
+/// parameter arrived as and the values it was read into, so a second copy of the present ones would
+/// be memory neither of them is charged for.
 pub(crate) fn validate_topk_parameters(values: &[Option<f64>]) -> Result<()> {
-    let values: Vec<_> = values.iter().flatten().copied().collect();
-    let Some(max) = values.iter().copied().reduce(|a, b| {
-        if a.is_nan() || b.is_nan() {
-            f64::NAN
+    // A position the series decided nothing at is no parameter value, so only the present ones are
+    // read. NaN is tracked rather than folded into the bounds: it is a value Prometheus refuses
+    // outright, not the largest one, and it is refused even where every value is below 1.
+    let (mut max, mut min, mut nan) = (f64::NEG_INFINITY, f64::INFINITY, false);
+    for value in values.iter().flatten() {
+        if value.is_nan() {
+            nan = true;
         } else {
-            a.max(b)
+            max = max.max(*value);
+            min = min.min(*value);
         }
-    }) else {
-        return Ok(());
-    };
+    }
+    if nan {
+        return Err(DataFusionError::Execution("Parameter value is NaN".into()));
+    }
+    // A `k` below 1 selects nothing, so a value that would not fit an int64 is never read.
     if max < 1.0 {
         return Ok(());
     }
-    if values.iter().any(|value| value.is_nan()) {
-        return Err(DataFusionError::Execution("Parameter value is NaN".into()));
-    }
-    let min = values.iter().copied().reduce(f64::min).unwrap();
     if min <= -9_223_372_036_854_775_808.0 {
         return Err(DataFusionError::Execution(format!(
             "Scalar value {min} underflows int64"
         )));
     }
-    let max = values.iter().copied().reduce(f64::max).unwrap();
     if max >= 9_223_372_036_854_774_784.0 {
         return Err(DataFusionError::Execution(format!(
             "Scalar value {max} overflows int64"
