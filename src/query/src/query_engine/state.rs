@@ -101,6 +101,7 @@ pub struct QueryEngineState {
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
     experimental_native_promql: bool,
+    experimental_native_split_reduce: bool,
     /// Whether this engine's regions are reached in process, which is what lets a region take a
     /// `LogicalPlan` instead of Substrait bytes.
     in_process_region_transport: bool,
@@ -338,6 +339,7 @@ impl QueryEngineState {
             extension_rules,
             plugins,
             experimental_native_promql: options.experimental_native_promql,
+            experimental_native_split_reduce: options.experimental_native_split_reduce,
             in_process_region_transport,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -489,6 +491,10 @@ impl QueryEngineState {
 
     pub(crate) fn experimental_native_promql(&self) -> bool {
         self.experimental_native_promql
+    }
+
+    pub(crate) fn experimental_native_split_reduce(&self) -> bool {
+        self.experimental_native_split_reduce
     }
 
     /// Whether a region read is served in this process, so a region can take a `LogicalPlan`.

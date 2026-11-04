@@ -37,7 +37,7 @@ use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, Extension, LogicalPlanBuilder, Operator, Subquery,
-    binary_expr, col, lit,
+    UserDefinedLogicalNodeCore, binary_expr, col, lit,
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
@@ -50,7 +50,7 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
 use promql::extension_plan::{
-    FusedSeries, FusedSeriesBinding, HistogramFold, HistogramFoldOperation,
+    FusedSeries, FusedSeriesBinding, HistogramFold, HistogramFoldOperation, SplitDepth,
 };
 use regex::Regex;
 use store_api::data_source::DataSource;
@@ -358,6 +358,112 @@ fn hybrid_fused(scan: LogicalPlan, metric: &str) -> LogicalPlan {
     .unwrap();
     LogicalPlan::Extension(Extension {
         node: Arc::new(fused),
+    })
+}
+
+/// A split aggregate over `scan` at `depth`, compiled from `sum(some_metric)`.
+///
+/// The producer reads `scan` and exports state; at [`SplitDepth::Two`] the reducer folds that state
+/// into state and the merge reads the reducer's output instead of the producer's.
+fn split_aggregate_plan(scan: LogicalPlan, depth: SplitDepth) -> LogicalPlan {
+    let stmt = promql_parser::parser::EvalStmt {
+        expr: promql_parser::parser::parse("sum(some_metric)").unwrap(),
+        start: std::time::UNIX_EPOCH,
+        end: std::time::UNIX_EPOCH + std::time::Duration::from_secs(10),
+        interval: std::time::Duration::from_secs(1),
+        lookback_delta: std::time::Duration::from_secs(1),
+    };
+    let series = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec { name: "v0".into() }]),
+        eval_grid: None,
+    });
+    let tree = compile(&stmt, series, SeriesOrdering::KeyThenTime).unwrap();
+    let binding = FusedSeriesBinding {
+        grid: statement_grid(&stmt).unwrap(),
+        time_index: "ts".into(),
+        tags: vec![],
+        metric_name: Some(Arc::from("some_metric")),
+    };
+    let trees = FusedSeries::split_aggregate(&tree, "ts", depth)
+        .unwrap()
+        .expect("sum(some_metric) splits");
+    let mut input = LogicalPlan::Extension(Extension {
+        node: Arc::new(
+            FusedSeries::try_new_state_export(
+                Arc::from("sum(some_metric)"),
+                trees.partial,
+                binding.clone(),
+                vec![scan],
+            )
+            .unwrap(),
+        ),
+    });
+    if let Some(reduce) = trees.reduce {
+        input = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new_state_export(
+                    Arc::from("sum(some_metric)"),
+                    reduce,
+                    binding.clone(),
+                    vec![input],
+                )
+                .unwrap(),
+            ),
+        });
+    }
+    let output_schema = Arc::new(
+        datafusion_common::DFSchema::try_from(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            arrow::datatypes::Field::new("sum(v0)", DataType::Float64, true),
+        ]))
+        .unwrap(),
+    );
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(
+            FusedSeries::try_new(
+                Arc::from("sum(some_metric)"),
+                trees.final_tree,
+                binding,
+                vec![input],
+                output_schema,
+            )
+            .unwrap(),
+        ),
+    })
+}
+
+/// A one-table scan the split plans read.
+fn test_table_scan(name: &str) -> LogicalPlan {
+    LogicalPlanBuilder::scan(
+        name,
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(TestTable::table_with_name(0, name.to_string())),
+        ))),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap()
+}
+
+/// Rebuilds `plan`'s outer fused node over `child`.
+fn over(plan: &LogicalPlan, child: LogicalPlan) -> LogicalPlan {
+    let LogicalPlan::Extension(extension) = plan else {
+        panic!("a split aggregate is an extension node: {plan}");
+    };
+    let fused = extension
+        .node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .expect("a split aggregate's node is a FusedSeries");
+    let rebuilt = UserDefinedLogicalNodeCore::with_exprs_and_inputs(fused, Vec::new(), vec![child])
+        .expect("the node holds the one input it is given");
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(rebuilt),
     })
 }
 
@@ -708,6 +814,95 @@ fn a_naming_projection_does_not_widen_the_in_process_exception() {
     assert!(
         !is_in_process_plan(&foreign),
         "a rename above an ordinary scan is not the exception"
+    );
+}
+
+/// The two-level split is admitted in process, and only while both state links are the stages they
+/// claim: an ordinary values producer in either one is not the chain the exception covers.
+///
+/// The exception is what keeps the reducer and the merge on the frontend while the producer rides
+/// inside the region, so it has to name the exact chain. A `SeriesFrame` node can also carry
+/// evaluated values, so the frames' formats alone do not establish that either link exports state.
+#[test]
+fn the_two_level_split_is_admitted_in_process() {
+    let scan = || test_table_scan("t");
+    let one = split_aggregate_plan(scan(), SplitDepth::One);
+    let two = split_aggregate_plan(scan(), SplitDepth::Two);
+    assert!(is_in_process_plan(&one), "the one-hop split stays admitted");
+    assert!(is_in_process_plan(&two), "the two-hop split is admitted");
+
+    // A one-hop split is not the two-hop chain: a merge over a reducer is one node deeper, so
+    // naming the chain exactly means the shorter one keeps its own (unchanged) shape.
+    let reduce = {
+        let LogicalPlan::Extension(extension) = &two else {
+            unreachable!()
+        };
+        extension
+            .node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap()
+            .children()[0]
+            .clone()
+    };
+
+    // An ordinary values producer where the reducer was.
+    let values = hybrid_fused(scan(), "some_metric");
+    let swapped_reduce = over(&two, values.clone());
+    assert!(
+        !is_in_process_plan(&swapped_reduce),
+        "a merge over a values producer is not the state chain"
+    );
+
+    // An ordinary values producer where the producer was: the reducer now folds samples.
+    let swapped_producer = over(&reduce, values);
+    let chain = over(&two, swapped_producer);
+    assert!(
+        !is_in_process_plan(&chain),
+        "a reducer over a values producer is not the state chain"
+    );
+
+    // A merged values node in the middle (a `Final` reading state over ordinary values) keeps the
+    // chain's shape but loses the stage the link claims.
+    let renamed = LogicalPlanBuilder::from(two.clone())
+        .project(vec![col("sum(v0)")])
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        is_in_process_plan(&renamed),
+        "the naming projection of the split keeps the exception"
+    );
+}
+
+/// A closed plan keeps the encoding checks for its state nodes: the exception is what admits them,
+/// so without in-process transport the plan is still refused as a whole.
+#[test]
+fn a_closed_two_level_split_keeps_the_encoding_refusal() {
+    let split = split_aggregate_plan(test_table_scan("t"), SplitDepth::Two);
+    assert!(
+        DFLogicalSubstraitConvertor
+            .encode(&split, DefaultSerializer)
+            .is_err(),
+        "a state-exporting node has no wire form: {split}"
+    );
+
+    let closed = PlanRewriter::new(&split, false);
+    assert!(
+        !closed.in_process_fused_root,
+        "a closed plan is not the in-process exception"
+    );
+    assert!(
+        !closed.whole_plan_encodable,
+        "a closed plan keeps the encodability gate: its state nodes have no wire form"
+    );
+
+    let in_process = PlanRewriter::new(&split, true);
+    assert!(in_process.in_process_fused_root, "{split}");
+    assert!(
+        !in_process.whole_plan_encodable,
+        "the admitted chain has no wire form either: the in-process exception, not an encoding, is \
+         what carries it"
     );
 }
 

@@ -84,7 +84,7 @@ mod frame_output;
 
 use super::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
-    series_to_record_batch,
+    SplitDepth, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::{SeriesRepartitionExec, SeriesRouting};
@@ -943,7 +943,11 @@ fn state_tree(stage: AggregateStage, input: NativeType) -> NativeTree {
         output: child_type,
     };
     let output = match stage {
-        AggregateStage::Partial => NativeType::AggregateState(state),
+        // The two stages that hand state on are the same shape here: one folds values into it and
+        // the other folds state into it.
+        AggregateStage::Partial | AggregateStage::PartialReduce => {
+            NativeType::AggregateState(state)
+        }
         AggregateStage::Final | AggregateStage::Complete => {
             NativeType::Samples(Arc::new(SeriesSchema {
                 fields: raw_schema().fields.clone(),
@@ -1803,7 +1807,10 @@ fn state_export_decode_rejects_schema_and_format_mismatch() {
     let wrong_format = mutate_envelope_payload(&bytes, |payload| {
         payload.format = FusedOutputFormat::PlainRows;
     });
-    assert_decode_error(&wrong_format, "Partial stage requires SeriesFrame output");
+    assert_decode_error(
+        &wrong_format,
+        "state-producing stage requires SeriesFrame output",
+    );
 }
 
 #[test]
@@ -5856,7 +5863,10 @@ async fn partial_root_requires_frame_output() {
         FusedOutputFormat::PlainRows,
     )
     .expect_err("Partial rows output is refused");
-    assert!(error.to_string().contains("Partial stage"));
+    assert!(
+        error.to_string().contains("state-producing stage"),
+        "{error}"
+    );
 }
 
 /// `EXPLAIN` says nothing extra about the row table and names the frame output.
@@ -6613,9 +6623,10 @@ fn histogram_over_sum_splits_and_declares_complete_bucket_routing() {
             Grouping::Without(Arc::from([Arc::from(HOST)])),
         ] {
             let tree = histogram_over_sum_tree(group.clone(), function);
-            let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME)
+            let trees = FusedSeries::split_aggregate(&tree, TIME, SplitDepth::One)
                 .unwrap()
                 .expect("histogram over sum must split");
+            let (partial, final_tree) = (trees.partial, trees.final_tree);
             assert!(matches!(
                 &partial.root().expr,
                 NativeExpr::Aggregate { op, .. }
@@ -6697,7 +6708,9 @@ fn histogram_split_declines_only_rewrites_that_change_the_routing_key() {
         })
         .unwrap();
         assert_eq!(
-            FusedSeries::split_aggregate(&tree, TIME).unwrap().is_some(),
+            FusedSeries::split_aggregate(&tree, TIME, SplitDepth::One)
+                .unwrap()
+                .is_some(),
             accepted,
             "{dst}"
         );
@@ -6749,7 +6762,9 @@ fn histogram_split_allows_single_owner_routing_label_rewrites() {
             };
             let tree = NativeTree::try_new(root).unwrap();
             assert_eq!(
-                FusedSeries::split_aggregate(&tree, TIME).unwrap().is_some(),
+                FusedSeries::split_aggregate(&tree, TIME, SplitDepth::One)
+                    .unwrap()
+                    .is_some(),
                 accepted,
                 "group {group:?}, before histogram: {before_histogram}"
             );
@@ -6802,7 +6817,10 @@ fn histogram_final_replaces_incompatible_state_router() {
         ),
     ] {
         let tree = histogram_over_sum_tree(group, HistogramFunction::Quantile(0.5));
-        let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
+        let trees = FusedSeries::split_aggregate(&tree, TIME, SplitDepth::One)
+            .unwrap()
+            .unwrap();
+        let (partial, final_tree) = (trees.partial, trees.final_tree);
         let partial_node = FusedSeries::try_new_state_export(
             Arc::from("partial"),
             partial.clone(),
@@ -6880,7 +6898,10 @@ async fn histogram_split_routes_whole_state_batches_and_preserves_each_bound() {
             Arc::from([Arc::from("le")])
         };
         let tree = histogram_over_sum_tree(Grouping::By(group), HistogramFunction::Quantile(0.5));
-        let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
+        let trees = FusedSeries::split_aggregate(&tree, TIME, SplitDepth::One)
+            .unwrap()
+            .unwrap();
+        let (partial, final_tree) = (trees.partial, trees.final_tree);
         let partitions = vec![
             frames(&[
                 labelled_chunk(
@@ -7067,7 +7088,10 @@ async fn histogram_split_colocates_metadata_distinct_results_before_their_merge(
         output,
     })
     .unwrap();
-    let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
+    let trees = FusedSeries::split_aggregate(&tree, TIME, SplitDepth::One)
+        .unwrap()
+        .unwrap();
+    let (partial, final_tree) = (trees.partial, trees.final_tree);
     let build = |overlap: bool| {
         let mut partitions = vec![Vec::new(), Vec::new()];
         for (partition, kind) in ["a", "b"].into_iter().enumerate() {

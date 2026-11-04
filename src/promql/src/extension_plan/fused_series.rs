@@ -106,6 +106,8 @@ use crate::vector_match::{DuplicateEvidence, MatchingLabels};
 #[cfg(test)]
 mod tests;
 
+pub use crate::native::split::{SplitDepth, SplitTrees};
+
 /// The label a metric name is stored under, which is not a tag column of the input.
 const METRIC_NAME: &str = "__name__";
 
@@ -247,7 +249,7 @@ fn evaluated_output(tree: &NativeTree) -> DataFusionResult<Arc<SeriesSchema>> {
 fn state_frame_output_schema(tree: &NativeTree) -> DataFusionResult<SchemaRef> {
     let NativeType::AggregateState(state) = &tree.root().output else {
         return Err(DataFusionError::Plan(
-            "FusedSeries Partial root does not produce aggregate state".into(),
+            "FusedSeries state-producing root does not produce aggregate state".into(),
         ));
     };
     let schema = Arc::new(SeriesSchema {
@@ -277,12 +279,12 @@ fn output_frame_schema(
     root_kind: FusedInputKind,
 ) -> DataFusionResult<SchemaRef> {
     match &tree.root().expr {
-        NativeExpr::Aggregate { op, .. }
-            if op.stage == crate::native::plan::AggregateStage::Partial =>
-        {
+        // A `Partial` producer and a `PartialReduce` reducer both hand state on, so both publish
+        // state frames rather than series frames.
+        NativeExpr::Aggregate { op, .. } if op.stage.produces_state() => {
             if root_kind != FusedInputKind::AggregateState {
                 return Err(DataFusionError::Plan(
-                    "FusedSeries Partial root must produce aggregate state".into(),
+                    "FusedSeries state-producing root must produce aggregate state".into(),
                 ));
             }
             state_frame_output_schema(tree)
@@ -547,15 +549,17 @@ impl FusedSeries {
         )
     }
 
-    /// The two trees a native aggregate over `tree` is split into, if it can be split at all.
+    /// The trees a native aggregate over `tree` is split into, if it can be split at all.
     ///
     /// The first runs where the series are read and answers the state each partition folded; the
-    /// second runs where every partition's state has arrived and answers the statement's series.
-    /// `time_index` is the column the tree's grid points are reported under.
+    /// last runs where every partition's state has arrived and answers the statement's series.
+    /// `time_index` is the column the tree's grid points are reported under, and `depth` decides
+    /// whether a reducer folds the exported state once more before that merge.
     pub fn split_aggregate(
         tree: &NativeTree,
         time_index: &str,
-    ) -> DataFusionResult<Option<(NativeTree, NativeTree)>> {
+        depth: SplitDepth,
+    ) -> DataFusionResult<Option<SplitTrees>> {
         let fields = crate::native::split::prefix_fields(tree)?;
         let split = match crate::native::split::split(tree.root(), &fields, time_index) {
             Ok(Some(split)) => split,
@@ -565,9 +569,7 @@ impl FusedSeries {
             Err(DataFusionError::NotImplemented(_)) => return Ok(None),
             Err(error) => return Err(error),
         };
-        Ok(split
-            .into_trees()?
-            .map(|trees| (trees.partial, trees.final_tree)))
+        split.into_trees(depth)
     }
 
     /// The evaluated series-frame schema declared by a native tree's root.
@@ -593,11 +595,11 @@ impl FusedSeries {
         // built.
         if matches!(
             &tree.root().expr,
-            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+            NativeExpr::Aggregate { op, .. } if op.stage.produces_state()
         ) && format != FusedOutputFormat::SeriesFrame
         {
             return Err(DataFusionError::Plan(
-                "FusedSeries Partial stage requires SeriesFrame output".into(),
+                "FusedSeries state-producing stage requires SeriesFrame output".into(),
             ));
         }
         if format == FusedOutputFormat::SeriesFrame {
@@ -809,7 +811,7 @@ impl FusedSeries {
                     // derived from the Final grouping and the suffix, not matching-key classes.
                     let (group, policy) = state_group.as_ref().ok_or_else(|| {
                         DataFusionError::Plan(
-                            "FusedSeries reads aggregate state but holds no Final aggregate".into(),
+                            "FusedSeries reads aggregate state but holds no aggregate that folds it".into(),
                         )
                     })?;
                     let count = input.properties().partitioning.partition_count();
@@ -1486,9 +1488,13 @@ pub fn input_locality(root: &NativeNode) -> InputLocality {
     // folded; the `Final` half above the exchange is what needs every contribution in one place.
     // Reading it as a global fold instead would gather the scan into one partition and throw away
     // the parallelism the split exists to keep.
+    //
+    // A `PartialReduce` is partition-local in the same sense: it folds the state rows that reached
+    // its own partition and hands the folded state on, and the merge above it is what needs every
+    // contribution of a group on one owner.
     if matches!(
         &root.expr,
-        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+        NativeExpr::Aggregate { op, .. } if op.stage.produces_state()
     ) {
         return InputLocality::PartitionLocal;
     }
@@ -1571,15 +1577,23 @@ fn tree_inputs_for_locality(root: &NativeNode) -> Vec<&crate::native::plan::Boun
     inputs
 }
 
-/// The owner count and routing policy required by a Final aggregate and its suffix.
+/// The owner count and routing policy required by a merge over aggregate state and its suffix.
 ///
 /// State rows already carry the cut's full group labels. Histogram suffixes need a coarser key:
 /// every bound of one histogram and every histogram whose metadata-free outputs collide must
 /// meet, while the Final kernel still folds separately by the original group labels.
+///
+/// A reducer is the other node that reads state: it folds the state it is handed into state again,
+/// so its input needs the same owners a `Final` does, derived from the same binding. The two agree
+/// because a reduce hands on exactly the state it was handed - the group the `Final` above it
+/// finalizes by is the group the reduce folds by.
 fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
     fn find(node: &NativeNode, histogram: bool) -> Option<(&Grouping, bool)> {
         match &node.expr {
             NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final => {
+                Some((&op.group, histogram))
+            }
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::PartialReduce => {
                 Some((&op.group, histogram))
             }
             NativeExpr::Vector { input, op } => find(
@@ -2304,10 +2318,10 @@ impl FusedSeriesExec {
             NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)?;
         let output_series = tree.root().output.samples();
         let scalar_root = matches!(tree.root().output, NativeType::Scalar(_));
-        let partial_root = matches!(&tree.root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial);
-        if partial_root && format != FusedOutputFormat::SeriesFrame {
+        let state_root = matches!(&tree.root().expr, NativeExpr::Aggregate { op, .. } if op.stage.produces_state());
+        if state_root && format != FusedOutputFormat::SeriesFrame {
             return Err(DataFusionError::Plan(
-                "FusedSeries Partial stage requires SeriesFrame output".into(),
+                "FusedSeries state-producing stage requires SeriesFrame output".into(),
             ));
         }
         let frame_schema = if format == FusedOutputFormat::SeriesFrame {
@@ -2332,7 +2346,7 @@ impl FusedSeriesExec {
         } else {
             false
         };
-        let classification = if partial_root || frame_schema {
+        let classification = if state_root || frame_schema {
             Vec::new()
         } else if scalar_root {
             let scalar_fields = scalar_root_fields(&output_schema, &tags, &time_column)?;
@@ -2384,7 +2398,8 @@ impl FusedSeriesExec {
             if state && count > 1 {
                 let (owners, policy) = state_routing(tree.root()).ok_or_else(|| {
                     DataFusionError::Plan(
-                        "FusedSeries reads aggregate state but holds no Final aggregate".into(),
+                        "FusedSeries reads aggregate state but holds no aggregate that folds it"
+                            .into(),
                     )
                 })?;
                 if owners == StateGroup::Single
@@ -2512,7 +2527,7 @@ impl FusedSeriesExec {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(partition_count),
-            if partial_root || frame_schema {
+            if state_root || frame_schema {
                 // Partial aggregate state and canonical frame series are emitted only after EOF.
                 EmissionType::Final
             } else {
@@ -2798,16 +2813,16 @@ impl ExecutionPlan for FusedSeriesExec {
             .map(|source| state.input_ids(source).collect())
             .collect();
         // One reading of the root decides both the mode and its binding, so the mode cannot
-        // disagree with its binding: a Partial root without state output is a plan error.
+        // disagree with its binding: a state-producing root without state output is a plan error.
         let state_binding = match (&self.tree.root().expr, &self.tree.root().output) {
             (NativeExpr::Aggregate { op, .. }, NativeType::AggregateState(binding))
-                if op.stage == AggregateStage::Partial =>
+                if op.stage.produces_state() =>
             {
                 Some(Arc::clone(binding))
             }
-            (NativeExpr::Aggregate { op, .. }, _) if op.stage == AggregateStage::Partial => {
+            (NativeExpr::Aggregate { op, .. }, _) if op.stage.produces_state() => {
                 return Err(DataFusionError::Plan(
-                    "FusedSeries Partial root must produce aggregate state".into(),
+                    "FusedSeries state-producing root must produce aggregate state".into(),
                 ));
             }
             _ => None,
@@ -2853,7 +2868,7 @@ impl ExecutionPlan for FusedSeriesExec {
             if state_mode {
                 let binding = state_binding.as_ref().ok_or_else(|| {
                     DataFusionError::Plan(
-                        "FusedSeries Partial root has no aggregate-state binding".into(),
+                        "FusedSeries state-producing root has no aggregate-state binding".into(),
                     )
                 })?;
                 let schema = Arc::new(SeriesSchema {
@@ -2868,7 +2883,9 @@ impl ExecutionPlan for FusedSeriesExec {
                 Ok(pack_aggregate_state(
                     source,
                     state_schema.ok_or_else(|| {
-                        DataFusionError::Plan("FusedSeries Partial state schema is missing".into())
+                        DataFusionError::Plan(
+                            "FusedSeries state-producing schema is missing".into(),
+                        )
                     })?,
                     schema,
                 )?)

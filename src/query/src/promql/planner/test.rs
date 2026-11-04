@@ -501,6 +501,7 @@ async fn plan_direct_or(
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_split_reduce: false,
     };
     planner
         .or_operator(
@@ -591,6 +592,7 @@ async fn mixed_direct_or(histogram_on_left: bool) -> (PromPlanner, LogicalPlan) 
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_split_reduce: false,
     };
     let left_context = direct_or_context("lhs", &["job", "k"], "v");
     let right_context = direct_or_context("rhs", &["job", "k"], "v");
@@ -664,6 +666,7 @@ async fn mixed_aggregate_input(histograms: Vec<NativeHistogram>) -> (PromPlanner
         },
         promql_annotations: None,
         native_fused: false,
+        native_split_reduce: false,
     };
     (planner, plan)
 }
@@ -2180,6 +2183,7 @@ async fn execute_no_match_discovery(query: &str) -> (LogicalPlan, Vec<RecordBatc
         &build_query_engine_state(),
         None,
         true,
+        false,
     )
     .await
     .unwrap();
@@ -2289,7 +2293,33 @@ async fn native_metric_discovery_without_a_matching_metric_answers_absent_and_or
 /// time index `timestamp`, one field `field_0` — which is the shape the selector context resolves
 /// to a raw series schema of one field.
 async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan {
-    let table_provider = build_test_table_provider_with_options(
+    let table_provider = native_test_table_provider().await;
+    build_native_fused_plan_with_provider(query, native_fused, table_provider).await
+}
+
+/// The same plan, with the split aggregate's second state hop asked for or not.
+async fn build_native_fused_plan_with_split_reduce(
+    query: &str,
+    native_fused: bool,
+    native_split_reduce: bool,
+) -> LogicalPlan {
+    let table_provider = native_test_table_provider().await;
+    let eval_stmt = build_eval_stmt(query);
+    PromPlanner::stmt_to_plan_with_annotations(
+        table_provider,
+        &eval_stmt,
+        &build_query_engine_state(),
+        None,
+        native_fused,
+        native_split_reduce,
+    )
+    .await
+    .unwrap()
+}
+
+/// The one-table provider every native planner test plans against.
+async fn native_test_table_provider() -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
         1,
         1,
@@ -2299,8 +2329,7 @@ async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan
         ConcreteDataType::float64_datatype(),
         NATIVE_ENGINE,
     )
-    .await;
-    build_native_fused_plan_with_provider(query, native_fused, table_provider).await
+    .await
 }
 
 async fn build_native_fused_plan_with_provider(
@@ -2315,6 +2344,7 @@ async fn build_native_fused_plan_with_provider(
         &build_query_engine_state(),
         None,
         native_fused,
+        false,
     )
     .await
     .unwrap()
@@ -3784,6 +3814,7 @@ async fn native_fused_partitioned_pair_requires_per_selector_raw_sources() {
         &state,
         None,
         true,
+        false,
     )
     .await
     .unwrap();
@@ -3898,6 +3929,7 @@ async fn native_fused_cross_table_union_with_a_colliding_column_falls_back() {
             &build_query_engine_state(),
             None,
             native_fused,
+            false,
         )
         .await
         .expect_err("the existing plan refuses a non-string union label");
@@ -4334,6 +4366,191 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
     }
 }
 
+/// Whether `plan` is a `FusedSeries` node.
+fn is_fused(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<FusedSeries>())
+}
+
+/// How many `FusedSeries` nodes `plan` holds.
+fn fused_count(plan: &LogicalPlan) -> usize {
+    usize::from(is_fused(plan))
+        + plan
+            .inputs()
+            .iter()
+            .map(|input| fused_count(input))
+            .sum::<usize>()
+}
+
+/// The second state hop is opt-in, and the plan without it is the one the split has always built.
+///
+/// With the flag off the statement plans exactly as it did before the hop existed: a `Final` node
+/// over the `Partial` producer. With it on a `PartialReduce` sits between them, so the state is
+/// folded by one more owner before any value is finished. Both routers carry the owner width and
+/// policy the `Final` derives from its own grouping, which is what says the extra hop folded state
+/// for the owners that finish it rather than for some other key.
+#[tokio::test]
+async fn native_split_reduce_adds_a_reducer_between_the_split_halves() {
+    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::physical_plan::displayable;
+    use datafusion::physical_plan::empty::EmptyExec;
+    use promql::extension_plan::{FusedOutputFormat, SeriesRepartitionExec, SeriesRouting};
+    use store_api::region_engine::RawLabelSource;
+
+    /// The state routers a physical plan holds, as `(owners, policy)` pairs.
+    fn routers(plan: &Arc<dyn ExecutionPlan>) -> Vec<(usize, SeriesRouting)> {
+        fn visit(plan: &Arc<dyn ExecutionPlan>, found: &mut Vec<(usize, SeriesRouting)>) {
+            if let Some(router) = plan.downcast_ref::<SeriesRepartitionExec>() {
+                found.push((router.outputs(), router.routing_policy().clone()));
+            }
+            for child in plan.children() {
+                visit(child, found);
+            }
+        }
+        let mut found = Vec::new();
+        visit(plan, &mut found);
+        found
+    }
+
+    /// The merge's physical plan over a stand-in state producer of `width` owners.
+    fn final_plan(
+        node: &FusedSeries,
+        state_schema: datafusion::arrow::datatypes::SchemaRef,
+        width: usize,
+    ) -> Arc<dyn ExecutionPlan> {
+        let input = Arc::new(EmptyExec::new(state_schema)) as Arc<dyn ExecutionPlan>;
+        node.to_execution_plan_with_parallelism(
+            vec![(input, RawLabelSource::Explicit, SeriesOrdering::Contiguous)],
+            width,
+        )
+        .unwrap()
+    }
+
+    for query in ["sum(some_metric)", "sum by (tag_0) (some_metric)"] {
+        // Today's plan: the flag off builds the same tree, node for node.
+        let today = build_native_fused_plan(query, true).await;
+        let off = build_native_fused_plan_with_split_reduce(query, true, false).await;
+        assert_eq!(
+            today.display_indent().to_string(),
+            off.display_indent().to_string(),
+            "`{query}`: the flag off must plan what it planned without the flag"
+        );
+        assert_eq!(today, off, "`{query}`: the flag off changed the plan");
+        assert_eq!(2, fused_count(&off), "`{query}`: {off}");
+
+        // The flag on: one more stage, and that stage is the reducer.
+        let on = build_native_fused_plan_with_split_reduce(query, true, true).await;
+        assert_eq!(
+            3,
+            fused_count(&on),
+            "`{query}`: the split must run a producer, a reducer and a merge: {on}"
+        );
+        let final_node = find_final_split(&on).expect("the merge is the outer node");
+        let reduce = partial_below(final_node).expect("the merge reads the reducer");
+        assert_eq!(
+            FusedOutputFormat::SeriesFrame,
+            reduce.format(),
+            "`{query}`: the reducer publishes state frames"
+        );
+        let NativeExpr::Aggregate { op, .. } = &reduce.tree().root().expr else {
+            panic!(
+                "`{query}`: the reducer's root is an aggregate: {}",
+                reduce.tree()
+            );
+        };
+        assert_eq!(AggregateStage::PartialReduce, op.stage, "`{query}`");
+        assert!(
+            matches!(&reduce.tree().root().output, NativeType::AggregateState(_)),
+            "`{query}`: the reducer hands on state"
+        );
+        let partial = partial_below(reduce).expect("the reducer reads the producer");
+        assert!(matches!(
+            &partial.tree().root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+        ));
+        assert!(matches!(partial.children(), [LogicalPlan::TableScan(_)]));
+        // The two state links are one binding: the reducer folds the state the producer exported and
+        // hands on exactly what the merge finalizes.
+        assert_eq!(
+            partial.tree().root().output,
+            reduce.tree().root().output,
+            "`{query}`: the reducer must hand on the state it is handed"
+        );
+
+        // The physical shape `EXPLAIN` prints, with the reducer's input as a stand-in producer.
+        let width = 4;
+        let producer =
+            Arc::new(EmptyExec::new(Arc::clone(reduce.schema().inner()))) as Arc<dyn ExecutionPlan>;
+        let reduce_exec = reduce
+            .to_execution_plan_with_parallelism(
+                vec![(
+                    producer,
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous,
+                )],
+                width,
+            )
+            .unwrap();
+        let merge_exec = final_node
+            .to_execution_plan_with_parallelism(
+                vec![(
+                    reduce_exec,
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous,
+                )],
+                width,
+            )
+            .unwrap();
+        let explain = displayable(merge_exec.as_ref()).indent(true).to_string();
+        assert!(
+            explain.contains("partial_reduce"),
+            "`{query}`: EXPLAIN must show the reducer: {explain}"
+        );
+        // Outermost first: the merge's router, then the reducer's own.
+        let found = routers(&merge_exec);
+        // The merge routes exactly as it did without the reducer.
+        let off_final = find_final_split(&off).expect("the flag-off plan still splits");
+        let off_partial = partial_below(off_final).expect("the merge reads the producer");
+        let off_plan = final_plan(off_final, Arc::clone(off_partial.schema().inner()), width);
+        let off_routers = routers(&off_plan);
+        if query.contains("by (tag_0)") {
+            assert_eq!(
+                2,
+                found.len(),
+                "`{query}`: one router before the reducer and one before the merge: {explain}"
+            );
+            let (merge_owners, merge_policy) = found[0].clone();
+            let (reducer_owners, reducer_policy) = found[1].clone();
+            assert_eq!(
+                (width, SeriesRouting::CanonicalLabels),
+                (reducer_owners, reducer_policy.clone()),
+                "`{query}`: the reducer's input is routed by the cut's group: {explain}"
+            );
+            assert_eq!(
+                (reducer_owners, reducer_policy),
+                (merge_owners, merge_policy.clone()),
+                "`{query}`: the merge's owners are the reducer's: {explain}"
+            );
+            assert_eq!(
+                vec![(width, SeriesRouting::CanonicalLabels)],
+                off_routers,
+                "`{query}`: the merge without the reducer: {off_plan:?}"
+            );
+            assert_eq!(
+                off_routers[0],
+                (merge_owners, merge_policy),
+                "`{query}`: the merge's routing must not change with the reducer"
+            );
+        } else {
+            // One group has one owner, so neither hop needs an exchange: the width the merge asks
+            // for is the width it is handed, exactly as it was without the reducer.
+            assert!(
+                found.is_empty() && off_routers.is_empty(),
+                "`{query}`: a single owner needs no state router: {explain}\n{off_plan:?}"
+            );
+        }
+    }
+}
+
 /// A data-free vector stays in the gathered parent while the data-bearing prefix is cut.
 #[tokio::test]
 async fn native_fused_data_free_vector_does_not_block_segmentation() {
@@ -4508,9 +4725,10 @@ async fn native_split_and_complete_aggregate_produce_identical_values() {
     )
     .await;
     let state = build_query_engine_state();
-    let split = PromPlanner::stmt_to_plan_with_annotations(provider, &stmt, &state, None, true)
-        .await
-        .unwrap();
+    let split =
+        PromPlanner::stmt_to_plan_with_annotations(provider, &stmt, &state, None, true, false)
+            .await
+            .unwrap();
     let final_node = find_final_split(&split).expect("the query must use a split aggregate");
     let partial = partial_below(final_node).unwrap();
     let complete = FusedSeries::try_new(
@@ -4902,6 +5120,7 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
         .unwrap(),
         promql_annotations: None,
         native_fused: true,
+        native_split_reduce: false,
     };
     let PromExpr::Binary(binary) =
         parser::parse("histogram_quantile(0.9, m) / histogram_quantile(0.5, m)").unwrap()
@@ -5093,6 +5312,7 @@ async fn native_fused_clamp_aggregate_is_admitted() {
         &state,
         None,
         true,
+        false,
     )
     .await
     .unwrap();
@@ -5116,6 +5336,7 @@ async fn native_fused_clamp_aggregate_is_admitted() {
         &operator_eval_stmt(query),
         &state,
         None,
+        false,
         false,
     )
     .await;
@@ -6991,6 +7212,7 @@ async fn comparison_binary_join_uses_tsid_and_keeps_it_in_filtered_result() {
         ctx: PromPlannerContext::from_eval_stmt(&eval_stmt).unwrap(),
         promql_annotations: None,
         native_fused: false,
+        native_split_reduce: false,
     };
     let plan = planner
         .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
@@ -8439,6 +8661,7 @@ async fn mixed_histogram_helpers_report_annotations() {
             &state,
             Some(collector.clone()),
             false,
+            false,
         )
         .await
         .unwrap();
@@ -8599,6 +8822,7 @@ async fn mixed_or_topk_bottomk_ignore_native_histograms() {
             &operator_eval_stmt(&format!("{op}(1, lf or on(tag) lh)")),
             &state,
             Some(collector.clone()),
+            false,
             false,
         )
         .await
@@ -8938,6 +9162,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
         },
         promql_annotations: Some(collector.clone()),
         native_fused: false,
+        native_split_reduce: false,
     };
     let input = LogicalPlan::Extension(Extension {
         node: Arc::new(
@@ -10268,6 +10493,7 @@ async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
         ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")).unwrap(),
         promql_annotations: None,
         native_fused: false,
+        native_split_reduce: false,
     };
     planner.ctx.time_index_column = Some("timestamp".to_string());
     planner.ctx.start = 1_000;
@@ -11109,6 +11335,7 @@ async fn test_direct_or_numeric_value_types() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_split_reduce: false,
     };
     let left_context = direct_or_context("lhs", &["job"], "v");
     let right_context = direct_or_context("rhs", &["job"], "v");
@@ -11597,6 +11824,7 @@ async fn malformed_classic_bucket_does_not_drop_native_histogram() {
         &state,
         Some(collector.clone()),
         false,
+        false,
     )
     .await
     .unwrap();
@@ -11680,6 +11908,7 @@ async fn test_mixed_binary_operator_reports_only_dropped_samples() {
             &operator_eval_stmt(query),
             &state,
             Some(annotations.clone()),
+            false,
             false,
         )
         .await
@@ -12343,6 +12572,7 @@ async fn test_mixed_or_value_aliases_do_not_replace_labels() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_split_reduce: false,
     };
     let left = LogicalPlanBuilder::from(scan(&left))
         .project(vec![

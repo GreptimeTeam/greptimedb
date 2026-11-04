@@ -286,6 +286,66 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
     );
 }
 
+/// A split aggregate shows every stage it was split into, so an EXPLAIN of one reads as the hops
+/// between a producer, a reducer and the merge that finishes it.
+///
+/// The reducer's line differs from the `final` above it only by the stage it names: the state it is
+/// handed and the state it hands on are one binding, which is why the extra hop is what the display
+/// has to make visible.
+#[test]
+fn a_split_aggregate_shows_every_stage_it_runs() {
+    use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
+
+    let out = grid(0, 60_000, 4);
+    let state = Arc::new(super::super::plan::AggregateStateSchema {
+        group: Grouping::By(Arc::new(["job".into()])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+        accumulators: fields(),
+        grid: Arc::clone(&out),
+    });
+    let state_input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: NativeType::AggregateState(Arc::clone(&state)),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: NativeType::AggregateState(Arc::clone(&state)),
+    };
+    let reduce = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(state_input),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::PartialReduce,
+            },
+        },
+        output: NativeType::AggregateState(Arc::clone(&state)),
+    };
+    let merge = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(reduce),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Final,
+            },
+        },
+        output: evaluated(Arc::clone(&out)),
+    };
+    let tree = NativeTree::try_new(merge).unwrap();
+    assert_eq!(
+        tree.to_string(),
+        shown(&[
+            "NativeTree",
+            "  root Aggregate sum by [job] final",
+            "    input Aggregate sum by [job] partial_reduce",
+            "      input Input aggregate state",
+        ])
+    );
+}
+
 /// An aggregate and a binary operation name the binding they were compiled with, which is what
 /// makes the line worth reading.
 #[test]

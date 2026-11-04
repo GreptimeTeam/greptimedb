@@ -96,6 +96,9 @@ use crate::standalone::GreptimeDbStandaloneBuilder;
 /// The per-request key that turns the native route on for one query. The planner's own constant is
 /// crate-private, so it is repeated here.
 const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
+/// The per-request key that asks the native aggregate split for a second state hop. Repeated for the
+/// same reason as the key above.
+const NATIVE_SPLIT_REDUCE_EXTENSION_KEY: &str = "query.experimental_native_split_reduce";
 /// The physical name of the fused producer.
 const FUSED_EXEC_NAME: &str = "FusedSeriesExec";
 /// The metric a fused producer registers for the values its own root node produced, per partition.
@@ -489,11 +492,23 @@ async fn run_query(
     native: bool,
     observer: &NativePlanObserver,
 ) -> (QueryResult, NativeCapture) {
+    run_query_with_split_reduce(instance, promql, native, false, observer).await
+}
+
+/// The same run, also asking for the split aggregate's second state hop.
+async fn run_query_with_split_reduce(
+    instance: &Arc<Instance>,
+    promql: &str,
+    native: bool,
+    split_reduce: bool,
+    observer: &NativePlanObserver,
+) -> (QueryResult, NativeCapture) {
     let sql = tql_eval(promql);
     let mark = observer.mark();
     let mut query_ctx = QueryContext::with_db_name(None);
     query_ctx.set_extension(QUERY_PARALLELISM_HINT, SCAN_PARTITIONS.to_string());
     query_ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, native.to_string());
+    query_ctx.set_extension(NATIVE_SPLIT_REDUCE_EXTENSION_KEY, split_reduce.to_string());
     let output = instance
         .do_query(&sql, Arc::new(query_ctx))
         .await
@@ -2063,6 +2078,151 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         // contributions. Keep the per-partition activity check above; contribution totals belong
         // to the exact native root input_samples metric checked here.
     }
+}
+
+/// The second state hop of the split is opt-in per request, and it answers what the first one does.
+///
+/// The engine-wide option is on for the whole engine, while each query decides for itself: the same
+/// statement runs once with the request extension off, which is the split as it has always been, and
+/// once with it on, which puts a `PartialReduce` between the four producers and the merge. The
+/// answers have to agree, because both fold the same states - only the hop that folds them differs -
+/// and the executed plans have to differ, because the hop is what the request asked for. Both runs
+/// are native, so the row comparison is between two state bridges rather than against the legacy
+/// plan, which the fixture's hand-derived answer covers separately.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_split_reduce_matches_the_one_level_split() {
+    common_telemetry::init_default_ut_logging();
+
+    let observer = Arc::new(NativePlanObserver::default());
+    let plugins = Plugins::new();
+    plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_split_reduce")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            // The engine-wide switch alone changes no plan: the request below still has to ask for
+            // the hop, which is what lets one engine run both shapes.
+            experimental_native_split_reduce: true,
+            ..Default::default()
+        })
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = Arc::clone(standalone.fe_instance());
+    setup_fixture(&instance).await;
+
+    // `job = a` holds the counter series with rates 1, 3 and 5, and `job = b` the ones with 2 and
+    // 4, so a group's answer is the sum of rates that only a merge over every partition reaches.
+    const GROUP_A: &[(&str, &str)] = &[("job", "a")];
+    const GROUP_B: &[(&str, &str)] = &[("job", "b")];
+    let promql = format!("sum by (job) (rate({COUNTER_TABLE}[5m]))");
+    let expected = [(GROUP_A, 9.0), (GROUP_B, 6.0)]
+        .iter()
+        .map(|(labels, value)| ResultRow {
+            ts_millis: EVAL_MILLIS,
+            labels: labels
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect(),
+            value: Some(*value),
+        })
+        .collect::<Vec<_>>();
+
+    // One level: the producers export state and the merge finishes it.
+    let (one_level, one_capture) = run_query(&instance, &promql, true, &observer).await;
+    assert_rows(&one_level.rows, &expected, &format!("one-level `{promql}`"));
+    assert_eq!(
+        1,
+        one_capture.fused.len(),
+        "`{promql}`: one producer per native run: {:?}",
+        one_capture.fused.len()
+    );
+    assert_eq!(1, one_capture.finalize.len(), "`{promql}`");
+    let one_text = capture_text(&one_capture);
+    assert!(
+        !one_text.contains("partial_reduce"),
+        "`{promql}`: the plan without the option must hold no reducer: {one_text}"
+    );
+
+    // Two levels: one more state hop, and the same answer.
+    let (two_level, two_capture) =
+        run_query_with_split_reduce(&instance, &promql, true, true, &observer).await;
+    assert_rows(
+        &two_level.rows,
+        &one_level.rows,
+        &format!("two-level `{promql}` against one-level"),
+    );
+    assert_rows(&two_level.rows, &expected, &format!("two-level `{promql}`"));
+    assert_eq!(
+        2,
+        two_capture.fused.len(),
+        "`{promql}`: the option adds the reducer to the producers"
+    );
+    assert_eq!(1, two_capture.finalize.len(), "`{promql}`");
+    let two_text = capture_text(&two_capture);
+    assert!(
+        two_text.contains("partial_reduce"),
+        "`{promql}`: the plan with the option must fold state into state: {two_text}"
+    );
+    // The reducer is the node that names the hop, and it hands on state rather than values.
+    let reducers = two_capture
+        .fused
+        .iter()
+        .filter(|node| {
+            NodeDisplay(node.as_ref())
+                .to_string()
+                .contains("partial_reduce")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        1,
+        reducers.len(),
+        "`{promql}`: exactly one reducer: {two_text}"
+    );
+    let reducer = reducers[0];
+    assert_eq!(
+        FrameContent::AggregateState,
+        SeriesFrameDeclaration::parse(reducer.schema().as_ref())
+            .unwrap_or_else(|error| panic!("`{promql}`: invalid reducer frame: {error}"))
+            .content(),
+        "`{promql}`: the reducer exports aggregate state: {two_text}"
+    );
+    // The reducer folds the state the producers exported, so its input is the router that put each
+    // group's rows in one place rather than a producer directly.
+    let reducer_children = reducer.children();
+    assert_eq!(
+        1,
+        reducer_children.len(),
+        "`{promql}`: the reducer must keep one input: {two_text}"
+    );
+    let reducer_input = through_cooperative(reducer_children[0]);
+    assert!(
+        reducer_input.is::<SeriesRepartitionExec>(),
+        "`{promql}`: the reducer reads a state router's output, got {}: {two_text}",
+        reducer_input.name()
+    );
+    let consumed = reducer.metrics().is_some_and(|metrics| {
+        metrics.iter().any(|metric| {
+            matches!(
+                metric.value(),
+                MetricValue::Count { count, .. }
+                    if metric.value().name() == ROOT_INPUT_SAMPLES_METRIC && count.value() > 0
+            )
+        })
+    });
+    assert!(
+        consumed,
+        "`{promql}`: the reducer must consume aggregate state: {two_text}"
+    );
+}
+
+/// Every captured plan's node text, for assertions about what a query planned.
+fn capture_text(capture: &NativeCapture) -> String {
+    let mut text = String::new();
+    for node in capture.fused.iter().chain(&capture.finalize) {
+        text.push_str(&NodeDisplay(node.as_ref()).to_string());
+        text.push('\n');
+    }
+    text
 }
 
 #[tokio::test(flavor = "multi_thread")]
