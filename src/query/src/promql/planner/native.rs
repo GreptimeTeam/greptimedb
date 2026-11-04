@@ -1835,14 +1835,31 @@ async fn segment_tree(
             Arc::new(schema)
         }
     };
+    // A recursively constructed segment still has its original source binding. Its parent may
+    // combine another metric; giving the segment that parent's metric would relabel both inputs.
+    // Direct scan segments keep their established builder and binding unchanged.
+    let segment_binding = |source_ids: &[Option<usize>]| -> (Option<Arc<str>>, String) {
+        let mut sources = source_ids.iter().flatten().copied();
+        let Some(source) = sources.next() else {
+            return (metric.clone(), time_index.to_string());
+        };
+        if sources.next().is_some() {
+            return (None, time_index.to_string());
+        }
+        per_source.get(source).map_or_else(
+            || (metric.clone(), time_index.to_string()),
+            |(metric, time, _)| (metric.clone(), time.clone()),
+        )
+    };
+    let (segment_metric, segment_time_index) = segment_binding(&current_source_ids);
     let Ok(plan) = FusedSeries::try_new_with_format(
         Arc::from(prom_expr.to_string()),
         parent,
         FusedSeriesBinding {
             grid: Arc::clone(grid),
-            time_index: time_index.to_string(),
+            time_index: segment_time_index,
             tags: tags.to_vec(),
-            metric_name: metric.clone(),
+            metric_name: segment_metric,
         },
         inputs,
         output_schema,
