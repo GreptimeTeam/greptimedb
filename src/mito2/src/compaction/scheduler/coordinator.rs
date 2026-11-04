@@ -71,30 +71,58 @@ impl ReadyUnit {
 /// Engine-wide compaction admission, in front of the generic FIFO executor.
 /// Only admitted jobs enter that executor, so its queue cannot hide contenders.
 pub(crate) struct CompactionCoordinator {
+    /// Executor that runs admitted units. [`Self::new_local`] derives its runner
+    /// count from the same value as `capacity`.
     executor: SchedulerRef,
+    /// Maximum number of units holding capacity at once, including units the
+    /// executor has not polled yet. Clamped to at least one.
     capacity: usize,
+    /// Admission accounting shared by every region worker. [`Self::lock`]
+    /// deliberately ignores poisoning because an unwind leaves the accounting
+    /// consistent.
     state: Mutex<CoordinatorState>,
+    /// Signal that wakes [`Self::stop`] when `running` or the ready index changes.
     drained: Notify,
 }
 
+/// Admission accounting shared by every region worker.
 #[derive(Default)]
 struct CoordinatorState {
+    /// Per-region service and ready units. Idle regions stay here until they are
+    /// unloaded, so batch boundaries cannot erase their service debt.
     regions: HashMap<RegionId, RegionQueue>,
     /// Iteration scales with current ready regions, not a hash table's peak capacity.
     /// Idle regions retain service debt in `regions` without participating in admission.
     ready_regions: BTreeSet<RegionId>,
+    /// Units holding capacity from admission through their released future,
+    /// including work that was authorized but never polled.
     running: usize,
+    /// Set by [`CompactionCoordinator::stop`]; later submissions are rejected.
     closed: bool,
+    /// Non-recursive dispatch guard: only the current drainer admits and submits.
     dispatching: bool,
+    /// Monotonic floor of observed [`RegionQueue::service`], in the same
+    /// half-byte unit. It clamps a region that slept through a busy period.
     virtual_time: u128,
+    /// Global admission tick. A larger value means a later admission; it breaks
+    /// service ties and is unrelated to the WAL or row `sequence`.
     sequence: u64,
 }
 
+/// One region's ready units and accumulated service.
 struct RegionQueue {
+    /// Prepared units in fair-picker order. Admission pops the front.
     ready: VecDeque<ReadyUnit>,
+    /// Units of this region currently holding capacity.
     running: usize,
+    /// Weighted service consumed so far, in half-byte units: each admission adds
+    /// its charge, and only work refunded before its first poll is subtracted.
     service: u128,
+    /// [`CoordinatorState::sequence`] of this region's last admission. Service
+    /// ties go to the region whose last admission is older.
     last_served: u64,
+    /// Set by [`CompactionCoordinator::forget_region`]; the entry is pruned once
+    /// it has no ready or running work.
     retired: bool,
 }
 
