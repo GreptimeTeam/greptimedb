@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use api::v1::OpType;
 use datatypes::arrow::array::{
-    Array, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, StringArray,
+    Array, BinaryArray, BinaryDictionaryBuilder, BooleanArray, DictionaryArray, StringArray,
     TimestampMillisecondArray, UInt8Array, UInt64Array,
 };
 use datatypes::arrow::compute::cast;
@@ -822,6 +822,84 @@ async fn multiple_sources_merge_versions_in_each_target_sequence_domain(
             "published metadata changes the read sequences of region {id}"
         );
     }
+}
+
+#[tokio::test]
+async fn test_overlapping_partition_masks_are_rejected_before_creating_outputs() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let mut plan = fixture.plan(3);
+    // Tags "010".."019" satisfy both predicates. `check_exprs = false` keeps
+    // the rule as the caller supplied it, so only the executor can reject it.
+    plan.partition_rule = Arc::new(
+        MultiDimPartitionRule::try_new(
+            vec!["tag_0".into()],
+            vec![1, 2],
+            vec![
+                col("tag_0").gt_eq(Value::String("010".into())),
+                col("tag_0").lt(Value::String("020".into())),
+            ],
+            false,
+        )
+        .unwrap(),
+    );
+    let (context, protection) = fixture.context(None);
+    let error = compact_regions(plan, context).await.err().unwrap();
+    assert!(
+        matches!(&error, crate::error::Error::InvalidMultiRegionCompaction { reason, .. }
+            if reason.contains("matches multiple target partitions")),
+        "{error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+}
+
+/// Partition rule whose mask length cannot be produced by a real rule.
+struct WrongMaskSizeRule;
+
+impl partition::PartitionRule for WrongMaskSizeRule {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn partition_columns(&self) -> &[String] {
+        &[]
+    }
+
+    fn find_region(
+        &self,
+        _values: &[Value],
+    ) -> partition::error::Result<store_api::storage::RegionNumber> {
+        Ok(0)
+    }
+
+    fn split_record_batch(
+        &self,
+        _batch: &RecordBatch,
+    ) -> partition::error::Result<
+        std::collections::HashMap<
+            store_api::storage::RegionNumber,
+            partition::partition::RegionMask,
+        >,
+    > {
+        Ok(std::collections::HashMap::from([(
+            0,
+            partition::partition::RegionMask::new(BooleanArray::from(vec![true]), 1),
+        )]))
+    }
+}
+
+#[tokio::test]
+async fn test_mis_sized_partition_mask_is_rejected_before_creating_outputs() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let mut plan = fixture.plan(2);
+    plan.partition_rule = Arc::new(WrongMaskSizeRule);
+    let (context, protection) = fixture.context(None);
+    let error = compact_regions(plan, context).await.err().unwrap();
+    assert!(
+        matches!(&error, crate::error::Error::InvalidMultiRegionCompaction { reason, .. }
+            if reason.contains("wrong row count")),
+        "{error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
