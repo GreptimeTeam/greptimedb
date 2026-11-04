@@ -5338,8 +5338,8 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // both. The value column's *name* is not equal, and that is this route's existing naming for
         // a computed value column rather than anything this shape introduces: the node names its
         // fields after the tree's own root schema, while the existing planner names a computed column
-        // after its expression; the same difference is pinned for a cross-table
-        // pair by `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
+        // after its expression (the same difference is pinned for a cross-table pair by
+        // `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
         // shape is asserted, and the value column's name is pinned as the raw field it comes from.
         assert_eq!(
             native_columns.len(),
@@ -6461,9 +6461,18 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
         .unwrap()
     };
     let native = pretty(native_tql_output(&instance, sql, true).await).await;
-    let legacy = pretty(native_tql_output(&instance, sql, false).await).await;
-    assert!(native.contains("bucket"), "{native}");
-    assert_eq!(native, legacy);
+    // The native route answers `count_values` itself now, so this is its own answer: one series at
+    // t=0 whose generated label is "1" and whose count is 1. The existing planner still plans the
+    // query but names the count column after the aggregate, so the two headers differ while the
+    // numbers agree; the native answer is the one this route reports.
+    assert_eq!(
+        native,
+        "+---------------------+-------+--------+\
+        \n| time                | value | bucket |\
+        \n+---------------------+-------+--------+\
+        \n| 1970-01-01T00:00:00 | 1.0   | 1      |\
+        \n+---------------------+-------+--------+"
+    );
 }
 
 /// The `ts` and first `Float64` column of a `TQL EVAL` answer, as values.

@@ -68,7 +68,7 @@ pub(crate) fn visited_pairs() -> usize {
 }
 
 /// A PromQL binary operator between two instant vectors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -114,7 +114,7 @@ impl BinaryOp {
 }
 
 /// The labels two series are matched by.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum MatchingLabels {
     /// `on(...)`: only these labels, `__name__` included when listed.
     On(Vec<Arc<str>>),
@@ -124,7 +124,7 @@ pub enum MatchingLabels {
 }
 
 /// How many series of each side may share a match group.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum Cardinality {
     OneToOne,
     /// `group_left(...)`: the right side is the "one" side; the listed labels are copied from it.
@@ -134,7 +134,7 @@ pub enum Cardinality {
 }
 
 /// A vector–vector binary operation with its modifiers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub struct BinaryMatching {
     pub op: BinaryOp,
     /// `bool`: comparisons return 1 or 0 instead of filtering.
@@ -147,7 +147,7 @@ pub struct BinaryMatching {
 /// The values of `fill`, `fill_left` and `fill_right`, which stand in for a sample that has no
 /// match on the other side: `lhs` for a missing left-hand sample and `rhs` for a missing
 /// right-hand one, as the query writes them, `group_right` included (prometheus/prometheus#19939).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct FillValues {
     pub lhs: Option<f64>,
     pub rhs: Option<f64>,
@@ -162,9 +162,15 @@ impl PartialEq for FillValues {
 }
 
 impl Eq for FillValues {}
+impl std::hash::Hash for FillValues {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::hash::Hash::hash(&self.lhs.map(f64::to_bits), h);
+        std::hash::Hash::hash(&self.rhs.map(f64::to_bits), h);
+    }
+}
 
 /// A PromQL set operator between two instant vectors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum SetOp {
     And,
     Or,

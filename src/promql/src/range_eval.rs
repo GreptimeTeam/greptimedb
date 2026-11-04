@@ -45,7 +45,7 @@ pub(crate) use function::quantile;
 /// `(E - range_ms, E]`, where `E` is `T - offset_ms`, or `anchor_ms - offset_ms` with `@`. A
 /// modifier widens that: `anchored` also reads the lookback before `E - range_ms`, `smoothed` the
 /// lookback on both sides, and a scan feeding the window has to read that much more.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct RangeWindow {
     /// Positive window length in milliseconds.
     pub range_ms: i64,
@@ -62,7 +62,7 @@ pub struct RangeWindow {
 /// The experimental range selector modifiers of Prometheus, which read samples beyond the
 /// window to pin its boundary values. Not to be confused with an `@` anchor, which fixes the
 /// window's end.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum RangeModifier {
     /// `anchored`: the window also reads the last sample at or before its start, up to the
     /// statement's lookback before it, and takes it as the value at the start.

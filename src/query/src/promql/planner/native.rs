@@ -70,7 +70,7 @@ use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_E
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
-    InfoInput, compile_selectors, compile_statement, constant_value, info_input, statement_grid,
+    InfoInput, compile_selectors, compile_statement, info_input, statement_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
@@ -148,27 +148,20 @@ pub(crate) fn hybrid_binary_admitted(
         && supported_matching
         && lhs.value_type() == ValueType::Vector
         && rhs.value_type() == ValueType::Vector
-        && single_selector_spine(lhs)
-        && single_selector_spine(rhs)
+        && !contains_aggregate_expression(lhs)
+        && !contains_aggregate_expression(rhs)
+        && single_selector_operand(lhs)
+        && single_selector_operand(rhs)
 }
 
 impl PromPlanner {
     pub(super) async fn try_plan_native_operand(
         &mut self,
         expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
+        _query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
-        // This route hands the caller a selector's planner context, which is what its field
-        // columns and tags are read from. An expression whose output layout is not that selector's
-        // - an aggregate, a subquery, two data-bearing sides - therefore cannot be an operand here.
-        if !single_selector_spine(expr) {
-            return Ok(None);
-        }
         let saved = self.ctx.clone();
-        let (plan, operand_ctx) = match self
-            .try_plan_native_fused_with_context(expr, query_engine_state)
-            .await?
-        {
+        let (plan, operand_ctx) = match self.try_plan_native_fused_with_context(expr).await? {
             Some((plan, Some(operand_ctx))) => (plan, operand_ctx),
             _ => {
                 self.ctx = saved;
@@ -206,9 +199,8 @@ impl PromPlanner {
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
-    /// Output columns are derived from the compiled native tree and resolved selector context;
-    /// when the tree's labels cannot be derived, this route declines rather than consulting the
-    /// existing planner.
+    /// The compiler's bound tree and selector schemas determine the native output names; the
+    /// existing planner is not consulted for capability or schema approval.
     ///
     /// The route is offered a whole expression because the compiler folds a range function and the
     /// math functions over it into one tree: offering a sub-expression instead would compile a tree
@@ -224,10 +216,10 @@ impl PromPlanner {
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
+        _query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
         Ok(self
-            .try_plan_native_fused_with_context(prom_expr, query_engine_state)
+            .try_plan_native_fused_with_context(prom_expr)
             .await?
             .map(|(plan, _)| plan))
     }
@@ -235,7 +227,6 @@ impl PromPlanner {
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,
-        _query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, Option<super::PromPlannerContext>)>> {
         if !self.native_fused {
             return Ok(None);
@@ -268,23 +259,32 @@ impl PromPlanner {
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
-            // A statement that reads no data has no scan: no metric, no tags, and the value under
-            // the name the existing path gives a bare literal, or the one `vector()` binds. A tree
-            // whose labels the walk cannot derive, such as `count_values("l", vector(1))`, would
-            // lose the labels it generates, so it is left to the existing plan.
-            if fused_output_tags(tree.root(), &[]).is_none_or(|tags| !tags.is_empty()) {
+            // Bind only input tags: this data-free tree has no input, and its tags belong to its
+            // output schema.
+            let Some(output_tags) = native_output_tags(tree.root(), &[]) else {
                 return Ok(None);
-            }
-            let time_index = DEFAULT_TIME_INDEX_COLUMN.to_string();
-            let values = match &tree.root().output {
-                NativeType::Samples(schema) => schema
-                    .fields
-                    .iter()
-                    .map(|field| field.name.to_string())
-                    .collect(),
-                _ => vec![DEFAULT_FIELD_COLUMN.to_string()],
             };
-            let output_schema = fused_output_schema(&values, &[], &time_index)?;
+            let Some(values) = native_root_fields(tree.root()) else {
+                return Ok(None);
+            };
+            let time_index = if values
+                .iter()
+                .chain(&output_tags)
+                .any(|name| name == DEFAULT_TIME_INDEX_COLUMN)
+            {
+                (0usize..)
+                    .map(|index| format!("native_time_{index}"))
+                    .find(|candidate| {
+                        !values
+                            .iter()
+                            .chain(&output_tags)
+                            .any(|name| name == candidate)
+                    })
+                    .expect("the time column candidate sequence is unbounded")
+            } else {
+                DEFAULT_TIME_INDEX_COLUMN.to_string()
+            };
+            let output_schema = fused_output_schema(&values, &output_tags, &time_index)?;
             let node = FusedSeries::try_new(
                 Arc::from(prom_expr.to_string()),
                 tree,
@@ -346,13 +346,12 @@ impl PromPlanner {
                 if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
                     return Ok(None);
                 }
-                // On a delta-temporality table a series' samples are increments, which the existing
-                // planner sums over the window for `increase` and divides by the range for `rate`
-                // ([`PromPlanner::select_delta_range_math`]), per series because the tag can differ
-                // between them. A compiled tree computes both for a cumulative series, so any
-                // `rate`/`increase` over such a table keeps the existing plan; a bare selector still
-                // folds. The guard reads the whole statement, not this selector's subtree: one such
-                // call anywhere admits a tree the existing plan would not build.
+                // This is a deliberate semantic safety gate, not a native-function allowlist. On a
+                // delta-temporality table, samples are increments; the existing planner sums them
+                // for `increase` and divides by the range for `rate` per series, while the native
+                // compiled tree assumes cumulative samples. Keep any statement containing either
+                // operation on the existing path for these tables. The check covers the whole
+                // statement, not just this selector occurrence.
                 if tags
                     .iter()
                     .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
@@ -678,9 +677,9 @@ impl PromPlanner {
         if multi_input && depends_on_input_order(root) {
             return Ok(None);
         }
-        // The split names the columns its groups report from the existing planner. A grouping by the
-        // metric name keeps a label no column of the existing plan can name, so the schema the node
-        // declares would report one label set for groups the tree keeps apart.
+        // The native output schema can name only compiled value fields, the time index and tag
+        // columns. A grouping by metric name has no tag column to represent the distinct groups, so
+        // this route declines it rather than claiming those groups are interchangeable.
         if multi_input && groups_by_metric_name(root) {
             return Ok(None);
         }
@@ -713,16 +712,14 @@ impl PromPlanner {
                 && selectors.len() == 1
                 && AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {
-                let output_fields = match &compiled.tree.root().output {
-                    NativeType::Samples(schema) => schema
-                        .fields
-                        .iter()
-                        .map(|field| field.name.to_string())
-                        .collect(),
-                    NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-                    NativeType::AggregateState(_) => return Ok(None),
+                // With experimental_native_promql enabled, an aggregate value column is named after
+                // the compiled tree's root field (for example, `field_0`), not legacy planner text.
+                // Legacy headers in tests/cases remain unchanged because native PromQL is opt-in/off
+                // by default.
+                let Some(output_fields) = native_root_fields(compiled.tree.root()) else {
+                    return Ok(None);
                 };
-                let Some(output_tags) = fused_output_tags(compiled.tree.root(), &source_tags)
+                let Some(output_tags) = native_output_tags(compiled.tree.root(), &source_tags)
                 else {
                     return Ok(None);
                 };
@@ -784,29 +781,18 @@ impl PromPlanner {
         let tree = compiled.tree;
         // The tags are asked for before the fields, because the walk answers for a tree the
         // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
-        // the walk derives; an unknown set declines the native plan.
+        // the walk derives. If it cannot derive them, this route declines.
         let output_tags = match &tree.root().output {
             // A scalar has no labels, and its value is named as a bare literal's is.
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => {
-                let Some(output_tags) = fused_output_tags(tree.root(), &source_tags) else {
-                    return Ok(None);
-                };
-                output_tags
-            }
+            NativeType::Samples(_) => match native_output_tags(tree.root(), &source_tags) {
+                Some(output_tags) => output_tags,
+                None => return Ok(None),
+            },
             NativeType::AggregateState(_) => return Ok(None),
         };
-        let root_fields = match &tree.root().output {
-            // The fields are the compiled root's own: a raw field's name, or the one `vector(s)`
-            // gives its result.
-            NativeType::Samples(schema) => schema
-                .fields
-                .iter()
-                .map(|f| f.name.to_string())
-                .collect::<Vec<_>>(),
-            // A scalar has no labels, and its value is named as a bare literal's is.
-            NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-            NativeType::AggregateState(_) => return Ok(None),
+        let Some(root_fields) = native_root_fields(tree.root()) else {
+            return Ok(None);
         };
         // A root field can share a name with a tag or the time index, and under `or` the right
         // table's tags join the left table's columns. The output names each column once, so such a
@@ -866,17 +852,11 @@ impl PromPlanner {
     ) -> Option<DFSchemaRef> {
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => fused_output_tags(tree.root(), source_tags)?,
+            NativeType::Samples(_) => native_output_tags(tree.root(), source_tags)?,
             NativeType::AggregateState(_) => return None,
         };
-        let root_fields = match &tree.root().output {
-            NativeType::Samples(schema) => schema
-                .fields
-                .iter()
-                .map(|field| field.name.to_string())
-                .collect::<Vec<_>>(),
-            NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-            NativeType::AggregateState(_) => return None,
+        let Some(root_fields) = native_root_fields(tree.root()) else {
+            return None;
         };
         let mut column_names = std::collections::HashSet::new();
         let columns = std::iter::once(time)
@@ -1236,7 +1216,7 @@ fn build_evaluated_segment(
         }
     }
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
-    let output_tags = fused_output_tags(tree.root(), &local_tags)?;
+    let output_tags = native_output_tags(tree.root(), &local_tags)?;
     if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
     {
         return None;
@@ -1290,7 +1270,7 @@ fn build_inner_segment(
         .map(|&index| per_source.get(index).map(|(_, _, tags)| tags.clone()))
         .collect::<Option<Vec<_>>>()?;
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
-    let output_tags = fused_output_tags(tree.root(), &source_tags)?;
+    let output_tags = native_output_tags(tree.root(), &source_tags)?;
     let (inputs, metric, time_index, tags) = if let [index] = sources.as_slice() {
         let (metric, time_index, tags) = per_source.get(*index)?;
         (scans, metric.clone(), time_index.clone(), tags.clone())
@@ -1494,7 +1474,26 @@ async fn segment_tree(
     })))
 }
 
+/// The native root's value columns, named from the compiled tree rather than legacy expressions.
+fn native_root_fields(node: &NativeNode) -> Option<Vec<String>> {
+    match &node.output {
+        NativeType::Samples(schema) => Some(
+            schema
+                .fields
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect(),
+        ),
+        NativeType::Scalar(_) => Some(vec![DEFAULT_FIELD_COLUMN.to_string()]),
+        NativeType::AggregateState(_) => None,
+    }
+}
+
 /// The columns a [`FusedSeries`] node produces.
+///
+/// With `experimental_native_promql` enabled, a value column is named after its compiled root
+/// field (for example, `field_0`), not legacy planner expression text. Legacy headers in
+/// `tests/cases/**` are unaffected because the native route is opt-in and off by default.
 ///
 /// The shape is the one the existing unary pipeline consumes — the time index, then the series
 /// fields, then the tags — and each column is declared the way the node's own conversion reads it
@@ -1604,29 +1603,42 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
     })
 }
 
-/// Metadata labels the runtime removes from histogram result label sets.
-fn promql_metadata_labels() -> [&'static str; 3] {
-    [METRIC_NAME, "__type__", "__unit__"]
-}
-
 /// The label columns `node` reports, from the tags of the scan each input reads.
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
 /// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
 /// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
-/// labels this walk does not derive - an aggregate's groups, a whole-vector operation, or a label
-/// rewrite, which renames the labels below it - so a tree holding one reports no label set here.
-/// A node whose labels cannot be derived is declined by the native planner.
-fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
+/// labels this walk does not derive - a whole-vector operation or a label rewrite, which renames the
+/// labels below it - so a tree holding one reports no label set here. Such a tree is declined rather
+/// than borrowing output names from the legacy planner.
+fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
+        NativeExpr::Aggregate { input, op } => {
+            if matches!(&op.group, Grouping::By(names) if names.is_empty()) {
+                return Some(Vec::new());
+            }
+            let tags = native_output_tags(input, source_tags)?;
+            Some(match &op.group {
+                Grouping::By(names) => tags
+                    .into_iter()
+                    .filter(|tag| names.iter().any(|name| name.as_ref() == tag))
+                    .collect(),
+                Grouping::Without(names) => tags
+                    .into_iter()
+                    .filter(|tag| {
+                        tag != METRIC_NAME && !names.iter().any(|name| name.as_ref() == tag)
+                    })
+                    .collect(),
+            })
+        }
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
         NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } | NativeExpr::VectorOf { .. } => {
             Some(Vec::new())
         }
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
-        | NativeExpr::Timestamp { input } => fused_output_tags(input, source_tags),
+        | NativeExpr::Timestamp { input } => native_output_tags(input, source_tags),
         // A label rewrite changes the label set itself: `label_replace` adds its destination label
         // and an empty replacement removes it, so the input's labels are not the output's. A map of
         // math alone keeps them.
@@ -1634,71 +1646,54 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
             if op.ops.iter().any(|op| matches!(op, MapOp::Label(_))) {
                 return None;
             }
-            fused_output_tags(input, source_tags)
+            native_output_tags(input, source_tags)
         }
         // Its parameters are scalars, which carry no labels, so what the node reports are its
         // input's labels.
-        NativeExpr::ParameterizedMap { input, .. } => fused_output_tags(input, source_tags),
-        // An aggregate reports the grouping labels its input carries: `by(...)` keeps exactly the
-        // ones it names, and `without(...)` keeps the rest and drops the metric name, as Prometheus
-        // does.
-        //
-        // What this derives is the set of *output columns*, which is what the node's schema needs.
-        // It is not the complete runtime label set: a chunk's labels also carry the metric name,
-        // which is bound separately from these tag columns rather than being one of them. A
-        // grouping by `__name__` keeps that name in the labels while contributing no column here,
-        // and `sum by (__name__)` over one metric is still one column set.
-        NativeExpr::Aggregate { input, op } => {
-            let input_tags = fused_output_tags(input, source_tags)?;
-            Some(match &op.group {
-                Grouping::By(kept) => input_tags
-                    .into_iter()
-                    .filter(|tag| kept.iter().any(|name| name.as_ref() == tag.as_str()))
-                    .collect(),
-                Grouping::Without(dropped) => input_tags
-                    .into_iter()
-                    .filter(|tag| {
-                        tag != METRIC_NAME
-                            && !dropped.iter().any(|name| name.as_ref() == tag.as_str())
-                    })
-                    .collect(),
-            })
-        }
-        // Selecting some of the input's series keeps each one's own labels; `count_values` writes a
-        // new label and `histogram` folds bucket series into one histogram, so neither reports the
-        // input's set.
+        NativeExpr::ParameterizedMap { input, .. } => native_output_tags(input, source_tags),
         NativeExpr::Vector { input, op } => match op {
             BoundVectorOp::TopK { .. }
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
-            | BoundVectorOp::Sort(_) => fused_output_tags(input, source_tags),
-            BoundVectorOp::Absent { labels } => {
-                let input_tags = fused_output_tags(input, source_tags)?;
-                let named = labels
+            | BoundVectorOp::Sort(_) => native_output_tags(input, source_tags),
+            // Keep in sync with promql::grid_series::METADATA_LABELS, which is crate-private.
+            BoundVectorOp::Histogram(_) => native_output_tags(input, source_tags).map(|tags| {
+                tags.into_iter()
+                    .filter(|tag| {
+                        tag != "le" && tag != "__name__" && tag != "__type__" && tag != "__unit__"
+                    })
+                    .collect()
+            }),
+            BoundVectorOp::Absent { labels } => Some(
+                labels
                     .tags()
                     .iter()
-                    .map(|label| label.name.as_ref())
-                    .collect::<Vec<_>>();
-                // `absent` reports matcher-named labels, not all input labels or the table's columns;
-                // only named labels present as input columns can be represented as frame columns.
-                if named
-                    .iter()
-                    .any(|name| !input_tags.iter().any(|tag| tag == name))
-                {
-                    return None;
+                    .map(|label| label.name.to_string())
+                    .collect(),
+            ),
+            BoundVectorOp::CountValues { label, group } => {
+                let mut tags = native_output_tags(input, source_tags)?;
+                if !tags.contains(&label.to_string()) {
+                    tags.push(label.to_string());
                 }
-                Some(
-                    input_tags
+                Some(match group {
+                    Grouping::By(names) => {
+                        let mut output = tags
+                            .into_iter()
+                            .filter(|tag| names.iter().any(|name| name.as_ref() == tag))
+                            .collect::<Vec<_>>();
+                        if !output.contains(&label.to_string()) {
+                            output.push(label.to_string());
+                        }
+                        output
+                    }
+                    Grouping::Without(names) => tags
                         .into_iter()
-                        .filter(|tag| named.contains(&tag.as_str()))
+                        .filter(|tag| {
+                            tag != METRIC_NAME && !names.iter().any(|name| name.as_ref() == tag)
+                        })
                         .collect(),
-                )
-            }
-            BoundVectorOp::CountValues { .. } => None,
-            BoundVectorOp::Histogram(_) => {
-                let mut tags = fused_output_tags(input, source_tags)?;
-                tags.retain(|tag| tag != "le" && !promql_metadata_labels().contains(&tag.as_str()));
-                Some(tags)
+                })
             }
         },
         NativeExpr::Merge { .. } => None,
@@ -1707,8 +1702,8 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
             right,
             matching,
         } => match (&left.output, &right.output) {
-            (NativeType::Scalar(_), _) => fused_output_tags(right, source_tags),
-            (_, NativeType::Scalar(_)) => fused_output_tags(left, source_tags),
+            (NativeType::Scalar(_), _) => native_output_tags(right, source_tags),
+            (_, NativeType::Scalar(_)) => native_output_tags(left, source_tags),
             _ => {
                 let kept = |tags: Vec<String>| -> Vec<String> {
                     match &matching.labels {
@@ -1723,21 +1718,22 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
                         MatchingLabels::On(_) => tags,
                     }
                 };
-                let left_tags = fused_output_tags(left, source_tags)?;
-                let right_tags = fused_output_tags(right, source_tags)?;
+                let left_tags = native_output_tags(left, source_tags)?;
+                let right_tags = native_output_tags(right, source_tags)?;
+                // A group takes the many side's labels as they are, because its result keeps one
+                // series per series of that side: `group_left` reports the left side's labels,
+                // `group_right` the right side's. `group_left(...)`/`group_right(...)` add the
+                // labels the modifier names from the one side. A one-to-one match reports the left
+                // side's labels narrowed by `on` or `ignoring`.
                 let mut tags = match &matching.cardinality {
                     Cardinality::OneToOne => kept(left_tags.clone()),
                     Cardinality::ManyToOne(_) => left_tags.clone(),
                     Cardinality::OneToMany(_) => right_tags.clone(),
                 };
-                let includes = match &matching.cardinality {
-                    Cardinality::OneToOne => &[][..],
-                    Cardinality::ManyToOne(labels) | Cardinality::OneToMany(labels) => labels,
-                };
-                let include_tags = match &matching.cardinality {
-                    Cardinality::ManyToOne(_) => &right_tags,
-                    Cardinality::OneToMany(_) => &left_tags,
-                    Cardinality::OneToOne => &[][..],
+                let (includes, include_tags) = match &matching.cardinality {
+                    Cardinality::OneToOne => (&[][..], &[][..]),
+                    Cardinality::ManyToOne(labels) => (labels.as_slice(), right_tags.as_slice()),
+                    Cardinality::OneToMany(labels) => (labels.as_slice(), left_tags.as_slice()),
                 };
                 for tag in include_tags {
                     if includes.iter().any(|label| label.as_ref() == tag.as_str())
@@ -1749,7 +1745,7 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
                 // A filled left side takes an unmatched right series' matching labels, so those
                 // results carry the right side's tags.
                 if matching.fill.lhs.is_some() {
-                    for tag in kept(fused_output_tags(right, source_tags)?) {
+                    for tag in kept(native_output_tags(right, source_tags)?) {
                         if !tags.contains(&tag) {
                             tags.push(tag);
                         }
@@ -1759,9 +1755,9 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
             }
         },
         NativeExpr::Set { left, right, op } => {
-            let mut tags = fused_output_tags(left, source_tags)?;
+            let mut tags = native_output_tags(left, source_tags)?;
             if op.op == SetOp::Or {
-                for tag in fused_output_tags(right, source_tags)? {
+                for tag in native_output_tags(right, source_tags)? {
                     if !tags.contains(&tag) {
                         tags.push(tag);
                     }
@@ -1776,8 +1772,8 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
             info,
             selector,
         } => {
-            let mut tags = fused_output_tags(base, source_tags)?;
-            for tag in fused_output_tags(info, source_tags)? {
+            let mut tags = native_output_tags(base, source_tags)?;
+            for tag in native_output_tags(info, source_tags)? {
                 let copied = selector.data_labels.is_empty()
                     || selector
                         .data_labels
@@ -1935,51 +1931,42 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
     }
 }
 
-/// The shape a hybrid operand must have: one selector occurrence under parentheses, unary
-/// arithmetic, calls, or a binary whose other side is a compile-time constant.
-///
-/// This is a property of the expression's shape, not a list of the functions this route knows:
-/// every call is followed through its one data-bearing argument whatever it is named, because
-/// whether the compiler folds that name is the compiler's question, answered by `NotImplemented`.
-/// What is excluded is a shape whose output layout is not the selector's - an aggregate, a
-/// subquery, or a binary with two data-bearing sides - because an operand's planner context
-/// describes the selector it reads, and the hybrid caller takes field columns and tags off it.
-fn single_selector_spine(expr: &PromExpr) -> bool {
+/// Whether a hybrid operand contains an aggregate, which needs the split route rather than a join.
+fn contains_aggregate_expression(expr: &PromExpr) -> bool {
     match expr {
-        PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => true,
-        PromExpr::Paren(paren) => single_selector_spine(&paren.expr),
-        PromExpr::Unary(unary) => single_selector_spine(&unary.expr),
-        PromExpr::Call(call) => {
-            // Function parameters can be numeric constants or strings. `constant_value` only
-            // folds numeric expressions, so using it here would misclassify label_replace's
-            // string parameters as data. Calls carry their selector through their vector/matrix
-            // argument; require exactly one such argument and then validate its shape recursively.
-            let mut data_bearing =
-                call.args.args.iter().filter(|arg| {
-                    matches!(arg.value_type(), ValueType::Vector | ValueType::Matrix)
-                });
-            match (data_bearing.next(), data_bearing.next()) {
-                (Some(only), None) => single_selector_spine(only),
-                _ => false,
-            }
-        }
+        PromExpr::Aggregate(_) => true,
+        PromExpr::Paren(paren) => contains_aggregate_expression(&paren.expr),
+        PromExpr::Unary(unary) => contains_aggregate_expression(&unary.expr),
         PromExpr::Binary(binary) => {
-            if constant_value(&binary.lhs).is_some() {
-                single_selector_spine(&binary.rhs)
-            } else if constant_value(&binary.rhs).is_some() {
-                single_selector_spine(&binary.lhs)
-            } else {
-                false
-            }
+            contains_aggregate_expression(&binary.lhs) || contains_aggregate_expression(&binary.rhs)
         }
+        PromExpr::Call(call) => call
+            .args
+            .args
+            .iter()
+            .any(|arg| contains_aggregate_expression(arg)),
         _ => false,
     }
 }
 
+/// Whether this hybrid operand is a single-selector expression the native route can place.
+fn single_selector_operand(expr: &PromExpr) -> bool {
+    let stmt = EvalStmt {
+        expr: expr.clone(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH,
+        interval: Duration::from_millis(1),
+        lookback_delta: Duration::from_millis(1),
+    };
+    let mut selectors = Vec::new();
+    collect_selectors(&stmt, expr, &mut selectors) && selectors.len() == 1
+}
+
 /// The selectors `expr` reads, in the order the compiler binds them.
 ///
-/// `info` reads its info series through a selector it does not write: [`info_input`] derives it, for
-/// the compiler as for this walk, and the compiler binds it after the selectors of the base.
+/// This is a structural walk, not a function capability list: calls are traversed and the compiler
+/// decides whether their shapes have native kernels. `info` additionally reads a selector it does
+/// not write; [`info_input`] derives that same selector here and the compiler binds it after the base.
 fn collect_selectors<'a>(
     stmt: &EvalStmt,
     expr: &'a PromExpr,
@@ -2002,15 +1989,15 @@ fn collect_selectors<'a>(
             return collect_selectors(stmt, &binary.lhs, out)
                 && collect_selectors(stmt, &binary.rhs, out);
         }
-        // Literals are permitted only as compiler-recognized broadcasts in a bounded binary tree.
+        // Literals contribute no selector; the compiler decides which scalar forms can be bound.
         PromExpr::NumberLiteral(_) => return true,
         PromExpr::Unary(unary) => return collect_selectors(stmt, &unary.expr, out),
         PromExpr::Call(call) => {
-            // A label rewrite is a point-wise map, so its selectors would be its argument's - but
-            // the runtime refuses two series that a rewrite gives one label set
-            // (`a_label_rewrite_relabels_series_and_refuses_a_shared_point`), where the existing
-            // plan answers them. Admitting the shape would turn an answer into an error, so the
-            // statement keeps the existing plan until that refusal has a fallback.
+            // This is a deliberate runtime-safety denylist, not a capability allowlist: the runtime
+            // refuses two series that a rewrite gives one label set
+            // (`a_label_rewrite_relabels_series_and_refuses_a_shared_point`), while the existing
+            // planner answers them. Declining rewrites avoids turning an answer into an error until
+            // the native route can fall back from that runtime refusal.
             if matches!(call.func.name, "label_replace" | "label_join") {
                 return false;
             }
@@ -2029,7 +2016,8 @@ fn collect_selectors<'a>(
 
 /// Whether `engine` can serve raw series frames to the fused-series node.
 ///
-/// A whitelist avoids probing a region from logical planning; declining only costs the native route.
+/// This is a scanner capability boundary: it avoids probing a region during logical planning, and
+/// declining leaves the existing plan available.
 fn supports_native_raw_series(engine: &str) -> bool {
     matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
 }
@@ -2070,7 +2058,8 @@ fn metric_scan_and_table_id(
     Some((scan.clone(), filter.predicate.clone(), *table_id))
 }
 
-/// Whether `expr` calls `rate`/`increase` anywhere in its admitted expression tree.
+/// Whether `expr` contains `rate`/`increase`, used only by the delta-temporality semantic safety
+/// gate, not as a native-function capability list.
 fn calls_rate_or_increase(expr: &PromExpr) -> bool {
     match expr {
         PromExpr::Call(call) => {
@@ -2099,8 +2088,9 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, cut_segments, fused_output_tags,
-        hybrid_binary_admitted, independent_scan_pair, native_promql_requested, scan_time_filter,
+        METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, cut_segments,
+        hybrid_binary_admitted, independent_scan_pair, native_output_tags, native_promql_requested,
+        scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -2265,17 +2255,17 @@ mod tests {
         let on = compiled_test_tree("x + on(host) x");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            fused_output_tags(on.root(), &sources)
+            native_output_tags(on.root(), &sources)
         );
         let ignoring = compiled_test_tree("x + x");
         assert_eq!(
             Some(tags.clone()),
-            fused_output_tags(ignoring.root(), &sources)
+            native_output_tags(ignoring.root(), &sources)
         );
         let empty_on = compiled_test_tree("x + on() x");
         assert_eq!(
             Some(tags.clone()),
-            fused_output_tags(empty_on.root(), &sources)
+            native_output_tags(empty_on.root(), &sources)
         );
 
         // Two tables with different tags: the left side's labels pass through a wrapper and a
@@ -2287,12 +2277,12 @@ mod tests {
         let wrapped = compiled_test_tree("100 * (1 - x / on(host) y)");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            fused_output_tags(wrapped.root(), &sources)
+            native_output_tags(wrapped.root(), &sources)
         );
         let and = compiled_test_tree("x and on(host) y");
         assert_eq!(
             Some(sources[0].clone()),
-            fused_output_tags(and.root(), &sources)
+            native_output_tags(and.root(), &sources)
         );
         let or = compiled_test_tree("x or y");
         assert_eq!(
@@ -2301,7 +2291,7 @@ mod tests {
                 "kind".to_string(),
                 "zone".to_string()
             ]),
-            fused_output_tags(or.root(), &sources)
+            native_output_tags(or.root(), &sources)
         );
         // An unmatched right series answers with its own matching labels under a left fill.
         let fill = compiled_test_tree("x + fill_left(0) y");
@@ -2311,12 +2301,12 @@ mod tests {
                 "kind".to_string(),
                 "zone".to_string()
             ]),
-            fused_output_tags(fill.root(), &sources)
+            native_output_tags(fill.root(), &sources)
         );
         let fill_on = compiled_test_tree("x + on(host) fill(0) y");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            fused_output_tags(fill_on.root(), &sources)
+            native_output_tags(fill_on.root(), &sources)
         );
         // Group modifiers retain the many-side labels and copy declared labels from the one side.
         let group_sources = [
@@ -2351,7 +2341,7 @@ mod tests {
                 .map(String::from)
                 .collect()
             ),
-            fused_output_tags(group_left.root(), &group_sources)
+            native_output_tags(group_left.root(), &group_sources)
         );
         let group_right =
             compiled_test_tree("x * on(cluster, namespace, pod) group_right(container) y");
@@ -2369,7 +2359,7 @@ mod tests {
                 .map(String::from)
                 .collect()
             ),
-            fused_output_tags(group_right.root(), &group_sources)
+            native_output_tags(group_right.root(), &group_sources)
         );
         // An outer match narrows the labels the inner one already narrowed.
         let sources = [
@@ -2384,7 +2374,7 @@ mod tests {
         ] {
             assert_eq!(
                 Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
-                fused_output_tags(compiled_test_tree(query).root(), &sources),
+                native_output_tags(compiled_test_tree(query).root(), &sources),
                 "{query}"
             );
         }
@@ -2400,15 +2390,42 @@ mod tests {
             let aggregate = compiled_test_tree(query);
             assert_eq!(
                 Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
-                fused_output_tags(aggregate.root(), &sources),
+                native_output_tags(aggregate.root(), &sources),
                 "{query}"
             );
         }
+        // Whole-vector operators that retain series keep the input labels, while `absent` derives
+        // its output names from the compiler-bound label set and `count_values` adds its value tag.
+        let hostname_source = [vec!["hostname".to_string()]];
+        for query in [
+            "topk(10, sum by (hostname) (rate(x[5m])))",
+            "bottomk(10, sum by (hostname) (rate(x[5m])))",
+            "limitk(10, sum by (hostname) (rate(x[5m])))",
+            "limit_ratio(0.5, sum by (hostname) (rate(x[5m])))",
+            "sort(sum by (hostname) (rate(x[5m])))",
+        ] {
+            assert_eq!(
+                Some(vec!["hostname".to_string()]),
+                native_output_tags(compiled_test_tree(query).root(), &hostname_source),
+                "{query}"
+            );
+        }
+        let absent = compiled_test_tree("absent(x{host=\"a\", job=\"b\"})");
+        assert_eq!(
+            Some(vec!["host".to_string(), "job".to_string()]),
+            native_output_tags(absent.root(), &sources)
+        );
+        let count_values =
+            compiled_test_tree("count_values by (host) (\"sample\", sum by (host) (x))");
+        assert_eq!(
+            Some(vec!["host".to_string(), "sample".to_string()]),
+            native_output_tags(count_values.root(), &sources)
+        );
         // Selecting some series keeps each one's own labels, whatever the grouping was.
         let topk = compiled_test_tree("topk(1, x)");
         assert_eq!(
             Some(sources[0].clone()),
-            fused_output_tags(topk.root(), &sources),
+            native_output_tags(topk.root(), &sources),
             "topk keeps the labels of the series it selects"
         );
         // A label rewrite renames the label set below it, which this walk does not derive either.
@@ -2417,7 +2434,11 @@ mod tests {
             r#"label_join(x, "dst", "-", "src", "src")"#,
         ] {
             let rewrite = compiled_test_tree(query);
-            assert_eq!(None, fused_output_tags(rewrite.root(), &sources), "{query}");
+            assert_eq!(
+                None,
+                native_output_tags(rewrite.root(), &sources),
+                "{query}"
+            );
         }
     }
 
@@ -2454,7 +2475,28 @@ mod tests {
         let tree = compiled_test_tree("x * on(pod) group_left(container) y");
         assert_eq!(
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
-            fused_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources)
+        );
+    }
+
+    #[test]
+    fn output_tags_without_grouping_drops_metric_name() {
+        let sources = [vec![
+            "instance".to_string(),
+            METRIC_NAME.to_string(),
+            "job".to_string(),
+        ]];
+
+        let sum = compiled_test_tree("sum without (instance) (x)");
+        assert_eq!(
+            Some(vec!["job".to_string()]),
+            native_output_tags(sum.root(), &sources)
+        );
+
+        let count_values = compiled_test_tree("count_values without (instance) (\"sample\", x)");
+        assert_eq!(
+            Some(vec!["job".to_string(), "sample".to_string()]),
+            native_output_tags(count_values.root(), &sources)
         );
     }
 
@@ -2467,17 +2509,34 @@ mod tests {
         let tree = compiled_test_tree("x * on(pod) group_right(container) y");
         assert_eq!(
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
-            fused_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources)
         );
     }
 
+    #[test]
+    fn histogram_quantile_output_tags_drop_bucket_and_metadata_labels() {
+        let sources = [vec![
+            "le".to_string(),
+            "__name__".to_string(),
+            "__type__".to_string(),
+            "__unit__".to_string(),
+            "job".to_string(),
+        ]];
+        let tree = compiled_test_tree("histogram_quantile(0.9, x)");
+        assert_eq!(
+            Some(vec!["job".to_string()]),
+            native_output_tags(tree.root(), &sources)
+        );
+    }
+
+    /// A map that only computes values passes its input's labels through unchanged.
     #[test]
     fn match_output_tags_pass_through_pointwise_math() {
         let sources = [vec!["host".to_string(), "kind".to_string()]];
         let tree = compiled_test_tree("abs(x) * 2");
         assert_eq!(
             Some(vec!["host".to_string(), "kind".to_string()]),
-            fused_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources)
         );
     }
 
@@ -2499,9 +2558,12 @@ mod tests {
             "A and B",
             "A + on() B",
             "A + on(job) group_left B",
-            "sum(A) / B",
             "100 / B",
             "A / (B + C)",
+            // A fold on either side: one shared output label set cannot describe both operands, and
+            // the shapes that produced a `tag_0` planning error before the aggregate gate existed.
+            "sum(A) / B",
+            "A / sum(B)",
         ] {
             assert!(!hybrid_admission(query), "{query}");
         }

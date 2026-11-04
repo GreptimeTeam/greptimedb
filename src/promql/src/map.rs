@@ -46,7 +46,7 @@ use crate::grid_series::GridSeriesBuilder;
 use crate::map_time::DateFunction;
 
 /// Float math supported by the evaluated-series kernel.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MathOp {
     /// Absolute value.
     Abs,
@@ -450,5 +450,37 @@ fn float_sample(sample: SampleRef<'_>) -> Option<f64> {
         SampleRef::Float(sample) => Some(sample),
         SampleRef::Missing => None,
         _ => unreachable!("validated as float"),
+    }
+}
+
+impl PartialEq for MathOp {
+    fn eq(&self, o: &Self) -> bool {
+        match (self, o) {
+            (Self::Round { nearest: a }, Self::Round { nearest: b }) => a.to_bits() == b.to_bits(),
+            (Self::Clamp { min: a, max: b }, Self::Clamp { min: c, max: d }) => {
+                a.to_bits() == c.to_bits() && b.to_bits() == d.to_bits()
+            }
+            (Self::ClampMin { min: a }, Self::ClampMin { min: b })
+            | (Self::ClampMax { max: a }, Self::ClampMax { max: b }) => a.to_bits() == b.to_bits(),
+            (Self::Date(a), Self::Date(b)) => a == b,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(o),
+        }
+    }
+}
+impl Eq for MathOp {}
+impl std::hash::Hash for MathOp {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::mem::discriminant(self).hash(h);
+        match self {
+            Self::Round { nearest: x } | Self::ClampMin { min: x } | Self::ClampMax { max: x } => {
+                x.to_bits().hash(h)
+            }
+            Self::Clamp { min, max } => {
+                min.to_bits().hash(h);
+                max.to_bits().hash(h)
+            }
+            Self::Date(d) => d.hash(h),
+            _ => (),
+        }
     }
 }
