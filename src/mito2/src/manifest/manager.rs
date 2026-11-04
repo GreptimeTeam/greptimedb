@@ -863,7 +863,7 @@ mod test {
 
     use super::*;
     use crate::manifest::action::{RegionChange, RegionEdit};
-    use crate::manifest::tests::utils::basic_region_metadata;
+    use crate::manifest::tests::utils::{basic_region_metadata, manifest_recovery_usage};
     use crate::test_util::TestEnv;
 
     #[tokio::test]
@@ -979,26 +979,6 @@ mod test {
         manager.validate_manifest(&new_metadata, 1);
     }
 
-    /// Just for test, refer to wal_dir_usage in src/store-api/src/logstore.rs.
-    async fn manifest_dir_usage(path: &str) -> u64 {
-        let mut size = 0;
-        let mut read_dir = tokio::fs::read_dir(path).await.unwrap();
-        while let Ok(dir_entry) = read_dir.next_entry().await {
-            let Some(entry) = dir_entry else {
-                break;
-            };
-            if entry.file_type().await.unwrap().is_file() {
-                let file_name = entry.file_name().into_string().unwrap();
-                if file_name.contains(".checkpoint") || file_name.contains(".json") {
-                    let file_size = entry.metadata().await.unwrap().len() as usize;
-                    debug!("File: {file_name:?}, size: {file_size}");
-                    size += file_size;
-                }
-            }
-        }
-        size as u64
-    }
-
     #[tokio::test]
     async fn test_manifest_size() {
         let metadata = Arc::new(basic_region_metadata());
@@ -1035,7 +1015,7 @@ mod test {
 
         // get manifest size
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
+        assert_eq!(manifest_size, manifest_recovery_usage(&manifest_dir).await);
 
         // update 10 times nop_action to trigger checkpoint
         for _ in 0..10 {
@@ -1062,10 +1042,9 @@ mod test {
 
         // check manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
+        assert_eq!(manifest_size, manifest_recovery_usage(&manifest_dir).await);
 
-        // Reopen the manager,
-        // we just calculate the size from the latest checkpoint file
+        // Reopening reconstructs the same logical recovery set from stored bytes.
         manager.stop().await;
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, None)
@@ -1075,7 +1054,9 @@ mod test {
         manager.validate_manifest(&new_metadata, 11);
 
         // get manifest size again
-        let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1398);
+        assert_eq!(
+            manager.manifest_usage(),
+            manifest_recovery_usage(&manifest_dir).await
+        );
     }
 }
