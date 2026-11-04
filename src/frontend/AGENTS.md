@@ -76,6 +76,8 @@ including caches owned by pipeline and protocol handlers.
 
 - **OTLP metrics** (`instance/otlp.rs`): authorize all emitted destinations before
   schema preflight can reject points or expose destination schemas.
+  Reserve exemplar expansion with the transport's memory limiter before building
+  rows; retain the permit through `WriteProgress` until writes complete.
 
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
   one shared batcher for opted-in HTTP Prom and OTLP metric-engine

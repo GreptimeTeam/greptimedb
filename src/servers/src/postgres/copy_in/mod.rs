@@ -721,7 +721,11 @@ impl PostgresServerHandlerInner {
                 let request = ExportMetricsServiceRequest::decode(bytes.as_slice())
                     .map_err(|e| bad_copy_data(format!("invalid OTLP payload: {e}")))?;
                 let outcome = otlp_handler
-                    .metrics(request, Arc::new(ctx))
+                    .metrics(
+                        request,
+                        Arc::new(ctx),
+                        Some((self.memory_limiter.clone(), 0)),
+                    )
                     .await
                     .map_err(convert_err)?;
                 // Same failure semantics as the HTTP route: a payload

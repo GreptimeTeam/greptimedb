@@ -33,6 +33,7 @@ use crate::query_handler::CopyInHandlerRef;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::ReloadableTlsServerConfig;
 
@@ -45,6 +46,7 @@ pub struct PostgresServer {
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     otlp_with_metric_engine: bool,
+    memory_limiter: ServerMemoryLimiter,
     bind_addr: Option<SocketAddr>,
     process_manager: Option<ProcessManagerRef>,
 }
@@ -85,6 +87,7 @@ impl PostgresServer {
             influxdb_handler: None,
             otlp_handler: None,
             otlp_with_metric_engine: false,
+            memory_limiter: ServerMemoryLimiter::default(),
             bind_addr: None,
             process_manager,
         }
@@ -93,6 +96,12 @@ impl PostgresServer {
     /// Enables ordinary-table batching for connections accepted by this server.
     pub fn with_batching_enabled(mut self, enabled: bool) -> Self {
         self.batching_enabled = enabled;
+        self
+    }
+
+    /// Sets the shared memory limiter used for OTLP exemplar expansion.
+    pub fn with_memory_limiter(mut self, limiter: ServerMemoryLimiter) -> Self {
+        self.memory_limiter = limiter;
         self
     }
 
@@ -137,6 +146,7 @@ impl PostgresServer {
             influxdb_handler: self.influxdb_handler.clone(),
             otlp_handler: self.otlp_handler.clone(),
             otlp_with_metric_engine: self.otlp_with_metric_engine,
+            memory_limiter: self.memory_limiter.clone(),
             user_provider: make_handler.user_provider.clone(),
             param_provider: make_handler.param_provider.clone(),
             force_tls: make_handler.force_tls,

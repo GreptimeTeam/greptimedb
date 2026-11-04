@@ -561,7 +561,9 @@ fn convert_remote_write_v2(
             checked_total(histogram_count_total, counts.histograms, "histogram")?;
     }
 
-    budget.reserve(crate::exemplar::estimated_row_bytes(&exemplars))?;
+    budget.reserve(crate::exemplar::estimated_row_bytes(
+        exemplars.values().map(Vec::as_slice),
+    ))?;
 
     Ok(RemoteWriteV2WriteRequests {
         samples: into_context_req(sample_tables),

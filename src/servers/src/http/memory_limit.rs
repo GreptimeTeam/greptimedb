@@ -155,7 +155,12 @@ pub async fn decoded_body_accounting_middleware(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
 
-    let accounting = BodyMemoryAccounting::default();
+    // Share the wire-byte ledger so handlers see all permits held by this request.
+    let accounting = req
+        .extensions()
+        .get::<BodyMemoryAccounting>()
+        .cloned()
+        .unwrap_or_default();
     // Retain the permits for the whole request, like the global middleware.
     let retained_accounting = accounting.clone();
     let (mut parts, body) = req.into_parts();

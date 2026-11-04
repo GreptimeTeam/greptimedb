@@ -111,8 +111,8 @@ const MAX_REJECTION_MESSAGE_BYTES: usize = 512;
 /// Result of converting one OTLP metrics request.
 #[derive(Debug)]
 pub struct MetricsConversion {
-    pub exemplars: RowInsertRequests,
-    pub exemplar_rows: usize,
+    /// Kept normalized until the frontend reserves memory for row expansion.
+    pub exemplars: Vec<crate::exemplar::Exemplar>,
     pub requests: RowInsertRequests,
     /// Row count of `requests`; the resource descriptor is not counted.
     pub rows: usize,
@@ -403,7 +403,7 @@ fn encode_metrics(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
-    exemplars: &mut Vec<crate::exemplar::Exemplar>,
+    exemplars: &mut Vec<exemplars::RowExemplars>,
 ) -> Result<()> {
     let name = &metadata.name;
 
@@ -556,7 +556,7 @@ fn encode_exponential_histogram(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
-    exemplars: &mut Vec<crate::exemplar::Exemplar>,
+    exemplars: &mut Vec<exemplars::RowExemplars>,
 ) -> Result<()> {
     let name = &metadata.name;
     let temporality = match exponential_histogram_gate(histogram) {
@@ -621,10 +621,9 @@ fn encode_exponential_histogram(
             exemplars,
             &data_point.exemplars,
             name,
-            table,
-            &row,
+            table.num_rows(),
             metric_ctx,
-        )?;
+        );
         table.add_row(row);
         add_accepted_data_points(outcome, 1)?;
     }
@@ -1049,7 +1048,7 @@ fn encode_gauge(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
-    exemplars: &mut Vec<crate::exemplar::Exemplar>,
+    exemplars: &mut Vec<exemplars::RowExemplars>,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
         name,
@@ -1074,10 +1073,9 @@ fn encode_gauge(
             exemplars,
             &data_point.exemplars,
             name,
-            table,
-            &row,
+            table.num_rows(),
             metric_ctx,
-        )?;
+        );
         table.add_row(row);
     }
 
@@ -1093,7 +1091,7 @@ fn encode_sum(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
-    exemplars: &mut Vec<crate::exemplar::Exemplar>,
+    exemplars: &mut Vec<exemplars::RowExemplars>,
 ) -> Result<()> {
     let is_delta = matches!(
         AggregationTemporality::try_from(sum.aggregation_temporality),
@@ -1131,10 +1129,9 @@ fn encode_sum(
             exemplars,
             &data_point.exemplars,
             name,
-            table,
-            &row,
+            table.num_rows(),
             metric_ctx,
-        )?;
+        );
         table.add_row(row);
     }
 
@@ -1165,7 +1162,7 @@ fn encode_histogram(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
-    exemplars: &mut Vec<crate::exemplar::Exemplar>,
+    exemplars: &mut Vec<exemplars::RowExemplars>,
 ) -> Result<()> {
     let normalized_name = name;
 
@@ -1269,10 +1266,9 @@ fn encode_histogram(
                 exemplars,
                 bucket_exemplars,
                 &bucket_table_name,
-                bucket_table,
-                &bucket_row,
+                bucket_table.num_rows(),
                 metric_ctx,
-            )?;
+            );
             bucket_table.add_row(bucket_row);
         }
 
@@ -1632,8 +1628,22 @@ mod tests {
         gauge.data_points[0].time_unix_nano =
             2 * common_catalog::consts::SEMANTIC_GRAPH_WINDOW_NANOS as u64;
         request.resource_metrics.push(rejected);
-        let prepared = prepare_metrics(request, &mut descriptor_ctx()).unwrap();
+        let mut prepared = prepare_metrics(request, &mut descriptor_ctx()).unwrap();
         assert!(prepared.has_exemplars());
+        for request in &mut prepared.requests {
+            let rows = request.rows.as_mut().unwrap();
+            rows.schema.push(ColumnSchema {
+                column_name: "defaulted_host".into(),
+                datatype: api::v1::ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            });
+            for row in &mut rows.rows {
+                row.values.push(api::v1::Value {
+                    value_data: Some(ValueData::StringValue("unknown".into())),
+                });
+            }
+        }
         let conversion = prepared
             .finish(
                 vec![None, Some("incompatible schema".into())],
@@ -1647,8 +1657,13 @@ mod tests {
             ),
             (1, 1)
         );
-        assert_eq!(conversion.exemplar_rows, 1);
-        let exemplar_rows = conversion.exemplars.inserts[0].rows.as_ref().unwrap();
+        assert_eq!(conversion.exemplars.len(), 1);
+        assert_eq!(
+            conversion.exemplars[0].series_labels["defaulted_host"],
+            "unknown"
+        );
+        let (exemplars, _) = crate::exemplar::into_rows(conversion.exemplars).unwrap();
+        let exemplar_rows = exemplars.inserts[0].rows.as_ref().unwrap();
         let metric = exemplar_rows
             .schema
             .iter()
@@ -1907,7 +1922,7 @@ mod tests {
                 let result = to_grpc_insert_requests(request, &mut ctx);
                 if source == AttributeType::Scope {
                     let conversion = result.unwrap();
-                    assert_eq!(1, conversion.exemplar_rows);
+                    assert_eq!(1, conversion.exemplars.len());
                     assert!(
                         column_names(&conversion.requests, "source_metric")
                             .contains(&"otel_scope___name__".to_string())
@@ -1916,7 +1931,7 @@ mod tests {
                     let conversion = result.unwrap();
                     assert_eq!(conversion.outcome.accepted_data_points, 0);
                     assert_eq!(conversion.outcome.rejected_data_points, 1);
-                    assert_eq!(conversion.exemplar_rows, 0);
+                    assert_eq!(conversion.exemplars.len(), 0);
                     assert!(conversion.outcome.error_message.unwrap().contains(&format!(
                         "OTLP attribute `{key}` resolves to reserved label `__name__`"
                     )));
@@ -2892,7 +2907,7 @@ mod tests {
             assert_eq!(conversion.rows, 3);
             assert_eq!(conversion.outcome.accepted_data_points, 3);
             assert_eq!(conversion.outcome.rejected_data_points, 0);
-            assert_eq!(conversion.exemplar_rows, 6);
+            assert_eq!(conversion.exemplars.len(), 6);
         }
     }
 
@@ -3017,8 +3032,9 @@ mod tests {
                     (6, "inf"),
                 ],
             };
-            assert_eq!(conversion.exemplar_rows, expected.len(), "{mode}");
-            let rows = conversion.exemplars.inserts[0].rows.as_ref().unwrap();
+            assert_eq!(conversion.exemplars.len(), expected.len(), "{mode}");
+            let (exemplars, _) = crate::exemplar::into_rows(conversion.exemplars).unwrap();
+            let rows = exemplars.inserts[0].rows.as_ref().unwrap();
             let index = |name| {
                 rows.schema
                     .iter()

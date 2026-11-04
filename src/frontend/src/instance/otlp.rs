@@ -46,9 +46,11 @@ use servers::otlp::trace::span::TraceSpanGroup;
 use servers::query_handler::{
     MetricsIngestOutcome, OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
 };
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use session::context::QueryContextRef;
 use session::protocol_ctx::OtlpMetricCtx;
-use snafu::ResultExt;
+use session::write_progress::WriteProgress;
+use snafu::{IntoError, ResultExt};
 use table::requests::{
     OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PER_TABLE_INDEX_KEY,
     SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_LOG, SIGNAL_TYPE_METRIC,
@@ -98,6 +100,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
+        memory_limiter: Option<(ServerMemoryLimiter, u64)>,
     ) -> ServerResult<MetricsIngestOutcome> {
         self.plugins
             .get::<PermissionCheckerRef>()
@@ -163,7 +166,6 @@ impl OpenTelemetryProtocolHandler for Instance {
             requests,
             rows,
             exemplars,
-            exemplar_rows,
             semantic_index,
             resource_info,
             mut outcome,
@@ -179,6 +181,31 @@ impl OpenTelemetryProtocolHandler for Instance {
             return Ok(outcome);
         }
 
+        let ctx = if !exemplars.is_empty()
+            && let Some((limiter, held_bytes)) = memory_limiter
+        {
+            let bytes =
+                servers::exemplar::estimated_row_bytes(std::iter::once(exemplars.as_slice()))
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .ok_or_else(|| {
+                        error::MemoryLimitExceededSnafu.into_error(
+                            common_memory_manager::Error::MemoryLimitExceeded {
+                                requested_bytes: u64::MAX,
+                                limit_bytes: limiter.limit_bytes(),
+                            },
+                        )
+                    })?;
+            limiter.check_request_fits(bytes, held_bytes)?;
+            let reservation = Arc::new(limiter.acquire(bytes).await?);
+            let mut ctx = ctx.fork();
+            // Queued and detached writes retain the reservation after caller cancellation.
+            ctx.set_write_progress(Arc::new(WriteProgress::with_reservation(reservation)));
+            Arc::new(ctx)
+        } else {
+            ctx
+        };
+        let exemplar_rows = exemplars.len();
+        let (exemplars, _) = servers::exemplar::into_rows(exemplars)?;
         let total_rows = rows.checked_add(exemplar_rows).ok_or_else(|| {
             error::InvalidOtlpMetricInputSnafu {
                 reason: "combined metric and exemplar row count overflow",

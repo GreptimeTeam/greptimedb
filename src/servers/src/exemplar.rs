@@ -50,8 +50,10 @@ pub struct Exemplar {
 pub type ExemplarRequests = BTreeMap<Option<String>, Vec<Exemplar>>;
 
 /// Bounds row capacity after each database's metrics share one exemplar schema.
-pub(crate) fn estimated_row_bytes(requests: &ExemplarRequests) -> Option<usize> {
-    requests.values().try_fold(0usize, |total, exemplars| {
+pub fn estimated_row_bytes<'a>(
+    requests: impl IntoIterator<Item = &'a [Exemplar]>,
+) -> Option<usize> {
+    requests.into_iter().try_fold(0usize, |total, exemplars| {
         let mut tags = BTreeSet::new();
         let mut payload = 0usize;
         // Shared series data is copied into each output row.

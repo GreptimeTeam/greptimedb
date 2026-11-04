@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use api::v1::{SemanticType, Value, value::ValueData};
+use api::v1::{ColumnSchema, SemanticType, Value, value::ValueData};
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
 use session::protocol_ctx::OtlpMetricCtx;
 use snafu::{OptionExt, ensure};
@@ -23,7 +23,46 @@ use snafu::{OptionExt, ensure};
 use crate::error::{InvalidOtlpMetricInputSnafu, Result};
 use crate::exemplar::{self as normalized, Exemplar as Observation};
 use crate::otlp::metrics::{scalar_value_string, translate_label_name};
-use crate::row_writer::TableData;
+
+/// Observations whose inherited labels are bound after source-row normalization.
+pub(crate) struct RowExemplars {
+    pub(crate) metric: Arc<str>,
+    /// Starts as an emitted table's row offset; preparation maps it into `row_locations`.
+    pub(crate) row: usize,
+    observations: Vec<Observation>,
+}
+
+impl RowExemplars {
+    /// Drops observations whose inherited tags cannot be represented by the exemplar schema.
+    pub(crate) fn finish(mut self, schema: &[ColumnSchema], row: &[Value]) -> Vec<Observation> {
+        let labels = normalized::labels(
+            schema.iter().zip(row).filter_map(|(column, value)| {
+                if column.semantic_type != SemanticType::Tag as i32 {
+                    return None;
+                }
+                match &value.value_data {
+                    Some(ValueData::StringValue(value)) => {
+                        Some((column.column_name.clone(), value.clone()))
+                    }
+                    _ => None,
+                }
+            }),
+            false,
+            |name| !name.is_empty(),
+        );
+        let Ok(labels) = labels else {
+            crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                .with_label_values(&["otlp"])
+                .inc_by(self.observations.len() as u64);
+            return Vec::new();
+        };
+        let labels = Arc::new(labels);
+        for observation in &mut self.observations {
+            observation.series_labels = labels.clone();
+        }
+        self.observations
+    }
+}
 
 pub(super) fn value(exemplar: &Exemplar) -> Result<f64> {
     match exemplar
@@ -37,42 +76,26 @@ pub(super) fn value(exemplar: &Exemplar) -> Result<f64> {
     }
 }
 
-/// Reads the emitted row so resource promotion and label precedence cannot diverge.
-pub(super) fn append<'a>(
-    output: &mut Vec<Observation>,
+/// Retains the emitted row's identity until destination defaults have been filled.
+pub(crate) fn append<'a>(
+    output: &mut Vec<RowExemplars>,
     exemplars: impl IntoIterator<Item = &'a Exemplar>,
     metric: &str,
-    table: &TableData,
-    row: &[Value],
+    row: usize,
     ctx: &OtlpMetricCtx,
-) -> Result<()> {
+) {
     let mut exemplars = exemplars.into_iter().peekable();
     if exemplars.peek().is_none() {
-        return Ok(());
+        return;
     }
-    // Names have already been translated according to the configured OTLP strategy.
     let validate_name = |name: &[u8]| !name.is_empty();
-    let series_labels = normalized::labels(
-        table
-            .columns()
-            .iter()
-            .zip(row)
-            .filter_map(|(column, value)| {
-                if column.semantic_type != SemanticType::Tag as i32 {
-                    return None;
-                }
-                match &value.value_data {
-                    Some(ValueData::StringValue(value)) => {
-                        Some((column.column_name.clone(), value.clone()))
-                    }
-                    _ => None,
-                }
-            }),
-        false,
-        validate_name,
-    )?;
-    let series_labels = Arc::new(series_labels);
+    let series_labels = Arc::new(BTreeMap::new());
     let metric: Arc<str> = metric.into();
+    let mut pending = RowExemplars {
+        metric: metric.clone(),
+        row,
+        observations: Vec::new(),
+    };
     for exemplar in exemplars {
         let observation: Result<_> = (|| {
             let mut names = HashSet::new();
@@ -121,13 +144,15 @@ pub(super) fn append<'a>(
             })
         })();
         match observation {
-            Ok(observation) => output.push(observation),
+            Ok(observation) => pending.observations.push(observation),
             Err(_) => crate::metrics::EXEMPLARS_DROPPED_TOTAL
                 .with_label_values(&["otlp"])
                 .inc(),
         }
     }
-    Ok(())
+    if !pending.observations.is_empty() {
+        output.push(pending);
+    }
 }
 
 #[cfg(test)]
@@ -135,6 +160,7 @@ mod tests {
     use super::*;
     use crate::otlp::metrics::string_key_value;
     use crate::row_writer;
+    use crate::row_writer::TableData;
 
     #[test]
     fn test_exemplar_labels_follow_otlp_translation_strategy() {
@@ -182,12 +208,20 @@ mod tests {
                     &mut output,
                 )
                 .unwrap();
+                let (requests, rows) = tables.into_row_insert_requests();
+                assert_eq!(rows, 1);
+                let rows = requests.inserts[0].rows.as_ref().unwrap();
+                let output = output
+                    .into_iter()
+                    .flat_map(|pending| {
+                        let row = pending.row;
+                        pending.finish(&rows.schema, &rows.rows[row].values)
+                    })
+                    .collect::<Vec<_>>();
                 let name = translate_label_name(name, strategy);
                 assert_eq!(output.len(), 1);
                 assert_eq!(output[0].series_labels[&name], "GET");
                 assert_eq!(output[0].labels[&name], "POST");
-                let (requests, rows) = tables.into_row_insert_requests();
-                assert_eq!(rows, 1);
                 assert!(
                     requests.inserts[0]
                         .rows
@@ -219,14 +253,22 @@ mod tests {
         };
         let ctx = OtlpMetricCtx::default();
         let mut output = Vec::new();
-        append(&mut output, [&exemplar], "latency", &table, &row, &ctx).unwrap();
-        assert_eq!(output[0].timestamp, 1720000000123456789);
-        assert_eq!(output[0].series_labels["job"], "api");
-        assert_eq!(output[0].labels["trace_id"], "ab".repeat(16));
-        assert_eq!(output[0].labels["span_id"], "cd".repeat(8));
+        append(&mut output, [&exemplar], "latency", table.num_rows(), &ctx);
+        let first = output.pop().unwrap().finish(table.columns(), &row);
+        assert_eq!(first[0].timestamp, 1720000000123456789);
+        assert_eq!(first[0].series_labels["job"], "api");
+        assert_eq!(first[0].labels["trace_id"], "ab".repeat(16));
+        assert_eq!(first[0].labels["span_id"], "cd".repeat(8));
         let mut without_id = exemplar.clone();
         without_id.trace_id.clear();
-        append(&mut output, [&without_id], "latency", &table, &row, &ctx).unwrap();
-        assert_eq!(output[1].labels["trace_id"], "fallback");
+        append(
+            &mut output,
+            [&without_id],
+            "latency",
+            table.num_rows(),
+            &ctx,
+        );
+        let second = output.pop().unwrap().finish(table.columns(), &row);
+        assert_eq!(second[0].labels["trace_id"], "fallback");
     }
 }

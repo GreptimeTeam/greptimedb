@@ -70,7 +70,7 @@ impl ServerMemoryLimiter {
     }
 
     /// Rejects requests whose additional bytes cannot fit alongside their own held permits.
-    pub(crate) fn check_request_fits(&self, bytes: u64, held_bytes: u64) -> Result<()> {
+    pub fn check_request_fits(&self, bytes: u64, held_bytes: u64) -> Result<()> {
         let requested_bytes = held_bytes.checked_add(bytes);
         let limit_bytes = self.limit_bytes();
         match requested_bytes {
