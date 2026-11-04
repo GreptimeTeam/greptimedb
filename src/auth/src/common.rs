@@ -40,8 +40,8 @@ pub const MAX_PBKDF2_SHA256_ITERATIONS: u32 = 1_000_000;
 pub const MAX_PBKDF2_SHA256_SALT_LEN: usize = 1024;
 pub const PG_SCRAM_SHA256_KEY_LEN: usize = 32;
 
-/// Placeholder used when rendering user-provider passwords.
-const REDACTED_USER_PROVIDER_PASSWORD: &str = "[REDACTED]";
+/// Placeholder used when rendering potentially secret user-provider options.
+pub(crate) const REDACTED_USER_PROVIDER_OPTION: &str = "[REDACTED]";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -56,8 +56,8 @@ pub fn userinfo_by_name(username: Option<String>) -> UserInfoRef {
 }
 
 pub fn user_provider_from_option(opt: &str) -> Result<UserProviderRef> {
-    let (name, content) = opt.split_once(':').with_context(|| InvalidConfigSnafu {
-        value: opt.to_string(),
+    let (name, content) = opt.split_once(':').context(InvalidConfigSnafu {
+        value: REDACTED_USER_PROVIDER_OPTION,
         msg: "UserProviderOption must be in format `<option>:<value>`",
     })?;
     match name {
@@ -70,19 +70,19 @@ pub fn user_provider_from_option(opt: &str) -> Result<UserProviderRef> {
             WatchFileUserProvider::new(content).map(|p| Arc::new(p) as UserProviderRef)
         }
         _ => InvalidConfigSnafu {
-            value: name.to_string(),
+            value: REDACTED_USER_PROVIDER_OPTION,
             msg: "Invalid UserProviderOption",
         }
         .fail(),
     }
 }
 
-/// Serializes a `user_provider` option with inline passwords redacted.
+/// Serializes a `user_provider` option, exposing only known file-based forms.
 ///
 /// The option is held as a [`SecretString`] so `Debug` and the default
 /// serializer never print it. This serializer exposes the value only to keep
-/// the non-secret parts (provider name, usernames and file paths) visible in
-/// configuration dumps such as the `/config` endpoint.
+/// provider names and file paths visible for those forms in configuration dumps
+/// such as the `/config` endpoint.
 pub fn serialize_user_provider_option<S>(
     value: &Option<SecretString>,
     serializer: S,
@@ -98,40 +98,29 @@ where
     }
 }
 
-/// Replaces the passwords of the inline `static_user_provider:cmd:` form with
-/// a placeholder.
+/// Redacts user-provider options except known file-based forms with nonempty paths.
 ///
-/// The `file:` forms only carry a path and are returned unchanged, as are
-/// unknown providers.
+/// Only `static_user_provider:file:<path>` and `watch_file_user_provider:<path>`
+/// are returned unchanged. Inline credentials, unknown providers and malformed
+/// options are replaced entirely with a placeholder.
 pub fn redact_user_provider_option(value: &str) -> String {
-    let Some((provider, rest)) = value.split_once(':') else {
-        return value.to_string();
+    let is_file_provider = match value.split_once(':') {
+        Some((STATIC_USER_PROVIDER, content)) => content
+            .strip_prefix("file:")
+            .is_some_and(|path| !path.is_empty()),
+        Some((WATCH_FILE_USER_PROVIDER, path)) => !path.is_empty(),
+        _ => false,
     };
-    if provider != STATIC_USER_PROVIDER {
-        return value.to_string();
+    if is_file_provider {
+        value.to_string()
+    } else {
+        REDACTED_USER_PROVIDER_OPTION.to_string()
     }
-    let Some((mode, users)) = rest.split_once(':') else {
-        return value.to_string();
-    };
-    if mode != "cmd" {
-        return value.to_string();
-    }
-
-    let users = users
-        .split(',')
-        .map(|entry| match entry.split_once('=') {
-            Some((name, _password)) => format!("{name}={REDACTED_USER_PROVIDER_PASSWORD}"),
-            // A malformed entry carries no password to redact.
-            None => entry.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{provider}:{mode}:{users}")
 }
 
 pub fn static_user_provider_from_option(opt: &str) -> Result<StaticUserProvider> {
-    let (name, content) = opt.split_once(':').with_context(|| InvalidConfigSnafu {
-        value: opt.to_string(),
+    let (name, content) = opt.split_once(':').context(InvalidConfigSnafu {
+        value: REDACTED_USER_PROVIDER_OPTION,
         msg: "UserProviderOption must be in format `<option>:<value>`",
     })?;
     match name {
@@ -140,7 +129,7 @@ pub fn static_user_provider_from_option(opt: &str) -> Result<StaticUserProvider>
             Ok(provider)
         }
         _ => InvalidConfigSnafu {
-            value: name.to_string(),
+            value: REDACTED_USER_PROVIDER_OPTION,
             msg: format!("Invalid UserProviderOption, expect only {STATIC_USER_PROVIDER}"),
         }
         .fail(),
@@ -583,6 +572,7 @@ fn double_sha1(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
 
     fn mysql_native_password_auth_data(password: &[u8], salt: &[u8]) -> Vec<u8> {
         let hash_stage_1 = sha1_one(password);
@@ -709,29 +699,71 @@ mod tests {
 
     #[test]
     fn test_redact_user_provider_option() {
-        assert_eq!(
-            redact_user_provider_option(
-                "static_user_provider:cmd:alice=secret,bob=pbkdf2_sha256:4096:aa:bb"
-            ),
-            "static_user_provider:cmd:alice=[REDACTED],bob=[REDACTED]"
-        );
-        assert_eq!(
-            redact_user_provider_option("static_user_provider:file:/etc/greptimedb/users"),
-            "static_user_provider:file:/etc/greptimedb/users"
-        );
-        assert_eq!(
-            redact_user_provider_option("watch_file_user_provider:/etc/greptimedb/users"),
-            "watch_file_user_provider:/etc/greptimedb/users"
-        );
-        assert_eq!(
-            redact_user_provider_option("ldap_user_provider:/etc/greptimedb/ldap.toml"),
-            "ldap_user_provider:/etc/greptimedb/ldap.toml"
-        );
-        // Malformed entries carry no password to redact.
-        assert_eq!(
-            redact_user_provider_option("static_user_provider:cmd:alice"),
-            "static_user_provider:cmd:alice"
-        );
+        for option in [
+            "static_user_provider:file:/etc/greptimedb/users",
+            "watch_file_user_provider:/etc/greptimedb/users",
+            "static_user_provider:file:users.txt",
+            "watch_file_user_provider:users.txt",
+        ] {
+            assert_eq!(redact_user_provider_option(option), option);
+        }
+
+        for option in [
+            "",
+            "secret",
+            "alice=secret",
+            "static_user_provider",
+            "static_user_provider:",
+            "static_user_provider:file",
+            "static_user_provider:file:",
+            "static_user_provider:filex:/etc/greptimedb/users",
+            "static_user_provider:cmd:alice=secret,bob=pbkdf2_sha256:4096:aa:bb",
+            "static_user_provider:cmd:alice",
+            "static_user_provider:cmd:alice:secret",
+            "static_user_provider:cmd:alice=plain:prefix,secret-tail",
+            "static_user_provider:cmdx:alice=secret",
+            "watch_file_user_provider",
+            "watch_file_user_provider:",
+            "ldap_user_provider:/etc/greptimedb/ldap.toml",
+            "unknown_user_provider:cmd:alice=secret",
+        ] {
+            assert_eq!(redact_user_provider_option(option), "[REDACTED]");
+        }
+    }
+
+    #[test]
+    fn test_user_provider_errors_redact_credentials() {
+        for option in [
+            "secret",
+            "alice=secret",
+            "alice=secret,bob=other_secret",
+            "alice=secret:cmd:alice=secret",
+            "static_user_provider:alice=secret",
+            "static_user_provider:alice=secret:cmd",
+            "static_user_provider:cmdx:alice=secret",
+            "unknown_user_provider:cmd:alice=secret",
+            "static_user_provider:cmd:alice:invalid=secret",
+            "static_user_provider:cmd:alice=secret=tail",
+            "static_user_provider:cmd:alice=pbkdf2_sha256:secret",
+            "static_user_provider:cmd:alice=mysql_native_password:secret",
+            "static_user_provider:cmd:alice=pg_scram_sha256:secret",
+            "static_user_provider:cmd:bob=secret,alice=pbkdf2_sha256:secret",
+            "static_user_provider:cmd:alice:secret",
+            "static_user_provider:cmd:alice=plain:prefix,secret-tail",
+            "static_user_provider:cmd:watch_file_user_provider:secret",
+        ] {
+            for error in [
+                user_provider_from_option(option).err().unwrap(),
+                static_user_provider_from_option(option).err().unwrap(),
+            ] {
+                assert!(!error.to_string().contains("secret"));
+                assert!(!format!("{error:?}").contains("secret"));
+                let Error::InvalidConfig { value, .. } = error else {
+                    panic!("Expected an invalid config error");
+                };
+                assert_eq!(value, "[REDACTED]");
+            }
+        }
     }
 
     #[test]

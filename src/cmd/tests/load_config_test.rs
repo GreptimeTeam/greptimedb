@@ -847,7 +847,7 @@ fn test_load_standalone_user_provider_cmd_from_config_is_redacted_in_config_dump
 
     // ...while a config dump (e.g. `/config`) only exposes the redacted form.
     let serialized = options.to_toml().unwrap();
-    assert!(serialized.contains("alice=[REDACTED]"));
+    assert!(serialized.contains("user_provider = \"[REDACTED]\""));
     assert!(!serialized.contains("secret"));
 }
 

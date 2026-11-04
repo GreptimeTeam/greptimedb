@@ -251,8 +251,7 @@ mod tests {
         };
 
         let serialized = options.to_toml().unwrap();
-        assert!(serialized.contains("alice=[REDACTED]"));
-        assert!(serialized.contains("bob=[REDACTED]"));
+        assert!(serialized.contains("user_provider = \"[REDACTED]\""));
         assert!(!serialized.contains("secret"));
         assert!(!serialized.contains("pbkdf2_sha256"));
 
