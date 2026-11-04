@@ -4061,11 +4061,45 @@ impl PromPlanner {
 
                 ScalarFunc::GeneratedExpr
             }
-            _ => self.resolve_scalar_function(
-                func.name,
-                query_engine_state,
-                self.all_field_columns_are_native_histograms(input_schema),
-            )?,
+            _ => {
+                if let Some(f) = query_engine_state
+                    .session_state()
+                    .scalar_functions()
+                    .get(func.name)
+                {
+                    if self.all_field_columns_are_native_histograms(input_schema) {
+                        ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
+                    } else {
+                        ScalarFunc::DataFusionBuiltin(f.clone())
+                    }
+                } else if let Some(factory) = query_engine_state.scalar_function(func.name) {
+                    if self.all_field_columns_are_native_histograms(input_schema) {
+                        ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
+                    } else {
+                        let func_state = query_engine_state.function_state();
+                        let query_ctx = self.table_provider.query_ctx();
+
+                        ScalarFunc::DataFusionUdf(Arc::new(factory.provide(FunctionContext {
+                            state: func_state,
+                            query_ctx: query_ctx.clone(),
+                        })))
+                    }
+                } else if let Some(f) = datafusion_functions::math::functions()
+                    .iter()
+                    .find(|f| f.name() == func.name)
+                {
+                    if self.all_field_columns_are_native_histograms(input_schema) {
+                        ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
+                    } else {
+                        ScalarFunc::DataFusionUdf(f.clone())
+                    }
+                } else {
+                    return UnsupportedExprSnafu {
+                        name: func.name.to_string(),
+                    }
+                    .fail();
+                }
+            }
         };
 
         for value in &self.ctx.field_columns {
@@ -4204,60 +4238,6 @@ impl PromPlanner {
         }
 
         Ok((exprs, new_tags))
-    }
-
-    fn resolve_scalar_function(
-        &self,
-        name: &str,
-        query_engine_state: &QueryEngineState,
-        histogram_input: bool,
-    ) -> Result<ScalarFunc> {
-        let drop_histogram = || {
-            Arc::new(NativeHistogramDrop::float_null_udf(
-                format!(
-                    "{name}: dropped native histogram samples because this function is not supported for native histograms"
-                ),
-                self.promql_annotations.clone(),
-            ))
-        };
-        if let Some(function) = query_engine_state
-            .session_state()
-            .scalar_functions()
-            .get(name)
-        {
-            if histogram_input {
-                Ok(ScalarFunc::DataFusionUdf(drop_histogram()))
-            } else {
-                Ok(ScalarFunc::DataFusionBuiltin(function.clone()))
-            }
-        } else if let Some(factory) = query_engine_state.scalar_function(name) {
-            if histogram_input {
-                Ok(ScalarFunc::DataFusionUdf(drop_histogram()))
-            } else {
-                let function_state = query_engine_state.function_state();
-                let query_ctx = self.table_provider.query_ctx();
-                Ok(ScalarFunc::DataFusionUdf(Arc::new(factory.provide(
-                    FunctionContext {
-                        state: function_state,
-                        query_ctx: query_ctx.clone(),
-                    },
-                ))))
-            }
-        } else if let Some(function) = datafusion_functions::math::functions()
-            .iter()
-            .find(|function| function.name() == name)
-        {
-            if histogram_input {
-                Ok(ScalarFunc::DataFusionUdf(drop_histogram()))
-            } else {
-                Ok(ScalarFunc::DataFusionUdf(function.clone()))
-            }
-        } else {
-            UnsupportedExprSnafu {
-                name: name.to_string(),
-            }
-            .fail()
-        }
     }
 
     fn select_delta_range_math(
