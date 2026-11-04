@@ -27,7 +27,7 @@ use crate::grid_series::external;
 mod tests;
 
 /// A PromQL date function: `minute(v)`, `year()` and so on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum DateFunction {
     DayOfMonth,
     DayOfWeek,

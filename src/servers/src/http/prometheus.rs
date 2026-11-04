@@ -49,7 +49,7 @@ use futures::future::join_all;
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
-use promql_parser::parser::token::TokenType;
+use promql_parser::parser::token::{self, TokenType};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinModifier, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier,
@@ -1448,21 +1448,19 @@ fn binary_metric_name_side<'a>(
 /// Recursively collect all metric names from a PromQL expression
 fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
     match expr {
-        PromqlExpr::Aggregate(AggregateExpr { modifier, expr, .. }) => {
-            match modifier {
+        PromqlExpr::Aggregate(AggregateExpr {
+            op, modifier, expr, ..
+        }) => {
+            if !matches!(
+                op.id(),
+                token::T_TOPK | token::T_BOTTOMK | token::T_LIMITK | token::T_LIMIT_RATIO
+            ) && !matches!(
+                modifier,
                 Some(LabelModifier::Include(labels))
-                    if !labels.labels.contains(&METRIC_NAME.to_string()) =>
-                {
-                    metric_names.clear();
-                    return;
-                }
-                Some(LabelModifier::Exclude(labels))
-                    if labels.labels.contains(&METRIC_NAME.to_string()) =>
-                {
-                    metric_names.clear();
-                    return;
-                }
-                _ => {}
+                    if labels.labels.contains(&METRIC_NAME.to_string())
+            ) {
+                metric_names.clear();
+                return;
             }
             collect_metric_names(expr, metric_names)
         }
@@ -3252,9 +3250,121 @@ mod tests {
             },
             // Aggregation and function cases
             TestCase {
-                name: "metric with aggregation",
-                promql: "sum(cpu_usage)",
+                name: "topk preserves metric name",
+                promql: "topk(1, cpu_usage)",
                 expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "bottomk preserves metric name",
+                promql: "bottomk(1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk without preserves metric name",
+                promql: "topk without(host) (1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk by preserves metric name",
+                promql: "topk by(job) (1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "limitk preserves metric name",
+                promql: "limitk(1, cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "topk does not restore folded metric name",
+                promql: "topk(1, sum(cpu_usage))",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "outer aggregate drops topk metric name",
+                promql: "sum(topk(1, cpu_usage))",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "ungrouped aggregate drops metric name",
+                promql: "sum(cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate by non-name label drops metric name",
+                promql: "sum by (job) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without non-name label drops metric name",
+                promql: "sum without (host) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without empty label list drops metric name",
+                promql: "sum without () (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without nonexistent label drops metric name",
+                promql: "sum without (nonexistent) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate by name and job keeps metric name",
+                promql: "sum by (__name__, job) (cpu_usage)",
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "minimum without host drops metric name",
+                promql: "min without (host) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without name drops metric name",
+                promql: "sum without (__name__) (cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "ungrouped average drops metric name",
+                promql: "avg(cpu_usage)",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "nested ungrouped aggregate drops metric name",
+                promql: "sum(sum by (job) (cpu_usage))",
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -3273,9 +3383,16 @@ mod tests {
                 should_error: false,
             },
             TestCase {
-                name: "complex aggregation",
+                name: "grouping by name preserves equality metric name",
+                promql: r#"sum by (__name__) ({__name__="alpha_total"})"#,
+                expected_metric: Some("alpha_total"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "aggregate without instance drops metric name",
                 promql: r#"sum without (instance) (cpu_usage{job="node"})"#,
-                expected_metric: Some("cpu_usage"),
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },

@@ -42,7 +42,10 @@ use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::UnboundedMemoryPool;
-use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder};
+use datafusion::logical_expr::UserDefinedLogicalNode;
+use datafusion::logical_expr::{
+    Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
+};
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
@@ -54,23 +57,23 @@ use promql::extension_plan::{
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    BoundAggregate, BoundInput, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree,
-    NativeType, fused_output_tags, reads_across_series,
+    BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp, NativeExpr,
+    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series,
 };
-use promql::vector_match::{Cardinality, MatchingLabels};
-use promql_parser::label::{METRIC_NAME, Matchers};
+use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
+use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
     VectorMatchCardinality, VectorSelector, token,
 };
-use session::context::QueryContextRef;
+use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
-    InfoInput, compile_selectors, compile_statement, constant_value, info_input, statement_grid,
+    InfoInput, compile_selectors, compile_statement, info_input, statement_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
@@ -112,6 +115,10 @@ pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
 const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
 /// One prepared occurrence of a selector: its scan, raw-series layout and reporting columns.
+/// What one discovered metric contributes: the shared schema, its time column, the tags the union
+/// reports, and the one metric name the single-source shape carries.
+type DiscoveredSelectorMetadata = (Arc<SeriesSchema>, String, Vec<String>, Arc<str>);
+
 type PreparedInput = (
     LogicalPlan,
     Arc<SeriesSchema>,
@@ -148,27 +155,20 @@ pub(crate) fn hybrid_binary_admitted(
         && supported_matching
         && lhs.value_type() == ValueType::Vector
         && rhs.value_type() == ValueType::Vector
-        && single_selector_spine(lhs)
-        && single_selector_spine(rhs)
+        && !contains_aggregate_expression(lhs)
+        && !contains_aggregate_expression(rhs)
+        && single_selector_operand(lhs)
+        && single_selector_operand(rhs)
 }
 
 impl PromPlanner {
     pub(super) async fn try_plan_native_operand(
         &mut self,
         expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
+        _query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
-        // This route hands the caller a selector's planner context, which is what its field
-        // columns and tags are read from. An expression whose output layout is not that selector's
-        // - an aggregate, a subquery, two data-bearing sides - therefore cannot be an operand here.
-        if !single_selector_spine(expr) {
-            return Ok(None);
-        }
         let saved = self.ctx.clone();
-        let (plan, operand_ctx) = match self
-            .try_plan_native_fused_with_context(expr, query_engine_state)
-            .await?
-        {
+        let (plan, operand_ctx) = match self.try_plan_native_fused_with_context(expr).await? {
             Some((plan, Some(operand_ctx))) => (plan, operand_ctx),
             _ => {
                 self.ctx = saved;
@@ -203,9 +203,8 @@ impl PromPlanner {
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
-    /// Output columns are derived from the compiled native tree and resolved selector context;
-    /// when the tree's labels cannot be derived, this route declines rather than consulting the
-    /// existing planner.
+    /// The compiler's bound tree and selector schemas determine the native output names; the
+    /// existing planner is not consulted for capability or schema approval.
     ///
     /// The route is offered a whole expression because the compiler folds a range function and the
     /// math functions over it into one tree: offering a sub-expression instead would compile a tree
@@ -218,13 +217,192 @@ impl PromPlanner {
     /// plans it with the existing planner as if this method did not exist. The aggregate split only
     /// admits shapes the split can carry; other vector-wide operations, subqueries, alternative
     /// matchers, and unbindable scans keep existing planning.
+    /// Builds the scan of the one logical table the current context is bound to. The caller has
+    /// already preprocessed this selector's matchers and set the context to its table.
+    async fn prepare_one_scan(
+        &mut self,
+        matchers: Matchers,
+        selector_count: usize,
+        prom_expr: &PromExpr,
+        logical_scan_id: &mut Option<u32>,
+        logical_ids_differ: &mut bool,
+    ) -> Result<Option<PreparedInput>> {
+        let (Some(metric), Some(time)) = (
+            self.ctx.table_name.clone(),
+            self.ctx.time_index_column.clone(),
+        ) else {
+            return Ok(None);
+        };
+        let tags = self.ctx.tag_columns.clone();
+        let fields = self.ctx.field_columns.clone();
+        // A `__field__` matcher narrows the field set in a projection the existing planner
+        // builds, and the raw series scan below this node has no equivalent: it reports every
+        // field the scan carries. Binding all of them would fold fields the query excluded, so
+        // the route is declined until the field selector is reused here.
+        if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
+            return Ok(None);
+        }
+        // This is a deliberate semantic safety gate, not a native-function allowlist. On a
+        // delta-temporality table, samples are increments; the existing planner sums them
+        // for `increase` and divides by the range for `rate` per series, while the native
+        // compiled tree assumes cumulative samples. Keep any statement containing either
+        // operation on the existing path for these tables. The check covers the whole
+        // statement, not just this selector occurrence.
+        if tags
+            .iter()
+            .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
+            && calls_rate_or_increase(prom_expr)
+        {
+            return Ok(None);
+        }
+        // The selector's own table scan, built by the same method the existing path uses:
+        // the physical planner turns it into the region scan the node reads, and building a
+        // scan here instead would let the two paths disagree about the columns they read.
+        let table_ref = self.table_ref()?;
+        let mut input = self.create_table_scan_plan(table_ref).await?;
+        let logical_scan = metric_scan_and_table_id(&input);
+        let has_verified_metric_rewrite = logical_scan.is_some();
+        // A metric logical table's id is part of the identity its own scan reads: two
+        // logical tables served through one physical table prepare two scans of that one
+        // table, and the ids are what says they are two metrics. A selector whose scan is not
+        // a logical rewrite contributes no id, and a missing id on either side is not a
+        // difference.
+        if let Some((_, _, table_id)) = &logical_scan {
+            match *logical_scan_id {
+                None => *logical_scan_id = Some(*table_id),
+                Some(first) if first != *table_id => *logical_ids_differ = true,
+                Some(_) => {}
+            }
+        }
+        let scan = match logical_scan {
+            Some((mut scan, predicate, _)) => {
+                // Preserve logical field order and the table restriction on the direct
+                // physical scan.
+                let source_schema = scan.source.schema();
+                let Some(mut ordered_projection) = fields
+                    .iter()
+                    .map(|field| source_schema.index_of(field).ok())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return Ok(None);
+                };
+                let original_projection = scan.projection.as_ref();
+                let selected_indices = original_projection
+                    .cloned()
+                    .unwrap_or_else(|| (0..source_schema.fields().len()).collect());
+                for index in selected_indices {
+                    let is_field = fields
+                        .iter()
+                        .any(|field| field == source_schema.field(index).name());
+                    if !is_field && !ordered_projection.contains(&index) {
+                        ordered_projection.push(index);
+                    }
+                }
+                scan.filters.push(predicate);
+                scan = TableScanBuilder::from(scan)
+                    .with_projection(Some(ordered_projection))
+                    .build()
+                    .context(DataFusionPlanningSnafu)?;
+                input = LogicalPlan::TableScan(scan.clone());
+                scan
+            }
+            None => match &input {
+                LogicalPlan::TableScan(scan) => scan.clone(),
+                _ => return Ok(None),
+            },
+        };
+        let table = self.table_from_source(&scan.source)?;
+        let table_meta = &table.table_info().meta;
+        // An engine without a raw-series scanner has no frame to give this node, and by the
+        // time the physical planner asks, the logical plan is already this node: the refusal
+        // there is a planning error, not a fallback. So the engine is checked here, where the
+        // existing plan is still the answer. A file-engine table is the concrete case: its
+        // scanner is a `SinglePartitionScanner`, which leaves `raw_series_schema` at the
+        // default `None`. A metric-engine selector is admitted through its verified logical
+        // rewrite, with no separate multi-selector exclusion: each input is a metric logical
+        // table served through that rewrite, and the ids those rewrites carry are what tells
+        // two different ones apart below. Two occurrences of one logical table stay two
+        // scans of the one physical table, answered where that table's region runs them.
+        if !supports_native_raw_series(&table_meta.engine)
+            || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
+        {
+            return Ok(None);
+        }
+        // The region's raw-series preflight refuses these, and the physical layer turns that
+        // refusal into an error, so decline this route here instead.
+        let time_index_type = table_meta
+            .schema
+            .timestamp_column()
+            .map(|column| &column.data_type);
+        if time_index_type
+            != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
+            || table_meta
+                .options
+                .extra_options
+                .get(store_api::mito_engine_options::APPEND_MODE_KEY)
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        {
+            return Ok(None);
+        }
+        // Preserve the existing single-selector guard that its partition keys are tags.
+        if selector_count == 1
+            && !table_meta
+                .partition_column_names()
+                .all(|column| tags.iter().any(|tag| tag == column))
+        {
+            return Ok(None);
+        }
+        // A multi-scan plan has no placement over a table split into several regions: the
+        // dist analyzer refuses a multi-child node there, so such a query keeps the
+        // existing plan instead of failing.
+        if selector_count > 1 && table_meta.partition_column_names().next().is_some() {
+            return Ok(None);
+        }
+        // The region's columnar series-index samples, one of the readers this scan may be
+        // served by, store `Float64` fields only, and the logical plan cannot tell which
+        // reader arrives. So every field has to be `Float64`: an integer, a `Float32`, a
+        // decimal, a string or a native histogram field keeps the existing plan, which the
+        // physical layer still serves.
+        if !fields.iter().all(|field| {
+            Self::field_column_type(input.schema(), field) == Some(&ArrowDataType::Float64)
+        }) {
+            return Ok(None);
+        }
+        let series_schema = Arc::new(SeriesSchema {
+            fields: fields
+                .iter()
+                .map(|name| FieldSpec {
+                    name: Arc::from(name.as_str()),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            eval_grid: None,
+        });
+        // The row filter is the selector's own: the time range is added after compiling,
+        // because only the compiler knows whether this occurrence reads a window or one
+        // instant.
+        let mut filters = Self::matchers_to_expr(matchers, input.schema())?;
+        if let LogicalPlan::TableScan(table_scan) = &mut input {
+            table_scan.filters.append(&mut filters);
+        } else {
+            return Ok(None);
+        }
+        Ok(Some((
+            input,
+            series_schema,
+            Some(Arc::from(metric)),
+            time,
+            tags,
+        )))
+    }
+
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
+        _query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
         Ok(self
-            .try_plan_native_fused_with_context(prom_expr, query_engine_state)
+            .try_plan_native_fused_with_context(prom_expr)
             .await?
             .map(|(plan, _)| plan))
     }
@@ -232,7 +410,6 @@ impl PromPlanner {
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,
-        _query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, Option<super::PromPlannerContext>)>> {
         if !self.native_fused {
             return Ok(None);
@@ -265,23 +442,32 @@ impl PromPlanner {
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
-            // A statement that reads no data has no scan: no metric, no tags, and the value under
-            // the name the existing path gives a bare literal, or the one `vector()` binds. This
-            // scan-free root path only carries that empty label set; generated labels remain on
-            // the existing plan.
-            if fused_output_tags(tree.root(), &[]).is_none_or(|tags| !tags.is_empty()) {
+            // Bind only input tags: this data-free tree has no input, and its tags belong to its
+            // output schema.
+            let Some(output_tags) = native_output_tags(tree.root(), &[]) else {
                 return Ok(None);
-            }
-            let time_index = DEFAULT_TIME_INDEX_COLUMN.to_string();
-            let values = match &tree.root().output {
-                NativeType::Samples(schema) => schema
-                    .fields
-                    .iter()
-                    .map(|field| field.name.to_string())
-                    .collect(),
-                _ => vec![DEFAULT_FIELD_COLUMN.to_string()],
             };
-            let output_schema = fused_output_schema(&values, &[], &time_index)?;
+            let Some(values) = native_root_fields(tree.root()) else {
+                return Ok(None);
+            };
+            let time_index = if values
+                .iter()
+                .chain(&output_tags)
+                .any(|name| name == DEFAULT_TIME_INDEX_COLUMN)
+            {
+                (0usize..)
+                    .map(|index| format!("native_time_{index}"))
+                    .find(|candidate| {
+                        !values
+                            .iter()
+                            .chain(&output_tags)
+                            .any(|name| name == candidate)
+                    })
+                    .expect("the time column candidate sequence is unbounded")
+            } else {
+                DEFAULT_TIME_INDEX_COLUMN.to_string()
+            };
+            let output_schema = fused_output_schema(&values, &output_tags, &time_index)?;
             let node = FusedSeries::try_new(
                 Arc::from(prom_expr.to_string()),
                 tree,
@@ -317,6 +503,186 @@ impl PromPlanner {
                 if !selector.matchers.or_matchers.is_empty() {
                     return Ok(None);
                 }
+                // A selector that names no metric is answered by enumerating the schema's logical
+                // metric tables: one input per metric, each reading its own region. The tag walk
+                // then sees every input's own labels, so each series keeps the identity the
+                // expression itself cannot name.
+                if discovers_metric_name(selector) {
+                    let name_matchers = selector.matchers.find_matchers(METRIC_NAME);
+                    let mut ordinary_matchers = selector.matchers.clone();
+                    ordinary_matchers
+                        .matchers
+                        .retain(|matcher| matcher.name != METRIC_NAME);
+                    // Name matchers constrain discovered table names rather than row columns.
+                    // Supplying a temporary name lets preprocessing reset the context and apply
+                    // schema/database and ordinary matchers without its expected NoMetricMatcher.
+                    let matchers = match self
+                        .preprocess_label_matchers(&ordinary_matchers, &Some(String::new()))
+                    {
+                        Ok(m) => m,
+                        Err(_) => return Ok(None),
+                    };
+                    let effective_schema = self
+                        .ctx
+                        .schema_name
+                        .clone()
+                        .unwrap_or_else(|| self.table_provider.query_ctx().current_schema());
+                    // Authorization is decided before anything is read: a table the caller may not
+                    // see never becomes a source, so its name reaches neither the plan nor an error.
+                    let scope = self.table_provider.query_ctx().metric_discovery_scope();
+                    if matches!(scope, MetricDiscoveryScope::Unavailable) {
+                        return Ok(None);
+                    }
+                    let mut metrics = self
+                        .table_provider
+                        .logical_metric_tables(&effective_schema)
+                        .await
+                        .map_err(|error| DataFusionError::External(Box::new(error)))
+                        .context(DataFusionPlanningSnafu)?;
+                    if let MetricDiscoveryScope::Allowed(allowed) = scope {
+                        let catalog = self.table_provider.query_ctx().current_catalog();
+                        // Borrowed keys, so a wide allowlist is one pass to build and one lookup
+                        // per metric rather than a scan of the allowlist for each of them.
+                        let permitted = allowed
+                            .iter()
+                            .map(|target| {
+                                (
+                                    target.catalog.as_str(),
+                                    target.schema.as_str(),
+                                    target.table.as_str(),
+                                )
+                            })
+                            .collect::<std::collections::HashSet<_>>();
+                        metrics.retain(|table| {
+                            let info = table.table_info();
+                            // Reject metadata that disagrees with where the table was enumerated.
+                            info.catalog_name == catalog
+                                && info.schema_name == effective_schema
+                                && permitted.contains(&(
+                                    info.catalog_name.as_str(),
+                                    info.schema_name.as_str(),
+                                    info.name.as_str(),
+                                ))
+                        });
+                    }
+                    metrics.retain(|table| {
+                        name_matchers
+                            .iter()
+                            .all(|matcher| matcher.is_match(&table.table_info().name))
+                    });
+                    // A label a table does not carry reads as the empty string on every one of its
+                    // rows, so a matcher that rejects the empty string cannot match anything there.
+                    metrics.retain(|table| {
+                        let schema = table.schema();
+                        matchers.matchers.iter().all(|matcher| {
+                            matcher.is_match("")
+                                || schema.column_schema_by_name(&matcher.name).is_some()
+                        })
+                    });
+                    metrics.sort_by_key(|table| table.table_info().name.clone());
+                    if metrics.len() > MAX_DISCOVERED_METRICS {
+                        return Err(DataFusionError::Plan(format!(
+                            "the selector matches {} metric tables, over the {MAX_DISCOVERED_METRICS} one query may scan; narrow it",
+                            metrics.len()
+                        )))
+                        .context(DataFusionPlanningSnafu);
+                    }
+                    if metrics.is_empty() {
+                        return Ok(None);
+                    }
+                    // One compiler source per selector: the discovered scans become one union
+                    // input, so the compiled tree still reads what the planner prepared.
+                    let mut sources = Vec::with_capacity(metrics.len());
+                    let mut selector_metadata: Option<DiscoveredSelectorMetadata> = None;
+                    for table in metrics {
+                        self.ctx.table_name = Some(table.table_info().name.clone());
+                        if self.setup_context().await?.is_some() {
+                            return Ok(None);
+                        }
+                        let Some((scan, schema, metric, time, mut tags)) = self
+                            .prepare_one_scan(
+                                matchers.clone(),
+                                1,
+                                prom_expr,
+                                &mut logical_scan_id,
+                                &mut logical_ids_differ,
+                            )
+                            .await?
+                        else {
+                            return Ok(None);
+                        };
+                        let Some(metric) = metric else {
+                            return Ok(None);
+                        };
+                        // The expression names no metric, so each source reports its own: the tag is
+                        // what tells two metrics with equal ordinary labels apart.
+                        if !tags.iter().any(|tag| tag == METRIC_NAME) {
+                            tags.push(METRIC_NAME.to_string());
+                        }
+                        let fields = schema
+                            .fields
+                            .iter()
+                            .map(|field| field.name.to_string())
+                            .collect();
+                        sources.push(LogicalPlan::Extension(Extension {
+                            node: Arc::new(
+                                RawSeriesSource::try_new(
+                                    metric.clone(),
+                                    tags.clone(),
+                                    fields,
+                                    scan,
+                                )
+                                .context(DataFusionPlanningSnafu)?,
+                            ),
+                        }));
+                        if let Some((first_schema, _, union_tags, _)) = &mut selector_metadata {
+                            let first_fields = first_schema
+                                .fields
+                                .iter()
+                                .map(|field| field.name.as_ref())
+                                .collect::<Vec<_>>();
+                            let metric_fields = schema
+                                .fields
+                                .iter()
+                                .map(|field| field.name.as_ref())
+                                .collect::<Vec<_>>();
+                            if first_fields != metric_fields {
+                                return Err(DataFusionError::Plan(format!(
+                                    "discovered metric {} has an unsupported field layout; expected {:?}, found {:?}",
+                                    table.table_info().name,
+                                    first_fields,
+                                    metric_fields,
+                                )))
+                                .context(DataFusionPlanningSnafu);
+                            }
+                            union_tags.extend(tags);
+                            union_tags.sort();
+                            union_tags.dedup();
+                        } else {
+                            selector_metadata = Some((schema, time, tags, metric));
+                        }
+                    }
+                    let Some((schema, time, mut tags, single_metric)) = selector_metadata else {
+                        return Ok(None);
+                    };
+                    tags.sort();
+                    tags.dedup();
+                    let (union, metric) = if sources.len() == 1 {
+                        (sources.pop().unwrap(), Some(single_metric))
+                    } else {
+                        (
+                            LogicalPlan::Union(
+                                Union::try_new_with_loose_types(
+                                    sources.into_iter().map(Arc::new).collect(),
+                                )
+                                .context(DataFusionPlanningSnafu)?,
+                            ),
+                            None,
+                        )
+                    };
+                    prepared.push((union, schema, metric, time, tags));
+                    continue;
+                }
                 let matchers =
                     match self.preprocess_label_matchers(&selector.matchers, &selector.name) {
                         Ok(m) => m,
@@ -328,168 +694,19 @@ impl PromPlanner {
                 if selectors.len() == 1 {
                     single_input_context = Some(self.ctx.clone());
                 }
-                let (Some(metric), Some(time)) = (
-                    self.ctx.table_name.clone(),
-                    self.ctx.time_index_column.clone(),
-                ) else {
+                let Some(one) = self
+                    .prepare_one_scan(
+                        matchers,
+                        selectors.len(),
+                        prom_expr,
+                        &mut logical_scan_id,
+                        &mut logical_ids_differ,
+                    )
+                    .await?
+                else {
                     return Ok(None);
                 };
-                let tags = self.ctx.tag_columns.clone();
-                let fields = self.ctx.field_columns.clone();
-                // A `__field__` matcher narrows the field set in a projection the existing planner
-                // builds, and the raw series scan below this node has no equivalent: it reports every
-                // field the scan carries. Binding all of them would fold fields the query excluded, so
-                // the route is declined until the field selector is reused here.
-                if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
-                    return Ok(None);
-                }
-                // On a delta-temporality table a series' samples are increments, which the existing
-                // planner sums over the window for `increase` and divides by the range for `rate`
-                // ([`PromPlanner::select_delta_range_math`]), per series because the tag can differ
-                // between them. A compiled tree computes both for a cumulative series, so any
-                // `rate`/`increase` over such a table keeps the existing plan; a bare selector still
-                // folds. The guard reads the whole statement, not this selector's subtree: one such
-                // call anywhere admits a tree the existing plan would not build.
-                if tags
-                    .iter()
-                    .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
-                    && calls_rate_or_increase(prom_expr)
-                {
-                    return Ok(None);
-                }
-                // The selector's own table scan, built by the same method the existing path uses:
-                // the physical planner turns it into the region scan the node reads, and building a
-                // scan here instead would let the two paths disagree about the columns they read.
-                let table_ref = self.table_ref()?;
-                let mut input = self.create_table_scan_plan(table_ref).await?;
-                let logical_scan = metric_scan_and_table_id(&input);
-                let has_verified_metric_rewrite = logical_scan.is_some();
-                // A metric logical table's id is part of the identity its own scan reads: two
-                // logical tables served through one physical table prepare two scans of that one
-                // table, and the ids are what says they are two metrics. A selector whose scan is not
-                // a logical rewrite contributes no id, and a missing id on either side is not a
-                // difference.
-                if let Some((_, _, table_id)) = &logical_scan {
-                    match logical_scan_id {
-                        None => logical_scan_id = Some(*table_id),
-                        Some(first) if first != *table_id => logical_ids_differ = true,
-                        Some(_) => {}
-                    }
-                }
-                let scan = match logical_scan {
-                    Some((mut scan, predicate, _)) => {
-                        // Preserve logical field order and the table restriction on the direct
-                        // physical scan.
-                        let source_schema = scan.source.schema();
-                        let Some(mut ordered_projection) = fields
-                            .iter()
-                            .map(|field| source_schema.index_of(field).ok())
-                            .collect::<Option<Vec<_>>>()
-                        else {
-                            return Ok(None);
-                        };
-                        let original_projection = scan.projection.as_ref();
-                        let selected_indices = original_projection
-                            .cloned()
-                            .unwrap_or_else(|| (0..source_schema.fields().len()).collect());
-                        for index in selected_indices {
-                            let is_field = fields
-                                .iter()
-                                .any(|field| field == source_schema.field(index).name());
-                            if !is_field && !ordered_projection.contains(&index) {
-                                ordered_projection.push(index);
-                            }
-                        }
-                        scan.filters.push(predicate);
-                        scan = TableScanBuilder::from(scan)
-                            .with_projection(Some(ordered_projection))
-                            .build()
-                            .context(DataFusionPlanningSnafu)?;
-                        input = LogicalPlan::TableScan(scan.clone());
-                        scan
-                    }
-                    None => match &input {
-                        LogicalPlan::TableScan(scan) => scan.clone(),
-                        _ => return Ok(None),
-                    },
-                };
-                let table = self.table_from_source(&scan.source)?;
-                let table_meta = &table.table_info().meta;
-                // An engine without a raw-series scanner has no frame to give this node, and by the
-                // time the physical planner asks, the logical plan is already this node: the refusal
-                // there is a planning error, not a fallback. So the engine is checked here, where the
-                // existing plan is still the answer. A file-engine table is the concrete case: its
-                // scanner is a `SinglePartitionScanner`, which leaves `raw_series_schema` at the
-                // default `None`. A metric-engine selector is admitted through its verified logical
-                // rewrite, with no separate multi-selector exclusion: each input is a metric logical
-                // table served through that rewrite, and the ids those rewrites carry are what tells
-                // two different ones apart below. Two occurrences of one logical table stay two
-                // scans of the one physical table, answered where that table's region runs them.
-                if !supports_native_raw_series(&table_meta.engine)
-                    || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
-                {
-                    return Ok(None);
-                }
-                // The region's raw-series preflight refuses these, and the physical layer turns that
-                // refusal into an error, so decline this route here instead.
-                let time_index_type = table_meta
-                    .schema
-                    .timestamp_column()
-                    .map(|column| &column.data_type);
-                if time_index_type
-                    != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
-                    || table_meta
-                        .options
-                        .extra_options
-                        .get(store_api::mito_engine_options::APPEND_MODE_KEY)
-                        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-                {
-                    return Ok(None);
-                }
-                // Preserve the existing single-selector guard that its partition keys are tags.
-                if selectors.len() == 1
-                    && !table_meta
-                        .partition_column_names()
-                        .all(|column| tags.iter().any(|tag| tag == column))
-                {
-                    return Ok(None);
-                }
-                // A multi-scan plan has no placement over a table split into several regions: the
-                // dist analyzer refuses a multi-child node there, so such a query keeps the
-                // existing plan instead of failing.
-                if selectors.len() > 1 && table_meta.partition_column_names().next().is_some() {
-                    return Ok(None);
-                }
-                // The region's columnar series-index samples, one of the readers this scan may be
-                // served by, store `Float64` fields only, and the logical plan cannot tell which
-                // reader arrives. So every field has to be `Float64`: an integer, a `Float32`, a
-                // decimal, a string or a native histogram field keeps the existing plan, which the
-                // physical layer still serves.
-                if !fields.iter().all(|field| {
-                    Self::field_column_type(input.schema(), field) == Some(&ArrowDataType::Float64)
-                }) {
-                    return Ok(None);
-                }
-                let series_schema = Arc::new(SeriesSchema {
-                    fields: fields
-                        .iter()
-                        .map(|name| FieldSpec {
-                            name: Arc::from(name.as_str()),
-                        })
-                        .collect::<Vec<_>>()
-                        .into(),
-                    eval_grid: None,
-                });
-                // The row filter is the selector's own: the time range is added after compiling,
-                // because only the compiler knows whether this occurrence reads a window or one
-                // instant.
-                let mut filters = Self::matchers_to_expr(matchers, input.schema())?;
-                if let LogicalPlan::TableScan(table_scan) = &mut input {
-                    table_scan.filters.append(&mut filters);
-                } else {
-                    return Ok(None);
-                }
-                prepared.push((input, series_schema, Some(Arc::from(metric)), time, tags));
+                prepared.push(one);
             }
             Ok(Some((prepared, single_input_context, logical_ids_differ)))
         }
@@ -595,8 +812,84 @@ impl PromPlanner {
                 .raw_scan_bounds()
                 .context(DataFusionPlanningSnafu)?;
             let filter = scan_time_filter(start, end, inclusive, time);
-            if let LogicalPlan::TableScan(table_scan) = &mut *scan {
+            if let LogicalPlan::Extension(extension) = scan
+                && extension.node.as_any().is::<RawSeriesSource>()
+            {
+                let mut inputs = extension
+                    .node
+                    .inputs()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let Some(LogicalPlan::TableScan(table_scan)) = inputs.first_mut() else {
+                    return Err(DataFusionError::Internal(
+                        "RawSeriesSource input is not a TableScan".into(),
+                    ))
+                    .context(DataFusionPlanningSnafu);
+                };
                 table_scan.filters.push(filter);
+                let replacement = extension
+                    .node
+                    .with_exprs_and_inputs(vec![], inputs)
+                    .context(DataFusionPlanningSnafu)?;
+                *scan = LogicalPlan::Extension(Extension { node: replacement });
+            } else if let LogicalPlan::Union(union) = scan {
+                // A discovered selector's sources each read their own region, and the metric
+                // engine checks that two logical metrics agree on their time column's unit, not on
+                // its name. So each bound is built from the column that source actually carries.
+                for child in &mut union.inputs {
+                    let LogicalPlan::Extension(extension) = child.as_ref() else {
+                        return Err(DataFusionError::Internal(format!(
+                            "Union child at {index} is not a RawSeriesSource for time-bound pushdown"
+                        )))
+                        .context(DataFusionPlanningSnafu);
+                    };
+                    let source = extension
+                        .node
+                        .as_any()
+                        .downcast_ref::<RawSeriesSource>()
+                        .ok_or_else(|| {
+                            DataFusionError::Internal(format!(
+                                "Union child at {index} is not a RawSeriesSource for time-bound pushdown"
+                            ))
+                        })
+                        .context(DataFusionPlanningSnafu)?;
+                    let mut inputs = source.inputs().into_iter().cloned().collect::<Vec<_>>();
+                    let Some(LogicalPlan::TableScan(table_scan)) = inputs.first_mut() else {
+                        return Err(DataFusionError::Internal(format!(
+                            "RawSeriesSource child at {index} is not backed by a TableScan"
+                        )))
+                        .context(DataFusionPlanningSnafu);
+                    };
+                    let source_time = table_scan
+                        .projected_schema
+                        .fields()
+                        .iter()
+                        .find(|field| {
+                            matches!(
+                                field.data_type(),
+                                datafusion::arrow::datatypes::DataType::Timestamp(_, _)
+                            )
+                        })
+                        .map(|field| field.name().clone());
+                    let Some(source_time) = source_time else {
+                        return Err(DataFusionError::Internal(format!(
+                            "RawSeriesSource child at {index} has no timestamp column"
+                        )))
+                        .context(DataFusionPlanningSnafu);
+                    };
+                    let source_filter = scan_time_filter(start, end, inclusive, &source_time);
+                    table_scan.filters.push(source_filter);
+                    let replacement = extension
+                        .node
+                        .with_exprs_and_inputs(vec![], inputs)
+                        .context(DataFusionPlanningSnafu)?;
+                    *child = Arc::new(LogicalPlan::Extension(Extension { node: replacement }));
+                }
+            } else if let LogicalPlan::TableScan(table_scan) = scan {
+                table_scan.filters.push(filter);
+            } else if let LogicalPlan::EmptyRelation(_) = scan {
+                // The typed empty input has no scan to constrain.
             } else {
                 return Err(DataFusionError::Internal(format!(
                     "the child at {index} is not the table scan this route prepared"
@@ -623,7 +916,16 @@ impl PromPlanner {
         let children = prepared
             .into_iter()
             .map(|(scan, schema, metric, _, tags)| {
-                if !cross_table {
+                // A discovered selector already carries its own sources: a single metric is one
+                // `RawSeriesSource`, several are a `Union` of them, and each names the metric it
+                // reads. Wrapping either again would nest a source in a source.
+                let already_sourced = matches!(&scan, LogicalPlan::Union(_))
+                    || matches!(
+                        &scan,
+                        LogicalPlan::Extension(extension)
+                            if extension.node.as_any().is::<RawSeriesSource>()
+                    );
+                if !cross_table || already_sourced {
                     return Ok(scan);
                 }
                 let Some(metric) = metric else {
@@ -685,9 +987,9 @@ impl PromPlanner {
         if multi_input && depends_on_input_order(root) {
             return Ok(None);
         }
-        // The split names the columns its groups report from the existing planner. A grouping by the
-        // metric name keeps a label no column of the existing plan can name, so the schema the node
-        // declares would report one label set for groups the tree keeps apart.
+        // The native output schema can name only compiled value fields, the time index and tag
+        // columns. A grouping by metric name has no tag column to represent the distinct groups, so
+        // this route declines it rather than claiming those groups are interchangeable.
         if multi_input && groups_by_metric_name(root) {
             return Ok(None);
         }
@@ -739,16 +1041,14 @@ impl PromPlanner {
                 && selectors.len() == 1
                 && AggregateFinalize::can_split(&tree, &series_schema.fields, &time)
             {
-                let output_fields = match &compiled.tree.root().output {
-                    NativeType::Samples(schema) => schema
-                        .fields
-                        .iter()
-                        .map(|field| field.name.to_string())
-                        .collect(),
-                    NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-                    NativeType::AggregateState(_) => return Ok(None),
+                // With experimental_native_promql enabled, an aggregate value column is named after
+                // the compiled tree's root field (for example, `field_0`), not legacy planner text.
+                // Legacy headers in tests/cases remain unchanged because native PromQL is opt-in/off
+                // by default.
+                let Some(output_fields) = native_root_fields(compiled.tree.root()) else {
+                    return Ok(None);
                 };
-                let Some(output_tags) = fused_output_tags(compiled.tree.root(), &source_tags)
+                let Some(output_tags) = native_output_tags(compiled.tree.root(), &source_tags)
                 else {
                     return Ok(None);
                 };
@@ -815,29 +1115,18 @@ impl PromPlanner {
         // Multi-input fused execution already reads every input in this execution.
         // The tags are asked for before the fields, because the walk answers for a tree the
         // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
-        // the walk derives; an unknown set declines the native plan.
+        // the walk derives. If it cannot derive them, this route declines.
         let output_tags = match &tree.root().output {
             // A scalar has no labels, and its value is named as a bare literal's is.
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => {
-                let Some(output_tags) = fused_output_tags(tree.root(), &source_tags) else {
-                    return Ok(None);
-                };
-                output_tags
-            }
+            NativeType::Samples(_) => match native_output_tags(tree.root(), &source_tags) {
+                Some(output_tags) => output_tags,
+                None => return Ok(None),
+            },
             NativeType::AggregateState(_) => return Ok(None),
         };
-        let root_fields = match &tree.root().output {
-            // The fields are the compiled root's own: a raw field's name, or the one `vector(s)`
-            // gives its result.
-            NativeType::Samples(schema) => schema
-                .fields
-                .iter()
-                .map(|f| f.name.to_string())
-                .collect::<Vec<_>>(),
-            // A scalar has no labels, and its value is named as a bare literal's is.
-            NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-            NativeType::AggregateState(_) => return Ok(None),
+        let Some(root_fields) = native_root_fields(tree.root()) else {
+            return Ok(None);
         };
         // A root field can share a name with a tag or the time index, and under `or` the right
         // table's tags join the left table's columns. The output names each column once, so such a
@@ -897,17 +1186,11 @@ impl PromPlanner {
     ) -> Option<DFSchemaRef> {
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => fused_output_tags(tree.root(), source_tags)?,
+            NativeType::Samples(_) => native_output_tags(tree.root(), source_tags)?,
             NativeType::AggregateState(_) => return None,
         };
-        let root_fields = match &tree.root().output {
-            NativeType::Samples(schema) => schema
-                .fields
-                .iter()
-                .map(|field| field.name.to_string())
-                .collect::<Vec<_>>(),
-            NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
-            NativeType::AggregateState(_) => return None,
+        let Some(root_fields) = native_root_fields(tree.root()) else {
+            return None;
         };
         let mut column_names = std::collections::HashSet::new();
         let columns = std::iter::once(time)
@@ -1497,7 +1780,7 @@ fn build_evaluated_segment(
         )?;
         return Some((plan, tags));
     }
-    let output_tags = fused_output_tags(tree.root(), &local_tags)?;
+    let output_tags = native_output_tags(tree.root(), &local_tags)?;
     if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
     {
         return None;
@@ -1551,7 +1834,7 @@ fn build_inner_segment(
         .map(|&index| per_source.get(index).map(|(_, _, tags)| tags.clone()))
         .collect::<Option<Vec<_>>>()?;
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
-    let output_tags = fused_output_tags(tree.root(), &source_tags)?;
+    let output_tags = native_output_tags(tree.root(), &source_tags)?;
     let (inputs, metric, time_index, tags) = if let [index] = sources.as_slice() {
         let (metric, time_index, tags) = per_source.get(*index)?;
         (scans, metric.clone(), time_index.clone(), tags.clone())
@@ -1870,7 +2153,26 @@ async fn segment_tree(
     })))
 }
 
+/// The native root's value columns, named from the compiled tree rather than legacy expressions.
+fn native_root_fields(node: &NativeNode) -> Option<Vec<String>> {
+    match &node.output {
+        NativeType::Samples(schema) => Some(
+            schema
+                .fields
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect(),
+        ),
+        NativeType::Scalar(_) => Some(vec![DEFAULT_FIELD_COLUMN.to_string()]),
+        NativeType::AggregateState(_) => None,
+    }
+}
+
 /// The columns a [`FusedSeries`] node produces.
+///
+/// With `experimental_native_promql` enabled, a value column is named after its compiled root
+/// field (for example, `field_0`), not legacy planner expression text. Legacy headers in
+/// `tests/cases/**` are unaffected because the native route is opt-in and off by default.
 ///
 /// The shape is the one the existing unary pipeline consumes — the time index, then the series
 /// fields, then the tags — and each column is declared the way the node's own conversion reads it
@@ -1978,6 +2280,299 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
         };
         *table.get_or_insert(&scan.table_name) == &scan.table_name
     })
+}
+
+/// The label columns `node` reports, from the tags of the scan each input reads.
+///
+/// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
+/// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
+/// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
+/// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
+/// labels this walk does not derive - a whole-vector operation or a label rewrite, which renames the
+/// labels below it - so a tree holding one reports no label set here. Such a tree is declined rather
+/// than borrowing output names from the legacy planner.
+/// The most metric tables one discovered selector will scan.
+///
+/// Every one of them costs a scan of the physical region behind it, and the union is as wide as
+/// the schema, so a selector that matches everything is answered by narrowing it rather than by
+/// planning one query that reads the whole schema at once.
+const MAX_DISCOVERED_METRICS: usize = 1024;
+
+/// Whether a selector names no single table and has to enumerate the schema's metric tables to
+/// answer.
+///
+/// Exported so the authorization layer can ask the same question before it authorizes what the
+/// planner will scan; the two answers have to agree. #10107 uses it from the frontend.
+pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
+    let name_matchers = selector.matchers.find_matchers(METRIC_NAME);
+    let has_non_equal_name_matcher = name_matchers
+        .iter()
+        .any(|matcher| !matches!(&matcher.op, MatchOp::Equal));
+    let has_exact_name_matcher = name_matchers.len() == 1 && !has_non_equal_name_matcher;
+    selector.name.is_none()
+        && !has_exact_name_matcher
+        && selector.matchers.or_matchers.is_empty()
+        && (name_matchers.len() > 1
+            || has_non_equal_name_matcher
+            || selector.matchers.matchers.iter().any(|matcher| {
+                !["__schema__", "__database__", "__field__", METRIC_NAME]
+                    .contains(&matcher.name.as_str())
+            }))
+}
+
+/// Whether a binary operation reports the samples of the side it keeps, name included.
+fn keeps_metric_name(matching: &promql::vector_match::BinaryMatching) -> bool {
+    use promql::vector_match::BinaryOp;
+    matches!(
+        matching.op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
+    ) && !matching.return_bool
+}
+
+/// The tags a node reports after the metric name is dropped, which is what its runtime does to the
+/// samples it reports.
+fn without_metric_name(tags: Vec<String>) -> Vec<String> {
+    tags.into_iter().filter(|tag| tag != METRIC_NAME).collect()
+}
+
+fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
+    match &node.expr {
+        NativeExpr::Aggregate { input, op } => {
+            if matches!(&op.group, Grouping::By(names) if names.is_empty()) {
+                return Some(Vec::new());
+            }
+            let tags = native_output_tags(input, source_tags)?;
+            Some(match &op.group {
+                Grouping::By(names) => tags
+                    .into_iter()
+                    .filter(|tag| names.iter().any(|name| name.as_ref() == tag))
+                    .collect(),
+                Grouping::Without(names) => tags
+                    .into_iter()
+                    .filter(|tag| {
+                        tag != METRIC_NAME && !names.iter().any(|name| name.as_ref() == tag)
+                    })
+                    .collect(),
+            })
+        }
+        NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
+        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } | NativeExpr::VectorOf { .. } => {
+            Some(Vec::new())
+        }
+        // These report a value of their own rather than the sample they read, and the runtime drops
+        // the name for each of them. `source_tags` is the authority on what an input carries, so a
+        // discovery input arrives carrying `__name__` and these arms are what decides it does not
+        // survive.
+        NativeExpr::Instant { input, op } => {
+            let tags = native_output_tags(input, source_tags)?;
+            Some(match op.value {
+                InstantValue::Timestamp => without_metric_name(tags),
+                InstantValue::Sample | InstantValue::InfoTimestamp => tags,
+            })
+        }
+        NativeExpr::Window { input, op } => {
+            let tags = native_output_tags(input, source_tags)?;
+            Some(if op.function.drops_metric_name() {
+                without_metric_name(tags)
+            } else {
+                tags
+            })
+        }
+        NativeExpr::Timestamp { input } => {
+            Some(without_metric_name(native_output_tags(input, source_tags)?))
+        }
+        // A label rewrite changes the label set itself: `label_replace` and `label_join` write their
+        // destination label, so the input's labels are not the output's. A map of math alone keeps
+        // them, minus the metric name its kernel drops.
+        NativeExpr::Map { input, op } => {
+            if op.ops.iter().any(|op| matches!(op, MapOp::Label(_))) {
+                let mut tags = native_output_tags(input, source_tags)?;
+                for operation in op.ops.iter() {
+                    if let MapOp::Label(rewrite) = operation {
+                        let destination = rewrite.destination();
+                        if destination == "__name__" {
+                            return None;
+                        }
+                        tags.retain(|tag| tag != destination);
+                        tags.push(destination.to_string());
+                    }
+                }
+                return Some(tags);
+            }
+            let tags = native_output_tags(input, source_tags)?;
+            // A math kernel drops the name; a histogram kernel drops only the name, keeping the type
+            // and unit.
+            Some(
+                if op
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, MapOp::Math(_) | MapOp::Histogram(_)))
+                {
+                    without_metric_name(tags)
+                } else {
+                    tags
+                },
+            )
+        }
+        // Its parameters are scalars, which carry no labels, so what the node reports are its
+        // input's labels.
+        NativeExpr::ParameterizedMap { input, .. } => {
+            Some(without_metric_name(native_output_tags(input, source_tags)?))
+        }
+        NativeExpr::Vector { input, op } => match op {
+            BoundVectorOp::TopK { .. }
+            | BoundVectorOp::LimitK { .. }
+            | BoundVectorOp::LimitRatio { .. }
+            | BoundVectorOp::Sort(_) => native_output_tags(input, source_tags),
+            // Keep in sync with promql::grid_series::METADATA_LABELS, which is crate-private.
+            BoundVectorOp::Histogram(_) => native_output_tags(input, source_tags).map(|tags| {
+                tags.into_iter()
+                    .filter(|tag| {
+                        tag != "le" && tag != "__name__" && tag != "__type__" && tag != "__unit__"
+                    })
+                    .collect()
+            }),
+            BoundVectorOp::Absent { labels } => Some(
+                labels
+                    .tags()
+                    .iter()
+                    .map(|label| label.name.to_string())
+                    .collect(),
+            ),
+            BoundVectorOp::CountValues { label, group } => {
+                let mut tags = native_output_tags(input, source_tags)?;
+                if !tags.contains(&label.to_string()) {
+                    tags.push(label.to_string());
+                }
+                Some(match group {
+                    Grouping::By(names) => {
+                        let mut output = tags
+                            .into_iter()
+                            .filter(|tag| names.iter().any(|name| name.as_ref() == tag))
+                            .collect::<Vec<_>>();
+                        if !output.contains(&label.to_string()) {
+                            output.push(label.to_string());
+                        }
+                        output
+                    }
+                    Grouping::Without(names) => tags
+                        .into_iter()
+                        .filter(|tag| {
+                            tag != METRIC_NAME && !names.iter().any(|name| name.as_ref() == tag)
+                        })
+                        .collect(),
+                })
+            }
+        },
+        // The merge already assembled one series per canonical label set, so its labels are the
+        // labels its input reported.
+        NativeExpr::Merge { input } => native_output_tags(input, source_tags),
+        // A filtering comparison reports the samples of the side it keeps, so the name survives it.
+        // Every other binary operation computes new values, and `bool` reports the comparison's
+        // outcome rather than either operand's samples, so both drop the name.
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => {
+            let keeps_name = keeps_metric_name(matching);
+            let tags = match (&left.output, &right.output) {
+                (NativeType::Scalar(_), _) => native_output_tags(right, source_tags)?,
+                (_, NativeType::Scalar(_)) => native_output_tags(left, source_tags)?,
+                _ => {
+                    let kept = |tags: Vec<String>| -> Vec<String> {
+                        match &matching.labels {
+                            MatchingLabels::On(names) if !names.is_empty() => tags
+                                .into_iter()
+                                .filter(|tag| {
+                                    names.iter().any(|name| name.as_ref() == tag.as_str())
+                                })
+                                .collect(),
+                            MatchingLabels::Ignoring(names) => tags
+                                .into_iter()
+                                .filter(|tag| {
+                                    !names.iter().any(|name| name.as_ref() == tag.as_str())
+                                })
+                                .collect(),
+                            MatchingLabels::On(_) => tags,
+                        }
+                    };
+                    let left_tags = native_output_tags(left, source_tags)?;
+                    let right_tags = native_output_tags(right, source_tags)?;
+                    // A group takes the many side's labels as they are, because its result keeps
+                    // one series per series of that side: `group_left` reports the left side's
+                    // labels, `group_right` the right side's. `group_left(...)`/`group_right(...)`
+                    // add the labels the modifier names from the one side. A one-to-one match
+                    // reports the left side's labels narrowed by `on` or `ignoring`.
+                    let mut tags = match &matching.cardinality {
+                        Cardinality::OneToOne => kept(left_tags.clone()),
+                        Cardinality::ManyToOne(_) => left_tags.clone(),
+                        Cardinality::OneToMany(_) => right_tags.clone(),
+                    };
+                    let (includes, include_tags) = match &matching.cardinality {
+                        Cardinality::OneToOne => (&[][..], &[][..]),
+                        Cardinality::ManyToOne(labels) => {
+                            (labels.as_slice(), right_tags.as_slice())
+                        }
+                        Cardinality::OneToMany(labels) => (labels.as_slice(), left_tags.as_slice()),
+                    };
+                    for tag in include_tags {
+                        if includes.iter().any(|label| label.as_ref() == tag.as_str())
+                            && !tags.contains(tag)
+                        {
+                            tags.push(tag.clone());
+                        }
+                    }
+                    // A filled left side takes an unmatched right series' matching labels, so
+                    // those results carry the right side's tags.
+                    if matching.fill.lhs.is_some() {
+                        for tag in kept(native_output_tags(right, source_tags)?) {
+                            if !tags.contains(&tag) {
+                                tags.push(tag);
+                            }
+                        }
+                    }
+                    tags
+                }
+            };
+            Some(if keeps_name {
+                tags
+            } else {
+                without_metric_name(tags)
+            })
+        }
+        NativeExpr::Set { left, right, op } => {
+            let mut tags = native_output_tags(left, source_tags)?;
+            if op.op == SetOp::Or {
+                for tag in native_output_tags(right, source_tags)? {
+                    if !tags.contains(&tag) {
+                        tags.push(tag);
+                    }
+                }
+            }
+            Some(tags)
+        }
+        // A base series keeps its labels and takes the data labels of its info series: the ones the
+        // selector names, or all of them when it names none.
+        NativeExpr::Info {
+            base,
+            info,
+            selector,
+        } => {
+            let mut tags = native_output_tags(base, source_tags)?;
+            for tag in native_output_tags(info, source_tags)? {
+                let copied = selector.data_labels.is_empty()
+                    || selector
+                        .data_labels
+                        .iter()
+                        .any(|label| label.as_ref() == tag.as_str());
+                if copied && !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+            }
+            Some(tags)
+        }
+    }
 }
 
 /// Whether `node` reads no data at all: a constant, the evaluation time, or an operation between
@@ -2123,51 +2718,42 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
     }
 }
 
-/// The shape a hybrid operand must have: one selector occurrence under parentheses, unary
-/// arithmetic, calls, or a binary whose other side is a compile-time constant.
-///
-/// This is a property of the expression's shape, not a list of the functions this route knows:
-/// every call is followed through its one data-bearing argument whatever it is named, because
-/// whether the compiler folds that name is the compiler's question, answered by `NotImplemented`.
-/// What is excluded is a shape whose output layout is not the selector's - an aggregate, a
-/// subquery, or a binary with two data-bearing sides - because an operand's planner context
-/// describes the selector it reads, and the hybrid caller takes field columns and tags off it.
-fn single_selector_spine(expr: &PromExpr) -> bool {
+/// Whether a hybrid operand contains an aggregate, which needs the split route rather than a join.
+fn contains_aggregate_expression(expr: &PromExpr) -> bool {
     match expr {
-        PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => true,
-        PromExpr::Paren(paren) => single_selector_spine(&paren.expr),
-        PromExpr::Unary(unary) => single_selector_spine(&unary.expr),
-        PromExpr::Call(call) => {
-            // Function parameters can be numeric constants or strings. `constant_value` only
-            // folds numeric expressions, so using it here would misclassify label_replace's
-            // string parameters as data. Calls carry their selector through their vector/matrix
-            // argument; require exactly one such argument and then validate its shape recursively.
-            let mut data_bearing =
-                call.args.args.iter().filter(|arg| {
-                    matches!(arg.value_type(), ValueType::Vector | ValueType::Matrix)
-                });
-            match (data_bearing.next(), data_bearing.next()) {
-                (Some(only), None) => single_selector_spine(only),
-                _ => false,
-            }
-        }
+        PromExpr::Aggregate(_) => true,
+        PromExpr::Paren(paren) => contains_aggregate_expression(&paren.expr),
+        PromExpr::Unary(unary) => contains_aggregate_expression(&unary.expr),
         PromExpr::Binary(binary) => {
-            if constant_value(&binary.lhs).is_some() {
-                single_selector_spine(&binary.rhs)
-            } else if constant_value(&binary.rhs).is_some() {
-                single_selector_spine(&binary.lhs)
-            } else {
-                false
-            }
+            contains_aggregate_expression(&binary.lhs) || contains_aggregate_expression(&binary.rhs)
         }
+        PromExpr::Call(call) => call
+            .args
+            .args
+            .iter()
+            .any(|arg| contains_aggregate_expression(arg)),
         _ => false,
     }
 }
 
+/// Whether this hybrid operand is a single-selector expression the native route can place.
+fn single_selector_operand(expr: &PromExpr) -> bool {
+    let stmt = EvalStmt {
+        expr: expr.clone(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH,
+        interval: Duration::from_millis(1),
+        lookback_delta: Duration::from_millis(1),
+    };
+    let mut selectors = Vec::new();
+    collect_selectors(&stmt, expr, &mut selectors) && selectors.len() == 1
+}
+
 /// The selectors `expr` reads, in the order the compiler binds them.
 ///
-/// `info` reads its info series through a selector it does not write: [`info_input`] derives it, for
-/// the compiler as for this walk, and the compiler binds it after the selectors of the base.
+/// This is a structural walk, not a function capability list: calls are traversed and the compiler
+/// decides whether their shapes have native kernels. `info` additionally reads a selector it does
+/// not write; [`info_input`] derives that same selector here and the compiler binds it after the base.
 fn collect_selectors<'a>(
     stmt: &EvalStmt,
     expr: &'a PromExpr,
@@ -2190,7 +2776,7 @@ fn collect_selectors<'a>(
             return collect_selectors(stmt, &binary.lhs, out)
                 && collect_selectors(stmt, &binary.rhs, out);
         }
-        // Literals are permitted only as compiler-recognized broadcasts in a bounded binary tree.
+        // Literals contribute no selector; the compiler decides which scalar forms can be bound.
         PromExpr::NumberLiteral(_) => return true,
         PromExpr::Unary(unary) => return collect_selectors(stmt, &unary.expr, out),
         PromExpr::Call(call) => {
@@ -2219,7 +2805,8 @@ fn collect_selectors<'a>(
 
 /// Whether `engine` can serve raw series frames to the fused-series node.
 ///
-/// A whitelist avoids probing a region from logical planning; declining only costs the native route.
+/// This is a scanner capability boundary: it avoids probing a region during logical planning, and
+/// declining leaves the existing plan available.
 fn supports_native_raw_series(engine: &str) -> bool {
     matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
 }
@@ -2260,7 +2847,8 @@ fn metric_scan_and_table_id(
     Some((scan.clone(), filter.predicate.clone(), *table_id))
 }
 
-/// Whether `expr` calls `rate`/`increase` anywhere in its admitted expression tree.
+/// Whether `expr` contains `rate`/`increase`, used only by the delta-temporality semantic safety
+/// gate, not as a native-function capability list.
 fn calls_rate_or_increase(expr: &PromExpr) -> bool {
     match expr {
         PromExpr::Call(call) => {
@@ -2289,8 +2877,9 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, cut_segments, fused_output_tags,
-        hybrid_binary_admitted, independent_scan_pair, native_promql_requested, scan_time_filter,
+        METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, cut_segments,
+        hybrid_binary_admitted, independent_scan_pair, native_output_tags, native_promql_requested,
+        scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -2455,17 +3044,17 @@ mod tests {
         let on = compiled_test_tree("x + on(host) x");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            fused_output_tags(on.root(), &sources)
+            native_output_tags(on.root(), &sources)
         );
         let ignoring = compiled_test_tree("x + x");
         assert_eq!(
             Some(tags.clone()),
-            fused_output_tags(ignoring.root(), &sources)
+            native_output_tags(ignoring.root(), &sources)
         );
         let empty_on = compiled_test_tree("x + on() x");
         assert_eq!(
             Some(tags.clone()),
-            fused_output_tags(empty_on.root(), &sources)
+            native_output_tags(empty_on.root(), &sources)
         );
 
         // Two tables with different tags: the left side's labels pass through a wrapper and a
@@ -2477,12 +3066,12 @@ mod tests {
         let wrapped = compiled_test_tree("100 * (1 - x / on(host) y)");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            fused_output_tags(wrapped.root(), &sources)
+            native_output_tags(wrapped.root(), &sources)
         );
         let and = compiled_test_tree("x and on(host) y");
         assert_eq!(
             Some(sources[0].clone()),
-            fused_output_tags(and.root(), &sources)
+            native_output_tags(and.root(), &sources)
         );
         let or = compiled_test_tree("x or y");
         assert_eq!(
@@ -2491,7 +3080,7 @@ mod tests {
                 "kind".to_string(),
                 "zone".to_string()
             ]),
-            fused_output_tags(or.root(), &sources)
+            native_output_tags(or.root(), &sources)
         );
         // An unmatched right series answers with its own matching labels under a left fill.
         let fill = compiled_test_tree("x + fill_left(0) y");
@@ -2501,12 +3090,12 @@ mod tests {
                 "kind".to_string(),
                 "zone".to_string()
             ]),
-            fused_output_tags(fill.root(), &sources)
+            native_output_tags(fill.root(), &sources)
         );
         let fill_on = compiled_test_tree("x + on(host) fill(0) y");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            fused_output_tags(fill_on.root(), &sources)
+            native_output_tags(fill_on.root(), &sources)
         );
         // Group modifiers retain the many-side labels and copy declared labels from the one side.
         let group_sources = [
@@ -2541,7 +3130,7 @@ mod tests {
                 .map(String::from)
                 .collect()
             ),
-            fused_output_tags(group_left.root(), &group_sources)
+            native_output_tags(group_left.root(), &group_sources)
         );
         let group_right =
             compiled_test_tree("x * on(cluster, namespace, pod) group_right(container) y");
@@ -2559,7 +3148,7 @@ mod tests {
                 .map(String::from)
                 .collect()
             ),
-            fused_output_tags(group_right.root(), &group_sources)
+            native_output_tags(group_right.root(), &group_sources)
         );
         // An outer match narrows the labels the inner one already narrowed.
         let sources = [
@@ -2574,7 +3163,7 @@ mod tests {
         ] {
             assert_eq!(
                 Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
-                fused_output_tags(compiled_test_tree(query).root(), &sources),
+                native_output_tags(compiled_test_tree(query).root(), &sources),
                 "{query}"
             );
         }
@@ -2590,15 +3179,42 @@ mod tests {
             let aggregate = compiled_test_tree(query);
             assert_eq!(
                 Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
-                fused_output_tags(aggregate.root(), &sources),
+                native_output_tags(aggregate.root(), &sources),
                 "{query}"
             );
         }
+        // Whole-vector operators that retain series keep the input labels, while `absent` derives
+        // its output names from the compiler-bound label set and `count_values` adds its value tag.
+        let hostname_source = [vec!["hostname".to_string()]];
+        for query in [
+            "topk(10, sum by (hostname) (rate(x[5m])))",
+            "bottomk(10, sum by (hostname) (rate(x[5m])))",
+            "limitk(10, sum by (hostname) (rate(x[5m])))",
+            "limit_ratio(0.5, sum by (hostname) (rate(x[5m])))",
+            "sort(sum by (hostname) (rate(x[5m])))",
+        ] {
+            assert_eq!(
+                Some(vec!["hostname".to_string()]),
+                native_output_tags(compiled_test_tree(query).root(), &hostname_source),
+                "{query}"
+            );
+        }
+        let absent = compiled_test_tree("absent(x{host=\"a\", job=\"b\"})");
+        assert_eq!(
+            Some(vec!["host".to_string(), "job".to_string()]),
+            native_output_tags(absent.root(), &sources)
+        );
+        let count_values =
+            compiled_test_tree("count_values by (host) (\"sample\", sum by (host) (x))");
+        assert_eq!(
+            Some(vec!["host".to_string(), "sample".to_string()]),
+            native_output_tags(count_values.root(), &sources)
+        );
         // Selecting some series keeps each one's own labels, whatever the grouping was.
         let topk = compiled_test_tree("topk(1, x)");
         assert_eq!(
             Some(sources[0].clone()),
-            fused_output_tags(topk.root(), &sources),
+            native_output_tags(topk.root(), &sources),
             "topk keeps the labels of the series it selects"
         );
         for query in [
@@ -2613,7 +3229,7 @@ mod tests {
                         .map(String::from)
                         .collect()
                 ),
-                fused_output_tags(rewrite.root(), &sources),
+                native_output_tags(rewrite.root(), &sources),
                 "{query}"
             );
         }
@@ -2652,7 +3268,28 @@ mod tests {
         let tree = compiled_test_tree("x * on(pod) group_left(container) y");
         assert_eq!(
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
-            fused_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources)
+        );
+    }
+
+    #[test]
+    fn output_tags_without_grouping_drops_metric_name() {
+        let sources = [vec![
+            "instance".to_string(),
+            METRIC_NAME.to_string(),
+            "job".to_string(),
+        ]];
+
+        let sum = compiled_test_tree("sum without (instance) (x)");
+        assert_eq!(
+            Some(vec!["job".to_string()]),
+            native_output_tags(sum.root(), &sources)
+        );
+
+        let count_values = compiled_test_tree("count_values without (instance) (\"sample\", x)");
+        assert_eq!(
+            Some(vec!["job".to_string(), "sample".to_string()]),
+            native_output_tags(count_values.root(), &sources)
         );
     }
 
@@ -2665,17 +3302,34 @@ mod tests {
         let tree = compiled_test_tree("x * on(pod) group_right(container) y");
         assert_eq!(
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
-            fused_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources)
         );
     }
 
+    #[test]
+    fn histogram_quantile_output_tags_drop_bucket_and_metadata_labels() {
+        let sources = [vec![
+            "le".to_string(),
+            "__name__".to_string(),
+            "__type__".to_string(),
+            "__unit__".to_string(),
+            "job".to_string(),
+        ]];
+        let tree = compiled_test_tree("histogram_quantile(0.9, x)");
+        assert_eq!(
+            Some(vec!["job".to_string()]),
+            native_output_tags(tree.root(), &sources)
+        );
+    }
+
+    /// A map that only computes values passes its input's labels through unchanged.
     #[test]
     fn match_output_tags_pass_through_pointwise_math() {
         let sources = [vec!["host".to_string(), "kind".to_string()]];
         let tree = compiled_test_tree("abs(x) * 2");
         assert_eq!(
             Some(vec!["host".to_string(), "kind".to_string()]),
-            fused_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources)
         );
     }
 
@@ -2697,9 +3351,12 @@ mod tests {
             "A and B",
             "A + on() B",
             "A + on(job) group_left B",
-            "sum(A) / B",
             "100 / B",
             "A / (B + C)",
+            // A fold on either side: one shared output label set cannot describe both operands, and
+            // the shapes that produced a `tag_0` planning error before the aggregate gate existed.
+            "sum(A) / B",
+            "A / sum(B)",
         ] {
             assert!(!hybrid_admission(query), "{query}");
         }

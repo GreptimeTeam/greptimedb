@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures::TryStreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -72,6 +73,21 @@ impl DfTableSourceProvider {
     /// Returns the query context.
     pub fn query_ctx(&self) -> &QueryContextRef {
         &self.query_ctx
+    }
+
+    /// The logical metric tables of `schema`: the metric engine's own tables, not their physical
+    /// backing. A selector that names no metric is answered by enumerating these.
+    pub async fn logical_metric_tables(&self, schema: &str) -> Result<Vec<TableRef>> {
+        self.catalog_manager
+            .tables(&self.default_catalog, schema, Some(&self.query_ctx))
+            .try_filter(|table| {
+                std::future::ready(
+                    table.table_info().meta.engine == common_catalog::consts::METRIC_ENGINE
+                        && !table.table_info().is_physical_table(),
+                )
+            })
+            .try_collect()
+            .await
     }
 
     pub fn resolve_table_ref(&self, table_ref: TableReference) -> Result<ResolvedTableReference> {

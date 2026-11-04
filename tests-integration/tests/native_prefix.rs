@@ -65,7 +65,7 @@ fn evaluated_frame_schema(tree: &NativeTree) -> datafusion::common::DFSchemaRef 
 // a possible empty closing chunk, so it does not exercise a chain spanning many batches. The
 // parallelism-one path is exercised by `native_prefix_executes_over_real_mito_region`.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_prefix_multi_partition_series_chains() {
+async fn native_prefix_multi_partition_single_position_chains() {
     let instance = GreptimeDbStandaloneBuilder::new("native_prefix_partitioned_chains")
         .with_query_options(QueryOptions {
             parallelism: 16,
@@ -234,9 +234,8 @@ async fn native_prefix_multi_partition_series_chains() {
             entry
                 .1
                 .extend(field.iter().filter_map(|sample| match sample {
-                    datatypes::series::samples::SampleRef::Float(value) => Some(value),
-                    datatypes::series::samples::SampleRef::Histogram(_)
-                    | datatypes::series::samples::SampleRef::Missing => None,
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Histogram(_) | SampleRef::Missing => None,
                 }));
         }
     }
@@ -248,6 +247,209 @@ async fn native_prefix_multi_partition_series_chains() {
             *values,
             "`{host}` reports the rate of its own samples, which a cut chain would lose"
         );
+    }
+}
+
+// The one-position case above cannot exercise a chain that spans chunks. This 8,192-position grid
+// across 16 region-scan partitions does: whatever chunk boundaries the merge produces, each host's
+// chain must arrive complete, in time order, and close exactly once.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_prefix_multi_partition_multi_chunk_chains() {
+    let instance = GreptimeDbStandaloneBuilder::new("native_prefix_partitioned_multi_chunk_chains")
+        .with_query_options(QueryOptions {
+            parallelism: 16,
+            ..Default::default()
+        })
+        .with_auto_create_table(false)
+        .build()
+        .await;
+    let fe = instance.fe_instance();
+    execute_sql(fe, "CREATE TABLE native_prefix_partitioned (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY(host))").await;
+    let mut values = String::new();
+    for host in 0..16 {
+        for sample in 0..20_000 {
+            let timestamp = sample as u64 * 1_000;
+            let value = sample as f64;
+            values.push_str(&format!("('host{host}', {value}, {timestamp}),"));
+        }
+    }
+    values.pop();
+    execute_sql(
+        fe,
+        &format!("INSERT INTO native_prefix_partitioned(host, val, ts) VALUES {values}"),
+    )
+    .await;
+    execute_sql(fe, "ADMIN FLUSH_TABLE('native_prefix_partitioned')").await;
+
+    let ctx = QueryContext::arc();
+    let statement =
+        QueryLanguageParser::parse_sql("SELECT * FROM native_prefix_partitioned", &ctx).unwrap();
+    let planned = fe
+        .query_engine()
+        .planner()
+        .plan(&statement, ctx.clone())
+        .await
+        .unwrap();
+    let LogicalPlan::Projection(projection) = planned else {
+        panic!("expected projection");
+    };
+    let LogicalPlan::TableScan(scan) = projection.input.as_ref() else {
+        panic!("expected table scan");
+    };
+    let scan = scan.clone();
+    let child = LogicalPlan::TableScan(datafusion::logical_expr::logical_plan::TableScan {
+        projection: Some((0..scan.projected_schema.fields().len()).collect()),
+        ..scan
+    });
+    let grid =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(10_000, 1_000, 8_192).unwrap()).unwrap());
+    let raw = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from("val"),
+        }]),
+        eval_grid: None,
+    });
+    let evaluated = Arc::new(SeriesSchema {
+        fields: Arc::clone(&raw.fields),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let raw_type = NativeType::Samples(raw);
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
+                    output: raw_type.clone(),
+                    ordering: SeriesOrdering::KeyThenTime,
+                }),
+                output: raw_type,
+            }),
+            op: BoundWindow {
+                function: RangeFunction::Rate,
+                window: RangeWindow {
+                    range_ms: 10_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: grid.clone(),
+            },
+        },
+        output: NativeType::Samples(evaluated),
+    })
+    .unwrap();
+    let binding = FusedSeriesBinding {
+        grid,
+        metric_name: Some(Arc::from("native_prefix_partitioned")),
+        time_index: "ts".into(),
+        tags: vec!["host".into()],
+    };
+    let frame_schema = evaluated_frame_schema(&tree);
+    let fused = FusedSeries::try_new_with_format(
+        Arc::from("rate(native_prefix_partitioned[10s])"),
+        tree,
+        binding,
+        vec![child],
+        frame_schema,
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let plan = LogicalPlan::Extension(Extension {
+        node: Arc::new(fused),
+    });
+    let bytes = DFLogicalSubstraitConvertor
+        .encode(&plan, DefaultSerializer)
+        .unwrap()
+        .to_vec();
+    let region = instance
+        .mito_engine
+        .regions()
+        .into_iter()
+        .find(|region| {
+            region
+                .metadata()
+                .column_metadatas
+                .iter()
+                .any(|column| column.column_schema.name == "host")
+        })
+        .unwrap();
+    let metadata = region.metadata();
+    let mut stream = instance
+        .datanode
+        .region_server()
+        .handle_remote_read(
+            QueryRequest {
+                header: Some(RegionRequestHeader {
+                    query_context: Some((&*ctx).into()),
+                    ..Default::default()
+                }),
+                region_id: metadata.region_id.as_u64(),
+                plan: bytes,
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+    let mut batches = Vec::new();
+    while let Some(batch) = stream.next().await {
+        batches.push(batch.unwrap());
+    }
+    let schema = batches.first().expect("evaluated frames").schema.clone();
+    let batches = RecordBatches::try_new(schema, batches).unwrap();
+    let decoded = common_query::series_frame::unpack_evaluated_series(
+        Box::pin(DfRecordBatchStreamAdapter::new(batches.as_stream())),
+        None,
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    let mut per_host = std::collections::BTreeMap::<String, (usize, Vec<i64>, Vec<f64>)>::new();
+    for (series, is_last) in decoded {
+        let host = series
+            .metric
+            .get("host")
+            .unwrap_or_else(|| panic!("a decoded series keeps its host label: {:?}", series.metric))
+            .to_string();
+        let entry = per_host.entry(host).or_default();
+        if is_last {
+            entry.0 += 1;
+        }
+        if !series.time.is_empty() {
+            entry
+                .1
+                .extend_from_slice(series.time.timestamps().unwrap().as_ref());
+        }
+        for field in series.fields.iter() {
+            entry
+                .2
+                .extend(field.iter().filter_map(|sample| match sample {
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Histogram(_) | SampleRef::Missing => None,
+                }));
+        }
+    }
+    assert_eq!(16, per_host.len(), "one chain per host: {per_host:?}");
+    let expected_timestamps = (0..8_192).map(|i| 10_000 + i * 1_000).collect::<Vec<_>>();
+    for (host, (closes, timestamps, values)) in &per_host {
+        assert_eq!(1, *closes, "`{host}` closes its chain exactly once");
+        assert_eq!(
+            8_192,
+            timestamps.len(),
+            "`{host}` keeps every grid position across chunk boundaries"
+        );
+        assert_eq!(
+            &expected_timestamps, timestamps,
+            "`{host}` arrives in order over its whole contiguous grid"
+        );
+        assert_eq!(8_192, values.len(), "`{host}` keeps every value");
+        for value in values {
+            assert!(
+                (value - 1.0).abs() < 1e-12,
+                "`{host}` reports the rate of its own samples, which a cut chain would lose: {value}"
+            );
+        }
     }
 }
 
@@ -422,19 +624,27 @@ async fn native_prefix_executes_over_real_mito_region() {
         );
     }
     let mut tampered = bytes;
-    // The version is the first four bytes of the embedded FusedSeries payload; flipping the
-    // Substrait envelope is intentionally avoided, so locate the native protocol version.
-    let native_prefix_version = 1u32.to_le_bytes();
-    let embedded = tampered
+    // Locate the complete FusedSeries envelope in the Substrait bytes. Its version is the first
+    // word and its payload length is the second; no payload-field offsets are needed here.
+    let envelope_at = tampered
         .windows(fused_payload.len())
         .position(|window| window == fused_payload.as_slice())
-        .expect("FusedSeries payload in Substrait plan");
-    let prefix_version = embedded + 8;
+        .expect("FusedSeries envelope in Substrait plan");
+    let version_bytes: [u8; 4] = tampered[envelope_at..envelope_at + 4]
+        .try_into()
+        .unwrap_or_else(|_| panic!("missing version bytes at {envelope_at}"));
+    let version = u32::from_le_bytes(version_bytes);
+    assert_eq!(version, 3, "observed version bytes: {version_bytes:?}");
+    let length_bytes: [u8; 4] = tampered[envelope_at + 4..envelope_at + 8]
+        .try_into()
+        .unwrap_or_else(|_| panic!("missing length bytes at {}", envelope_at + 4));
+    let payload_length = u32::from_le_bytes(length_bytes);
     assert_eq!(
-        &tampered[prefix_version..prefix_version + 4],
-        &native_prefix_version
+        payload_length as usize,
+        fused_payload.len() - 8,
+        "observed length bytes: {length_bytes:?}"
     );
-    tampered[prefix_version] = 2;
+    tampered[envelope_at] = 99;
     let error = server
         .handle_remote_read(
             QueryRequest {
@@ -451,7 +661,7 @@ async fn native_prefix_executes_over_real_mito_region() {
         .err()
         .expect("invalid prefix rejected");
     assert!(
-        format!("{error:?}").contains("unknown version"),
+        format!("{error:?}").contains("unsupported FusedSeries envelope version"),
         "{error:?}"
     );
 }
