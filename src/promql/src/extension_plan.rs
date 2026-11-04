@@ -43,12 +43,12 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::{Expr, Extension, LogicalPlan};
 use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
+#[cfg(feature = "test-utils")]
+pub use fused_series::is_canonical_producer_exec;
 pub use fused_series::{
     FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesStream,
     InputLocality, input_locality, matching_operands_drop_key, tree_source_fields,
 };
-#[cfg(feature = "test-utils")]
-pub use fused_series::is_canonical_producer_exec;
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
 };
