@@ -284,6 +284,30 @@ impl Fixture {
         )
     }
 
+    /// Reads an output exactly as the owning region will once the returned
+    /// metadata is published: partition filtering and sequence override are
+    /// both derived from that metadata.
+    async fn read_published_output(
+        &self,
+        file: FileMeta,
+        metadata: RegionMetadataRef,
+    ) -> Vec<RecordBatch> {
+        let mut reader = self
+            .layer
+            .read_sst(FileHandle::new(file, Arc::new(NoopFilePurger)))
+            .expected_metadata(Some(metadata))
+            .cache(CacheStrategy::Disabled)
+            .build()
+            .await
+            .unwrap()
+            .unwrap();
+        let mut batches = Vec::new();
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
+            batches.push(batch);
+        }
+        batches
+    }
+
     async fn read_output(
         &self,
         mut file: FileMeta,
@@ -728,6 +752,11 @@ async fn multiple_sources_merge_versions_in_each_target_sequence_domain(
             [101, if unknown_bound { 7 } else { 201 }]
         };
         let mut observed = HashSet::new();
+        let mut published = HashSet::new();
+        // Kept for the published-metadata read after the physical checks.
+        let files_for_publish = files.clone();
+        let published_row_count: u64 = files.iter().map(|file| file.num_rows).sum();
+        let mut published_rows = 0u64;
         for file in files {
             assert_eq!(
                 if unknown_bound && id.region_sequence() == 1 {
@@ -742,7 +771,7 @@ async fn multiple_sources_merge_versions_in_each_target_sequence_domain(
                 file.preserve_row_sequence
             );
             for batch in fixture
-                .read_output(file, targets[&id].metadata.clone())
+                .read_output(file.clone(), targets[&id].metadata.clone())
                 .await
             {
                 let sequence = batch
@@ -768,6 +797,30 @@ async fn multiple_sources_merge_versions_in_each_target_sequence_domain(
             }
         }
         assert_eq!(expected.into_iter().collect::<HashSet<_>>(), observed);
+        // Publishing the returned metadata must not change any row sequence:
+        // the region reader derives partition filtering and overrides from it.
+        for file in files_for_publish {
+            for batch in fixture
+                .read_published_output(file, targets[&id].metadata.clone())
+                .await
+            {
+                let sequence = batch
+                    .column(sequence_column_index(batch.num_columns()))
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap();
+                published.extend(sequence.values().iter().copied());
+                published_rows += batch.num_rows() as u64;
+            }
+        }
+        assert_eq!(
+            published_row_count, published_rows,
+            "published metadata drops rows of region {id}"
+        );
+        assert_eq!(
+            observed, published,
+            "published metadata changes the read sequences of region {id}"
+        );
     }
 }
 
