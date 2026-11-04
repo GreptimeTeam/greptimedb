@@ -586,24 +586,25 @@ INSERT INTO TABLE presence_metric VALUES
 
 Affected Rows: 15
 
--- Ordinary NaN keeps `cpu0` present in the grouped count, while the NULL sample
--- on `cpu2` still leaves a zero-valued row in `count(...) by (cpu)`.
+-- Ordinary NaN is still a sample, so `cpu0` stays in the grouped count. A NULL is not a
+-- sample: at a step where `cpu2` has only NULLs the group is empty, and `count(...) by (cpu)`
+-- returns no row for it rather than a zero.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 600, '200s') count(presence_metric{instance="i1"}) by (cpu);
 
-+---------------------+----------------------------+------+
-| ts                  | count(presence_metric.val) | cpu  |
-+---------------------+----------------------------+------+
-| 1970-01-01T00:00:00 | 1.0                        | cpu1 |
-| 1970-01-01T00:00:00 | 1.0                        | cpu2 |
-| 1970-01-01T00:00:00 | 2.0                        | cpu0 |
-| 1970-01-01T00:03:20 | 1.0                        | cpu1 |
-| 1970-01-01T00:03:20 | 2.0                        | cpu0 |
-| 1970-01-01T00:06:40 | 1.0                        | cpu1 |
-| 1970-01-01T00:06:40 | 2.0                        | cpu0 |
-| 1970-01-01T00:10:00 | 1.0                        | cpu1 |
-| 1970-01-01T00:10:00 | 2.0                        | cpu0 |
-+---------------------+----------------------------+------+
++---------------------+-----+------+
+| ts                  | val | cpu  |
++---------------------+-----+------+
+| 1970-01-01T00:00:00 | 1.0 | cpu1 |
+| 1970-01-01T00:00:00 | 1.0 | cpu2 |
+| 1970-01-01T00:00:00 | 2.0 | cpu0 |
+| 1970-01-01T00:03:20 | 1.0 | cpu1 |
+| 1970-01-01T00:03:20 | 2.0 | cpu0 |
+| 1970-01-01T00:06:40 | 1.0 | cpu1 |
+| 1970-01-01T00:06:40 | 2.0 | cpu0 |
+| 1970-01-01T00:10:00 | 1.0 | cpu1 |
+| 1970-01-01T00:10:00 | 2.0 | cpu0 |
++---------------------+-----+------+
 
 -- Nested-count rewrite should preserve grouped presence after stale-marker filtering
 -- and null-value pruning.
