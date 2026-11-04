@@ -458,13 +458,6 @@ impl ColumnarPreparedSource {
                         table_id: table.value(row),
                         tsid: tsid.value(row),
                     };
-                    let mut values = HashMap::new();
-                    for (column_id, strings) in &tag_arrays {
-                        values.insert(
-                            *column_id,
-                            (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
-                        );
-                    }
                     // TODO(yingwen): Separate raw-series identity from label representation.
                     // The PoC formats assume (table_id, tsid) uniqueness; encode once at
                     // this adapter boundary until RawSeriesChunk no longer needs sparse keys.
@@ -476,12 +469,14 @@ impl ColumnarPreparedSource {
                     let merge_key_len = key.len();
                     codec
                         .encode_to_vec(
-                            tags.iter().map(|(id, _)| {
+                            tag_arrays.iter().map(|(id, strings)| {
                                 (
                                     *id,
-                                    values[id]
-                                        .as_deref()
-                                        .map_or(ValueRef::Null, ValueRef::String),
+                                    if strings.is_null(row) {
+                                        ValueRef::Null
+                                    } else {
+                                        ValueRef::String(strings.value(row))
+                                    },
                                 )
                             }),
                             &mut key,
@@ -491,10 +486,6 @@ impl ColumnarPreparedSource {
                         .bytes
                         .entry("prepare_encoded_keys")
                         .or_default() += key.len() as u64;
-                    *preparation_metrics
-                        .counts
-                        .entry("prepare_tag_values")
-                        .or_default() += values.len() as u64;
                     if let Some(previous) = candidates.get(&id) {
                         *preparation_metrics
                             .counts
@@ -507,6 +498,19 @@ impl ColumnarPreparedSource {
                         }
                         continue;
                     }
+                    // Encode borrowed Arrow strings first. Duplicate identities still undergo
+                    // the full label-conflict check, without allocating another owned tag map.
+                    let mut values = HashMap::with_capacity(tag_arrays.len());
+                    for (column_id, strings) in &tag_arrays {
+                        values.insert(
+                            *column_id,
+                            (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
+                        );
+                    }
+                    *preparation_metrics
+                        .counts
+                        .entry("prepare_tag_values")
+                        .or_default() += values.len() as u64;
                     let bytes = key.len()
                         + values.values().flatten().map(String::len).sum::<usize>()
                         + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
