@@ -458,20 +458,27 @@ pub enum MapOp {
     Label(Arc<LabelRewrite>),
 }
 
-/// A parameterized scalar math function.
+/// A math function whose scalar parameters are bound as nodes, because at least one of them varies
+/// per grid point; Prometheus reads each parameter at every step. With constant parameters the same
+/// function is a [`MathOp`] in a [`BoundMap`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParameterizedOp {
+    /// `round(v, to_nearest)`.
     Round,
+    /// `clamp(v, min, max)`.
     Clamp,
+    /// `clamp_min(v, min)`.
     ClampMin,
+    /// `clamp_max(v, max)`.
     ClampMax,
 }
 
 impl ParameterizedOp {
+    /// How many parameters the function reads after its vector.
     pub fn arity(self) -> usize {
         match self {
             Self::Clamp => 2,
-            _ => 1,
+            Self::Round | Self::ClampMin | Self::ClampMax => 1,
         }
     }
 }
@@ -603,9 +610,14 @@ pub enum NativeExpr {
     Input(BoundInput),
     /// A constant scalar, evaluated on the statement's grid.
     Scalar(BoundScalar),
-    /// Evaluation time or a date function evaluated directly from it.
+    /// The evaluation time of each grid point, as `time()` reads it in seconds, or a date function
+    /// of it, as a date function called without an argument reads it.
+    ///
+    /// A date function is bound here rather than over `time()`: Prometheus reads the calendar from
+    /// the evaluation timestamp truncated to whole seconds, which the float `time()` does not carry
+    /// exactly for every timestamp.
     EvalTime { date: Option<DateFunction> },
-    /// A scalar materialized as one unlabeled series.
+    /// `vector(s)`: the scalar as one series without labels.
     VectorOf { input: Box<NativeNode> },
     /// An instant selection over its input.
     Instant {
@@ -624,7 +636,8 @@ pub enum NativeExpr {
         input: Box<NativeNode>,
         op: BoundMap,
     },
-    /// Point-wise math with scalar node parameters.
+    /// A point-wise math function over its input whose parameters are scalar nodes, in argument
+    /// order.
     ParameterizedMap {
         input: Box<NativeNode>,
         op: ParameterizedOp,

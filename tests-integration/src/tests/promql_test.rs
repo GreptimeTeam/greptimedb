@@ -2604,8 +2604,8 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         "the two colliding series must occupy different execution partitions, got {nonempty:?}"
     );
 
-    // Rewriting an existing distinguishing tag can collapse distinct label sets. This route does
-    // not route rewrite outputs by canonical label set, so it must preserve the legacy refusal.
+    // Rewriting an existing distinguishing tag can collapse distinct label sets. The canonical
+    // boundary must reject the overlap with the same error the existing plan reports.
     for (shape, expr) in [
         (
             "at the root",
@@ -2618,6 +2618,14 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         (
             "under topk",
             r#"topk(1, label_replace(probe, "host", "same", "host", ".*"))"#,
+        ),
+        (
+            "above a binary-created label",
+            r#"label_replace(sum by (dst) (label_replace(probe, "dst", "$1", "host", "(.*)") * 1), "dst", "same", "", "")"#,
+        ),
+        (
+            "above count_values",
+            r#"label_replace(count_values("v", probe), "v", "same", "v", ".*")"#,
         ),
     ] {
         observer.clear();
