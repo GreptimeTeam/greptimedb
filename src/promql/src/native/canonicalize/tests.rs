@@ -162,6 +162,14 @@ fn aggregate_over(inner: NativeNode, out: Arc<EvalGrid>, stage: AggregateStage) 
         AggregateStage::Partial => {
             NativeType::AggregateState(Arc::new(crate::native::plan::AggregateStateSchema {
                 group: Grouping::By(Arc::from([])),
+                // The state family this branch carries: the kind and its components come from the
+                // kernel binding, not from a second mapping.
+                kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+                components: Arc::from(
+                    crate::native::plan::aggregate_state_binding(AggregateKind::Sum)
+                        .expect("sum has a mergeable state")
+                        .1,
+                ),
                 accumulators: fields(1),
                 grid: Arc::clone(&out),
             }))

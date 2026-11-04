@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use datafusion::common::{DFSchema, DataFusionError};
 use datatypes::series::SeriesOrdering;
+use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 
@@ -151,6 +152,11 @@ fn partial_aggregate(inner: NativeNode) -> NativeNode {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: Arc::new([]),
             grid,
         })),
@@ -1041,6 +1047,11 @@ fn an_aggregate_output_matches_its_stage() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: Arc::new([]),
             grid: value_grid,
         })),
@@ -1114,6 +1125,11 @@ fn a_partial_aggregate_cannot_change_the_accumulator_count() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: fields(1),
             grid: out,
         })),
@@ -1158,6 +1174,11 @@ fn a_partial_aggregate_indexes_its_state_on_the_inputs_grid() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: Arc::new([]),
             grid: grid(0, 30_000, 8),
         })),
@@ -1244,6 +1265,11 @@ fn a_final_aggregate_cannot_change_the_field_count() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: fields(2),
             grid: Arc::clone(&out),
         })),
@@ -1463,6 +1489,8 @@ fn an_input_can_bind_aggregate_state() {
     let state_group_mismatch = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
         group: Grouping::Without(Arc::new([Arc::from("job")])),
         accumulators: schema_a.accumulators.clone(),
+        kind: schema_a.kind,
+        components: schema_a.components.clone(),
         grid: schema_a.grid.clone(),
     }));
     let mismatch = NativeNode {
@@ -1479,11 +1507,15 @@ fn an_input_can_bind_aggregate_state() {
     let state = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
         group: Grouping::By(Arc::new([Arc::from("job")])),
         accumulators: fields(2),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
         grid: Arc::clone(&state_grid),
     }));
     let equivalent_state = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
         group: Grouping::By(Arc::new([Arc::from("job")])),
         accumulators: fields(2),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
         grid: Arc::clone(&state_grid),
     }));
     let state_input = |bound: NativeType, output: NativeType| NativeNode {
@@ -1501,6 +1533,8 @@ fn an_input_can_bind_aggregate_state() {
     );
     let reversed_accumulators = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
         group: Grouping::By(Arc::new([Arc::from("job")])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
         accumulators: Arc::from([
             FieldSpec {
                 name: Arc::from("f1"),
