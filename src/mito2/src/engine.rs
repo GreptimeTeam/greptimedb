@@ -1276,6 +1276,14 @@ impl EngineInner {
             extension_provider_blocks_exact,
         )?;
 
+        // A metadata aggregate may split into exact files and a residual
+        // scan. Pin the residual memtable reads to this read view, so rows
+        // written after the split is proven are never read.
+        let metadata_aggr_fence = (self.config.experimental_metadata_aggr
+            && request.metadata_aggr_hint
+            && request.memtable_max_sequence.is_none())
+        .then_some(version_data.committed_sequence);
+
         // Get cache.
         let cache_manager = self.workers.cache_manager();
 
@@ -1298,6 +1306,11 @@ impl EngineInner {
         .with_start_time(query_start);
         let scan_region = if let Some(selection) = exact_selection {
             scan_region.with_exact_selection(selection)
+        } else {
+            scan_region
+        };
+        let scan_region = if let Some(sequence) = metadata_aggr_fence {
+            scan_region.with_metadata_aggr_fence(sequence)
         } else {
             scan_region
         };

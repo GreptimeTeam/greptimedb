@@ -15,6 +15,7 @@
 //! Scans a region according to the scan request.
 
 mod aggr;
+pub(crate) use aggr::StatisticsSplitPlan;
 #[cfg(any(test, feature = "test", feature = "testing"))]
 pub use aggr::overlap as metadata_aggr_overlap;
 
@@ -251,6 +252,9 @@ pub(crate) struct ScanRegion {
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
     experimental_metadata_aggr: bool,
+    /// Highest sequence memtables yield to a hinted metadata aggregate when
+    /// the request sets no upper bound. See [`Self::with_metadata_aggr_fence`].
+    metadata_aggr_fence: Option<SequenceNumber>,
     /// Whether to ignore range indexes during scans.
     ignore_range_index: bool,
     /// Whether to ignore inverted index.
@@ -290,6 +294,7 @@ impl ScanRegion {
             scan_memory_tracker: None,
             experimental_series_scan_v2: false,
             experimental_metadata_aggr: false,
+            metadata_aggr_fence: None,
             ignore_range_index: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
@@ -345,6 +350,17 @@ impl ScanRegion {
     /// Enables optional exact-count preparation for hinted scalar count scans.
     pub(crate) fn with_experimental_metadata_aggr(mut self, enabled: bool) -> Self {
         self.experimental_metadata_aggr = enabled;
+        self
+    }
+
+    /// Pins memtable reads to `sequence`, the committed sequence of the read
+    /// view. A split proves its exact files disjoint from the memtables'
+    /// bounds when it is prepared, but memtables keep accepting writes, and
+    /// the residual scan would otherwise read rows written later, possibly
+    /// a row an exact file has already counted.
+    #[must_use]
+    pub(crate) fn with_metadata_aggr_fence(mut self, sequence: SequenceNumber) -> Self {
+        self.metadata_aggr_fence = Some(sequence);
         self
     }
 
@@ -546,7 +562,9 @@ impl ScanRegion {
                     .with_predicate(predicate.clone())
                     .with_sequence(SequenceRange::new(
                         self.request.memtable_min_sequence,
-                        self.request.memtable_max_sequence,
+                        self.request
+                            .memtable_max_sequence
+                            .or(self.metadata_aggr_fence),
                     ))
                     .with_pre_filter_mode(filter_mode),
             )?;
@@ -642,7 +660,11 @@ impl ScanRegion {
         };
         let mut input = input.build();
         if self.experimental_metadata_aggr && self.request.metadata_aggr_hint {
-            input.exact_num_rows = aggr::prepare(&input, &self.request).await;
+            match aggr::prepare(&input, &self.request).await {
+                Some(aggr::MetadataAggr::Exact(rows)) => input.exact_num_rows = Some(rows),
+                Some(aggr::MetadataAggr::Split(plan)) => input.statistics_split = Some(plan),
+                None => {}
+            }
         }
         Ok(input)
     }
@@ -929,6 +951,8 @@ fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle
 pub struct ScanInput {
     /// Count proven against this read view and the complete static predicate.
     pub(crate) exact_num_rows: Option<usize>,
+    /// Exact and residual sources of a hinted COUNT, taken by the scanner.
+    pub(crate) statistics_split: Option<StatisticsSplitPlan>,
     /// Pinned series-index snapshot and its storage, when configured.
     pub(crate) series_index: Option<SeriesIndexReadContext>,
     /// Whether to ignore range indexes while retaining series-index candidate discovery.
@@ -1005,6 +1029,7 @@ pub struct ScanInput {
 
 /// Cached output of scan request analysis: the optional range-cache fingerprint
 /// plus the derived implied time range used by range cache and prefilter.
+#[derive(Clone)]
 struct ScanAnalysis {
     /// `None` when the scan is not eligible for range caching.
     fingerprint: Option<ScanRequestFingerprint>,
@@ -1022,6 +1047,59 @@ pub(crate) struct ScanInputBuilder {
 }
 
 impl ScanInput {
+    /// Returns this scan restricted to the given sources, sharing the read
+    /// view and every query setting. Opens no SST data.
+    pub(crate) fn with_sources(
+        &self,
+        files: Vec<FileHandle>,
+        memtables: Vec<MemRangeBuilder>,
+        exact_num_rows: Option<usize>,
+    ) -> Option<Self> {
+        #[cfg(feature = "enterprise")]
+        if !self.extension_ranges.is_empty() {
+            return None;
+        }
+        Some(Self {
+            exact_num_rows,
+            statistics_split: None,
+            series_index: self.series_index.clone(),
+            ignore_range_index: self.ignore_range_index,
+            access_layer: self.access_layer.clone(),
+            mapper: self.mapper.clone(),
+            read_cols: self.read_cols.clone(),
+            time_range: self.time_range,
+            scan_analysis: self.scan_analysis.clone(),
+            predicate: self.predicate.clone(),
+            region_partition_expr: self.region_partition_expr.clone(),
+            memtables,
+            files,
+            primary_key_mapper: self.primary_key_mapper.clone(),
+            batch_size: self.batch_size,
+            cache_strategy: self.cache_strategy.clone(),
+            ignore_file_not_found: self.ignore_file_not_found,
+            max_concurrent_scan_files: self.max_concurrent_scan_files,
+            scan_memory_tracker: self.scan_memory_tracker.clone(),
+            inverted_index_appliers: self.inverted_index_appliers.clone(),
+            bloom_filter_index_appliers: self.bloom_filter_index_appliers.clone(),
+            fulltext_index_appliers: self.fulltext_index_appliers.clone(),
+            query_start: self.query_start,
+            append_mode: self.append_mode,
+            filter_deleted: self.filter_deleted,
+            merge_mode: self.merge_mode,
+            series_row_selector: self.series_row_selector,
+            distribution: self.distribution,
+            explain_flat_format: self.explain_flat_format,
+            snapshot_sequence: self.snapshot_sequence,
+            sequence_range: self.sequence_range,
+            compaction: self.compaction,
+            compaction_read_parallelism: self.compaction_read_parallelism,
+            json2_rewrite_targets: self.json2_rewrite_targets.clone(),
+            query_stat_counters: self.query_stat_counters.clone(),
+            #[cfg(feature = "enterprise")]
+            extension_ranges: Vec::new(),
+        })
+    }
+
     /// Creates a new [ScanInputBuilder].
     #[must_use]
     pub(crate) fn builder(
@@ -1031,6 +1109,7 @@ impl ScanInput {
         ScanInputBuilder {
             input: ScanInput {
                 exact_num_rows: None,
+                statistics_split: None,
                 series_index: None,
                 ignore_range_index: false,
                 access_layer,
