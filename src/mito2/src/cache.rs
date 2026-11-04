@@ -1150,6 +1150,8 @@ pub struct CacheManager {
     sst_meta_cache: Option<SstMetaCache>,
     /// Unregisters compact metadata bytes when this manager is dropped.
     _sst_meta_size_registration: Option<CacheSizeRegistration>,
+    /// Skips output metadata prewarming for caches used only by the current compaction.
+    disable_sst_meta_cache_on_write: bool,
     /// Cache for decoded SST metadata, used only as an acceleration tier.
     sst_decoded_meta_cache: Option<SstDecodedMetaCache>,
     /// Cache for vectors.
@@ -1452,6 +1454,11 @@ impl CacheManager {
         self.sst_meta_cache.is_some()
     }
 
+    /// Whether newly written SST metadata should be prepared for later readers.
+    pub(crate) fn sst_meta_cache_on_write_enabled(&self) -> bool {
+        self.sst_meta_cache_enabled() && !self.disable_sst_meta_cache_on_write
+    }
+
     /// Gets a vector with repeated value for specific `key`.
     pub fn get_repeated_vector(
         &self,
@@ -1654,6 +1661,7 @@ pub fn selector_result_cache_hit() {
 #[derive(Default)]
 pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
+    disable_sst_meta_cache_on_write: bool,
     vector_cache_size: u64,
     page_cache_size: u64,
     index_metadata_size: u64,
@@ -1671,6 +1679,12 @@ impl CacheManagerBuilder {
     /// Sets meta cache size.
     pub fn sst_meta_cache_size(mut self, bytes: u64) -> Self {
         self.sst_meta_cache_size = bytes;
+        self
+    }
+
+    /// Keeps read-side metadata caching without prewarming newly written SSTs.
+    pub(crate) fn disable_sst_meta_cache_on_write(mut self) -> Self {
+        self.disable_sst_meta_cache_on_write = true;
         self
     }
 
@@ -1837,6 +1851,7 @@ impl CacheManagerBuilder {
         CacheManager {
             sst_meta_cache,
             _sst_meta_size_registration: sst_meta_size_registration,
+            disable_sst_meta_cache_on_write: self.disable_sst_meta_cache_on_write,
             sst_decoded_meta_cache,
             vector_cache,
             page_cache,

@@ -348,6 +348,8 @@ impl CompactionRegionOpener {
             cache_manager: Arc::new(
                 CacheManager::builder()
                     .sst_meta_cache_size(mito_config.sst_meta_cache_size.as_bytes())
+                    // This per-job cache has no readers for the newly written outputs.
+                    .disable_sst_meta_cache_on_write()
                     .build(),
             ),
             access_layer,
