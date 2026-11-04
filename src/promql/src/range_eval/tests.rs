@@ -5385,7 +5385,7 @@ fn resets_counts_a_start_timestamp_restart_the_counts_do_not_show() {
     );
 }
 
-/// An `offset` that cancels a start timestamp onto zero must not turn it into "no start"./// An `offset` that cancels a start timestamp onto zero must not turn it into "no start".
+/// An `offset` that cancels a start timestamp onto zero must not turn it into "no start".
 ///
 /// A start of `0` on the stored histogram means the sender stated none, so the check reads it as
 /// absent. Moving a real start forward by a negative offset could land it exactly on that marker:

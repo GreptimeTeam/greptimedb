@@ -2433,8 +2433,6 @@ fn scan_operand(node: &NativeNode) -> bool {
     pointwise_operand(node) || independent_scan_pair(node)
 }
 
-/// Whether every plan is a scan of one table. Filters, projections and bounds are
-/// occurrence-specific and deliberately do not participate in this check.
 /// Whether any aggregate in `node` consumes histogram samples, wherever it sits in the tree.
 ///
 /// The walk asks each aggregate what kind enters it rather than what the tree's root answers,
@@ -2476,6 +2474,8 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
     }
 }
 
+/// Whether every plan is a scan of one table. Filters, projections and bounds are
+/// occurrence-specific and deliberately do not participate in this check.
 pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPlan>) -> bool {
     let mut table = None;
     plans.into_iter().all(|plan| {
