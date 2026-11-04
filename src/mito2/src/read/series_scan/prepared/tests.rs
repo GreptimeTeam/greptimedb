@@ -1328,7 +1328,7 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
     // A catalog can outlive a source generation until reconciliation runs.
     let mut stale = make_context();
     let index = stale.input.series_index.as_mut().unwrap();
-    let (purger, _purges) = crate::series_index::purger::series_index_channel(store.clone());
+    let (purger, _purges) = crate::series_index::series_index_channel(store.clone());
     let samples = index
         .version
         .samples
