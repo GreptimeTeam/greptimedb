@@ -25,7 +25,7 @@ use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::Provider;
 use store_api::storage::RegionId;
 
-use crate::error::{JoinSnafu, RaftEngineSnafu, Result};
+use crate::error::{JoinSnafu, Result};
 use crate::raft_engine::protos::logstore::EntryImpl;
 
 #[allow(renamed_and_removed_lints, mismatched_lifetime_syntaxes, unused_parens)]
@@ -33,16 +33,15 @@ pub mod protos {
     include!(concat!(env!("OUT_DIR"), concat!("/", "protos/", "mod.rs")));
 }
 
-/// Syncs and drops `engine` on a blocking thread, as both block: dropping the last reference
-/// joins the engine's threads and trims and syncs the active log file, which is what closes it.
+/// Drops `engine` on a blocking thread, as that blocks: dropping the last reference joins the
+/// engine's threads and trims and syncs the active log file, which is what closes it.
+///
+/// No `Engine::sync` before: on raft-engine 0.4.2 it writes an empty batch, which returns before
+/// the fsync (see `durable_sync`).
 pub(crate) async fn close_engine(engine: Arc<Engine>) -> Result<()> {
-    common_runtime::spawn_blocking_global(move || {
-        let synced = engine.sync().context(RaftEngineSnafu);
-        drop(engine);
-        synced
-    })
-    .await
-    .context(JoinSnafu)?
+    common_runtime::spawn_blocking_global(move || drop(engine))
+        .await
+        .context(JoinSnafu)
 }
 
 impl EntryImpl {
