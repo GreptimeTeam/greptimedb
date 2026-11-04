@@ -106,24 +106,51 @@ impl PhysicalOptimizerRule for SeriesFrameOutput {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::SemanticType;
+    use common_error::ext::BoxedError;
+    use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
     use datafusion::arrow::datatypes::Schema;
     use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::common::DFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
+    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+    use datafusion::physical_plan::PhysicalExpr;
+    use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, SchemaRef};
+    use datatypes::series::SeriesOrdering;
     use datatypes::series::frame::raw_series_frame_schema;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::extension_plan::SeriesRouting;
+    use datatypes::series::time::{EvalGrid, GridSpec};
+    use promql::extension_plan::{
+        FusedOutputFormat, FusedSeries, FusedSeriesBinding, RawSeriesSource, SeriesRouting,
+    };
+    use promql::native::plan::{
+        BoundInput, BoundInstant, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+    };
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::region_engine::{
+        BoundTag, PrepareRequest, QueryScanContext, RawLabelSource, RegionScanner,
+        ScannerProperties,
+    };
+    use store_api::storage::{RegionId, ScanRequest};
+    use table::table::scan::RegionScanExec;
 
     use super::*;
 
-    fn raw_frame_schema() -> Arc<Schema> {
-        let series = SeriesSchema {
+    fn series_schema() -> Arc<SeriesSchema> {
+        Arc::new(SeriesSchema {
             fields: Arc::from([FieldSpec {
                 name: Arc::from("value"),
             }]),
             eval_grid: None,
-        };
-        raw_series_frame_schema(&series, FrameLabelMode::Explicit)
+        })
+    }
+
+    fn raw_frame_schema() -> Arc<Schema> {
+        raw_series_frame_schema(&series_schema(), FrameLabelMode::Explicit)
             .expect("a raw frame declares its layout")
     }
 
@@ -141,6 +168,231 @@ mod tests {
 
     fn optimized(plan: Arc<dyn ExecutionPlan>) -> DfResult<Arc<dyn ExecutionPlan>> {
         SeriesFrameOutput.optimize(plan, &ConfigOptions::default())
+    }
+
+    /// The region layout the raw-series fixtures scan: the tag `host`, the time index and one field.
+    fn region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "value",
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![1]);
+        Arc::new(builder.build().expect("the fixture metadata is valid"))
+    }
+
+    /// The label binding a per-series scan of [`region_metadata`] publishes: every key column is
+    /// bound, so one identity lives in one scan partition.
+    fn per_series_labels() -> RawLabelSource {
+        RawLabelSource::PrimaryKey {
+            metric_name: Arc::from("cpu"),
+            physical_metadata: region_metadata(),
+            logical_tags: Arc::from([BoundTag {
+                column_id: 1,
+                name: Arc::from("host"),
+            }]),
+        }
+    }
+
+    /// The region's scanner, answering the raw-series path the planner selects.
+    #[derive(Debug)]
+    struct RawSeriesScanner {
+        metadata: RegionMetadataRef,
+        properties: ScannerProperties,
+    }
+
+    impl DisplayAs for RawSeriesScanner {
+        fn fmt_as(
+            &self,
+            _format: DisplayFormatType,
+            f: &mut std::fmt::Formatter<'_>,
+        ) -> std::fmt::Result {
+            write!(f, "RawSeriesScanner")
+        }
+    }
+
+    impl RegionScanner for RawSeriesScanner {
+        fn name(&self) -> &str {
+            "RawSeriesScanner"
+        }
+
+        fn properties(&self) -> &ScannerProperties {
+            &self.properties
+        }
+
+        fn schema(&self) -> SchemaRef {
+            Arc::clone(&self.metadata.schema)
+        }
+
+        fn metadata(&self) -> RegionMetadataRef {
+            Arc::clone(&self.metadata)
+        }
+
+        fn prepare(&mut self, request: PrepareRequest) -> std::result::Result<(), BoxedError> {
+            self.properties.prepare(request);
+            Ok(())
+        }
+
+        fn scan_partition(
+            &self,
+            _ctx: &QueryScanContext,
+            _metrics: &ExecutionPlanMetricsSet,
+            _partition: usize,
+        ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+            Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
+                &self.metadata.schema,
+            ))))
+        }
+
+        fn raw_series_schema(
+            &self,
+            _label_source: &RawLabelSource,
+        ) -> std::result::Result<Option<Arc<SeriesSchema>>, BoxedError> {
+            Ok(Some(series_schema()))
+        }
+
+        fn has_predicate_without_region(&self) -> bool {
+            true
+        }
+
+        fn add_dyn_filter_to_predicate(
+            &mut self,
+            filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
+        ) -> Vec<bool> {
+            vec![false; filter_exprs.len()]
+        }
+
+        fn set_logical_region(&mut self, logical_region: bool) {
+            self.properties.set_logical_region(logical_region);
+        }
+
+        fn set_query_load_region_id(&mut self, region_id: RegionId) {
+            self.properties.set_query_load_region_id(region_id);
+        }
+    }
+
+    /// A region's native raw-series leaf over `partitions` scan partitions.
+    fn series_scan(partitions: usize) -> Arc<dyn ExecutionPlan> {
+        let scanner = RawSeriesScanner {
+            metadata: region_metadata(),
+            properties: ScannerProperties::new(vec![vec![]; partitions], false, 0),
+        };
+        let scan = Arc::new(
+            RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None)
+                .expect("the fixture scanner scans"),
+        );
+        scan.try_to_series_scan(per_series_labels())
+            .expect("the fixture binding is legal")
+            .expect("the fixture scanner answers raw series")
+    }
+
+    /// A [`RawSeriesSourceExec`] root over `child`, as the region planner builds one.
+    fn raw_source_root(child: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        RawSeriesSource::try_new(
+            Arc::from("cpu"),
+            vec!["host".to_string()],
+            vec!["value".to_string()],
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(
+                    DFSchema::try_from(raw_frame_schema()).expect("the frame is a legal schema"),
+                ),
+            }),
+        )
+        .expect("the source binds one metric")
+        .to_per_series_execution_plan(child)
+        .expect("the child is a raw frame of these fields")
+    }
+
+    /// A fused root running one sample selection over one per-series scan.
+    fn fused_root(partitions: usize) -> Arc<dyn ExecutionPlan> {
+        let grid = Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(0, 1_000, 2).expect("the grid is valid"))
+                .expect("the grid is materialized"),
+        );
+        let raw = NativeType::Samples(series_schema());
+        let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: series_schema().fields.clone(),
+            eval_grid: Some(Arc::clone(&grid)),
+        }));
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        source_index: 0,
+                        output: raw.clone(),
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: raw,
+                }),
+                op: BoundInstant {
+                    lookback_ms: 0,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value: InstantValue::Sample,
+                    output_grid: Arc::clone(&grid),
+                },
+            },
+            output: evaluated,
+        })
+        .expect("the tree is legal");
+        let output_schema = Arc::new(
+            DFSchema::try_from(
+                FusedSeries::series_frame_schema(&tree).expect("the tree declares a frame"),
+            )
+            .expect("the frame is a legal schema"),
+        );
+        let fused = FusedSeries::try_new_with_format(
+            Arc::from("cpu"),
+            tree,
+            FusedSeriesBinding {
+                grid,
+                metric_name: Some(Arc::from("cpu")),
+                time_index: "time".to_string(),
+                tags: vec!["host".to_string()],
+            },
+            vec![LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(
+                    DFSchema::try_from(raw_frame_schema()).expect("the frame is a legal schema"),
+                ),
+            })],
+            output_schema,
+            FusedOutputFormat::SeriesFrame,
+        )
+        .expect("the fused node is planned");
+        fused
+            .to_execution_plan(vec![(
+                series_scan(partitions),
+                per_series_labels(),
+                SeriesOrdering::Contiguous,
+            )])
+            .expect("the fused node is physical")
     }
 
     #[test]
@@ -193,6 +445,72 @@ mod tests {
         assert_eq!(
             promql::extension_plan::IdentityCompletion::CompleteDisjoint,
             router.identity_completion()
+        );
+    }
+
+    #[test]
+    fn a_per_series_raw_root_selects_complete_disjoint_router() {
+        let root = raw_source_root(series_scan(2));
+        assert!(
+            root.downcast_ref::<RawSeriesSourceExec>()
+                .expect("the root is the region's raw source")
+                .is_per_series_scan(),
+            "the fixture root is the per-series case"
+        );
+        assert_eq!(2, root.properties().output_partitioning().partition_count());
+
+        let exec = optimized(root).unwrap();
+        let router = exec
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("the root is routed");
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::CompleteDisjoint,
+            router.identity_completion(),
+            "a per-series scan owns each identity in one partition"
+        );
+    }
+
+    #[test]
+    fn a_raw_source_root_without_per_series_provenance_selects_merge_inputs_router() {
+        let root = raw_source_root(raw_plan(2));
+        assert!(
+            !root
+                .downcast_ref::<RawSeriesSourceExec>()
+                .expect("the root is the region's raw source")
+                .is_per_series_scan(),
+            "the fixture root is a raw source over something that is not a per-series scan"
+        );
+
+        let exec = optimized(root).unwrap();
+        let router = exec
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("the root is routed");
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::MergeInputs,
+            router.identity_completion(),
+            "the node alone proves nothing about where a scan keeps its identities"
+        );
+    }
+
+    #[test]
+    fn a_fused_root_with_disjoint_identities_selects_complete_disjoint_router() {
+        let root = fused_root(2);
+        assert!(
+            root.downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+                .expect("the root is the fused node")
+                .has_partition_disjoint_identities(),
+            "the fixture root is the fused case"
+        );
+        assert_eq!(2, root.properties().output_partitioning().partition_count());
+
+        let exec = optimized(root).unwrap();
+        let router = exec
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("the root is routed");
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::CompleteDisjoint,
+            router.identity_completion(),
+            "a fused chain over a per-series scan owns each identity in one partition"
         );
     }
 
