@@ -1394,22 +1394,20 @@ fn assert_flat_close(
 fn to_layout(mut partial: PartialAggregate) -> PartialAggregate {
     let kept = partial.op.state_fields();
     for group in &mut partial.groups {
-        for (_, states) in &mut group.points {
-            for state in states.iter_mut().flatten() {
-                let mut stripped = AccumulatorState::default();
-                for field in kept {
-                    match field {
-                        StateField::Value => stripped.value = state.value,
-                        StateField::Mean => stripped.mean = state.mean,
-                        StateField::Compensation => stripped.compensation = state.compensation,
-                        StateField::Count => stripped.count = state.count,
-                        StateField::IncrementalMean => {
-                            stripped.incremental_mean = state.incremental_mean
-                        }
+        for state in group.states.iter_mut().flatten() {
+            let mut stripped = AccumulatorState::default();
+            for field in kept {
+                match field {
+                    StateField::Value => stripped.value = state.value,
+                    StateField::Mean => stripped.mean = state.mean,
+                    StateField::Compensation => stripped.compensation = state.compensation,
+                    StateField::Count => stripped.count = state.count,
+                    StateField::IncrementalMean => {
+                        stripped.incremental_mean = state.incremental_mean
                     }
                 }
-                *state = stripped;
             }
+            *state = stripped;
         }
     }
     partial
@@ -1472,9 +1470,7 @@ fn finish_partial_reserves_one_slot_per_seen_point() {
     let expected = aggregator
         .state_bytes()
         .saturating_add(std::mem::size_of::<PartialGroup>())
-        .saturating_add(
-            SEEN.saturating_mul(std::mem::size_of::<(usize, Vec<Option<AccumulatorState>>)>()),
-        )
+        .saturating_add(SEEN.saturating_mul(std::mem::size_of::<usize>()))
         .saturating_add(SEEN.saturating_mul(std::mem::size_of::<Option<AccumulatorState>>()));
     let mut peak = 0usize;
     let partial = aggregator
@@ -1483,9 +1479,11 @@ fn finish_partial_reserves_one_slot_per_seen_point() {
             Ok(())
         })
         .unwrap();
-    // The vector is reserved once, at the points that carry a state, so pushing does not double it.
+    // The vectors are reserved once, at the points that carry a state, so pushing does not double
+    // them.
     assert_eq!(partial.groups[0].points.len(), SEEN);
     assert_eq!(partial.groups[0].points.capacity(), SEEN);
+    assert_eq!(partial.groups[0].states.capacity(), SEEN);
     assert_eq!(peak, expected);
 }
 
@@ -1503,13 +1501,17 @@ fn merge_charges_the_capacity_of_an_input_partial() {
     let mut points = Vec::with_capacity(1024);
     points.push(point);
     spare.groups[0].points = points;
+    let mut states = Vec::with_capacity(1024);
+    states.append(&mut spare.groups[0].states);
+    spare.groups[0].states = states;
     let peak = |partial: PartialAggregate| {
         let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
         let (peak, result) = peak_admission(|budget| merger.merge_budgeted(partial, budget));
         result.unwrap();
         peak
     };
-    let slack = 1023 * std::mem::size_of::<(usize, Vec<Option<AccumulatorState>>)>();
+    let slack =
+        1023 * (std::mem::size_of::<usize>() + std::mem::size_of::<Option<AccumulatorState>>());
     assert!(
         peak(spare) >= peak(partial).saturating_add(slack),
         "spare capacity was not admitted"
@@ -1551,6 +1553,7 @@ fn merge_admits_groups_and_blocks_before_it_inserts_them() {
             .map(|id| PartialGroup {
                 metric: metric("m", &[("i", &id.to_string())]),
                 points: Vec::new(),
+                states: Vec::new(),
             })
             .collect(),
     };
@@ -1564,7 +1567,7 @@ fn merge_admits_groups_and_blocks_before_it_inserts_them() {
     assert!(merger.merge_budgeted(partial(100..108), refused).is_err());
     assert_eq!(merger.state_bytes(), retained);
     let mut invalid = partial(200..201);
-    invalid.groups[0].points.push((256, Vec::new()));
+    invalid.groups[0].points.push(256);
     assert!(merger.merge(invalid).is_err());
     assert_eq!(merger.state_bytes(), retained);
     assert!(
@@ -1625,6 +1628,7 @@ fn a_long_metric_name_is_held_by_the_group_and_by_its_key() {
             groups: vec![PartialGroup {
                 metric: metric(name, &[]),
                 points: Vec::new(),
+                states: Vec::new(),
             }],
         };
         let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
@@ -1902,10 +1906,10 @@ fn a_merge_rejects_state_that_does_not_fit() {
     let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
     assert!(merger.merge(partial(AggregateOp::Avg)).is_err());
     let mut wide = partial(AggregateOp::Sum);
-    wide.groups[0].points[0].1.push(None);
+    wide.groups[0].states.push(None);
     assert!(merger.merge(wide).is_err());
     let mut late = partial(AggregateOp::Sum);
-    late.groups[0].points[0].0 = 128;
+    late.groups[0].points[0] = 128;
     assert!(merger.merge(late).is_err());
     assert!(merger.finish().unwrap().is_empty());
 }

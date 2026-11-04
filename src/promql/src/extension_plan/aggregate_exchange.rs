@@ -27,9 +27,10 @@ use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanArray, Float64Array, StringArray, UInt32Array, UInt64Array,
+    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, StringArray, UInt32Array,
+    UInt64Array,
 };
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, UInt32Type};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
@@ -53,11 +54,13 @@ const COLUMN_OVERHEAD: usize = 256;
 const STRING_CAPACITY: usize = 1024;
 
 /// One state row: a group's labels, the point and field it is of, and its state. Label columns are
-/// nullable, since absent and empty differ; `__name__` has the metric name's column.
+/// nullable, since absent and empty differ; `__name__` has the metric name's column. They are
+/// dictionaries, so a group's labels are stored once rather than once per (point, field) row.
 pub(crate) fn state_schema(tags: &[String]) -> SchemaRef {
-    let mut fields = vec![Field::new("metric_name", DataType::Utf8, true)];
+    let label = || DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
+    let mut fields = vec![Field::new("metric_name", label(), true)];
     let labels = ordinary_tags(tags).count();
-    fields.extend((0..labels).map(|at| Field::new(format!("tag_{at}"), DataType::Utf8, true)));
+    fields.extend((0..labels).map(|at| Field::new(format!("tag_{at}"), label(), true)));
     fields.extend([
         Field::new("point", DataType::UInt64, false),
         Field::new("field", DataType::UInt32, false),
@@ -102,6 +105,8 @@ pub(crate) struct PartialFold {
     /// The plan's charge for exported batches, which live until its queue drains.
     export_budget: Arc<Mutex<Option<MemoryReservation>>>,
     fold: Option<FloatAggregator>,
+    /// States per point: one per field of the schema the fold was built with.
+    width: usize,
 }
 
 impl PartialFold {
@@ -157,6 +162,7 @@ impl PartialFold {
             reservation,
             export_budget,
             fold: Some(fold),
+            width: schema.fields.len(),
         })
     }
 
@@ -185,42 +191,61 @@ impl PartialFold {
     }
 
     /// Encodes `partial` as one row buffer, admitted in full before it allocates, and hands it over
-    /// as slices of at most [`BATCH_ROWS`] rows that share it.
+    /// as slices of at most [`BATCH_ROWS`] rows that share it. Every label column is keyed by the
+    /// group's index, so one key array serves them all.
     fn encode(&self, partial: &PartialAggregate) -> DfResult<Vec<RecordBatch>> {
         let mut rows = 0usize;
         let mut label_bytes = 0usize;
         for group in &partial.groups {
-            let labels = group.metric.name().map_or(0, str::len).saturating_add(
+            label_bytes += group.metric.name().map_or(0, str::len).saturating_add(
                 ordinary_tags(&self.tags)
                     .filter_map(|tag| group.metric.get(tag).map(|value| tag.len() + value.len()))
                     .sum::<usize>(),
             );
-            let present: usize = group
-                .points
-                .iter()
-                .map(|p| p.1.iter().flatten().count())
-                .sum();
-            rows += present;
-            label_bytes += labels * present;
+            rows += group.states.iter().flatten().count();
         }
+        let groups = partial.groups.len();
         if rows > 0 {
-            self.grow_export(export_bytes(rows, label_bytes, self.tags.len()))?;
+            self.grow_export(export_bytes(rows, groups, label_bytes, self.tags.len()))?;
         }
-        let mut metric_name: Vec<Option<&str>> = Vec::with_capacity(rows);
-        let mut tags: Vec<Vec<_>> = self.tags.iter().map(|_| Vec::with_capacity(rows)).collect();
+        let mut group_key: Vec<u32> = Vec::with_capacity(rows);
+        let mut metric_name: Vec<Option<&str>> = Vec::with_capacity(groups);
+        let mut tags: Vec<Vec<_>> = self
+            .tags
+            .iter()
+            .map(|_| Vec::with_capacity(groups))
+            .collect();
         let (mut point, mut field) = (Vec::with_capacity(rows), Vec::with_capacity(rows));
         let mut components: [Vec<f64>; 4] = std::array::from_fn(|_| Vec::with_capacity(rows));
         let mut incremental_mean: Vec<bool> = Vec::with_capacity(rows);
-        for group in &partial.groups {
-            for (at, states) in &group.points {
+        for (key, group) in partial.groups.iter().enumerate() {
+            let key = u32::try_from(key).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "the aggregate state of {groups} groups exceeds its label keys"
+                ))
+            })?;
+            metric_name.push(group.metric.name());
+            for (column, tag) in tags.iter_mut().zip(self.tags.iter()) {
+                column.push(group.metric.get(tag));
+            }
+            if group.states.len() != group.points.len() * self.width {
+                return Err(DataFusionError::Execution(format!(
+                    "a partial group holds {} states for {} points of {} fields",
+                    group.states.len(),
+                    group.points.len(),
+                    self.width
+                )));
+            }
+            for (at, states) in group
+                .points
+                .iter()
+                .zip(group.states.chunks_exact(self.width))
+            {
                 for (index, state) in states.iter().enumerate() {
                     let Some(state) = state else {
                         continue;
                     };
-                    metric_name.push(group.metric.name());
-                    for (column, tag) in tags.iter_mut().zip(self.tags.iter()) {
-                        column.push(group.metric.get(tag));
-                    }
+                    group_key.push(key);
                     point.push(*at as u64);
                     field.push(index as u32);
                     components[0].push(state.value);
@@ -231,10 +256,17 @@ impl PartialFold {
                 }
             }
         }
+        let group_key = UInt32Array::from(group_key);
+        let labels = |values: Vec<Option<&str>>| -> DfResult<ArrayRef> {
+            Ok(Arc::new(DictionaryArray::try_new(
+                group_key.clone(),
+                Arc::new(StringArray::from(values)),
+            )?))
+        };
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(8 + tags.len());
-        columns.push(Arc::new(StringArray::from(metric_name)));
+        columns.push(labels(metric_name)?);
         for values in tags {
-            columns.push(Arc::new(StringArray::from(values)));
+            columns.push(labels(values)?);
         }
         columns.push(Arc::new(UInt64Array::from(point)));
         columns.push(Arc::new(UInt32Array::from(field)));
@@ -291,14 +323,14 @@ pub(crate) fn decode_state(
     let width = schema.fields.len();
     // The name list and the label column lookups are workspace, sized exactly and charged before
     // either allocates.
-    total = total.saturating_add(tags.len() * (size_of::<&str>() + size_of::<&StringArray>()));
+    total = total.saturating_add(tags.len() * (size_of::<&str>() + size_of::<LabelColumn>()));
     budget(total)?;
     let mut names: Vec<&str> = Vec::with_capacity(tags.len());
     names.extend(ordinary_tags(tags));
-    let metric_name: &StringArray = column(batch, "metric_name")?;
-    let mut tag_columns: Vec<&StringArray> = Vec::with_capacity(names.len());
+    let metric_name = label_column(batch, "metric_name")?;
+    let mut tag_columns: Vec<LabelColumn> = Vec::with_capacity(names.len());
     for at in 0..names.len() {
-        tag_columns.push(column(batch, &format!("tag_{at}"))?);
+        tag_columns.push(label_column(batch, &format!("tag_{at}"))?);
     }
     let point: &UInt64Array = column(batch, "point")?;
     let field: &UInt32Array = column(batch, "field")?;
@@ -333,17 +365,17 @@ pub(crate) fn decode_state(
         // label change opens a group: a row repeating the labels of the row before it is the same
         // group, and is that point's next field or the group's next point. Comparing a label change
         // against a change of point would open one group per row, since consecutive points of one
-        // group differ by definition.
-        let differs = |column: &StringArray| {
-            column.is_null(row - 1) != column.is_null(row)
-                || (!column.is_null(row) && column.value(row - 1) != column.value(row))
-        };
-        let opens =
-            row == 0 || differs(metric_name) || tag_columns.iter().any(|column| differs(column));
+        // group differ by definition. Keys are compared column by column: the encoder keys every
+        // column by group, but a concatenation renumbers or deduplicates each column's dictionary
+        // on its own. Equal keys in every column are equal labels; equal labels under different
+        // keys open a further group of the same labels, which the merge folds into one.
+        let opens = row == 0
+            || metric_name.differs(row)
+            || tag_columns.iter().any(|column| column.differs(row));
         if opens {
             // A push outgrowing the group vector doubles it, so the block it is about to allocate
-            // is admitted here; the point's tuple and state vector and the label scratch follow
-            // before either allocates, then what the labels carry once they are read.
+            // is admitted here; the point and its states and the label scratch follow before
+            // either allocates, then what the labels carry once they are read.
             let growth = if groups.len() == groups.capacity() {
                 groups.capacity().max(1) * 2 * size_of::<PartialGroup>()
             } else {
@@ -351,16 +383,16 @@ pub(crate) fn decode_state(
             };
             total = total.saturating_add(
                 growth
-                    + size_of::<(usize, Vec<Option<AccumulatorState>>)>()
+                    + size_of::<usize>()
                     + width * size_of::<Option<AccumulatorState>>()
                     + (names.len() + 1) * size_of::<(&str, &str)>(),
             );
             budget(total)?;
-            let name = (!metric_name.is_null(row)).then(|| metric_name.value(row));
+            let name = metric_name.value(row);
             let mut carried: Vec<(&str, &str)> = Vec::with_capacity(names.len());
             for (column, label) in tag_columns.iter().zip(&names) {
-                if !column.is_null(row) {
-                    carried.push((*label, column.value(row)));
+                if let Some(value) = column.value(row) {
+                    carried.push((*label, value));
                 }
             }
             // The label vector, the `Arc<str>` header each name and value points at, and the bytes
@@ -388,7 +420,8 @@ pub(crate) fn decode_state(
             })?;
             groups.push(PartialGroup {
                 metric,
-                points: vec![(at, vec![None; width])],
+                points: vec![at],
+                states: vec![None; width],
             });
         } else {
             // The same group as the row before: this row's point is the one its state belongs to.
@@ -401,36 +434,46 @@ pub(crate) fn decode_state(
             // point, and repeats a (point, field) pair. Both are accepted: the merge addresses
             // points by index, so a second entry for the same point folds into the same slot,
             // exactly as merging the two batches separately would.
+            let last = group.states.len().saturating_sub(width);
             let opens_point = match group.points.last() {
-                Some((last, states)) => *last != at || states[field].is_some(),
+                Some(previous) => *previous != at || group.states[last + field].is_some(),
                 None => true,
             };
             if opens_point {
-                // The point vector doubles when it outgrows itself, then the point's tuple and its
-                // state vector follow, both admitted before either allocates.
-                let growth = if group.points.len() == group.points.capacity() {
-                    group.points.capacity().max(1)
-                        * 2
-                        * size_of::<(usize, Vec<Option<AccumulatorState>>)>()
+                // Both vectors double when full, reserved exactly. As for the group vector, the
+                // new buffer is admitted beside the old one a moving realloc keeps while it copies.
+                let points = group.points.capacity();
+                let states = group.states.capacity();
+                let grow_points = group.points.len() == points;
+                let grow_states = group.states.len() + width > states;
+                let growth = if grow_points {
+                    points.max(1) * 2 * size_of::<usize>()
+                } else {
+                    0
+                } + if grow_states {
+                    (states + states.max(width)) * size_of::<Option<AccumulatorState>>()
                 } else {
                     0
                 };
-                total = total.saturating_add(
-                    growth
-                        + size_of::<(usize, Vec<Option<AccumulatorState>>)>()
-                        + width * size_of::<Option<AccumulatorState>>(),
-                );
+                total = total.saturating_add(growth);
                 budget(total)?;
-                group.points.push((at, vec![None; width]));
+                if grow_points {
+                    group.points.reserve_exact(points.max(1));
+                }
+                if grow_states {
+                    group.states.reserve_exact(states.max(width));
+                }
+                group.points.push(at);
+                group.states.resize(group.states.len() + width, None);
             }
         }
         let group = groups.last_mut().ok_or_else(|| {
             DataFusionError::Execution(format!("aggregate state row {row} opened no group"))
         })?;
-        let (_, states) = group.points.last_mut().ok_or_else(|| {
+        let slot = group.states.len().checked_sub(width).ok_or_else(|| {
             DataFusionError::Execution(format!("aggregate state row {row} continued no point"))
-        })?;
-        states[field] = Some(AccumulatorState {
+        })? + field;
+        group.states[slot] = Some(AccumulatorState {
             value: value.value(row),
             mean: mean.value(row),
             compensation: compensation.value(row),
@@ -439,6 +482,40 @@ pub(crate) fn decode_state(
         });
     }
     Ok(PartialAggregate { op, groups })
+}
+
+/// One label column of a state batch: its keys and the values they name.
+struct LabelColumn<'a> {
+    keys: &'a DictionaryArray<UInt32Type>,
+    values: &'a StringArray,
+}
+
+impl LabelColumn<'_> {
+    /// Whether the label of `row` has another key than the row before it.
+    fn differs(&self, row: usize) -> bool {
+        self.keys.key(row - 1) != self.keys.key(row)
+    }
+
+    /// The label of `row`, `None` where it is absent.
+    fn value(&self, row: usize) -> Option<&str> {
+        self.keys
+            .key(row)
+            .filter(|&key| self.values.is_valid(key))
+            .map(|key| self.values.value(key))
+    }
+}
+
+/// Reads the label column `name`, which the layout check has already made a string dictionary.
+fn label_column<'a>(batch: &'a RecordBatch, name: &str) -> DfResult<LabelColumn<'a>> {
+    let keys: &DictionaryArray<UInt32Type> = column(batch, name)?;
+    let values = keys
+        .values()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!("the column `{name}` has another type"))
+        })?;
+    Ok(LabelColumn { keys, values })
 }
 
 /// The caller's tag names in column order, without the metric name, which has its own column.
@@ -454,18 +531,19 @@ fn finished() -> DataFusionError {
 }
 
 /// An upper bound on one export: the scratch row vectors, the Arrow arrays they are frozen into --
-/// which live beside them while the strings are copied -- and the slices the output holds.
+/// which live beside them while the strings are copied -- and the slices the output holds. Rows
+/// carry one group key shared by every label column; label values are one entry per group.
 ///
 /// A string column starts at [`STRING_CAPACITY`] value bytes even when every row is null, and the
 /// builder copies what it appended before handing its buffer over, so one minimum capacity is
 /// admitted per column beside the label payload twice over. Coarse on purpose: an overestimate.
-fn export_bytes(rows: usize, label_bytes: usize, tags: usize) -> usize {
+fn export_bytes(rows: usize, groups: usize, label_bytes: usize, tags: usize) -> usize {
     let strings = tags.saturating_add(1);
-    let row = size_of::<u64>() + size_of::<u32>() + 4 * size_of::<f64>() + size_of::<bool>();
+    let row = 2 * size_of::<u32>() + size_of::<u64>() + 4 * size_of::<f64>() + size_of::<bool>();
     rows * row
-        + strings * rows * size_of::<Option<&str>>()
-        + strings * (rows + 1) * size_of::<i32>()
-        + strings * (rows / 8 + 1)
+        + strings * groups * size_of::<Option<&str>>()
+        + strings * (groups + 1) * size_of::<i32>()
+        + strings * (groups / 8 + 1)
         + strings * STRING_CAPACITY
         + 2 * label_bytes
         + (strings + 8) * COLUMN_OVERHEAD
