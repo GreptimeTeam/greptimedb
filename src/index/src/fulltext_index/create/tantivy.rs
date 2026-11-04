@@ -367,6 +367,66 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// Moves the writer into a blocking task that has not finished yet, which
+    /// is the state left behind when `finish()` is cancelled mid-commit.
+    fn interrupt_finalization(
+        creator: &mut TantivyFulltextIndexCreator,
+    ) -> std::sync::mpsc::Sender<()> {
+        let writer = creator.writer.take().expect("writer must still be active");
+        let directory = creator.directory.clone();
+        let (release, released) = std::sync::mpsc::channel();
+        creator.finishing = Some(common_runtime::spawn_blocking_global(move || {
+            // Both leases stay alive until the simulated commit returns.
+            let _directory = directory;
+            let _writer = writer;
+            released.recv().expect("release signal");
+            Ok(())
+        }));
+        release
+    }
+
+    #[tokio::test]
+    async fn test_abort_joins_retained_finalization() {
+        let root = create_temp_dir("tantivy-retained-finalize-");
+        let path = root.path().join("index");
+        let mut creator = TantivyFulltextIndexCreator::new(&path, Config::default(), 1)
+            .await
+            .unwrap();
+        creator.push_text("indexed text").await.unwrap();
+        let release = interrupt_finalization(&mut creator);
+        let pending_path = path.clone();
+        let aborting = tokio::spawn(async move {
+            creator.abort().await.unwrap();
+            creator
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !aborting.is_finished(),
+            "abort must join the in-flight finalization"
+        );
+        assert!(pending_path.exists());
+        release.send(()).unwrap();
+        let mut creator = aborting.await.unwrap();
+        assert!(creator.finishing.is_none());
+        assert!(!path.exists());
+        // Repeating abort must stay idempotent.
+        creator.abort().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_drop_with_retained_finalization_cleans_temporary_files() {
+        let root = create_temp_dir("tantivy-drop-retained-");
+        let path = root.path().join("index");
+        let mut creator = TantivyFulltextIndexCreator::new(&path, Config::default(), 1)
+            .await
+            .unwrap();
+        creator.push_text("indexed text").await.unwrap();
+        let release = interrupt_finalization(&mut creator);
+        drop(creator);
+        release.send(()).unwrap();
+        assert_directory_removed(&path).await;
+    }
+
     #[tokio::test]
     async fn test_detached_initialization_cleans_its_result() {
         let root = create_temp_dir("tantivy-detached-init-");
