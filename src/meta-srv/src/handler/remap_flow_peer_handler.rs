@@ -54,7 +54,7 @@ impl HeartbeatHandler for RemapFlowPeerHandler {
                 // Address errors must not prevent later heartbeat handlers from running.
                 error!(e; "Failed to update flownode address, peer: {:?}", peer);
             });
-        if let Ok(true) = updated {
+        if let Ok(Some(_)) = updated {
             let cache_idents = [CacheIdent::FlowNodeAddressChange(peer.id)];
             utils::invalidate_address_caches(ctx, peer.id, &cache_idents).await;
         }

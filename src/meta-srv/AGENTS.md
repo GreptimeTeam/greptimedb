@@ -43,6 +43,8 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   `handler/utils.rs` for per-node address persistence. Datanode address
   updates retain the statistics handler's per-node ordering. Address epochs are
   confirmed only after a successful save; cache invalidation remains best effort.
+  A changed datanode address invalidates every table on that node (`__dn_table`),
+  not only the tables in the current heartbeat.
 - **Datanode process fence**: before the handler chain, the leader's heartbeat
   session checks a datanode request's non-zero `node_epoch` against the highest
   one recorded under `__datanode_epoch`, read and raised through the leader
