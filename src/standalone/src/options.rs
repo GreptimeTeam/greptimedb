@@ -210,6 +210,7 @@ impl StandaloneOptions {
         let cloned_opts = self.clone();
         DatanodeOptions {
             node_id: Some(0),
+            logging: cloned_opts.logging,
             enable_telemetry: cloned_opts.enable_telemetry,
             wal: cloned_opts.wal,
             storage: cloned_opts.storage,
@@ -246,6 +247,22 @@ mod tests {
     use servers::batcher::BatchingProtocol;
 
     use crate::options::*;
+
+    #[test]
+    fn test_per_region_metrics_options_propagation() {
+        for enabled in [false, true] {
+            let mut options = StandaloneOptions::default();
+            options.logging.enable_per_region_metrics = enabled;
+            assert_eq!(
+                options.datanode_options().logging.enable_per_region_metrics,
+                enabled
+            );
+            assert_eq!(
+                options.frontend_options().logging.enable_per_region_metrics,
+                enabled
+            );
+        }
+    }
 
     #[test]
     fn test_user_provider_redacts_cmd_passwords_in_config() {

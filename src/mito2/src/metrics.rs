@@ -19,6 +19,7 @@ use lazy_static::lazy_static;
 use prometheus::core::{Collector, Desc};
 use prometheus::*;
 use puffin::puffin_manager::stager::StagerNotifier;
+use store_api::metrics::REGION_LABEL;
 
 use crate::region::{RegionMap, RegionMapRef};
 
@@ -55,7 +56,7 @@ impl RegionManifestSizeMetrics {
                     "greptime_mito_region_manifest_size_bytes",
                     "Manifest size in bytes, using the same accounting as region_statistics.manifest_size",
                 ),
-                &["region_id"],
+                &[REGION_LABEL],
             ).unwrap(),
             regions: Arc::new(Mutex::new(Vec::new())),
         }

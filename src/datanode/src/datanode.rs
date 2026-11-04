@@ -837,7 +837,7 @@ impl DatanodeBuilder {
             }
         };
         if opts.logging.enable_per_region_metrics {
-            mito_engine.enable_per_region_metrics();
+            mito_engine.enable_region_manifest_size_metrics();
         }
         Ok(mito_engine)
     }

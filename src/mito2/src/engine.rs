@@ -315,8 +315,8 @@ impl MitoEngine {
         builder.try_build().await
     }
 
-    /// Enables high-cardinality metrics for regions currently hosted by this engine.
-    pub fn enable_per_region_metrics(&self) {
+    /// Enables manifest size metrics for regions currently hosted by this engine.
+    pub fn enable_region_manifest_size_metrics(&self) {
         self.inner
             .workers
             .register_manifest_size_metrics(&crate::metrics::REGION_MANIFEST_SIZE);
