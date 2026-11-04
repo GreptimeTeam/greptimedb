@@ -597,23 +597,31 @@ async fn test_failed_target_never_returns_a_partial_table_result() {
 }
 
 #[rstest::rstest]
-#[case(crate::region::options::MergeMode::LastRow)]
-#[case(crate::region::options::MergeMode::LastNonNull)]
+#[case::merge_mode_ignored(false)]
+#[case::preserve_row_sequence(true)]
 #[tokio::test]
-async fn test_table_stage_does_not_apply_target_merge_mode(
-    #[case] merge_mode: crate::region::options::MergeMode,
-) {
+async fn test_table_stage_does_not_fold_versions(#[case] preserve_sequence: bool) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(8);
     for target in plan.targets.values_mut() {
-        target.options.append_mode = false;
-        target.options.preserve_row_sequence = false;
-        target.options.merge_mode = Some(merge_mode);
+        target.options.append_mode = true;
+        target.options.preserve_row_sequence = preserve_sequence;
+        // Nothing in the table stage may fold versions by this mode.
+        target.options.merge_mode = Some(crate::region::options::MergeMode::LastRow);
     }
     let output = compact_regions(plan, fixture.context(None).0)
         .await
         .unwrap();
     assert_eq!(124, output.stats.output_rows);
+    for (id, files) in &output.files {
+        for file in files {
+            // Only targets that see the input as foreign have a trusted bound.
+            assert_eq!(
+                preserve_sequence && *id != fixture.metadata.region_id,
+                file.preserve_row_sequence
+            );
+        }
+    }
 }
 
 #[tokio::test]
