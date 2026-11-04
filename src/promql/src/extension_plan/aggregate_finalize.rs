@@ -303,7 +303,7 @@ impl UserDefinedLogicalNodeCore for AggregateFinalize {
             ));
         }
         let input = inputs.swap_remove(0);
-        let expected = state_schema(&self.binding.tags);
+        let expected = state_schema(&self.grouping_tags);
         if input.schema().as_arrow() != expected.as_ref() {
             return Err(DataFusionError::Plan(format!(
                 "AggregateFinalize input must export aggregate state with schema {expected:?}, got {:?}",
