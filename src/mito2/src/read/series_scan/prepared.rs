@@ -508,12 +508,17 @@ impl ColumnarPreparedSource {
                     };
                     // The flat merger still needs the compact sparse ID prefix.
                     // Explicit-label chunks use a region-qualified identity below.
-                    let mut key = Vec::new();
+                    let mut key = if direct_labels {
+                        metadata.region_id.as_u64().to_be_bytes().to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    let identity_prefix_len = key.len();
                     let codec = SparsePrimaryKeyCodec::schemaless();
                     codec
                         .encode_internal(id.table_id, id.tsid, &mut key)
                         .map_err(|e| invalid(e.to_string()))?;
-                    let merge_key_len = key.len();
+                    let merge_key_len = key.len() - identity_prefix_len;
                     if !direct_labels {
                         codec
                             .encode_to_vec(
@@ -574,7 +579,6 @@ impl ColumnarPreparedSource {
                     }
                     tag_values += values.len() as u64;
                     let bytes = key.len()
-                        + if direct_labels { size_of::<u64>() } else { 0 }
                         + values.values().flatten().map(String::len).sum::<usize>()
                         + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
                         + std::mem::size_of::<Candidate>()
@@ -598,17 +602,8 @@ impl ColumnarPreparedSource {
                     } else {
                         None
                     };
-                    let key = if direct_labels {
-                        let mut identity = metadata.region_id.as_u64().to_be_bytes().to_vec();
-                        identity.extend_from_slice(&key);
-                        Buffer::from(identity)
-                    } else {
-                        Buffer::from(key)
-                    };
-                    let merge_key = key.slice_with_length(
-                        if direct_labels { size_of::<u64>() } else { 0 },
-                        merge_key_len,
-                    );
+                    let key = Buffer::from(key);
+                    let merge_key = key.slice_with_length(identity_prefix_len, merge_key_len);
                     candidates.insert(
                         id,
                         Candidate {
