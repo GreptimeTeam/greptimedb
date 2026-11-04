@@ -187,56 +187,76 @@ jobs:
       - name: Build the Prometheus oracle
         working-directory: tests/narthex-compat
         run: go build -o "$RUNNER_TEMP/oracle" ./oracle
-      - name: Compare against the pinned engine
+      - name: Compare the native route against the pinned engine
         run: |
           bash .github/scripts/narthex-prometheus-compat.sh \
             "$PWD/bins/greptime" \
             "$RUNNER_TEMP/oracle" \
             "$PWD/tests/narthex-compat/cases" \
-            "$RUNNER_TEMP/compat"
+            "$RUNNER_TEMP/compat-native" \
+            --native
+      - name: Compare the legacy route, for comparison
+        if: always()
+        # The existing route answers the same files in the same harness. A difference that shows up
+        # here and not above predates the native route; one that shows up only above is a native
+        # regression. Both are reported, so neither can be mistaken for the other.
+        run: |
+          bash .github/scripts/narthex-prometheus-compat.sh \
+            "$PWD/bins/greptime" \
+            "$RUNNER_TEMP/oracle" \
+            "$PWD/tests/narthex-compat/cases" \
+            "$RUNNER_TEMP/compat-legacy"
       - name: Summarize
         if: always()
         run: |
-          python3 - "$RUNNER_TEMP/compat/report.json" <<'PY'
+          python3 - "$RUNNER_TEMP" <<'PY'
           import json, sys
           from collections import Counter
           from pathlib import Path
 
-          path = Path(sys.argv[1])
-          if not path.is_file():
-              print("No report: the comparison did not reach the reporting step.")
-              raise SystemExit(0)
-          results = json.loads(path.read_text())
-          counts = Counter(entry["status"] for entry in results)
-          print("| status | queries |")
-          print("| --- | --- |")
-          for status in sorted(counts):
-              print(f"| {status} | {counts[status]} |")
-          known = [entry for entry in results if entry["status"] == "known-difference"]
-          if known:
-              print("\nKnown differences (listed in tests/narthex-compat/KNOWN-DIFFERENCES.md):")
-              for entry in known:
-                  print(f"- `{entry['expr']}` ({entry['case']})")
-          failed = [entry for entry in results if entry["status"] == "failed"]
-          if failed:
-              print("\nFailures:")
-              for entry in failed:
-                  print(f"- `{entry['expr']}` ({entry['case']}): {entry['problems']}")
+          root = Path(sys.argv[1])
+          for route in ("native", "legacy"):
+              path = root / f"compat-{route}" / "report.json"
+              print(f"\n### {route} route")
+              if not path.is_file():
+                  print("No report: the comparison did not reach the reporting step.")
+                  continue
+              results = json.loads(path.read_text())
+              counts = Counter(entry["status"] for entry in results)
+              print("| status | queries |")
+              print("| --- | --- |")
+              for status in sorted(counts):
+                  print(f"| {status} | {counts[status]} |")
+              known = [entry for entry in results if entry["status"] == "known-difference"]
+              if known:
+                  print("\nKnown differences (tests/narthex-compat/KNOWN-DIFFERENCES.md):")
+                  for entry in known:
+                      print(f"- `{entry['expr']}` ({entry['case']})")
+              failed = [entry for entry in results if entry["status"] == "failed"]
+              if failed:
+                  print("\nFailures:")
+                  for entry in failed:
+                      print(f"- `{entry['expr']}` ({entry['case']}): {entry['problems']}")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: narthex-prometheus-compat
-          path: ${{ runner.temp }}/compat/
+          path: |
+            ${{ runner.temp }}/compat-native/
+            ${{ runner.temp }}/compat-legacy/
           retention-days: 7
 
   vm-performance:
     name: vmbench lite (candidate, narthex baseline, VictoriaMetrics)
     needs: build
-    # The benchmark provisions an ephemeral cloud runner and needs the Aliyun/AWS credentials and the
-    # runner token, none of which a pull request from a fork receives. It runs where they exist: the
-    # nightly schedule and a manual dispatch.
-    if: ${{ github.event_name != 'pull_request' }}
+    # Manual only, for now. The benchmark provisions an ephemeral cloud runner and needs the Aliyun
+    # or AWS credentials and a runner token, so it cannot run on a pull request from a fork; and it
+    # does not measure this build yet - with no image tags passed it compares the published
+    # `greptime/greptimedb:latest` against `greptime/greptimedb:v1.2.1`. Running that on a schedule
+    # would rent a machine every night to measure something else, so the schedule runs correctness
+    # only until a candidate image is wired in.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     uses: ./.github/workflows/vmbench-long-range.yml
     with:
       # No image tags are passed: the benchmark measures the published `greptime/greptimedb:latest`
