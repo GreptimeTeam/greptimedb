@@ -413,6 +413,18 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
+    /// Returns whether this file's row sequences are trusted in the target region.
+    ///
+    /// Foreign files use their target-local sequence barrier; local files require
+    /// the preserve marker because their physical sequences belong to this region.
+    pub(crate) fn is_effective_target_sequence_trusted(&self, target_region_id: RegionId) -> bool {
+        if self.region_id != target_region_id {
+            self.sequence.is_some()
+        } else {
+            self.preserve_row_sequence
+        }
+    }
+
     /// Returns the primary key range if both min and max are present.
     pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
         match (&self.primary_key_min, &self.primary_key_max) {
@@ -557,6 +569,22 @@ impl fmt::Debug for FileHandle {
     }
 }
 
+/// Folds file-level sequence bounds into the output sequence bound of a merge.
+///
+/// A bound can be a row maximum or an admission marker; compaction must
+/// preserve both for sequence-based pruning. Unknown bounds must remain
+/// unknown rather than being replaced with a partial maximum.
+pub(crate) fn known_max_input_sequence<'a>(
+    inputs: impl IntoIterator<Item = &'a FileMeta>,
+) -> Option<NonZeroU64> {
+    let mut max: Option<NonZeroU64> = None;
+    for input in inputs {
+        let sequence = input.sequence?;
+        max = Some(max.map_or(sequence, |current| current.max(sequence)));
+    }
+    max
+}
+
 impl FileHandle {
     /// Creates a new logical SST reference. Index replacements must reuse its lifetime.
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
@@ -604,11 +632,8 @@ impl FileHandle {
     /// Foreign files use their target-local sequence barrier; local files require
     /// the preserve marker because their physical sequences belong to this region.
     pub(crate) fn is_effective_target_sequence_trusted(&self, target_region_id: RegionId) -> bool {
-        if self.region_id() != target_region_id {
-            self.meta_ref().sequence.is_some()
-        } else {
-            self.meta_ref().preserve_row_sequence
-        }
+        self.meta_ref()
+            .is_effective_target_sequence_trusted(target_region_id)
     }
 
     /// Returns the cross-region file id.

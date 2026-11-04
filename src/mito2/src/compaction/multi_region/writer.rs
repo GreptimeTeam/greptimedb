@@ -45,21 +45,12 @@ impl<'a> TargetWriter<'a> {
         limits: &'a MemoryLimits,
         max_file_size: usize,
     ) -> Self {
-        let sequence = target
-            .inputs
-            .values()
-            .try_fold(0_u64, |bound, file| {
-                file.sequence.map(|sequence| bound.max(sequence.get()))
-            })
-            .and_then(NonZeroU64::new);
+        let sequence = crate::sst::file::known_max_input_sequence(target.inputs.values());
         let preserve_row_sequence = target.options.preserve_row_sequence
-            && target.inputs.values().all(|file| {
-                if file.region_id == target.metadata.region_id {
-                    file.preserve_row_sequence
-                } else {
-                    file.sequence.is_some()
-                }
-            });
+            && target
+                .inputs
+                .values()
+                .all(|file| file.is_effective_target_sequence_trusted(target.metadata.region_id));
         Self {
             target,
             context,
