@@ -1378,6 +1378,7 @@ mod tests {
     use super::*;
     use crate::cache::CacheManager;
     use crate::compaction::compactor::CompactionVersion;
+    use crate::compaction::scheduler::pick_automatic_for_test;
     use crate::compaction::test_util::{
         compaction_region_with_ssts, new_file_handle, new_file_handle_with_sequence,
         new_file_handle_with_size_and_sequence,
@@ -3380,7 +3381,16 @@ mod tests {
             .into_iter()
             .chain(priority_test_files(10, 0, 40, false))
             .collect::<Vec<_>>();
-        let picker = priority_test_picker(1);
+        let mut region = compaction_region_with_ssts(
+            files.iter().map(|file| file.meta_ref().clone()),
+            Duration::from_secs(60),
+        )
+        .await;
+        region.ttl = None;
+        let crate::region::options::CompactionOptions::Twcs(options) =
+            &mut region.region_options.compaction;
+        options.time_window = Some(Duration::from_secs(1));
+        options.active_window_trigger_file_num = 2;
         let mut history = PickHistory::default();
         let start = Instant::now();
         history.seed_for_test(
@@ -3390,29 +3400,34 @@ mod tests {
             },
             start - Duration::from_secs(120),
         );
-        history.seed_for_test(
-            PickKey {
-                window: 10,
-                class: PickClass::L0Merge,
-            },
-            start - Duration::from_secs(90),
-        );
+        let younger = PickKey {
+            window: 10,
+            class: PickClass::L0Merge,
+        };
+        let waiting_since = start - Duration::from_secs(90);
+        history.seed_for_test(younger, waiting_since);
 
-        let first = picker
-            .build_output_with_history(assign_to_windows(files.iter(), 1), Some(10), &mut history)
+        // Exercise the production orchestration, not the test helper's copy of
+        // rank/truncate/acknowledge: only the selected key may consume a turn.
+        let first = pick_automatic_for_test(&region, &mut history, Some(1))
             .await
+            .unwrap()
             .unwrap();
-        assert_eq!(1, first.len());
-        assert_eq!(0, output_window(&first[0]));
+        assert_eq!(1, first.outputs.len());
+        assert_eq!(0, output_window(&first.outputs[0]));
+        assert_eq!(
+            Some(waiting_since),
+            history.priority_for_test(younger, start).1
+        );
 
         // No completion acknowledgement: selecting the older window already
         // consumed its turn, so the younger overdue window must go next.
-        let second = picker
-            .build_output_with_history(assign_to_windows(files.iter(), 1), Some(10), &mut history)
+        let second = pick_automatic_for_test(&region, &mut history, Some(1))
             .await
+            .unwrap()
             .unwrap();
-        assert_eq!(1, second.len());
-        assert_eq!(10, output_window(&second[0]));
+        assert_eq!(1, second.outputs.len());
+        assert_eq!(10, output_window(&second.outputs[0]));
     }
 
     #[rstest::rstest]
