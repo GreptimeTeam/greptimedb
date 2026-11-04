@@ -282,7 +282,17 @@ fn window_and_limitk_collect_only_unified_contributions() {
     let build = |node: NativeNode| {
         let tree = NativeTree::try_new(node).unwrap();
         let mut inputs = Vec::new();
-        RuntimeNode::build(tree.root(), &pool(), &mut inputs, "root".to_string()).unwrap()
+        let mut binary_before = 0;
+        RuntimeNode::build(
+            tree.root(),
+            &pool(),
+            &mut inputs,
+            &mut binary_before,
+            "root".to_string(),
+            None,
+        )
+        .unwrap()
+        .0
     };
 
     let raw_window = build(window_with(
