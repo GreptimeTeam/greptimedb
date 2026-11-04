@@ -35,7 +35,7 @@ use auth::user_provider_from_option;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use catalog::process_manager::{ProcessManager, ProcessManagerRef};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
-use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, MITO_ENGINE};
+use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, METRICS_EXEMPLARS_TABLE, MITO_ENGINE};
 use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc::channel_manager::ClientTlsOption;
@@ -1318,7 +1318,9 @@ pub async fn test_otel_arrow_exemplars_without_metric_engine(store_type: Storage
             2,
         ),
         (
-            "SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_name='metrics_exemplars'",
+            &format!(
+                "SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"
+            ),
             0,
         ),
     ] {

@@ -16,7 +16,7 @@ use std::env;
 use std::sync::Arc;
 
 use client::{DEFAULT_SCHEMA_NAME, OutputData};
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, METRICS_EXEMPLARS_TABLE};
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -4560,7 +4560,7 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
             let table = frontend
                 .catalog_manager()
                 .table(
-                    "greptime",
+                    DEFAULT_CATALOG_NAME,
                     "public",
                     &format!("routed_{version}_{suffix}"),
                     None,
@@ -4574,7 +4574,7 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
             );
         }
         let output = execute_sql(frontend, &format!(
-            "SELECT count(*) FROM metrics_exemplars e JOIN physical_a m ON e.__table_id = m.__table_id AND e.__tsid = m.__tsid WHERE e.greptime_metric = 'routed_{version}_a'"
+            "SELECT count(*) FROM {METRICS_EXEMPLARS_TABLE} e JOIN physical_a m ON e.__table_id = m.__table_id AND e.__tsid = m.__tsid WHERE e.greptime_metric = 'routed_{version}_a'"
         )).await;
         check_output_stream(
             output.data,
@@ -4583,7 +4583,12 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
         .await;
         let table = frontend
             .catalog_manager()
-            .table("greptime", "public", "metrics_exemplars", None)
+            .table(
+                DEFAULT_CATALOG_NAME,
+                "public",
+                METRICS_EXEMPLARS_TABLE,
+                None,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -4776,7 +4781,7 @@ async fn test_exemplar_precreated_table_options(
     execute_sql(frontend, "CREATE TABLE source_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
     execute_sql(frontend, "CREATE TABLE metric_source (job STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('on_physical_table'='source_physical')").await;
     execute_sql(frontend, &format!(
-        "CREATE TABLE metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) ENGINE=mito WITH ('append_mode'='{append_mode}', 'primary_key_encoding'='{encoding}', 'compaction.type'='twcs')"
+        "CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) ENGINE=mito WITH ('append_mode'='{append_mode}', 'primary_key_encoding'='{encoding}', 'compaction.type'='twcs')"
     )).await;
     let (request, _) = into_rows(vec![Exemplar {
         metric: "metric_source".into(),
@@ -4795,15 +4800,20 @@ async fn test_exemplar_precreated_table_options(
         let error = result.unwrap_err();
         assert_eq!(error.status_code(), StatusCode::InvalidArguments);
         assert!(
-            error.output_msg().contains(
-                "metrics_exemplars requires Mito, append_mode=true and primary_key_encoding=sparse"
-            ),
+            error.output_msg().contains(&format!(
+                "{METRICS_EXEMPLARS_TABLE} requires Mito, append_mode=true and primary_key_encoding=sparse"
+            )),
             "{error:?}"
         );
     }
     let table = frontend
         .catalog_manager()
-        .table("greptime", "public", "metrics_exemplars", None)
+        .table(
+            DEFAULT_CATALOG_NAME,
+            "public",
+            METRICS_EXEMPLARS_TABLE,
+            None,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -4815,10 +4825,10 @@ async fn test_exemplar_precreated_table_options(
     let sql = if accepted {
         let timestamp = 1_234_567_890 / 10_i64.pow(9 - precision);
         format!(
-            "SELECT count(*) FROM metrics_exemplars WHERE job = 'api' AND greptime_value = 2.0 AND CAST(greptime_timestamp AS BIGINT) = {timestamp}"
+            "SELECT count(*) FROM {METRICS_EXEMPLARS_TABLE} WHERE job = 'api' AND greptime_value = 2.0 AND CAST(greptime_timestamp AS BIGINT) = {timestamp}"
         )
     } else {
-        "SELECT count(*) FROM metrics_exemplars".into()
+        format!("SELECT count(*) FROM {METRICS_EXEMPLARS_TABLE}")
     };
     let output = execute_sql(frontend, &sql).await;
     check_output_stream(
@@ -4875,7 +4885,12 @@ async fn test_exemplar_source_identity_policy() {
     assert!(
         frontend
             .catalog_manager()
-            .table("greptime", "public", "metrics_exemplars", None)
+            .table(
+                DEFAULT_CATALOG_NAME,
+                "public",
+                METRICS_EXEMPLARS_TABLE,
+                None
+            )
             .await
             .unwrap()
             .is_none()
@@ -4885,7 +4900,7 @@ async fn test_exemplar_source_identity_policy() {
     execute_sql(frontend, create).await;
     let source = frontend
         .catalog_manager()
-        .table("greptime", "public", "metric_source", None)
+        .table(DEFAULT_CATALOG_NAME, "public", "metric_source", None)
         .await
         .unwrap()
         .unwrap()
@@ -4895,7 +4910,7 @@ async fn test_exemplar_source_identity_policy() {
     execute_sql(frontend, create).await;
     let replacement = frontend
         .catalog_manager()
-        .table("greptime", "public", "metric_source", None)
+        .table(DEFAULT_CATALOG_NAME, "public", "metric_source", None)
         .await
         .unwrap()
         .unwrap()
@@ -4915,7 +4930,12 @@ async fn test_exemplar_source_identity_policy() {
         .unwrap();
     let table = frontend
         .catalog_manager()
-        .table("greptime", "public", "metrics_exemplars", None)
+        .table(
+            DEFAULT_CATALOG_NAME,
+            "public",
+            METRICS_EXEMPLARS_TABLE,
+            None,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -4940,7 +4960,7 @@ async fn test_exemplar_source_identity_policy() {
     assert_eq!(info.meta.primary_key_indices, [0, 1, 2, 3]);
     let output = execute_sql(
         frontend,
-        "SELECT __table_id FROM metrics_exemplars ORDER BY __table_id",
+        &format!("SELECT __table_id FROM {METRICS_EXEMPLARS_TABLE} ORDER BY __table_id"),
     )
     .await;
     let OutputData::Stream(stream) = output.data else {

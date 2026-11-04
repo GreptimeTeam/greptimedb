@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, RowInsertRequests, Value};
+use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
 use common_grpc::precision::Precision;
 use common_query::prelude::{
-    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, METRICS_EXEMPLARS_TABLE, greptime_timestamp,
-    greptime_value,
+    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, greptime_timestamp, greptime_value,
 };
 use datatypes::json;
 use metric_engine::row_modifier::TsidGenerator;

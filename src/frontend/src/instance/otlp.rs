@@ -27,11 +27,11 @@ use auth::{
     PermissionTableTargets,
 };
 use client::Output;
-use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
-use common_error::ext::BoxedError;
-use common_query::prelude::{
-    EXEMPLAR_METRIC_COLUMN, GREPTIME_PHYSICAL_TABLE, METRICS_EXEMPLARS_TABLE,
+use common_catalog::consts::{
+    METRICS_EXEMPLARS_TABLE, trace_operations_table_name, trace_services_table_name,
 };
+use common_error::ext::BoxedError;
+use common_query::prelude::{EXEMPLAR_METRIC_COLUMN, GREPTIME_PHYSICAL_TABLE};
 use common_telemetry::{tracing, warn};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;

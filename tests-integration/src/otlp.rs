@@ -21,6 +21,7 @@ mod test {
     use api::region::RegionResponse;
     use api::v1::region::{RegionRequest, region_request};
     use client::{DEFAULT_CATALOG_NAME, OutputData};
+    use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::node_manager::{
         Datanode, DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef, NodeManagerRef,
@@ -1667,13 +1668,15 @@ WITH(
                 assert_eq!(dropped.get() - before, count as u64);
                 assert_eq!(limiter.used_bytes(), 0);
                 if round == 0 {
-                    assert_trace_v2_query(instance, "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='metrics_exemplars'", ctx.clone()).await.unwrap();
+                    assert_trace_v2_query(instance, &format!("SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"), ctx.clone()).await.unwrap();
                 }
             }
             for sql in [
                 "SELECT COUNT(*)=4 FROM exemplar_memory_0",
                 "SELECT COUNT(*)=2 FROM logical_sibling",
-                "SELECT COUNT(*)=2 AND MIN(greptime_metric)='logical_sibling' FROM metrics_exemplars",
+                &format!(
+                    "SELECT COUNT(*)=2 AND MIN(greptime_metric)='logical_sibling' FROM {METRICS_EXEMPLARS_TABLE}"
+                ),
             ] {
                 assert_trace_v2_query(instance, sql, ctx.clone())
                     .await
@@ -1777,7 +1780,7 @@ WITH(
         .unwrap();
         assert_trace_v2_query(
             instance,
-            "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='metrics_exemplars'",
+            &format!("SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"),
             ctx,
         )
         .await
@@ -1908,7 +1911,7 @@ WITH(
         connection.await.unwrap().unwrap();
         server.shutdown().await.unwrap();
 
-        for table in ["exemplar_memory_0", "metrics_exemplars"] {
+        for table in ["exemplar_memory_0", METRICS_EXEMPLARS_TABLE] {
             assert!(
                 instance
                     .catalog_manager()
@@ -2006,7 +2009,12 @@ WITH(
         );
         let table = instance
             .catalog_manager()
-            .table(DEFAULT_CATALOG_NAME, "public", "metrics_exemplars", None)
+            .table(
+                DEFAULT_CATALOG_NAME,
+                "public",
+                METRICS_EXEMPLARS_TABLE,
+                None,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -2139,7 +2147,7 @@ WITH(
         }
         assert_trace_v2_query(
             instance,
-            "SELECT COUNT(*)=1 AND MIN(greptime_metric)='retained' FROM metrics_exemplars",
+            &format!("SELECT COUNT(*)=1 AND MIN(greptime_metric)='retained' FROM {METRICS_EXEMPLARS_TABLE}"),
             ctx,
         )
         .await
@@ -2235,10 +2243,10 @@ WITH(
             )
             .await
             .unwrap();
-            assert_trace_v2_query(instance, "SELECT COUNT(*)=6 FROM metrics_exemplars e JOIN defaults_physical m ON e.__table_id=m.__table_id AND e.__tsid=m.__tsid AND e.greptime_timestamp=m.greptime_timestamp", ctx.clone()).await.unwrap();
+            assert_trace_v2_query(instance, &format!("SELECT COUNT(*)=6 FROM {METRICS_EXEMPLARS_TABLE} e JOIN defaults_physical m ON e.__table_id=m.__table_id AND e.__tsid=m.__tsid AND e.greptime_timestamp=m.greptime_timestamp"), ctx.clone()).await.unwrap();
             assert_trace_v2_query(
                 instance,
-                "SELECT COUNT(*)=6 FROM metrics_exemplars WHERE empty_tag='' AND host IS NOT NULL",
+                &format!("SELECT COUNT(*)=6 FROM {METRICS_EXEMPLARS_TABLE} WHERE empty_tag='' AND host IS NOT NULL"),
                 ctx,
             )
             .await
@@ -2303,17 +2311,17 @@ WITH(
                 )
                 .await
                 .unwrap();
-                assert_trace_v2_query(instance, "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='metrics_exemplars'", ctx).await.unwrap();
+                assert_trace_v2_query(instance, &format!("SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"), ctx).await.unwrap();
                 continue;
             }
             assert_trace_v2_query(
                 instance,
-                "SELECT COUNT(*)=2 FROM metrics_exemplars",
+                &format!("SELECT COUNT(*)=2 FROM {METRICS_EXEMPLARS_TABLE}"),
                 ctx.clone(),
             )
             .await
             .unwrap();
-            assert_trace_v2_query(instance, "SELECT COUNT(*)=2 FROM metrics_exemplars e JOIN greptime_physical_table m ON e.__table_id=m.__table_id AND e.__tsid=m.__tsid AND e.le=m.le AND e.job=m.job AND e.zone=m.zone WHERE e.greptime_metric='latency_bucket'", ctx).await.unwrap();
+            assert_trace_v2_query(instance, &format!("SELECT COUNT(*)=2 FROM {METRICS_EXEMPLARS_TABLE} e JOIN greptime_physical_table m ON e.__table_id=m.__table_id AND e.__tsid=m.__tsid AND e.le=m.le AND e.job=m.job AND e.zone=m.zone WHERE e.greptime_metric='latency_bucket'"), ctx).await.unwrap();
         }
     }
 
@@ -2333,9 +2341,9 @@ WITH(
             }));
             let ctx = Arc::new(ctx);
             let (failed, retained) = if metric_fails {
-                ("exemplar_partial_total", "metrics_exemplars")
+                ("exemplar_partial_total", METRICS_EXEMPLARS_TABLE)
             } else {
-                ("metrics_exemplars", "exemplar_partial_total")
+                (METRICS_EXEMPLARS_TABLE, "exemplar_partial_total")
             };
             instance
                 .do_query(
@@ -2369,8 +2377,10 @@ WITH(
                 assert_eq!(outcome.rejected_data_points, 1);
                 assert_trace_v2_query(
                     instance,
-                    "SELECT COUNT(*)=0 FROM information_schema.tables \
-                     WHERE table_name='metrics_exemplars'",
+                    &format!(
+                        "SELECT COUNT(*)=0 FROM information_schema.tables \
+                     WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"
+                    ),
                     ctx,
                 )
                 .await
@@ -3353,7 +3363,10 @@ WITH(
                         panic!("metric destinations must be resolved");
                     };
                     let denied = targets.iter().any(|t| {
-                        matches!(t.table.as_str(), "restricted_metric" | "metrics_exemplars")
+                        matches!(
+                            t.table.as_str(),
+                            "restricted_metric" | METRICS_EXEMPLARS_TABLE
+                        )
                     });
                     self.calls
                         .lock()
@@ -3442,7 +3455,7 @@ WITH(
         assert_eq!(err.status_code(), StatusCode::PermissionDenied);
         assert_eq!(
             std::mem::take(&mut *checker.calls.lock().unwrap()),
-            vec![vec!["allowed_metric"], vec!["metrics_exemplars"]]
+            vec![vec!["allowed_metric"], vec![METRICS_EXEMPLARS_TABLE]]
         );
         assert_trace_v2_query(
             instance,
