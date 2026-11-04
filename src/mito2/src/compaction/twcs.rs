@@ -25,6 +25,7 @@ use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
+use prometheus::{HistogramVec, IntCounterVec};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
@@ -200,10 +201,28 @@ fn parse_max_input_files(env_value: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_MAX_INPUT_FILES)
 }
 
+/// Cloneable planning metric handles, shared with spawned window evaluations.
+#[derive(Clone, Debug)]
+pub(crate) struct TwcsPickMetrics {
+    elapsed: HistogramVec,
+    scanned_windows: IntCounterVec,
+}
+
+impl Default for TwcsPickMetrics {
+    fn default() -> Self {
+        Self {
+            elapsed: TWCS_PICK_ELAPSED.clone(),
+            scanned_windows: TWCS_SCANNED_WINDOWS.clone(),
+        }
+    }
+}
+
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
 #[derive(Clone, Debug)]
 pub struct TwcsPicker {
+    /// Production uses registered handles; tests can use unregistered instances.
+    pub(crate) metrics: TwcsPickMetrics,
     /// Minimum file num to trigger a compaction in the active window.
     pub trigger_file_num: usize,
     /// Minimum L1 file num to allow a safety compaction in the active window.
@@ -244,8 +263,12 @@ impl TwcsPicker {
     ) -> Result<TwcsCandidates> {
         let all_candidates = context.all_candidates;
         let mode = if all_candidates { "fair" } else { "stateless" };
-        let _timer = TWCS_PICK_ELAPSED.with_label_values(&[mode]).start_timer();
-        let scanned_windows = TWCS_SCANNED_WINDOWS.with_label_values(&[mode]);
+        let _timer = self
+            .metrics
+            .elapsed
+            .with_label_values(&[mode])
+            .start_timer();
+        let scanned_windows = self.metrics.scanned_windows.with_label_values(&[mode]);
         let WindowOutputContext {
             all_candidates: _,
             expired_ssts,
@@ -1391,7 +1414,6 @@ mod tests {
         primary_key_mapper_for_test,
     };
     use crate::config::MitoConfig;
-    use crate::metrics::TWCS_SELECTED_CANDIDATES;
     use crate::region::options::RegionOptions;
     use crate::sst::file::{FileMeta, Level};
     use crate::sst::version::SstVersion;
@@ -1611,6 +1633,7 @@ mod tests {
                 max_background_tasks: None,
                 time_range: None,
                 all_windows_inactive: false,
+                metrics: Default::default(),
             };
 
             let output = picker.pick(&compaction_region).await.unwrap().unwrap();
@@ -1636,6 +1659,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
         let compaction_region = compaction_region_with_expired_sst().await;
 
@@ -1694,6 +1718,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker.pick(&compaction_region).await.unwrap().unwrap();
@@ -1758,6 +1783,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         assert!(picker.pick(&compaction_region).await.unwrap().is_none());
@@ -2328,6 +2354,7 @@ mod tests {
                 max_background_tasks: None,
                 time_range: None,
                 all_windows_inactive: false,
+                metrics: Default::default(),
             }
             .build_output_with_time_range(RegionId::from_u64(0), windows, active_window, None)
             .await
@@ -2481,6 +2508,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         }
         .build_output_with_time_range(RegionId::from_u64(0), windows, active_window, None)
         .await
@@ -2554,6 +2582,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2604,6 +2633,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2640,6 +2670,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -2687,6 +2718,7 @@ mod tests {
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2716,6 +2748,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let windows_no_limit = assign_to_windows(files.iter(), 3);
@@ -2765,6 +2798,7 @@ mod tests {
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2819,6 +2853,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2868,6 +2903,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2919,6 +2955,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3600);
@@ -2970,6 +3007,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3600);
@@ -3006,6 +3044,7 @@ mod tests {
             max_background_tasks: Some(1),
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3108,6 +3147,7 @@ mod tests {
                 Timestamp::new_millisecond(7_800),
             ),
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3145,6 +3185,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3175,6 +3216,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3206,6 +3248,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3237,6 +3280,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3267,6 +3311,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3312,6 +3357,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3456,8 +3502,28 @@ mod tests {
         if !eligible {
             files = vec![files[0].clone(), files[4].clone()];
         }
-        let picker = priority_test_picker(1);
-        let mut history = PickHistory::default();
+        // Unregistered instances cannot be changed by other libtest threads.
+        let selected_metrics = IntCounterVec::new(
+            prometheus::Opts::new("test_twcs_selected", "selected seeds"),
+            &["class", "priority"],
+        )
+        .unwrap();
+        let picker = TwcsPicker {
+            metrics: TwcsPickMetrics {
+                elapsed: HistogramVec::new(
+                    prometheus::HistogramOpts::new("test_twcs_pick_elapsed", "pick elapsed"),
+                    &["mode"],
+                )
+                .unwrap(),
+                scanned_windows: IntCounterVec::new(
+                    prometheus::Opts::new("test_twcs_scanned_windows", "scanned windows"),
+                    &["mode"],
+                )
+                .unwrap(),
+            },
+            ..priority_test_picker(1)
+        };
+        let mut history = PickHistory::with_selected_metrics_for_test(selected_metrics.clone());
         if fair && promoted {
             history.observe_for_test(
                 [PickKey {
@@ -3469,8 +3535,8 @@ mod tests {
             );
         }
         let mode = if fair { "fair" } else { "stateless" };
-        let elapsed = TWCS_PICK_ELAPSED.with_label_values(&[mode]);
-        let windows = TWCS_SCANNED_WINDOWS.with_label_values(&[mode]);
+        let elapsed = picker.metrics.elapsed.with_label_values(&[mode]);
+        let windows = picker.metrics.scanned_windows.with_label_values(&[mode]);
         let elapsed_before = elapsed.get_sample_count();
         let windows_before = windows.get();
         let selected = [
@@ -3480,9 +3546,9 @@ mod tests {
         ]
         .into_iter()
         .flat_map(|class| {
+            let selected_metrics = &selected_metrics;
             ["normal", "promoted"].into_iter().map(move |priority| {
-                let counter =
-                    TWCS_SELECTED_CANDIDATES.with_label_values(&[class.as_str(), priority]);
+                let counter = selected_metrics.with_label_values(&[class.as_str(), priority]);
                 let before = counter.get();
                 (class, priority, counter, before)
             })
@@ -3842,6 +3908,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         for (case, files, expected_level, expected_len) in [
@@ -3895,6 +3962,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3934,6 +4002,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -3986,6 +4055,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -4035,6 +4105,7 @@ mod tests {
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         }
     }
 
@@ -4353,6 +4424,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -4386,6 +4458,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -4419,6 +4492,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -4452,6 +4526,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker
@@ -4593,6 +4668,7 @@ mod tests {
             max_background_tasks: Some(1),
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         for (case, key_range, extra_size, overlapping_a, expected_inputs) in [
@@ -4845,6 +4921,7 @@ mod tests {
                 max_background_tasks: Some(1),
                 time_range: None,
                 all_windows_inactive: false,
+                metrics: Default::default(),
             };
 
             for active_window in [Some(0), None] {
@@ -4940,6 +5017,7 @@ mod tests {
                 max_background_tasks: Some(1),
                 time_range: None,
                 all_windows_inactive: manual,
+                metrics: Default::default(),
             };
             let mut files = window_files;
             files.push(l1_file(
@@ -5086,6 +5164,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            metrics: Default::default(),
         };
 
         let output = picker

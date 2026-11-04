@@ -171,6 +171,7 @@ pub(crate) fn new_twcs_picker(
             max_background_tasks,
             time_range,
             all_windows_inactive: manual,
+            metrics: Default::default(),
         },
     }
 }

@@ -16,6 +16,8 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use prometheus::IntCounterVec;
+
 use crate::compaction::twcs::{PickClass, WindowCandidate};
 use crate::metrics::TWCS_SELECTED_CANDIDATES;
 
@@ -46,11 +48,21 @@ impl From<&WindowCandidate> for PickKey {
 /// Region-resident scheduling metadata. It owns no file handles or reservations.
 /// Planning works on a private snapshot; the accepted plan consumes one fairness
 /// turn per selected key. Execution success or failure does not rewrite ages.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct PickHistory {
     /// First observation or last fairness turn for each eligible key.
     /// Repeated picks preserve this timestamp until the key is selected.
     waiting: HashMap<PickKey, Instant>,
+    selected_metrics: IntCounterVec,
+}
+
+impl Default for PickHistory {
+    fn default() -> Self {
+        Self {
+            waiting: HashMap::new(),
+            selected_metrics: TWCS_SELECTED_CANDIDATES.clone(),
+        }
+    }
 }
 
 /// Ascending fairness order: promoted work, oldest age, class, then newest window.
@@ -122,7 +134,7 @@ impl PickHistory {
             } else {
                 "normal"
             };
-            TWCS_SELECTED_CANDIDATES
+            self.selected_metrics
                 .with_label_values(&[key.class.as_str(), priority])
                 .inc();
             self.serve(key, now);
@@ -132,6 +144,14 @@ impl PickHistory {
 
 #[cfg(test)]
 impl PickHistory {
+    /// Uses isolated metric handles while retaining the production acknowledgement path.
+    pub(crate) fn with_selected_metrics_for_test(selected_metrics: IntCounterVec) -> Self {
+        Self {
+            waiting: HashMap::new(),
+            selected_metrics,
+        }
+    }
+
     /// Seeds waiting ages for cross-module scheduling tests.
     pub(crate) fn observe_for_test(&mut self, keys: impl Iterator<Item = PickKey>, now: Instant) {
         self.observe(keys, now);

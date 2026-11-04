@@ -245,7 +245,6 @@ mod tests {
         compaction_region_with_ssts, new_file_handle, new_file_handle_with_size_and_sequence,
     };
     use crate::compaction::twcs::PickClass;
-    use crate::metrics::TWCS_SELECTED_CANDIDATES;
     use crate::region::options::{CompactionOptions, MergeMode};
     use crate::sst::file::{FileMeta, RegionFileId};
     use crate::test_util::memtable_util::metadata_for_test;
@@ -333,7 +332,12 @@ mod tests {
             .set_compacting(busy);
         let request = compact_request::Options::Regular(Default::default());
         let picked = if fair {
-            let mut history = PickHistory::default();
+            let selected_metrics = prometheus::IntCounterVec::new(
+                prometheus::Opts::new("test_twcs_selected", "selected seeds"),
+                &["class", "priority"],
+            )
+            .unwrap();
+            let mut history = PickHistory::with_selected_metrics_for_test(selected_metrics.clone());
             let now = Instant::now();
             let waiting_since = now - Duration::from_secs(120);
             let keys: Vec<_> = (0..3)
@@ -343,7 +347,7 @@ mod tests {
                 })
                 .collect();
             history.observe_for_test(keys.iter().copied(), waiting_since);
-            let promoted = TWCS_SELECTED_CANDIDATES.with_label_values(&["l0_merge", "promoted"]);
+            let promoted = selected_metrics.with_label_values(&["l0_merge", "promoted"]);
             let promoted_before = promoted.get();
             let picked = pick_automatic_for_test(&region, &mut history, limit)
                 .await
