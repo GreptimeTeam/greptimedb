@@ -28,37 +28,13 @@ use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEnt
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
-use crate::error::{ProjectSchemaSnafu, Result};
+use crate::error::Result;
 use crate::information_schema::{
     DatanodeInspectKind, DatanodeInspectRequest, InformationSchemaTableScope, InformationTable,
     SSTS_INDEX_META, SSTS_MANIFEST, SSTS_STORAGE,
 };
 use crate::system_schema::SystemTable;
-use crate::system_schema::utils;
-
-fn projected_schema(schema: &SchemaRef, request: &ScanRequest) -> Result<SchemaRef> {
-    if let Some(p) = request.projection.as_deref() {
-        Ok(Arc::new(schema.try_project(p).context(ProjectSchemaSnafu)?))
-    } else {
-        Ok(schema.clone())
-    }
-}
-
-fn inspect_plan(
-    catalog_manager: &Weak<dyn CatalogManager>,
-    kind: DatanodeInspectKind,
-    schema: &SchemaRef,
-    request: ScanRequest,
-) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-    let projected_schema = projected_schema(schema, &request)?;
-    let info_ext = utils::information_extension(catalog_manager)?;
-    let req = DatanodeInspectRequest {
-        kind,
-        scan: request,
-    };
-
-    info_ext.inspect_datanode_plan(req, projected_schema)
-}
+use crate::system_schema::utils::{self, inspect_plan, projected_schema};
 
 /// Information schema table for sst manifest.
 pub struct InformationSchemaSstsManifest {

@@ -41,7 +41,9 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::error;
-use crate::information_schema::{DatanodeInspectRequest, InformationExtension};
+use crate::information_schema::{
+    DatanodeInspectKind, DatanodeInspectRequest, InformationExtension,
+};
 
 pub struct DistributedInformationExtension {
     meta_client: MetaClientRef,
@@ -67,6 +69,23 @@ impl DistributedInformationExtension {
             .map_err(BoxedError::new)
             .context(crate::error::ListNodesSnafu)?;
 
+        Self::inspect_nodes(datanode_manager, request, nodes).await
+    }
+
+    /// Executes inspection against discovered nodes after applying safe node pruning.
+    async fn inspect_nodes(
+        datanode_manager: DatanodeManagerRef,
+        request: DatanodeInspectRequest,
+        nodes: Vec<NodeInfo>,
+    ) -> std::result::Result<SendableRecordBatchStream, crate::error::Error> {
+        let nodes = prune_compaction_nodes(&request, nodes);
+        if nodes.is_empty() && request.kind == DatanodeInspectKind::CompactionTasks {
+            let schema = store_api::compaction_task::CompactionTaskEntry::schema();
+            let schema = crate::system_schema::projected_schema(&schema, &request.scan)?;
+            return Ok(common_recordbatch::RecordBatches::try_new(schema, vec![])
+                .context(crate::error::CreateRecordBatchSnafu)?
+                .as_stream());
+        }
         let limit = request.scan.limit;
         let plan = request
             .build_plan()
@@ -101,6 +120,24 @@ impl DistributedInformationExtension {
             None => Ok(Box::pin(chained)),
         }
     }
+}
+
+/// Prunes reporting nodes only for live compaction inspection. Region routes cannot
+/// locate tasks left on a former owner, so only known node IDs can exclude nodes.
+fn prune_compaction_nodes(request: &DatanodeInspectRequest, nodes: Vec<NodeInfo>) -> Vec<NodeInfo> {
+    if request.kind != DatanodeInspectKind::CompactionTasks {
+        return nodes;
+    }
+    let filter = common_recordbatch::filter::MetadataFilter::new(&request.scan.filters);
+    nodes
+        .into_iter()
+        .filter(|node| {
+            filter.matches(|name| {
+                (name == "node_id")
+                    .then_some(datafusion::common::ScalarValue::UInt64(Some(node.peer.id)))
+            })
+        })
+        .collect()
 }
 
 struct DistributedInspectExec {
@@ -325,14 +362,151 @@ mod tests {
     use store_api::storage::ScanRequest;
 
     use super::*;
-    use crate::information_schema::DatanodeInspectKind;
 
     struct UnusedDatanodeManager;
 
     #[async_trait::async_trait]
     impl DatanodeManager for UnusedDatanodeManager {
         async fn datanode(&self, _node: &Peer) -> DatanodeRef {
-            panic!("plan tests must not contact datanodes")
+            panic!("this test must not contact datanodes")
+        }
+    }
+
+    fn inspection_nodes() -> Vec<NodeInfo> {
+        [1, 2, 3]
+            .into_iter()
+            .map(|id| NodeInfo {
+                peer: Peer::new(id, format!("datanode-{id}:3001")),
+                last_activity_ts: 0,
+                status: common_meta::cluster::NodeStatus::Standalone,
+                version: String::new(),
+                git_commit: String::new(),
+                start_time_ms: 0,
+                total_cpu_millicores: 0,
+                total_memory_bytes: 0,
+                cpu_usage_millicores: 0,
+                memory_usage_bytes: 0,
+                hostname: String::new(),
+                env_vars: Default::default(),
+                schedulable: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_compaction_node_pruning() {
+        use datafusion::logical_expr::{col, lit};
+
+        for (filters, expected) in [
+            (vec![col("node_id").eq(lit(2u64))], vec![2]),
+            (vec![col("node_id").not_eq(lit(2u64))], vec![1, 3]),
+            (vec![], vec![1, 2, 3]),
+            (vec![col("state").eq(lit("running"))], vec![1, 2, 3]),
+            (
+                vec![
+                    col("node_id")
+                        .eq(lit(2u64))
+                        .or(col("table_id").eq(lit(42u32))),
+                ],
+                vec![1, 2, 3],
+            ),
+            (
+                vec![
+                    col("node_id").eq(lit(2u64)),
+                    col("state").eq(lit("running")),
+                ],
+                vec![2],
+            ),
+        ] {
+            let request = DatanodeInspectRequest {
+                kind: DatanodeInspectKind::CompactionTasks,
+                scan: ScanRequest {
+                    filters,
+                    ..Default::default()
+                },
+            };
+            let actual: Vec<_> = prune_compaction_nodes(&request, inspection_nodes())
+                .into_iter()
+                .map(|node| node.peer.id)
+                .collect();
+            assert_eq!(actual, expected, "{:?}", request.scan.filters);
+        }
+        for kind in [
+            DatanodeInspectKind::SstManifest,
+            DatanodeInspectKind::SstStorage,
+            DatanodeInspectKind::SstIndexMeta,
+            DatanodeInspectKind::RegionInfo,
+        ] {
+            let request = DatanodeInspectRequest {
+                kind,
+                scan: ScanRequest {
+                    filters: vec![col("node_id").eq(lit(99u64))],
+                    ..Default::default()
+                },
+            };
+            let actual: Vec<_> = prune_compaction_nodes(&request, inspection_nodes())
+                .into_iter()
+                .map(|node| node.peer.id)
+                .collect();
+            assert_eq!(actual, vec![1, 2, 3]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compaction_empty_nodes_preserve_projected_schema() {
+        use datafusion::logical_expr::{col, lit};
+        use datatypes::arrow::datatypes::DataType;
+
+        for nodes in [vec![], inspection_nodes()] {
+            for (projection, expected) in [
+                (
+                    vec![3, 0, 2],
+                    vec![
+                        ("node_id", DataType::UInt64, true),
+                        ("task_id", DataType::Utf8, false),
+                        ("table_id", DataType::UInt32, false),
+                    ],
+                ),
+                (vec![], vec![]),
+            ] {
+                let request = DatanodeInspectRequest {
+                    kind: DatanodeInspectKind::CompactionTasks,
+                    scan: ScanRequest {
+                        projection: Some(projection),
+                        filters: vec![col("node_id").eq(lit(99u64))],
+                        ..Default::default()
+                    },
+                };
+                // Panics if the production dispatch path contacts any excluded node.
+                let stream = DistributedInformationExtension::inspect_nodes(
+                    Arc::new(UnusedDatanodeManager),
+                    request,
+                    nodes.clone(),
+                )
+                .await
+                .unwrap();
+                let batches = common_recordbatch::RecordBatches::try_collect(stream)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                    0
+                );
+                let schema = batches.schema();
+                let actual: Vec<_> = schema
+                    .arrow_schema()
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name().as_str(),
+                            field.data_type().clone(),
+                            field.is_nullable(),
+                        )
+                    })
+                    .collect();
+                assert_eq!(actual, expected);
+            }
         }
     }
 

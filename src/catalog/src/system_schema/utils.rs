@@ -12,18 +12,51 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 
 use common_meta::key::TableMetadataManagerRef;
-use snafu::OptionExt;
+use datafusion::physical_plan::ExecutionPlan;
+use datatypes::schema::SchemaRef;
+use snafu::{OptionExt, ResultExt};
+use store_api::storage::ScanRequest;
 
 use crate::CatalogManager;
-use crate::error::{GetInformationExtensionSnafu, Result, UpgradeWeakCatalogManagerRefSnafu};
-use crate::information_schema::InformationExtensionRef;
+use crate::error::{
+    GetInformationExtensionSnafu, ProjectSchemaSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
+};
+use crate::information_schema::{
+    DatanodeInspectKind, DatanodeInspectRequest, InformationExtensionRef,
+};
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::semantic_graph::EntityGraphProviderRef;
 
 pub mod tables;
+
+/// Projects an inspection table schema according to the scan request.
+pub(crate) fn projected_schema(schema: &SchemaRef, request: &ScanRequest) -> Result<SchemaRef> {
+    if let Some(p) = request.projection.as_deref() {
+        Ok(Arc::new(schema.try_project(p).context(ProjectSchemaSnafu)?))
+    } else {
+        Ok(schema.clone())
+    }
+}
+
+/// Builds a datanode inspection plan with the requested output schema.
+pub(crate) fn inspect_plan(
+    catalog_manager: &Weak<dyn CatalogManager>,
+    kind: DatanodeInspectKind,
+    schema: &SchemaRef,
+    request: ScanRequest,
+) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    let projected_schema = projected_schema(schema, &request)?;
+    let info_ext = information_extension(catalog_manager)?;
+    let req = DatanodeInspectRequest {
+        kind,
+        scan: request,
+    };
+
+    info_ext.inspect_datanode_plan(req, projected_schema)
+}
 
 /// Try to get the entity-graph provider from a `[CatalogManager]` weak reference.
 /// Returns `None` when the manager is not the kv-backed one or the provider has

@@ -35,7 +35,7 @@ use crate::compaction::last_non_null;
 use crate::compaction::picker::{PickerOutput, new_picker, new_twcs_picker};
 use crate::compaction::scheduler::history::{PickHistory, PickKey};
 use crate::compaction::scheduler::state::{
-    CompactingFiles, CompactionExecution, CompactionPhase, CompactionTrigger,
+    CompactingFiles, CompactionExecution, CompactionInspection, CompactionPhase, CompactionTrigger,
 };
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
 use crate::compaction::unit::CompactionUnit;
@@ -169,13 +169,24 @@ pub(crate) async fn pick_automatic_for_test(
 
 impl CompactionScheduler {
     pub(super) fn dispatch_compaction_planning(
-        &self,
+        &mut self,
         plan_id: u64,
         request: CompactionRequest,
         options: compact_request::Options,
         time_range: Option<TimestampRange>,
         trigger: CompactionTrigger,
     ) {
+        if let Some(status) = self.region_status.get_mut(&request.region_id()) {
+            status.active.inspection.get_or_insert_with(|| {
+                CompactionInspection::new(
+                    request.region_id(),
+                    &options,
+                    request.max_parallelism,
+                    time_range,
+                    trigger,
+                )
+            });
+        }
         let plugins = self.plugins.clone();
         let max_background_compactions = self.engine_config.max_background_compactions;
         common_runtime::spawn_compact(async move {
@@ -399,6 +410,33 @@ impl CompactionScheduler {
                 let Some(status) = self.region_status.get_mut(&region_id) else {
                     return CompactionTransition::NoAction;
                 };
+                if let Some(info) = &mut status.active.inspection {
+                    let region = &prepared.compaction_region;
+                    info.entry.effective_options = Some(
+                        serde_json::json!({
+                            "compaction": region.region_options.compaction,
+                            "ttl": region.ttl,
+                            "merge_mode": region.region_options.merge_mode(),
+                            "max_picker_outputs": region.engine_config.max_background_compactions.min(region.max_parallelism.max(1)),
+                            "max_parallelism": region.max_parallelism.max(1),
+                            "time_window_seconds": prepared.picker_output.time_window_size,
+                            "max_output_file_size": prepared.picker_output.max_file_size,
+                        })
+                        .to_string(),
+                    );
+                    let mut inputs = std::collections::HashMap::new();
+                    for file in prepared
+                        .picker_output
+                        .outputs
+                        .iter()
+                        .flat_map(|o| o.inputs.iter())
+                        .chain(prepared.picker_output.expired_ssts.iter())
+                    {
+                        inputs.insert(file.file_id(), file.meta_ref().file_size);
+                    }
+                    info.entry.input_files = Some(inputs.len() as u64);
+                    info.entry.input_bytes = Some(inputs.values().sum());
+                }
                 let waiters = status.take_waiters();
                 match self
                     .prepare_or_submit_compaction(prepared, files, waiters, plan_id)

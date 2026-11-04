@@ -325,6 +325,30 @@ impl WorkerGroup {
         Ok(())
     }
 
+    /// Collects snapshots without sharing or duplicating worker-owned scheduler state.
+    pub(crate) async fn inspect_compaction_tasks(
+        &self,
+        filters: common_recordbatch::filter::MetadataFilter,
+    ) -> Result<Vec<store_api::compaction_task::CompactionTaskEntry>> {
+        let node_id = self.file_ref_manager().node_id();
+        let snapshots = try_join_all(self.workers.iter().map(|worker| {
+            let filters = filters.clone();
+            async move {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                worker
+                    .submit_request(WorkerRequest::InspectCompaction {
+                        filters,
+                        node_id,
+                        sender,
+                    })
+                    .await?;
+                receiver.await.context(crate::error::RecvSnafu)
+            }
+        }))
+        .await?;
+        Ok(snapshots.into_iter().flatten().collect())
+    }
+
     /// Submits a request to a worker in the group.
     pub(crate) async fn submit_to_worker(
         &self,
@@ -1320,6 +1344,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request);
+                }
+                WorkerRequest::InspectCompaction {
+                    filters,
+                    node_id,
+                    sender,
+                } => {
+                    if !sender.is_closed() {
+                        let _ =
+                            sender.send(self.compaction_scheduler.inspect_tasks(&filters, node_id));
+                    }
                 }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));

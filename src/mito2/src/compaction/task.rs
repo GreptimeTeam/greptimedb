@@ -73,6 +73,7 @@ impl Debug for CompactionTask {
 impl CompactionTask {
     /// Executes one unit and retains its resources until worker apply or failure acknowledgement.
     pub(crate) async fn run(&mut self) {
+        self.state.mark_started();
         let start = std::time::Instant::now();
         let result = std::panic::AssertUnwindSafe(self.run_once())
             .catch_unwind()

@@ -57,6 +57,11 @@ Internal series merges use the query runtime pool forwarded through
 `QueryScanContext`; reader and output-batch accounting uses the separate scan
 memory tracker. Direct scanner callers default to an unbounded operator pool.
 
+Live compaction inspection uses a worker request to read scheduler state, with
+request/effective parameter snapshots attached to the existing cycle. It does not
+keep a second registry or completed-task history. The datanode provider reuses the
+lazy inspection scan path and retains residual SQL filters.
+
 ## Public surface
 
 - Entry: `MitoEngine` in `src/mito2/src/engine.rs`, built via `MitoEngineBuilder`.

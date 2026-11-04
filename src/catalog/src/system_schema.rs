@@ -20,6 +20,8 @@ pub mod predicate;
 pub mod semantic_graph;
 mod utils;
 
+pub(crate) use utils::projected_schema;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

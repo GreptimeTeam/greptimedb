@@ -102,6 +102,8 @@ pub(super) enum CompactionTrigger {
 
 #[derive(Debug)]
 pub(super) struct ActiveCompaction {
+    /// Query metadata owned by this live cycle, dropped when it becomes idle.
+    pub(crate) inspection: Option<CompactionInspection>,
     pub(super) phase: CompactionPhase,
     trigger: CompactionTrigger,
     /// Waiters satisfied by the current planning or execution cycle. Picking waiters move into
@@ -117,6 +119,7 @@ impl ActiveCompaction {
     /// Creates an empty cycle while retaining the region's scheduling record.
     fn idle() -> Self {
         Self {
+            inspection: None,
             phase: CompactionPhase::Idle,
             trigger: CompactionTrigger::Automatic,
             waiters: Vec::new(),
@@ -131,6 +134,7 @@ impl ActiveCompaction {
         trigger: CompactionTrigger,
     ) -> Self {
         Self {
+            inspection: None,
             phase: CompactionPhase::Picking {
                 plan_id,
                 cancelled: false,
@@ -142,6 +146,7 @@ impl ActiveCompaction {
     }
 
     pub(super) fn start_picking(&mut self, plan_id: u64, trigger: CompactionTrigger) {
+        self.inspection = None;
         self.phase = CompactionPhase::Picking {
             plan_id,
             cancelled: false,
@@ -335,6 +340,8 @@ pub(super) struct CompactionStatus {
     /// A manual request is rejected if the current compaction is also manual. Automatic requests
     /// are merged into the active compaction instead of using this slot.
     pub(super) pending_request: Option<PendingCompaction>,
+    /// Metadata for the pending manual request, moved to the active cycle on promotion.
+    pub(crate) pending_inspection: Option<CompactionInspection>,
     /// Pending DDL requests that should run when compaction is done.
     ///
     /// Although [`SenderDdlRequest`] can wrap any DDL variant, production code only queues
@@ -359,6 +366,7 @@ impl CompactionStatus {
             access_layer,
             active: ActiveCompaction::idle(),
             pending_request: None,
+            pending_inspection: None,
             pending_ddl_requests: Vec::new(),
             executing_ddl: None,
         }
@@ -465,6 +473,13 @@ impl CompactionStatus {
 
     /// Sets a pending manual compaction request, replacing an older pending request.
     pub(super) fn set_pending_request(&mut self, pending: PendingCompaction) {
+        self.pending_inspection = Some(CompactionInspection::new(
+            self.region_id,
+            &pending.options,
+            pending.max_parallelism,
+            pending.time_range,
+            CompactionTrigger::Manual,
+        ));
         if let Some(prev) = self.pending_request.replace(pending) {
             debug!(
                 "Replace pending compaction options with new request {:?} for region: {}",
@@ -482,6 +497,7 @@ impl CompactionStatus {
             }));
         }
 
+        self.pending_inspection = None;
         if let Some(pending_compaction) = self.pending_request.take() {
             pending_compaction
                 .waiter
@@ -506,6 +522,7 @@ impl CompactionStatus {
             waiter.send(CompactionCancelledSnafu.fail());
         }
 
+        self.pending_inspection = None;
         if let Some(pending_compaction) = self.pending_request.take() {
             pending_compaction.waiter.send(
                 Err(Arc::new(CompactionCancelledSnafu.build())).context(CompactRegionSnafu {
@@ -559,6 +576,71 @@ pub(super) struct PendingCompaction {
     pub(crate) max_parallelism: usize,
     /// Optional time range that constrains candidate compaction windows.
     pub(crate) time_range: Option<TimestampRange>,
+}
+
+/// Per-cycle request metadata attached to scheduler state, without a task registry.
+#[derive(Debug, Clone)]
+pub(crate) struct CompactionInspection {
+    pub(crate) entry: store_api::compaction_task::CompactionTaskEntry,
+    pub(crate) submitted: Instant,
+}
+
+impl CompactionInspection {
+    pub(crate) fn new(
+        region_id: RegionId,
+        options: &compact_request::Options,
+        max_parallelism: usize,
+        time_range: Option<TimestampRange>,
+        trigger: CompactionTrigger,
+    ) -> Self {
+        let (kind, window) = match options {
+            compact_request::Options::Regular(_) => ("regular", None),
+            compact_request::Options::StrictWindow(window) => {
+                ("strict_window", Some(window.window_seconds))
+            }
+        };
+        let request_options = serde_json::json!({
+            "type": kind,
+            "window_seconds": window,
+            "max_parallelism": max_parallelism,
+            "time_range": time_range,
+        })
+        .to_string();
+        Self {
+            submitted: Instant::now(),
+            entry: store_api::compaction_task::CompactionTaskEntry {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                region_id: region_id.as_u64(),
+                table_id: region_id.table_id(),
+                node_id: None,
+                trigger_type: match trigger {
+                    CompactionTrigger::Manual => "manual",
+                    CompactionTrigger::Automatic => "automatic",
+                }
+                .into(),
+                state: "queued".into(),
+                phase: "waiting".into(),
+                submitted_at: common_time::util::current_time_millis(),
+                elapsed_millis: 0,
+                input_files: None,
+                input_bytes: None,
+                total_units: None,
+                completed_units: None,
+                request_options,
+                effective_options: None,
+            },
+        }
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        node_id: Option<u64>,
+    ) -> store_api::compaction_task::CompactionTaskEntry {
+        let mut entry = self.entry.clone();
+        entry.node_id = node_id;
+        entry.elapsed_millis = self.submitted.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        entry
+    }
 }
 
 #[cfg(test)]

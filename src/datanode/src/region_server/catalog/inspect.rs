@@ -172,6 +172,45 @@ impl PartitionStream for InspectPartition {
     }
 }
 
+/// Reads live compaction state only when a scan is executed.
+pub(crate) struct CompactionTasksSource {
+    engine: MitoEngine,
+}
+
+impl CompactionTasksSource {
+    pub(crate) fn new(engine: MitoEngine) -> Self {
+        Self { engine }
+    }
+}
+
+impl InspectSource for CompactionTasksSource {
+    fn schema(&self) -> SchemaRef {
+        store_api::compaction_task::CompactionTaskEntry::schema()
+            .arrow_schema()
+            .clone()
+    }
+
+    fn scan(&self, request: &InspectScan, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let engine = self.engine.clone();
+        let request = request.clone();
+        let schema = request.schema.clone();
+        let stream = async_stream::try_stream! {
+            let entries = engine.inspect_compaction_tasks(&request.filters).await.map_err(|err| DataFusionError::External(Box::new(err)))?;
+            for batch in entries.chunks(request.batch_size) {
+                yield store_api::compaction_task::CompactionTaskEntry::to_record_batch(batch, request.projection.as_deref())?;
+            }
+        };
+        Box::pin(RecordBatchStreamAdapter::new(schema, stream))
+    }
+}
+
+impl std::fmt::Debug for CompactionTasksSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactionTasksSource")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};

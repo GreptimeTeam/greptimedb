@@ -766,6 +766,12 @@ impl WorkerRequestWithTime {
 /// Request sent to a worker
 #[derive(Debug)]
 pub(crate) enum WorkerRequest {
+    /// Reads current compaction state on its owning worker.
+    InspectCompaction {
+        filters: common_recordbatch::filter::MetadataFilter,
+        node_id: Option<u64>,
+        sender: Sender<Vec<store_api::compaction_task::CompactionTaskEntry>>,
+    },
     /// Write to a region.
     Write(SenderWriteRequest),
 

@@ -625,6 +625,7 @@ impl CompactionScheduler {
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking_with_trigger(plan_id, CompactionTrigger::Manual);
+        status.active.inspection = status.pending_inspection.take();
         self.dispatch_compaction_planning(
             plan_id,
             request,
@@ -892,6 +893,62 @@ impl Drop for CompactionScheduler {
             // We are shutting down so notify all pending tasks.
             status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
         }
+    }
+}
+
+impl CompactionScheduler {
+    /// Reads live cycles on the owning worker, pruning regions before cloning parameters.
+    pub(crate) fn inspect_tasks(
+        &self,
+        filters: &common_recordbatch::filter::MetadataFilter,
+        node_id: Option<u64>,
+    ) -> Vec<store_api::compaction_task::CompactionTaskEntry> {
+        use datafusion_common::ScalarValue;
+        let mut entries = Vec::new();
+        for (region_id, status) in &self.region_status {
+            if !filters.matches(|name| match name {
+                "region_id" => Some(ScalarValue::UInt64(Some(region_id.as_u64()))),
+                "table_id" => Some(ScalarValue::UInt32(Some(region_id.table_id()))),
+                "node_id" => Some(ScalarValue::UInt64(node_id)),
+                _ => None,
+            }) {
+                continue;
+            }
+            if let Some(info) = &status.active.inspection
+                && !matches!(status.active.phase, state::CompactionPhase::Idle)
+            {
+                let mut entry = info.snapshot(node_id);
+                match &status.active.phase {
+                    state::CompactionPhase::Idle => {}
+                    state::CompactionPhase::Picking { cancelled, .. } => {
+                        entry.state = if *cancelled { "cancelling" } else { "running" }.into();
+                        entry.phase = "planning".into();
+                    }
+                    state::CompactionPhase::Remote { .. } => {
+                        entry.state = "running".into();
+                        entry.phase = "remote".into();
+                    }
+                    state::CompactionPhase::Units(local) => local.inspect(&mut entry),
+                    #[cfg(test)]
+                    state::CompactionPhase::Local { .. } => {
+                        entry.state = "running".into();
+                        entry.phase = "executing".into();
+                    }
+                }
+                if entry.matches(filters) {
+                    entries.push(entry);
+                }
+            }
+            if status.pending_request.is_some()
+                && let Some(info) = &status.pending_inspection
+            {
+                let entry = info.snapshot(node_id);
+                if entry.matches(filters) {
+                    entries.push(entry);
+                }
+            }
+        }
+        entries
     }
 }
 

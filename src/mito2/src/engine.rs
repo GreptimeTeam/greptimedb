@@ -750,6 +750,17 @@ impl MitoEngine {
         results
     }
 
+    /// Reads current compaction cycles with conservative metadata predicate pruning.
+    pub async fn inspect_compaction_tasks(
+        &self,
+        filters: &[Expr],
+    ) -> Result<Vec<store_api::compaction_task::CompactionTaskEntry>> {
+        self.inner
+            .workers
+            .inspect_compaction_tasks(MetadataFilter::new(filters))
+            .await
+    }
+
     /// Lists region info entries of all regions in the engine.
     pub async fn all_region_infos(&self) -> Vec<RegionInfoEntry> {
         let node_id = self.inner.workers.file_ref_manager().node_id();

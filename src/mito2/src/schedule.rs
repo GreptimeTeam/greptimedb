@@ -24,6 +24,7 @@ pub mod scheduler;
 pub(crate) struct CancellableTaskState {
     cancel_handle: Arc<CancellationHandle>,
     commit_started: Arc<Mutex<bool>>,
+    started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CancellableTaskState {
@@ -31,7 +32,17 @@ impl CancellableTaskState {
         Self {
             cancel_handle: Arc::new(CancellationHandle::default()),
             commit_started: Arc::new(Mutex::new(false)),
+            started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn mark_started(&self) {
+        self.started
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn started(&self) -> bool {
+        self.started.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn cancel_handle(&self) -> Arc<CancellationHandle> {

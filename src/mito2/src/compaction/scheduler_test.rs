@@ -2961,3 +2961,79 @@ async fn test_disable_compaction_scheduling(#[case] options: Options) {
         CompactionPlanningResult::Prepared(_)
     ));
 }
+
+#[tokio::test]
+async fn test_compaction_tasks_pending_identity_and_lifecycle() {
+    use common_recordbatch::filter::MetadataFilter;
+    use datafusion_expr::{col, lit};
+
+    let env = SchedulerEnv::new().await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let (mut finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let all = MetadataFilter::default();
+    let rows = scheduler.inspect_tasks(&all, Some(7));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (&*rows[0].trigger_type, &*rows[0].phase),
+        ("automatic", "planning")
+    );
+    assert!(rows[0].effective_options.is_none());
+    let automatic_id = rows[0].task_id.clone();
+    scheduler
+        .schedule_manual_compaction(
+            Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            &version,
+            &env.access_layer,
+            OptionOutputTx::none(),
+            &manifest,
+            schemas.clone(),
+            2,
+            None,
+        )
+        .unwrap();
+    let manual = MetadataFilter::new(&[col("trigger_type").eq(lit("manual"))]);
+    let rows = scheduler.inspect_tasks(&manual, Some(7));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, "queued");
+    assert_ne!(rows[0].task_id, automatic_id);
+    let manual_id = rows[0].task_id.clone();
+    let submitted_at = rows[0].submitted_at;
+    assert!(
+        scheduler
+            .inspect_tasks(
+                &MetadataFilter::new(&[col("node_id").eq(lit(8u64))]),
+                Some(7)
+            )
+            .is_empty()
+    );
+    // Finish automatic planning without running fake SSTs, promoting the pending request.
+    finished.result = CompactionPlanningResult::NoPlan(None);
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
+        .await;
+    let rows = scheduler.inspect_tasks(&all, Some(7));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].task_id, manual_id);
+    assert_eq!(rows[0].submitted_at, submitted_at);
+    assert_eq!(rows[0].phase, "planning");
+    assert_eq!(
+        scheduler
+            .region_status
+            .get_mut(&version.region_id())
+            .unwrap()
+            .request_cancel(),
+        crate::schedule::RequestCancelResult::CancelIssued
+    );
+    assert_eq!(
+        scheduler.inspect_tasks(&all, Some(7))[0].state,
+        "cancelling"
+    );
+    let finished = recv_compaction_pick_finished(&mut rx).await;
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas)
+        .await;
+    assert!(scheduler.inspect_tasks(&all, Some(7)).is_empty());
+}

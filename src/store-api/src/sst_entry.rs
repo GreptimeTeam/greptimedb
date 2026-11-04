@@ -522,7 +522,7 @@ impl PuffinIndexMetaEntry {
     }
 }
 
-fn build_plan_helper(
+pub(crate) fn build_plan_helper(
     scan_request: ScanRequest,
     table_name: &str,
     schema: SchemaRef,
