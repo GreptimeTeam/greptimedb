@@ -52,6 +52,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[cfg(feature = "enterprise")]
     #[snafu(display("Invalid multi-region compaction: {reason}"))]
     InvalidMultiRegionCompaction {
@@ -76,6 +77,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Unexpected data type"))]
     DataTypeMismatch {
         source: datatypes::error::Error,
