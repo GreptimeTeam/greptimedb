@@ -36,6 +36,7 @@ use table::table::Table;
 use super::*;
 
 struct PlanningOnlySource;
+
 impl DataSource for PlanningOnlySource {
     fn get_stream(
         &self,
@@ -138,6 +139,7 @@ impl PartitionStream for StatePartition {
     fn schema(&self) -> &datafusion::arrow::datatypes::SchemaRef {
         &self.schema
     }
+
     fn execute(&self, _ctx: Arc<TaskContext>) -> DfStream {
         let nodes = self.nodes.clone();
         let remote = self.remote.clone();
@@ -160,27 +162,34 @@ impl PartitionStream for StatePartition {
 #[async_trait::async_trait]
 impl InformationExtension for LocalNodes {
     type Error = catalog::error::Error;
+
     async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error> {
         unimplemented!()
     }
+
     async fn procedures(&self) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error> {
         unimplemented!()
     }
+
     async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error> {
         unimplemented!()
     }
+
     async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
         unimplemented!()
     }
+
     async fn inspect_datanode(
         &self,
         _request: DatanodeInspectRequest,
     ) -> std::result::Result<SendableRecordBatchStream, Self::Error> {
         unimplemented!()
     }
+
     fn supports_inspect_query_plan(&self) -> bool {
         true
     }
+
     fn inspect_datanode_query_plan(
         &self,
         remote: LogicalPlan,
@@ -294,6 +303,8 @@ async fn test_manifest_aggregate_states_match_baseline() {
 async fn test_manifest_aggregate_fallbacks() {
     for sql in [
         "SELECT COUNT(DISTINCT file_size) FROM ssts_manifest",
+        "SELECT AVG(file_size) FROM ssts_manifest",
+        "SELECT COUNT(*) FROM ssts_manifest WHERE file_path LIKE 'test/%'",
         "SELECT CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE) FROM ssts_manifest",
         "SELECT COUNT(*), CAST(SUM(CAST(file_size AS DECIMAL(39, 0))) AS DOUBLE) FROM ssts_manifest",
         "SELECT file_size, COUNT(*) FROM ssts_manifest GROUP BY file_size",

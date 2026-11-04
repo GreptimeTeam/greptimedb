@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use catalog::information_schema::InformationExtensionRef;
 use common_base::Plugins;
 use common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
 use common_function::function_factory::ScalarFunctionFactory;
@@ -213,12 +214,7 @@ impl QueryEngineState {
                 FUNCTION_REGISTRY.function_rewrites(),
             )),
         );
-        let inspect_extension = catalog_list
-            .as_any()
-            .downcast_ref::<catalog::kvbackend::KvBackendCatalogManager>()
-            .map(|catalog| catalog.information_extension())
-            .filter(|extension| extension.supports_inspect_query_plan());
-        if inspect_extension.is_some() {
+        if inspect_query_extension(&catalog_list).is_some() {
             analyzer.rules.push(Arc::new(SstManifestAggregateRule));
         }
         if with_dist_planner {
@@ -648,6 +644,14 @@ fn register_pg_catalog_compat(ctx: &SessionContext) {
     );
 }
 
+fn inspect_query_extension(catalog_manager: &CatalogManagerRef) -> Option<InformationExtensionRef> {
+    catalog_manager
+        .as_any()
+        .downcast_ref::<catalog::kvbackend::KvBackendCatalogManager>()
+        .map(|catalog| catalog.information_extension())
+        .filter(|extension| extension.supports_inspect_query_plan())
+}
+
 impl DfQueryPlanner {
     fn new(
         catalog_manager: CatalogManagerRef,
@@ -660,12 +664,7 @@ impl DfQueryPlanner {
             Arc::new(RangeSelectPlanner),
             Arc::new(RemoteDynFilterReceiverExtensionPlanner),
         ];
-        if let Some(extension) = catalog_manager
-            .as_any()
-            .downcast_ref::<catalog::kvbackend::KvBackendCatalogManager>()
-            .map(|catalog| catalog.information_extension())
-            .filter(|extension| extension.supports_inspect_query_plan())
-        {
+        if let Some(extension) = inspect_query_extension(&catalog_manager) {
             planners.push(Arc::new(SstManifestAggregatePlanner::new(extension)));
         }
         if let (Some(region_query_handler), Some(partition_rule_manager)) =

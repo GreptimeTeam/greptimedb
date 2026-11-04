@@ -157,7 +157,7 @@ impl UserDefinedLogicalNodeCore for SstManifestAggregate {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SstManifestAggregate: {}", self.remote.display())
+        write!(f, "SstManifestAggregate: {}", self.remote.display_indent())
     }
     fn with_exprs_and_inputs(&self, exprs: Vec<Expr>, inputs: Vec<LogicalPlan>) -> Result<Self> {
         if !exprs.is_empty() || !inputs.is_empty() {

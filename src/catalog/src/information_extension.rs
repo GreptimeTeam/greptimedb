@@ -201,7 +201,7 @@ impl DisplayAs for DistributedInspectExec {
             InspectPlan::Query(plan) => write!(
                 f,
                 "DistributedInspectExec: query={}, schema={:?}",
-                plan.display(),
+                plan.display_indent(),
                 self.arrow_schema
             ),
         }
