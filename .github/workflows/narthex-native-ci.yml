@@ -229,8 +229,9 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
     uses: ./.github/workflows/vmbench-long-range.yml
     with:
-      # A PR compares the PR's build with the branch it targets; a push compares the merged result
-      # with the same branch's previous tip, which is what the baseline input is for.
+      # No image tags are passed: the benchmark measures the published `greptime/greptimedb:latest`
+      # against its default comparison tag, not the binaries this workflow builds. Building and
+      # pushing an image for the ref under test is not wired here yet.
       range_preset: 1w
       compare_greptimedb: true
       run_victoriametrics: true

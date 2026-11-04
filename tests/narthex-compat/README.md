@@ -76,10 +76,16 @@ dropped, and the entry may not cover values, timestamps, missing points or extra
 
 ## Performance
 
-`vm-performance` reuses `vmbench-long-range.yml`, which already runs GreptimeDB and VictoriaMetrics
-on one prepared machine and supports a second GreptimeDB target for comparison. This workflow passes
-the `narthex` baseline as that second target and the PR's build as the candidate.
+`vm-performance` calls `vmbench-long-range.yml`, which runs GreptimeDB and VictoriaMetrics on one
+provisioned machine and supports a second GreptimeDB target for comparison. The call is gated to the
+nightly schedule and a manual dispatch: the benchmark provisions an Aliyun ECS or AWS EC2 runner, and
+a pull request from a fork never receives the credentials that needs.
 
-Not yet covered, and therefore not claimed: cold-process first-query timing, per-query regression
-thresholds derived from repeated runs, and the columnar metadata cache deadlock that used to make a
-cold Q09 time out (#10114). Those need the runner's own measurements before they can gate anything.
+What it measures today is not this build. The job passes no image tags, so the candidate is the
+published `greptime/greptimedb:latest` and the comparison target is `greptime/greptimedb:v1.2.1`,
+both Docker Hub defaults. Measuring the ref under test needs an image built and pushed from it, which
+this workflow does not do yet.
+
+Not covered, and therefore not claimed: cold-process first-query timing, per-query regression
+thresholds derived from repeated runs, and the stall where a query hangs behind a metadata load that
+holds a stripe (#10114). Those need the runner's own measurements before they can gate anything.
