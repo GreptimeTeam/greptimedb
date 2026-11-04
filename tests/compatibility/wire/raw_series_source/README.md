@@ -17,9 +17,6 @@ not demonstrate mixed-version fallback or distributed acceptance.
 cargo nextest run -p promql -p substrait@1.4.0-alpha.0 -E 'test(raw_series_source)'
 ```
 
-Until the dependency pin includes #349, these tests require a local patch to that
-proto revision.
-
 The bytes are the literal protobuf encoding: `08 01` (version 1), `12 13` plus
 UTF-8 metric bytes, `1a 01 7a`, `1a 01 61`, `22 07` plus `value_b`, and `22 07`
 plus `value_a`. SHA-256 of the hex file including its trailing newline:
