@@ -196,6 +196,7 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_v2_native_histogram,
                 test_remote_write_v2_histogram_prometheus_native_route,
+                test_remote_write_v2_histogram_float_prefix_native_route,
                 test_remote_write_v2_histogram_native_annotations,
                 test_remote_write_v2_histogram_native_arithmetic,
                 test_remote_write_v2_histogram_flush_native_consistency,
@@ -5815,6 +5816,151 @@ pub async fn test_remote_write_v2_histogram_prometheus_native_route(store_type: 
     );
     let fused = observer.take("remote-write native histogram selector");
     assert_eq!(fused.name(), "FusedSeriesExec");
+}
+
+/// A statement that reads histograms and answers floats stays on the native route.
+///
+/// The output column follows the kind the tree's root answers, not the kind its scan carries:
+/// `count_over_time`, `histogram_count`, `resets`, `changes` and `timestamp` all reduce a histogram
+/// to a float, and an aggregate above one of them folds floats. Typing the column by the scan
+/// declared a histogram column for a float answer, so every one of these shapes failed at execution
+/// and the aggregate ones failed to plan. Each case below therefore pins three things at once: the
+/// response is the legacy response, the fused node actually ran, and the value is the one the data
+/// holds.
+pub async fn test_remote_write_v2_histogram_float_prefix_native_route(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_float_prefix_native_route",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_float_prefix";
+    let mut request = remote_write_v2::request_with_labels_and_samples(
+        vec![(prom_store::METRIC_NAME_LABEL, metric), ("job", "api")],
+        vec![],
+    );
+    let name_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let metric_ref = request.symbols.iter().position(|s| s == metric).unwrap() as u32;
+    let job_ref = request.symbols.iter().position(|s| s == "job").unwrap() as u32;
+    let api_ref = request.symbols.iter().position(|s| s == "api").unwrap() as u32;
+    // Two samples of one run: the second carries a larger count under the same start timestamp, so
+    // the pair is a counter that never restarted. `resets` answers 0 rather than borrowing a reset
+    // from the payload comparing unequal, which is `changes`.
+    // `positive_deltas` are deltas between neighbouring buckets, so the bucket counts are their
+    // running sums: `[2, 1]` holds 2 and 3, and the write checks the count against 5. A payload
+    // whose buckets disagree with its count is rejected at the write, not at the query.
+    let sample = |timestamp: i64, deltas: Vec<i64>, count: u64, sum: f64| Histogram {
+        count: Some(Count::CountInt(count)),
+        sum,
+        schema: 1,
+        positive_spans: vec![BucketSpan {
+            offset: 0,
+            length: deltas.len() as u32,
+        }],
+        positive_deltas: deltas,
+        // `CounterResetHint::NotCounterReset`
+        reset_hint: 2,
+        start_timestamp: 1500,
+        timestamp,
+        ..Default::default()
+    };
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![name_ref, metric_ref, job_ref, api_ref],
+        histograms: vec![
+            sample(2_000, vec![2, 1], 5, 10.0),
+            sample(4_000, vec![4, 2], 10, 20.0),
+        ],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let written = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = written.status();
+    let body = written.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
+    for (query, encoded, expected) in [
+        (
+            "histogram_count(h)",
+            "histogram_count(native_histogram_float_prefix)",
+            "10.0",
+        ),
+        (
+            "count_over_time(h[1m])",
+            "count_over_time(native_histogram_float_prefix%5B1m%5D)",
+            "2.0",
+        ),
+        (
+            "resets(h[2m])",
+            "resets(native_histogram_float_prefix%5B2m%5D)",
+            "0.0",
+        ),
+        (
+            "changes(h[2m])",
+            "changes(native_histogram_float_prefix%5B2m%5D)",
+            "1.0",
+        ),
+        (
+            "timestamp(h)",
+            "timestamp(native_histogram_float_prefix)",
+            "4.0",
+        ),
+        (
+            "sum by (job)(resets(h[2m]))",
+            "sum%20by%20(job)(resets(native_histogram_float_prefix%5B2m%5D))",
+            "0.0",
+        ),
+    ] {
+        let url = format!("/v1/prometheus/api/v1/query?query={encoded}&time=4");
+        observer.clear();
+        let native = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=true")
+            .send()
+            .await;
+        assert_eq!(native.status(), StatusCode::OK, "{query} failed natively");
+        let native: Value = native.json().await;
+        let legacy = client.get(&url).send().await;
+        assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
+        let legacy: Value = legacy.json().await;
+        assert_eq!(
+            native["data"]["result"], legacy["data"]["result"],
+            "{query}: the native answer differs from the legacy one"
+        );
+        assert_eq!(
+            native["data"]["result"][0]["value"][1].as_str(),
+            Some(expected),
+            "{query}: {native}"
+        );
+        let fused = observer.take(query);
+        assert_eq!(fused.name(), "FusedSeriesExec", "{query} left the route");
+    }
 }
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
