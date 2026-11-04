@@ -428,7 +428,7 @@ fn source_batch(metadata: &RegionMetadataRef, series: u32, sequence: u64) -> Rec
 #[case::sparse_flat_zero(PrimaryKeyEncoding::Sparse, FormatType::Flat, 0)]
 #[case::sparse_flat_native(PrimaryKeyEncoding::Sparse, FormatType::Flat, 7)]
 #[tokio::test]
-async fn single_scan_routes_all_versions_without_folding(
+async fn test_single_scan_routes_all_versions_without_folding(
     #[case] encoding: PrimaryKeyEncoding,
     #[case] format: FormatType,
     #[case] sequence: u64,
@@ -579,7 +579,7 @@ async fn single_scan_routes_all_versions_without_folding(
 }
 
 #[tokio::test]
-async fn failed_target_never_returns_a_partial_table_result() {
+async fn test_failed_target_never_returns_a_partial_table_result() {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let (context, protection) = fixture.context(Some(RegionId::new(1, 1)));
     assert!(compact_regions(fixture.plan(8), context).await.is_err());
@@ -600,7 +600,7 @@ async fn failed_target_never_returns_a_partial_table_result() {
 #[case(crate::region::options::MergeMode::LastRow)]
 #[case(crate::region::options::MergeMode::LastNonNull)]
 #[tokio::test]
-async fn table_stage_does_not_apply_target_merge_mode(
+async fn test_table_stage_does_not_apply_target_merge_mode(
     #[case] merge_mode: crate::region::options::MergeMode,
 ) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
@@ -617,7 +617,7 @@ async fn table_stage_does_not_apply_target_merge_mode(
 }
 
 #[tokio::test]
-async fn long_tag_stream_is_lossless_and_insufficient_admission_creates_no_output() {
+async fn test_long_tag_stream_is_lossless_and_insufficient_admission_creates_no_output() {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         (0..200)
             .map(|series| {
@@ -683,7 +683,7 @@ async fn long_tag_stream_is_lossless_and_insufficient_admission_creates_no_outpu
 }
 
 #[tokio::test]
-async fn schema_defaults_are_materialized_without_losing_old_versions() {
+async fn test_schema_defaults_are_materialized_without_losing_old_versions() {
     use api::v1::SemanticType;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
@@ -729,7 +729,7 @@ async fn schema_defaults_are_materialized_without_losing_old_versions() {
 #[case::known_bounds(false)]
 #[case::unknown_bound(true)]
 #[tokio::test]
-async fn multiple_sources_merge_versions_in_each_target_sequence_domain(
+async fn test_multiple_sources_merge_versions_in_each_target_sequence_domain(
     #[case] unknown_bound: bool,
 ) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 3).await;
@@ -1115,7 +1115,7 @@ async fn test_json2_rewrite_preserves_values_through_multiregion_compaction() {
 }
 
 #[tokio::test]
-async fn unmatched_partition_values_use_the_table_default_region() {
+async fn test_unmatched_partition_values_use_the_table_default_region() {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(2);
     let exprs = vec![
@@ -1160,7 +1160,7 @@ async fn unmatched_partition_values_use_the_table_default_region() {
 }
 
 #[tokio::test]
-async fn nullable_field_partitioning_preserves_delete_records() {
+async fn test_nullable_field_partitioning_preserves_delete_records() {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(2);
     let exprs = vec![
@@ -1209,7 +1209,7 @@ async fn nullable_field_partitioning_preserves_delete_records() {
 }
 
 #[tokio::test]
-async fn unknown_partition_target_fails_before_creating_output() {
+async fn test_unknown_partition_target_fails_before_creating_output() {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(2);
     plan.partition_rule = Arc::new(
@@ -1281,7 +1281,7 @@ async fn wide_source_fixture() -> (Fixture, MultiRegionCompactionPlan) {
 }
 
 #[tokio::test]
-async fn wide_version_group_routes_lazily_without_retaining_fragment_dictionaries() {
+async fn test_wide_version_group_routes_lazily_without_retaining_fragment_dictionaries() {
     let (fixture, plan) = wide_source_fixture().await;
     let (context, _) = fixture.context(None);
     let counters = Arc::new(SourceCounters::default());
@@ -1336,7 +1336,7 @@ async fn wide_version_group_routes_lazily_without_retaining_fragment_dictionarie
 }
 
 #[tokio::test]
-async fn cancelling_between_routed_fragments_stops_the_source() {
+async fn test_cancelling_between_routed_fragments_stops_the_source() {
     let (fixture, plan) = wide_source_fixture().await;
     let (context, _) = fixture.context(None);
     let source = source::SharedSource::build(
@@ -1360,7 +1360,9 @@ async fn cancelling_between_routed_fragments_stops_the_source() {
 #[case::metadata(false)]
 #[case::actual_rows(true)]
 #[tokio::test]
-async fn cross_window_source_is_rejected_without_filtering_away_rows(#[case] stale_metadata: bool) {
+async fn test_cross_window_source_is_rejected_without_filtering_away_rows(
+    #[case] stale_metadata: bool,
+) {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 2, 0);
         let mut columns = batch.columns().to_vec();
@@ -1391,7 +1393,7 @@ async fn cross_window_source_is_rejected_without_filtering_away_rows(#[case] sta
 }
 
 #[tokio::test]
-async fn negative_subsecond_timestamp_stays_in_its_half_open_window() {
+async fn test_negative_subsecond_timestamp_stays_in_its_half_open_window() {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 2, 0);
         let mut columns = batch.columns().to_vec();
@@ -1417,7 +1419,7 @@ async fn negative_subsecond_timestamp_stays_in_its_half_open_window() {
 }
 
 #[tokio::test]
-async fn equal_key_group_crosses_batches_and_preserves_opposite_target_admission_orders() {
+async fn test_equal_key_group_crosses_batches_and_preserves_opposite_target_admission_orders() {
     fn versions(start: usize) -> Vec<RecordBatch> {
         let batch =
             new_record_batch_with_custom_sequence(&["000", "series"], start, start + 256, 0);
@@ -1583,7 +1585,7 @@ async fn overlapping_fixture() -> (Fixture, MultiRegionCompactionPlan) {
 #[case::range(false)]
 #[case::multi_column(true)]
 #[tokio::test]
-async fn streaming_merge_preserves_overlapping_versions_and_field_routing(
+async fn test_streaming_merge_preserves_overlapping_versions_and_field_routing(
     #[case] multi_column: bool,
 ) {
     let (fixture, mut plan) = overlapping_fixture().await;
@@ -1891,7 +1893,7 @@ impl SstWriteGuard for FailIndexSibling {
 #[case::cancel(false)]
 #[case::sibling_failure(true)]
 #[tokio::test]
-async fn interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibling: bool) {
+async fn test_interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibling: bool) {
     let mut fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         ["000", "020"]
             .into_iter()
@@ -2063,7 +2065,7 @@ impl SstWriteGuard for CancelBeforeCreate {
 }
 
 #[tokio::test]
-async fn cancelling_a_blocked_writer_preserves_sources_without_merge_spill() {
+async fn test_cancelling_a_blocked_writer_preserves_sources_without_merge_spill() {
     let (fixture, plan) = overlapping_fixture().await;
     let sources = plan.sources.clone();
     let (mut context, _) = fixture.context(None);
@@ -2089,7 +2091,7 @@ async fn cancelling_a_blocked_writer_preserves_sources_without_merge_spill() {
 }
 
 #[tokio::test]
-async fn private_routing_annotations_do_not_shadow_user_columns() {
+async fn test_private_routing_annotations_do_not_shadow_user_columns() {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -2149,7 +2151,7 @@ async fn private_routing_annotations_do_not_shadow_user_columns() {
 }
 
 #[tokio::test]
-async fn zero_versions_are_not_published_with_a_legacy_sequence_override() {
+async fn test_zero_versions_are_not_published_with_a_legacy_sequence_override() {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         vec![
             new_record_batch_with_custom_sequence(&["000", "series"], 0, 1, 0),
@@ -2216,7 +2218,7 @@ impl SstWriteGuard for ObserveOnlineOutput {
 }
 
 #[tokio::test]
-async fn output_starts_before_the_shared_source_is_exhausted() {
+async fn test_output_starts_before_the_shared_source_is_exhausted() {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         vec![new_record_batch_with_custom_sequence(
             &["000", "series"],
@@ -2252,7 +2254,7 @@ async fn output_starts_before_the_shared_source_is_exhausted() {
 }
 
 #[tokio::test]
-async fn invalid_target_options_are_rejected_before_creating_outputs() {
+async fn test_invalid_target_options_are_rejected_before_creating_outputs() {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(2);
     plan.targets
@@ -2270,7 +2272,7 @@ async fn invalid_target_options_are_rejected_before_creating_outputs() {
 }
 
 #[tokio::test]
-async fn all_resident_writers_are_admitted_before_creating_outputs() {
+async fn test_all_resident_writers_are_admitted_before_creating_outputs() {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(32);
     plan.memory_limit = 128 * 1024 * 1024;
@@ -2287,7 +2289,7 @@ async fn all_resident_writers_are_admitted_before_creating_outputs() {
 #[case::sync(crate::config::IndexBuildMode::Sync)]
 #[case::async_mode(crate::config::IndexBuildMode::Async)]
 #[tokio::test]
-async fn admission_includes_each_tantivy_creator_even_in_async_mode(
+async fn test_admission_includes_each_tantivy_creator_even_in_async_mode(
     #[case] mode: crate::config::IndexBuildMode,
 ) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
@@ -2315,7 +2317,7 @@ async fn admission_includes_each_tantivy_creator_even_in_async_mode(
 }
 
 #[tokio::test]
-async fn oversized_equal_key_group_fails_without_partial_outputs_or_spill() {
+async fn test_oversized_equal_key_group_fails_without_partial_outputs_or_spill() {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 262_144, 0);
         let mut columns = batch.columns().to_vec();
@@ -2340,7 +2342,7 @@ async fn oversized_equal_key_group_fails_without_partial_outputs_or_spill() {
 #[case::encoder("encoder")]
 #[case::metadata("metadata")]
 #[tokio::test]
-async fn limited_writer_fails_instead_of_publishing_over_budget(#[case] kind: &'static str) {
+async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kind: &'static str) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let plan = fixture.plan(1);
     let (context, protection) = fixture.context(None);
@@ -2369,7 +2371,7 @@ async fn limited_writer_fails_instead_of_publishing_over_budget(#[case] kind: &'
 }
 
 #[tokio::test]
-async fn cancelled_execution_does_not_create_output() {
+async fn test_cancelled_execution_does_not_create_output() {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let (context, protection) = fixture.context(None);
     context.cancellation.cancel();
