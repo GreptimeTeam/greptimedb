@@ -185,16 +185,23 @@ fn collect_inputs(
     }
     // Grouped artifacts may also contain sources excluded solely by time pruning.
     // Sequence-pruned, unassigned, and retired sources remain ineligible.
-    let assigned = files
+    let assigned: HashSet<_> = files
         .keys()
         .map(|i| input.files[*i].file_id().file_id())
-        .chain(input.time_pruned_files.iter().copied())
+        .collect();
+    let allowed = assigned
+        .iter()
+        .chain(&input.time_pruned_files)
+        .copied()
         .collect();
     let eligible_samples = index
         .version
         .samples
         .iter()
-        .filter(|(_, handle)| handle.entry().sources_visible(&assigned))
+        .filter(|(_, handle)| {
+            handle.entry().sources_visible(&allowed)
+                && assigned.iter().any(|id| handle.entry().covers(*id))
+        })
         .map(|(id, handle)| (*id, handle.clone()))
         .collect();
     let mut indexes = HashSet::new();
@@ -330,14 +337,15 @@ impl ColumnarPreparedSource {
         let assigned: HashSet<_> = files
             .iter()
             .map(|i| input.files[*i].file_id().file_id())
-            .chain(input.time_pruned_files.iter().copied())
             .collect();
-        for handle in index
-            .version
-            .samples
-            .values()
-            .filter(|h| h.entry().sources_visible(&assigned))
-        {
+        let allowed = assigned
+            .iter()
+            .chain(&input.time_pruned_files)
+            .copied()
+            .collect();
+        for handle in index.version.samples.values().filter(|h| {
+            h.entry().sources_visible(&allowed) && assigned.iter().any(|id| h.entry().covers(*id))
+        }) {
             let reader = crate::series_index::samples::reader::SamplesReader::open_cached(
                 index.store.clone(),
                 handle.clone(),

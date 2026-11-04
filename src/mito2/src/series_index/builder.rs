@@ -494,7 +494,7 @@ pub(crate) async fn build_sample_windows(
         }
         return Err(error);
     }
-    let source_windows: std::collections::HashMap<_, Vec<_>> = coverage
+    let mut source_windows: std::collections::HashMap<_, Vec<_>> = coverage
         .lock()
         .iter()
         .map(|(id, days)| (*id, days.iter().copied().collect()))
@@ -510,7 +510,7 @@ pub(crate) async fn build_sample_windows(
                 artifact,
                 source_file_ids: files.iter().map(|f| f.file_id().file_id()).collect(),
                 window: Some(day),
-                source_windows: source_windows.clone(),
+                source_windows: std::mem::take(&mut source_windows),
             },
             purger.clone(),
         ));

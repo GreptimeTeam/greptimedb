@@ -37,8 +37,9 @@ and range indexes. Readers pin each generation once. A grouped artifact is
 ineligible if any source SST is absent from the query's data snapshot; exact
 sequence-range or SST-sequence-pruned scans fall back to the existing path.
 Maintenance retains complete visible groups and groups only uncovered sources,
-with at most 64 sources per merge. Each entry records `source_windows`, the
-actual populated days for every source in its group. Coverage checks use this
+with at most 64 sources per merge. One anchor entry per group records `source_windows`, the
+actual populated days for every source in its group. Other daily entries share
+the same ordered source set without repeating the coverage map. Coverage checks use this
 record rather than enumerating the timestamp span. Earlier daily entries without
 this record require rebuilding. Publication commits all days together; retired
 objects remain pinned until readers release them. Source Parquet SSTs are unchanged.
