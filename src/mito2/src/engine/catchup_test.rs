@@ -14,6 +14,7 @@
 
 use std::assert_matches;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
@@ -32,6 +33,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Error;
+use crate::manifest::action::RegionEdit;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, flush_region,
     kafka_log_store_factory, prepare_test_for_kafka_log_store, put_rows,
@@ -166,6 +168,220 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
     let region = follower_engine.get_region(region_id).unwrap();
     assert!(region.is_writable());
     assert!(resp.is_ok());
+}
+
+#[apply(single_kafka_log_store_factory)]
+async fn test_catchup_preserves_region_edit_sequence(
+    factory: Option<LogStoreFactory>,
+    #[values(false, true)] open_before_edit: bool,
+) {
+    use store_api::region_engine::SettableRegionRoleState;
+
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env = TestEnv::with_prefix("catchup_edit_sequence")
+        .await
+        .with_log_store_factory(factory.clone());
+    let topic = prepare_test_for_kafka_log_store(&factory).await.unwrap();
+    let config = MitoConfig {
+        schedule_compaction_after_edit: false,
+        ..Default::default()
+    };
+    let leader_engine = env.create_engine(config.clone()).await;
+    let follower_engine = env.create_follower_engine(config).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(Some(topic.clone()))
+        .build();
+    let column_schemas = rows_schema(&request);
+    let open_request = RegionOpenRequest {
+        engine: String::new(),
+        table_dir: request.table_dir.clone(),
+        path_type: PathType::Bare,
+        options: HashMap::from([(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic))).unwrap(),
+        )]),
+        skip_wal_replay: true,
+        checkpoint: None,
+        requirements: Default::default(),
+    };
+    leader_engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &leader_engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&leader_engine, region_id, None).await;
+    let leader = leader_engine.get_region(region_id).unwrap();
+    let flushed_entry_id = leader.version().flushed_entry_id;
+    let flushed_sequence = leader.version().flushed_sequence;
+    let flushed_rows = scan_region(&leader_engine, region_id)
+        .await
+        .pretty_print()
+        .unwrap();
+
+    put_rows(
+        &leader_engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(3, 5),
+        },
+    )
+    .await;
+    let unflushed = leader.version_control.current();
+    let unflushed_entry_id = unflushed.last_entry_id;
+    assert!(unflushed_entry_id > flushed_entry_id);
+    assert_eq!(unflushed.version.flushed_entry_id, flushed_entry_id);
+
+    if open_before_edit {
+        follower_engine
+            .handle_request(region_id, RegionRequest::Open(open_request.clone()))
+            .await
+            .unwrap();
+    }
+    // Reuses the flushed SST without flushing the second batch.
+    let file = leader.version().ssts.levels()[0]
+        .files
+        .values()
+        .next()
+        .unwrap()
+        .meta_ref()
+        .clone();
+    leader_engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![file],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+    let edit_sequence = leader.version_control.committed_sequence();
+    assert!(edit_sequence > unflushed.committed_sequence);
+    let expected_rows = scan_region(&leader_engine, region_id)
+        .await
+        .pretty_print()
+        .unwrap();
+    assert_ne!(flushed_rows, expected_rows);
+
+    if !open_before_edit {
+        follower_engine
+            .handle_request(region_id, RegionRequest::Open(open_request))
+            .await
+            .unwrap();
+    }
+    let candidate_before_catchup = follower_engine.get_region(region_id).unwrap();
+    let before_catchup = candidate_before_catchup.version_control.current();
+    assert!(candidate_before_catchup.provider.is_remote_wal());
+    assert!(before_catchup.version.memtables.is_empty());
+    assert_eq!(before_catchup.last_entry_id, flushed_entry_id);
+    assert_eq!(
+        before_catchup.committed_sequence,
+        if open_before_edit {
+            flushed_sequence
+        } else {
+            edit_sequence
+        }
+    );
+    assert_eq!(
+        scan_region(&follower_engine, region_id)
+            .await
+            .pretty_print()
+            .unwrap(),
+        flushed_rows
+    );
+
+    let resp = leader_engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+    let last_entry_id = get_last_entry_id(resp);
+    assert_eq!(last_entry_id, Some(unflushed_entry_id));
+    assert_eq!(leader.version().flushed_entry_id, flushed_entry_id);
+    assert!(!leader.version().memtables.is_empty());
+    follower_engine
+        .handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                entry_id: last_entry_id,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    let candidate = follower_engine.get_region(region_id).unwrap();
+    assert!(candidate.is_writable());
+    assert_eq!(
+        Arc::ptr_eq(
+            &candidate_before_catchup.version_control,
+            &candidate.version_control
+        ),
+        !open_before_edit
+    );
+    let recovered = candidate.version_control.current();
+    assert!(recovered.last_entry_id >= unflushed_entry_id);
+    assert_eq!(recovered.version.flushed_entry_id, flushed_entry_id);
+    assert!(recovered.committed_sequence >= edit_sequence);
+    assert!(recovered.last_sequence >= recovered.committed_sequence);
+    assert!(!recovered.version.memtables.is_empty());
+    assert_eq!(
+        scan_region(&follower_engine, region_id)
+            .await
+            .pretty_print()
+            .unwrap(),
+        expected_rows
+    );
+
+    put_rows(
+        &follower_engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(5, 6),
+        },
+    )
+    .await;
+    let current = candidate.version_control.current();
+    assert_eq!(current.committed_sequence, recovered.last_sequence + 1);
+    assert!(current.committed_sequence > edit_sequence);
+    assert!(current.last_sequence >= current.committed_sequence);
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
++-------+---------+---------------------+";
+    assert_eq!(
+        scan_region(&follower_engine, region_id)
+            .await
+            .pretty_print()
+            .unwrap(),
+        expected
+    );
 }
 
 #[apply(single_kafka_log_store_factory)]
@@ -536,7 +752,10 @@ async fn scan_region(engine: &MitoEngine, region_id: RegionId) -> RecordBatches 
 }
 
 #[apply(single_raft_engine_log_store_factory)]
-async fn test_local_catchup(factory: Option<LogStoreFactory>) {
+async fn test_local_catchup(
+    factory: Option<LogStoreFactory>,
+    #[values(false, true)] reopen_before_catchup: bool,
+) {
     use store_api::region_engine::SettableRegionRoleState;
 
     use crate::test_util::LogStoreImpl;
@@ -599,6 +818,10 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
         rows: build_rows(8, 9),
     };
     put_rows(&leader_engine, region_id, rows).await;
+    let old_region = leader_engine.get_region(region_id).unwrap();
+    if !reopen_before_catchup {
+        old_region.version_control.update_last_sequence(10);
+    }
     let resp = leader_engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
         .await
@@ -606,27 +829,27 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
     let last_entry_id = get_last_entry_id(resp);
     assert_eq!(last_entry_id.unwrap(), 3);
 
-    close_region(&leader_engine, region_id).await;
-    // Reopen the region, and skip the wal replay.
-    leader_engine
-        .handle_request(
-            region_id,
-            RegionRequest::Open(RegionOpenRequest {
-                engine: String::new(),
-                table_dir: table_dir.clone(),
-                options: HashMap::new(),
-                skip_wal_replay: true,
-                path_type: PathType::Bare,
-                checkpoint: None,
-                requirements: Default::default(),
-            }),
-        )
-        .await
-        .unwrap();
+    assert_eq!(old_region.version_control.committed_sequence(), 7);
 
-    // The last entry id should be 1.
-    let region = leader_engine.get_region(region_id).unwrap();
-    assert_eq!(region.version_control.current().last_entry_id, 1);
+    if reopen_before_catchup {
+        close_region(&leader_engine, region_id).await;
+        open_region(&leader_engine, region_id, table_dir, true).await;
+    }
+    let region_before_catchup = leader_engine.get_region(region_id).unwrap();
+    let current = region_before_catchup.version_control.current();
+    if reopen_before_catchup {
+        assert!(current.version.memtables.is_empty());
+        assert_eq!(
+            (
+                current.last_sequence,
+                current.committed_sequence,
+                current.last_entry_id
+            ),
+            (3, 3, 1)
+        );
+    } else {
+        assert!(!current.version.memtables.is_empty());
+    }
 
     // There are 2 entries in the log store.
     let (start, end) = log_store.span(&RaftEngineProvider::new(region_id.into()));
@@ -644,9 +867,24 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
         )
         .await;
     assert!(resp.is_ok());
-    // After catchup, the last entry id should be 3.
     let region = leader_engine.get_region(region_id).unwrap();
-    assert_eq!(region.version_control.current().last_entry_id, 3);
+    assert_eq!(
+        Arc::ptr_eq(
+            &region_before_catchup.version_control,
+            &region.version_control
+        ),
+        reopen_before_catchup
+    );
+    let expected_last_sequence = if reopen_before_catchup { 3 } else { 10 };
+    let current = region.version_control.current();
+    assert_eq!(
+        (
+            current.last_sequence,
+            current.committed_sequence,
+            current.last_entry_id
+        ),
+        (expected_last_sequence, 3, 3)
+    );
 
     // The log store has been obsoleted these 2 entries.
     let (start, end) = log_store.span(&RaftEngineProvider::new(region_id.into()));
@@ -654,7 +892,7 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
     assert_eq!(end, None);
 
     // For local WAL, entries are not replayed during catchup.
-    // Therefore, any rows that were not flushed before closing the region will not be visible.
+    // Therefore, any rows that were not flushed before reopening the region will not be visible.
     let batches = scan_region(&leader_engine, region_id).await;
     let expected = "\
 +-------+---------+---------------------+
@@ -672,6 +910,11 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
         rows: build_rows(4, 7),
     };
     put_rows(&leader_engine, region_id, rows).await;
+    let current = region.version_control.current();
+    assert_eq!(
+        (current.last_sequence, current.committed_sequence),
+        (expected_last_sequence + 3, expected_last_sequence + 3)
+    );
 
     let batches = scan_region(&leader_engine, region_id).await;
     let expected = "\

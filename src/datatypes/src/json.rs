@@ -93,6 +93,9 @@ pub struct JsonTypeHint {
     #[serde(rename = "type")]
     pub data_type: ConcreteDataType,
     pub inverted_index: bool,
+    /// Optional Bloom Filter configuration for this path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipping_index: Option<crate::schema::SkippingIndexOptions>,
 }
 
 /// Specifies how encoding handles a value that does not match its JSON2 type hint.
@@ -215,6 +218,13 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
 
     let mut object = JsonObjectType::new();
     for hint in type_hints {
+        if let Some(options) = &hint.skipping_index {
+            crate::schema::SkippingIndexOptions::new(
+                options.granularity,
+                options.false_positive_rate(),
+                options.index_type.clone(),
+            )?;
+        }
         if hint.path.len() > JSON2_MAX_STRUCTURED_DEPTH {
             return InvalidJson2SettingsSnafu {
                 reason: format!(
@@ -739,17 +749,37 @@ mod tests {
     }
 
     #[test]
+    fn test_skipping_index_settings_roundtrip() {
+        let old = r#"{"type_hints":[{"path":["service","name"],"type":{"String":{}},"inverted_index":true}]}"#;
+        let legacy: JsonSettings = serde_json::from_str(old).unwrap();
+        assert!(legacy.type_hints()[0].skipping_index.is_none());
+        let mut hints = legacy.type_hints().to_vec();
+        hints[0].skipping_index = Some(crate::schema::SkippingIndexOptions::default());
+        let settings = JsonSettings::try_new(hints.clone(), Some(0)).unwrap();
+        let json = serde_json::to_string(&settings).unwrap();
+        assert_eq!(
+            settings,
+            serde_json::from_str::<JsonSettings>(&json).unwrap()
+        );
+        assert!(!settings.equivalent(&legacy));
+        hints[0].skipping_index.as_mut().unwrap().granularity = 0;
+        assert!(JsonSettings::try_new(hints, Some(0)).is_err());
+    }
+
+    #[test]
     fn test_json_settings_equivalent() -> Result<()> {
         let hints = vec![
             JsonTypeHint {
                 path: vec!["user".to_string(), "name".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             },
             JsonTypeHint {
                 path: vec!["count".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             },
         ];
         let settings = JsonSettings::try_new(hints.clone(), Some(10))?;
@@ -821,11 +851,13 @@ mod tests {
                     path: vec!["user".to_string(), "age".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: true,
+                    skipping_index: None,
                 },
                 JsonTypeHint {
                     path: vec!["user".to_string(), "name".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
             ],
             None,
@@ -841,11 +873,13 @@ mod tests {
                 path: vec!["user".to_string(), "age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
                 inverted_index: true,
+                skipping_index: None,
             },
             JsonTypeHint {
                 path: vec!["user".to_string(), "name".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             },
         ];
 
@@ -885,6 +919,7 @@ mod tests {
                     path: path.iter().map(|part| (*part).to_string()).collect(),
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index,
+                    skipping_index: None,
                 };
                 let serialized = json!({"type_hints": [hint.clone()]});
                 assert_eq!(
@@ -919,6 +954,7 @@ mod tests {
             path,
             data_type,
             inverted_index: false,
+            skipping_index: None,
         };
         assert!(
             JsonSettings::try_new(
@@ -982,6 +1018,7 @@ mod tests {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             None,
         )?;
@@ -1012,11 +1049,13 @@ mod tests {
                     path: vec!["to_string".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
                 JsonTypeHint {
                     path: vec!["to_int".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
             ],
             None,
@@ -1051,6 +1090,7 @@ mod tests {
                 path: vec!["user".to_string(), "age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             None,
         )?;
@@ -1212,6 +1252,7 @@ mod tests {
             path: vec!["age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
             inverted_index: false,
+            skipping_index: None,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
 
@@ -1244,6 +1285,7 @@ mod tests {
             path: vec!["count".to_string()],
             data_type: ConcreteDataType::uint64_datatype(),
             inverted_index: false,
+            skipping_index: None,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
 
@@ -1278,6 +1320,7 @@ mod tests {
             path: vec!["user".to_string(), "age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
             inverted_index: false,
+            skipping_index: None,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
 
@@ -1303,6 +1346,7 @@ mod tests {
             path: vec!["user".to_string(), "name".to_string()],
             data_type: ConcreteDataType::string_datatype(),
             inverted_index: false,
+            skipping_index: None,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
 
@@ -1328,6 +1372,7 @@ mod tests {
             path: vec!["user".to_string(), "age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
             inverted_index: false,
+            skipping_index: None,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
 
@@ -1342,11 +1387,13 @@ mod tests {
                 path: vec!["user".to_string(), "age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             },
             JsonTypeHint {
                 path: vec!["user".to_string(), "name".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             },
         ];
         let settings = JsonSettings::try_new(type_hints, None)?;

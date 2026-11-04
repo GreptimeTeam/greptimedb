@@ -117,6 +117,18 @@ jobs:
           --timeout-minutes "$BENCHMARK_TIMEOUT_MINUTES" --ttl-hours "$JANITOR_TTL_HOURS"
         python3 greptimedb/.github/scripts/oswal-s3-bench.py image --tag "$GREPTIMEDB_TAG" --image "$GREPTIMEDB_IMAGE_INPUT" \
           --images "$OSWAL_IMAGES"
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Pull every GreptimeDB image and record its version
       id: images
       env:
@@ -200,6 +212,18 @@ jobs:
       run: |
         bash greptimedb/.github/scripts/pull-benchmark-image.sh greptime/minio:2024
         docker compose -f greptimedb/tests-integration/fixtures/docker-compose.yml up -d --wait minio
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Pull and check images, write the plan
       run: |
         bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull
@@ -211,8 +235,8 @@ jobs:
           --runtime-image "$RUNTIME_IMAGE" --instance-type "$INSTANCE_TYPE" --region "$S3_REGION" --prefix "$RUN_PREFIX"
     - name: Probe the bucket
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_SECRET_ACCESS_KEY }}
       run: uv run greptimedb/.github/scripts/oswal-s3-bench.py probe --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
     - name: Put the Raft Engine WAL on the instance store
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh wal-disk "$WAL_ROOT"
@@ -220,8 +244,8 @@ jobs:
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh generate
     - name: Load every cell
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_SECRET_ACCESS_KEY }}
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh cells
     - name: Summary
       if: always()
@@ -229,14 +253,14 @@ jobs:
     - name: Delete the run's S3 prefix
       if: always()
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_SECRET_ACCESS_KEY }}
       run: uv run greptimedb/.github/scripts/oswal-s3-bench.py cleanup --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
     - name: Check the results hold no credentials
       if: always()
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_SECRET_ACCESS_KEY }}
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh scrub
     - name: Upload results (no corpus)
       if: always()

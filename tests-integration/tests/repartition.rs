@@ -16,23 +16,25 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, OutputData};
 use common_error::root_source;
 use common_event_recorder::{PersistentEventContext, TriggerReason};
 use common_meta::key::table_name::TableNameKey;
-use common_procedure::{ProcedureContext, ProcedureWithId, watcher};
+use common_procedure::{ProcedureContext, ProcedureId, ProcedureWithId, watcher};
 use common_query::Output;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
+use datatypes::arrow::array::AsArray;
 use frontend::instance::Instance;
 use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions, GcTickerRef};
 use meta_srv::metasrv::Metasrv;
 use mito2::gc::GcConfig;
 use servers::error::Result as ServerResult;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::{QueryContext, QueryContextRef};
+use session::Session;
+use session::context::{Channel, QueryContext, QueryContextRef};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::{RegionId, TableId};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
@@ -150,6 +152,48 @@ macro_rules! repartition_tests {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_repartition_procedure_id_session() {
+    let (cluster, _home_guard) = repartition_cluster("repartition_procedure_id_session").await;
+    let instance = cluster.fe_instance();
+    let session = Session::new(None, Channel::Postgres, Default::default(), 0);
+    let query_ctx = session.new_query_context();
+    run_sql(
+        instance,
+        r#"CREATE TABLE repartition_session_test ("id" INT PRIMARY KEY, ts TIMESTAMP TIME INDEX)
+           PARTITION ON COLUMNS ("id") ("id" < 10, "id" >= 10)"#,
+        session.new_query_context(),
+    )
+    .await
+    .unwrap();
+    query_ctx.set_last_procedure_id("previous-id".to_string());
+    let sql = r#"ALTER TABLE repartition_session_test REPARTITION ("id" < 10)
+                 INTO ("id" < 5, "id" >= 5 AND "id" < 10) WITH (wait=false)"#;
+    let OutputData::RecordBatches(batches) = run_sql(instance, sql, session.new_query_context())
+        .await
+        .unwrap()
+        .data
+    else {
+        panic!("expected Procedure ID result");
+    };
+    let batch = batches.iter().next().unwrap();
+    let id = batch
+        .column_by_name("Procedure ID")
+        .unwrap()
+        .as_string::<i32>()
+        .value(0);
+    assert_eq!(query_ctx.last_procedure_id().as_deref(), Some(id));
+    let mut watcher = cluster
+        .metasrv
+        .procedure_manager()
+        .procedure_watcher(ProcedureId::parse_str(id).unwrap())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(60), watcher::wait(&mut watcher))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_physical_metric_without_logical_table() {
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&StorageType::File);
@@ -247,7 +291,7 @@ async fn test_repartition_physical_metric_without_logical_table() {
 /// COUNT must use visible rows rather than the full row counts of shared SSTs.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_append_count_file() {
-    let (cluster, _home_guard) = append_count_cluster("repartition_append_count").await;
+    let (cluster, _home_guard) = repartition_cluster("repartition_append_count").await;
     let instance = cluster.fe_instance();
     let table = "count_repartition";
     prepare_append_count_table(instance, table, "").await;
@@ -265,7 +309,7 @@ async fn test_repartition_append_count_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_split_append_count_file() {
-    let (cluster, _home_guard) = append_count_cluster("split_append_count").await;
+    let (cluster, _home_guard) = repartition_cluster("split_append_count").await;
     let instance = cluster.fe_instance();
     let table = "count_split";
     prepare_append_count_table(
@@ -288,7 +332,7 @@ async fn test_split_append_count_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_append_count_memtable_file() {
-    let (cluster, home_guard) = append_count_cluster("repartition_append_count_memtable").await;
+    let (cluster, home_guard) = repartition_cluster("repartition_append_count_memtable").await;
     assert!(home_guard.path().is_dir());
     let instance = cluster.fe_instance();
     let table = "count_repartition_memtable";
@@ -305,7 +349,7 @@ async fn test_repartition_append_count_memtable_file() {
     assert!(home_guard.path().is_dir());
 }
 
-async fn append_count_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
+async fn repartition_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&StorageType::File);
     let home_dir = Arc::new(create_temp_dir(name));

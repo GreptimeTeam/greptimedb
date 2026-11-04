@@ -753,6 +753,7 @@ mod tests {
                 path: vec!["payload".to_string(), "cpu".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             None,
         )
@@ -787,11 +788,13 @@ mod tests {
                     path: vec!["payload".to_string(), "cpu".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
                 JsonTypeHint {
                     path: vec!["payload.cpu".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
             ],
             None,

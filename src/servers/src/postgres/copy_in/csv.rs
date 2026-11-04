@@ -40,12 +40,12 @@ use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
 use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector};
 use pgwire::error::{PgWireError, PgWireResult};
 
-use crate::postgres::copy_in::codec::{CopyInCodec, ParsedRow, RecordParser};
+use crate::postgres::copy_in::codec::{CopyFormat, ParsedRow, RecordParser};
 use crate::postgres::copy_in::options::CopyOptionSet;
 use crate::postgres::copy_in::{COPY_IN_FLUSH_ROWS, bad_copy_data, invalid_text_repr, unsupported};
 
 /// The validated `csv` format configuration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct CsvCodec {
     delimiter: u8,
     quote: u8,
@@ -54,7 +54,7 @@ pub(super) struct CsvCodec {
 }
 
 /// Builds the CSV codec from the parsed options.
-pub(super) fn build_csv_codec(mut options: CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>> {
+pub(super) fn build_csv_codec(mut options: CopyOptionSet) -> PgWireResult<CopyFormat> {
     let delimiter = options.take_single_byte("DELIMITER")?.unwrap_or(b',');
     let quote = options.take_single_byte("QUOTE")?.unwrap_or(b'"');
     // In PostgreSQL the default escape character for CSV is the quote
@@ -75,7 +75,7 @@ pub(super) fn build_csv_codec(mut options: CopyOptionSet) -> PgWireResult<Arc<dy
     if delimiter == quote {
         return Err(bad_copy_data("DELIMITER must not be equal to QUOTE"));
     }
-    Ok(Arc::new(CsvCodec {
+    Ok(CopyFormat::Csv(CsvCodec {
         delimiter,
         quote,
         escape,
@@ -83,13 +83,9 @@ pub(super) fn build_csv_codec(mut options: CopyOptionSet) -> PgWireResult<Arc<dy
     }))
 }
 
-impl CopyInCodec for CsvCodec {
-    fn name(&self) -> &'static str {
-        "csv"
-    }
-
+impl CsvCodec {
     /// The column types arrow-csv can decode against.
-    fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
+    pub(super) fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
         let supported = matches!(
             data_type,
             ConcreteDataType::Boolean(_)
@@ -117,7 +113,7 @@ impl CopyInCodec for CsvCodec {
         Ok(())
     }
 
-    fn create_parser(
+    pub(super) fn create_parser(
         &self,
         columns: &[ColumnSchema],
         timezone: &str,
@@ -292,9 +288,15 @@ mod tests {
         ]
     }
 
+    fn build_codec(set: CopyOptionSet) -> CsvCodec {
+        match build_csv_codec(set).unwrap() {
+            CopyFormat::Csv(codec) => codec,
+            other => panic!("expected csv format, got {other:?}"),
+        }
+    }
+
     fn parser() -> Box<dyn RecordParser + Send> {
-        build_csv_codec(CopyOptionSet::default())
-            .unwrap()
+        build_codec(CopyOptionSet::default())
             .create_parser(&test_columns(), "UTC")
             .unwrap()
     }
@@ -308,8 +310,7 @@ mod tests {
 
     fn rows_with(mut set: CopyOptionSet) -> Box<dyn RecordParser + Send> {
         set.take_format().unwrap();
-        build_csv_codec(set)
-            .unwrap()
+        build_codec(set)
             .create_parser(&test_columns(), "UTC")
             .unwrap()
     }
@@ -329,8 +330,8 @@ mod tests {
 
     #[test]
     fn test_build_defaults() {
-        let codec = build_csv_codec(CopyOptionSet::default()).unwrap();
-        assert_eq!(codec.name(), "csv");
+        let codec = build_codec(CopyOptionSet::default());
+        assert!(matches!(codec, CsvCodec { .. }));
     }
 
     #[test]
@@ -368,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_check_column_type() {
-        let codec = build_csv_codec(CopyOptionSet::default()).unwrap();
+        let codec = build_codec(CopyOptionSet::default());
         assert!(
             codec
                 .check_column_type(&ConcreteDataType::json_datatype())
@@ -524,8 +525,7 @@ mod tests {
             .into_bytes();
 
         let check = |chunk: usize| {
-            let mut parser = build_csv_codec(CopyOptionSet::default())
-                .unwrap()
+            let mut parser = build_codec(CopyOptionSet::default())
                 .create_parser(&sweep_columns, "UTC")
                 .unwrap();
             let mut ids: Vec<i32> = Vec::new();
@@ -560,8 +560,7 @@ mod tests {
             check(chunk);
             let mut shifted = payload.clone();
             shifted.drain(..37);
-            let mut parser = build_csv_codec(CopyOptionSet::default())
-                .unwrap()
+            let mut parser = build_codec(CopyOptionSet::default())
                 .create_parser(&sweep_columns, "UTC")
                 .unwrap();
             let mut count = 0usize;
@@ -585,8 +584,7 @@ mod tests {
                 false,
             ),
         ];
-        let mut parser = build_csv_codec(CopyOptionSet::default())
-            .unwrap()
+        let mut parser = build_codec(CopyOptionSet::default())
             .create_parser(&columns, "UTC")
             .unwrap();
         let rows = feed_all(
@@ -628,8 +626,7 @@ mod tests {
                 false,
             ),
         ];
-        let mut parser = build_csv_codec(CopyOptionSet::default())
-            .unwrap()
+        let mut parser = build_codec(CopyOptionSet::default())
             .create_parser(&columns, "UTC")
             .unwrap();
         parser.feed(b"maybe,2024-01-01 00:00:00\n").unwrap();
@@ -656,8 +653,7 @@ mod tests {
                 false,
             ),
         ];
-        let mut parser = build_csv_codec(CopyOptionSet::default())
-            .unwrap()
+        let mut parser = build_codec(CopyOptionSet::default())
             .create_parser(&columns, "Asia/Shanghai")
             .unwrap();
         let rows = feed_all(

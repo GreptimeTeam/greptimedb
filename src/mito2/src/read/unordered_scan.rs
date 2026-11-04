@@ -35,9 +35,12 @@ use store_api::region_engine::{
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::pruner::{PartitionPruner, Pruner};
-use crate::read::scan_region::{ScanInput, StreamContext};
+#[cfg(test)]
+use crate::read::scan_region::ScanInput;
+use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, scan_flat_file_ranges, scan_flat_mem_ranges,
+    PartitionMetrics, PartitionMetricsList, prepare_flat_mem_stream, scan_flat_file_ranges,
+    scan_flat_mem_ranges,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{ScannerMetrics, scan_util};
@@ -58,7 +61,8 @@ pub struct UnorderedScan {
 
 impl UnorderedScan {
     /// Creates a new [UnorderedScan].
-    pub(crate) fn new(input: ScanInput) -> Self {
+    pub(crate) fn new(stream_ctx: StreamContext) -> Self {
+        let input = &stream_ctx.input;
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows())
@@ -66,7 +70,7 @@ impl UnorderedScan {
         if let Some(counters) = input.query_stat_counters.clone() {
             properties.set_query_stat_counters(counters);
         }
-        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let stream_ctx = Arc::new(stream_ctx);
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
         // Create the shared pruner with number of workers equal to CPU cores.
@@ -134,6 +138,7 @@ impl UnorderedScan {
                         *index,
                         range_meta.time_range,
                     );
+                    let stream = prepare_flat_mem_stream(stream_ctx.clone(), stream);
                     for await record_batch in stream {
                         yield record_batch?;
                     }

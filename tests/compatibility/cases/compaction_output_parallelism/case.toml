@@ -1,0 +1,8 @@
+name = "compaction_output_parallelism"
+reason = "Verify old table options reopen with inherited output parallelism and support setting and clearing the new per-table override."
+introduced_by = "PR #9945"
+topologies = ["distributed", "standalone"]
+from_range = ["*"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["table", "metadata", "alter", "compaction"]
+owner = "storage"

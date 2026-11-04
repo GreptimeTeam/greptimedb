@@ -137,9 +137,10 @@ impl RegionEngine for FileRegionEngine {
         &self,
         region_id: RegionId,
         role: RegionRole,
+        _sent_at: Instant,
         _deadline: Instant,
-    ) -> Result<(), BoxedError> {
-        self.set_region_role(region_id, role)
+    ) -> Result<bool, BoxedError> {
+        self.set_region_role(region_id, role).map(|_| true)
     }
 
     async fn set_region_role_state_gracefully(

@@ -134,13 +134,18 @@ impl RegionAliveKeeper {
         }
     }
 
-    /// Renews the lease of regions to `deadline`.
-    async fn renew_region_leases(&self, regions: &[GrantedRegion], deadline: Instant) {
+    /// Renews the lease of regions to `deadline`, granted for a heartbeat sent at `sent_at`.
+    async fn renew_region_leases(
+        &self,
+        regions: &[GrantedRegion],
+        sent_at: Instant,
+        deadline: Instant,
+    ) {
         for region in regions {
             let (role, region_id) = (region.role().into(), RegionId::from(region.region_id));
             if let Some(handle) = self.find_handle(region_id).await {
                 handle
-                    .reset_deadline(role, deadline, region.extensions.clone())
+                    .reset_deadline(role, sent_at, deadline, region.extensions.clone())
                     .await;
             } else {
                 warn!(
@@ -281,7 +286,7 @@ impl HeartbeatResponseHandler for RegionAliveKeeper {
         if let Some(mito) = self.region_server.mito_engine() {
             mito.renew_node_lease(deadline.into_std());
         }
-        self.renew_region_leases(&region_lease.regions, deadline)
+        self.renew_region_leases(&region_lease.regions, start_instant, deadline)
             .await;
         self.close_staled_regions(&region_lease.closeable_region_ids)
             .await;
@@ -296,8 +301,8 @@ enum CountdownCommand {
     /// 4 * `heartbeat_interval_millis`
     Start(u64),
     /// Reset countdown deadline to the given instance.
-    /// (NextRole, Deadline, ExtensionInfo)
-    Reset((RegionRole, Instant, HashMap<String, Vec<u8>>)),
+    /// (NextRole, HeartbeatSentAt, Deadline, ExtensionInfo)
+    Reset((RegionRole, Instant, Instant, HashMap<String, Vec<u8>>)),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
@@ -377,12 +382,18 @@ impl CountdownTaskHandle {
     async fn reset_deadline(
         &self,
         role: RegionRole,
+        sent_at: Instant,
         deadline: Instant,
         extension_info: HashMap<String, Vec<u8>>,
     ) {
         if let Err(e) = self
             .tx
-            .send(CountdownCommand::Reset((role, deadline, extension_info)))
+            .send(CountdownCommand::Reset((
+                role,
+                sent_at,
+                deadline,
+                extension_info,
+            )))
             .await
         {
             warn!(
@@ -436,20 +447,25 @@ impl CountdownTask {
                                 started = true;
                             }
                         },
-                        Some(CountdownCommand::Reset((role, deadline, extension_info))) => {
+                        Some(CountdownCommand::Reset((role, sent_at, deadline, extension_info))) => {
                             let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
-                            if let Err(err) = self.region_server.set_region_role_with_lease(self.region_id, role, deadline.into_std()) {
-                                if err.status_code() == StatusCode::RegionNotFound {
-                                    // Table metadata in metasrv is deleted after its regions are dropped.
-                                    // The datanode may still receive lease renewal responses that depend on the metadata
-                                    // during the short period before it is removed.
-                                    warn!(err; "Failed to set region role to {role} for region {region_id}");
-                                } else {
-                                    error!(err; "Failed to set region role to {role} for region {region_id}");
+                            let applied = match self.region_server.set_region_role_with_lease(self.region_id, role, sent_at.into_std(), deadline.into_std()) {
+                                Ok(applied) => applied,
+                                Err(err) => {
+                                    if err.status_code() == StatusCode::RegionNotFound {
+                                        // Table metadata in metasrv is deleted after its regions are dropped.
+                                        // The datanode may still receive lease renewal responses that depend on the metadata
+                                        // during the short period before it is removed.
+                                        warn!(err; "Failed to set region role to {role} for region {region_id}");
+                                    } else {
+                                        error!(err; "Failed to set region role to {role} for region {region_id}");
+                                    }
+                                    false
                                 }
+                            };
 
-                            // Finalize leadership: persist backfilled metadata.
-                            } else if !prev_role_leader && role == RegionRole::Leader
+                            // Finalize leadership if the grant was applied: persist backfilled metadata.
+                            if applied && !prev_role_leader && role == RegionRole::Leader
                                 && let Err(err) = self
                                     .region_server
                                     .set_region_role_state_gracefully(self.region_id, SettableRegionRoleState::Leader)
@@ -503,26 +519,42 @@ impl CountdownTask {
 #[cfg(test)]
 mod test {
 
+    use std::sync::atomic::AtomicUsize;
+
     use api::v1::Rows;
     use api::v1::meta::{HeartbeatResponse, RegionLease};
     use common_meta::heartbeat::mailbox::HeartbeatMailbox;
     use mito2::config::MitoConfig;
+    use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
-    use store_api::region_engine::RegionEngine;
+    use store_api::region_engine::{
+        RegionEngine, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
+    };
     use store_api::region_request::{
         EnterStagingRequest, RegionPutRequest, StagingPartitionDirective,
     };
 
     use super::*;
-    use crate::tests::mock_region_server;
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     /// Handles a heartbeat response that grants `regions` for a heartbeat sent now.
     async fn handle_lease_response(alive_keeper: &RegionAliveKeeper, regions: Vec<GrantedRegion>) {
+        let sent_at = alive_keeper.epoch().elapsed();
+        handle_lease_response_sent_at(alive_keeper, sent_at, regions).await;
+    }
+
+    /// Handles a heartbeat response that grants `regions` for a heartbeat sent at `sent_at`
+    /// after the epoch.
+    async fn handle_lease_response_sent_at(
+        alive_keeper: &RegionAliveKeeper,
+        sent_at: Duration,
+        regions: Vec<GrantedRegion>,
+    ) {
         let (tx, _rx) = mpsc::channel(1);
         let response = HeartbeatResponse {
             region_lease: Some(RegionLease {
                 regions,
-                duration_since_epoch: alive_keeper.epoch().elapsed().as_millis() as u64,
+                duration_since_epoch: sent_at.as_millis() as u64,
                 // The countdown of a granted region does not expire during the test.
                 lease_seconds: 86400,
                 closeable_region_ids: vec![],
@@ -532,6 +564,38 @@ mod test {
         let mut ctx =
             HeartbeatResponseHandlerContext::new(Arc::new(HeartbeatMailbox::new(tx)), response);
         alive_keeper.handle(&mut ctx).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ignored_leader_grant_does_not_finalize_leadership() {
+        common_telemetry::init_default_ut_logging();
+        let region_server = mock_region_server();
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let (engine, _) = MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |engine| {
+            // The engine ignores the grant, so the region stays a follower.
+            engine.mock_role = Some(Some(RegionRole::Follower));
+            let finalized = finalized.clone();
+            engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(move |_| {
+                finalized.fetch_add(1, Ordering::Relaxed);
+                Ok(SetRegionRoleStateResponse::success(
+                    SetRegionRoleStateSuccess::mito(0),
+                ))
+            }));
+        });
+        let region_id = RegionId::new(1024, 1);
+        region_server.register_test_region(region_id, engine);
+        let alive_keeper =
+            RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
+        alive_keeper.register_region(region_id).await;
+        let grant = GrantedRegion {
+            region_id: region_id.as_u64(),
+            role: api::v1::meta::RegionRole::Leader.into(),
+            extensions: HashMap::new(),
+        };
+        handle_lease_response(&alive_keeper, vec![grant]).await;
+        // The countdown task has handled the grant once it answers.
+        alive_keeper.deadline(region_id).await.unwrap();
+        assert_eq!(0, finalized.load(Ordering::Relaxed));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -583,8 +647,24 @@ mod test {
             role: api::v1::meta::RegionRole::Leader.into(),
             extensions: HashMap::new(),
         };
-        handle_lease_response(&alive_keeper, vec![grant]).await;
+        handle_lease_response(&alive_keeper, vec![grant.clone()]).await;
         // The countdown task has applied the grant once it answers.
+        alive_keeper.deadline(region_id).await.unwrap();
+        put(region_id).await.unwrap();
+
+        // A grant for a heartbeat sent before a downgrade does not make the region a leader again.
+        let sent_before = alive_keeper.epoch().elapsed();
+        region_server
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+            .await
+            .unwrap();
+        handle_lease_response_sent_at(&alive_keeper, sent_before, vec![grant.clone()]).await;
+        alive_keeper.deadline(region_id).await.unwrap();
+        assert_eq!(region_server.is_region_leader(region_id), Some(false));
+
+        // Send times have millisecond precision, so the next heartbeat is sent after the downgrade.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        handle_lease_response(&alive_keeper, vec![grant]).await;
         alive_keeper.deadline(region_id).await.unwrap();
         put(region_id).await.unwrap();
     }
@@ -641,6 +721,7 @@ mod test {
                     role: api::v1::meta::RegionRole::Leader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(200),
             )
             .await;
@@ -694,6 +775,7 @@ mod test {
         countdown_handle
             .reset_deadline(
                 RegionRole::Leader,
+                Instant::now(),
                 Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
                 HashMap::new(),
             )
@@ -744,6 +826,7 @@ mod test {
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(3000),
             )
             .await;
@@ -792,6 +875,7 @@ mod test {
                     role: api::v1::meta::RegionRole::Leader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(3000),
             )
             .await;
@@ -834,6 +918,7 @@ mod test {
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(3000),
             )
             .await;

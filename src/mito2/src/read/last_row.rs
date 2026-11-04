@@ -16,7 +16,8 @@
 
 use std::sync::Arc;
 
-use datatypes::arrow::array::{Array, BinaryArray, UInt32Array};
+use api::v1::OpType;
+use datatypes::arrow::array::{Array, BinaryArray, UInt8Array, UInt32Array};
 use datatypes::arrow::compute::{concat_batches, take_record_batch};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, TryStreamExt};
@@ -31,7 +32,9 @@ use crate::error::{ComputeArrowSnafu, Result};
 use crate::read::read_columns::JsonTargetTypes;
 use crate::read::{BoxedRecordBatchStream, timestamp_array_to_i64_slice};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
-use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
+use crate::sst::parquet::flat_format::{
+    op_type_column_index, primary_key_column_index, time_index_column_index,
+};
 use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};
 use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::parquet::reader::FlatRowGroupReader;
@@ -287,6 +290,31 @@ impl LastKeyState {
 }
 
 impl FlatLastTimestampSelector {
+    /// Keeps the latest timestamp candidates in one sorted PUT batch, including ties.
+    pub(crate) fn select_batch(batch: RecordBatch) -> Result<RecordBatch> {
+        if batch.num_rows() <= 1 {
+            return Ok(batch);
+        }
+        let Some(op_types) = batch
+            .column(op_type_column_index(batch.num_columns()))
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+        else {
+            return Ok(batch);
+        };
+        if op_types.values().iter().any(|op| *op != OpType::Put as u8) {
+            return Ok(batch);
+        }
+        let mut selector = Self::default();
+        let mut pending = BatchBuffer::new();
+        selector.on_next(batch.clone(), &mut pending)?;
+        selector.finish(&mut pending)?;
+        if pending.num_rows == batch.num_rows() {
+            return Ok(batch);
+        }
+        pending.concat()
+    }
+
     /// Processes the next batch and appends completed-key results into `output_buffer`.
     pub(crate) fn on_next(
         &mut self,
@@ -470,6 +498,41 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
+
+    #[test]
+    fn test_select_batch_preserves_timestamp_ties_and_deletes()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let input = new_flat_batch(
+            &[b"a", b"a", b"a", b"b", b"b", b"c"],
+            &[1, 2, 2, 1, 2, 1],
+            &[1, 2, 3, 4, 5, 6],
+        );
+        let expected = take_record_batch(&input, &UInt32Array::from(vec![1, 2, 4, 5]))?;
+        assert_eq!(
+            expected,
+            FlatLastTimestampSelector::select_batch(input.clone())?
+        );
+        let empty = input.slice(0, 0);
+        assert_eq!(
+            empty,
+            FlatLastTimestampSelector::select_batch(empty.clone())?
+        );
+        let mut columns = input.columns().to_vec();
+        columns[op_type_column_index(input.num_columns())] = Arc::new(UInt8Array::from(vec![
+            OpType::Delete as u8,
+            OpType::Put as u8,
+            OpType::Put as u8,
+            OpType::Put as u8,
+            OpType::Put as u8,
+            OpType::Put as u8,
+        ]));
+        let with_delete = RecordBatch::try_new(input.schema(), columns)?;
+        assert_eq!(
+            with_delete,
+            FlatLastTimestampSelector::select_batch(with_delete.clone())?
+        );
+        Ok(())
+    }
 
     /// Helper to build a flat format RecordBatch for testing.
     fn new_flat_batch(primary_keys: &[&[u8]], timestamps: &[i64], fields: &[i64]) -> RecordBatch {

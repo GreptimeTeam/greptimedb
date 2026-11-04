@@ -39,6 +39,7 @@ use headers::HeaderValue;
 use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use operator::insert::PreparedMetricInserts;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
@@ -109,6 +110,64 @@ pub struct PromStoreResponse {
 
 #[async_trait]
 pub trait PromStoreProtocolHandler {
+    /// Resolves metric destinations before source identities are attached to exemplars.
+    /// Requires pre-write checks and admission to have succeeded for the entire request.
+    async fn prepare_metric_write(
+        &self,
+        _request: RowInsertRequests,
+        _ctx: QueryContextRef,
+    ) -> Result<PreparedMetricInserts> {
+        crate::error::NotSupportedSnafu {
+            feat: "metric write preparation",
+        }
+        .fail()
+    }
+
+    /// Executes the same routed metric writes used to resolve exemplar source identities.
+    async fn write_prepared_metric(
+        &self,
+        _request: PreparedMetricInserts,
+        _ctx: QueryContextRef,
+    ) -> Result<Output> {
+        crate::error::NotSupportedSnafu {
+            feat: "prepared metric ingestion",
+        }
+        .fail()
+    }
+
+    /// Writes exemplars using table identities captured while preparing the source metrics.
+    async fn write_exemplars_with_sources(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        _sources: &[TableInfoRef],
+    ) -> Result<Output> {
+        self.write_exemplars_prepared(request, ctx).await
+    }
+
+    /// Authorizes source series, including inputs with no metric samples.
+    async fn check_exemplar_sources(
+        &self,
+        _sources: &std::collections::BTreeSet<String>,
+        _ctx: QueryContextRef,
+    ) -> Result<()> {
+        crate::error::NotSupportedSnafu {
+            feat: "exemplar source authorization",
+        }
+        .fail()
+    }
+
+    async fn write_exemplars_prepared(
+        &self,
+        _request: RowInsertRequests,
+        _ctx: QueryContextRef,
+    ) -> Result<Output> {
+        crate::error::NotSupportedSnafu {
+            feat: "exemplar ingestion",
+        }
+        .fail()
+    }
+
     /// Runs pre-write checks/hooks for prometheus remote write requests.
     async fn pre_write(&self, request: &RowInsertRequests, ctx: QueryContextRef) -> Result<()>;
 

@@ -38,26 +38,6 @@ order by json_get(j, 'a.b');
 
 drop table json2_whole_and_path_read;
 
-create table json2_without_append_mode (
-    ts timestamp time index,
-    j json2
-);
-
-create table json2_append_mode_false (
-    ts timestamp time index,
-    j json2
-) with (
-    'append_mode' = 'false'
-);
-
-create table json2_alter_non_append (
-    ts timestamp time index
-);
-
-alter table json2_alter_non_append add column j json2;
-
-drop table json2_alter_non_append;
-
 create table json2_set_append_mode_false (
     ts timestamp time index,
     j json2
@@ -65,9 +45,22 @@ create table json2_set_append_mode_false (
     'append_mode' = 'true'
 );
 
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
 alter table json2_set_append_mode_false set 'append_mode' = 'false';
 
 drop table json2_set_append_mode_false;
+
+create table json2_primary_key (
+    ts timestamp time index,
+    j json2,
+    primary key (j)
+);
+
+create table json2_add_primary_key (ts timestamp time index);
+
+alter table json2_add_primary_key add column j json2 primary key;
+
+drop table json2_add_primary_key;
 
 -- JSON2 requires flat SST output even when append mode is enabled.
 create table json2_primary_key_format (

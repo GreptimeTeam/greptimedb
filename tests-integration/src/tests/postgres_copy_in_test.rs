@@ -316,6 +316,7 @@ async fn test_postgres_copy_in_failed_copy_then_new_copy() {
         Err(e) => e,
     };
     assert!(err.as_db_error().is_some(), "{err}");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // The connection is usable and a NEW copy succeeds on it.
     let rows = feed_copy_in(
@@ -516,6 +517,659 @@ async fn test_postgres_copy_in_empty_field_is_null() {
     assert_eq!(rows[1], (true, None));
     // Unquoted empty field: NULL.
     assert_eq!(rows[2], (true, None));
+
+    server.shutdown().await.unwrap();
+}
+
+/// `COPY FROM STDIN WITH (FORMAT influxdb)` ingests line protocol through
+/// the same pipeline as the HTTP influxdb write endpoint: lines route to
+/// their own measurements, tables are auto-created, and a batch behaves
+/// like an HTTP write of the same bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_line_protocol() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let payload = b"monitor,host=hosta cpu=66.6,memory=1024 1663840496100023100\n\
+                    monitor,host=hostb memory=1027 1663840496400340001\n\
+                    weather,location=us-midwest temperature=82 1663840496100023102\n";
+
+    // Feed byte-by-byte-ish: lines and UTF-8 may span CopyData chunks.
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        payload.chunks(7).map(Bytes::copy_from_slice).collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 3);
+
+    let messages = client
+        .simple_query("SELECT host, cpu, memory FROM monitor ORDER BY host")
+        .await
+        .unwrap();
+    let rows: Vec<(String, String, String)> = messages
+        .iter()
+        .filter_map(|m| {
+            let tokio_postgres::SimpleQueryMessage::Row(row) = m else {
+                return None;
+            };
+            Some((
+                row.get(0).unwrap_or("").to_string(),
+                row.get(1).unwrap_or("").to_string(),
+                row.get(2).unwrap_or("").to_string(),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("hosta".into(), "66.6".into(), "1024.0".into()),
+            ("hostb".into(), "".into(), "1027.0".into()),
+        ]
+    );
+
+    let messages = client
+        .simple_query("SELECT temperature FROM weather")
+        .await
+        .unwrap();
+    let temps: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(temps, vec!["82.0".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// The `precision` option carries the HTTP endpoint's semantics:
+/// nanosecond timestamps by default, other units on request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_precision() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb_prec").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb, precision 'ms')",
+        vec![Bytes::from_static(b"prec,host=h v=1 1465839830100\n")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT CAST(greptime_timestamp AS BIGINT) FROM prec")
+        .await
+        .unwrap();
+    let ts: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    // 1465839830100 ms == 1465839830100000000 ns
+    assert_eq!(ts.len(), 1);
+    let ts_ns: i64 = ts[0].parse().unwrap();
+    assert_eq!(ts_ns, 1465839830100000000);
+
+    server.shutdown().await.unwrap();
+}
+
+/// Records with newlines INSIDE quoted field values are one line-protocol
+/// record: the parser owns record boundaries, so a CopyData chunk boundary
+/// inside the quoted string — the case a naive line splitter breaks on —
+/// must not split it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_multiline_quoted_field() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb_ml").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // A record whose string field value contains a physical newline, and
+    // one with a backslash right before the newline (the parser skips the
+    // escaped newline; also not a record boundary).
+    let payload: Vec<u8> = b"mlog,host=a line=\"first\nsecond\" 100\n\
+                              mlog,host=b line=\"tail\\\nmore\" 200\n"
+        .to_vec();
+
+    // Split exactly on the internal newline of the first record: chunk 1
+    // ends after `first`, chunk 2 starts with the newline.
+    let split_at = payload.windows(6).position(|w| w == b"first\n").unwrap() + b"first".len();
+    let (head, tail) = payload.split_at(split_at);
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        vec![Bytes::copy_from_slice(head), Bytes::copy_from_slice(tail)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
+
+    let messages = client
+        .simple_query("SELECT line FROM mlog ORDER BY host")
+        .await
+        .unwrap();
+    let lines: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    // The quoted values keep their physical newlines: `first`, newline,
+    // `second`; and `tail`, backslash, newline, `more` (a backslash only
+    // escapes `\` and `"` in line-protocol strings, so it stays literal
+    // before the newline).
+    assert_eq!(
+        lines,
+        vec!["first\nsecond".to_string(), "tail\\\nmore".to_string()]
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+/// The payload is bounded by the HTTP write endpoints' own body limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_payload_limit() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb_cap").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // The HTTP write endpoints' default body limit (64 MiB) — kept in
+    // sync with servers::http::DEFAULT_BODY_LIMIT.
+    let limit = 64 * 1024 * 1024;
+    // Several chunks over the limit, none containing a record boundary.
+    let chunk = vec![b'x'; 1024 * 1024];
+    let mut sent = 0usize;
+    let mut sink = Box::pin(
+        client
+            .copy_in("COPY FROM STDIN WITH (FORMAT influxdb)")
+            .await
+            .unwrap(),
+    );
+    while sent <= limit {
+        sink.as_mut()
+            .send(Bytes::from(chunk.clone()))
+            .await
+            .unwrap();
+        sent += chunk.len();
+    }
+    // The cap fires mid-stream; the error surfaces when the copy
+    // completes (the sink buffers sends locally).
+    let error = sink
+        .as_mut()
+        .finish()
+        .await
+        .expect_err("expected the oversized payload to fail");
+    assert!(
+        error
+            .as_db_error()
+            .map(|d| d.message().contains("exceeds"))
+            .unwrap_or(false),
+        "unexpected error: {error}"
+    );
+
+    // The connection stays usable.
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+/// The regression for the retired line-splitter's failure mode: with
+/// 32,767 ordinary records plus a multiline quoted record whose first
+/// physical line lands exactly on the old 32,768-line flush threshold —
+/// and a CopyData chunk boundary at the quoted value's internal newline —
+/// the whole payload must still ingest as one request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_flush_threshold_multiline() {
+    init_default_ut_logging();
+    let (_guard, server) =
+        setup_pg_server(StorageType::File, "pg_copy_in_influxdb_threshold").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // 32,767 ordinary records, then a record whose quoted value spans
+    // three physical lines.
+    let mut head = String::new();
+    for i in 0..32_767 {
+        head.push_str(&format!(
+            "m,host=h{i} v={i} {}
+",
+            1_000 + i
+        ));
+    }
+    head.push_str("mlog,host=z line=\"first\nsecond\nthird\" 99999");
+    let tail = "
+"
+    .to_string();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        vec![
+            Bytes::from(head.into_bytes()),
+            Bytes::from(tail.into_bytes()),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 32_768);
+
+    let messages = client.simple_query("SELECT line FROM mlog").await.unwrap();
+    let lines: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, vec!["first\nsecond\nthird".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// Invalid UTF-8 fails the copy with a clear error and the connection
+/// stays usable; a trailing record without a newline is still ingested.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_invalid_utf8_and_trailing_record() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb_utf8").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // Trailing record without a newline: accepted.
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        vec![Bytes::from_static(b"m2,host=a v=7 300")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    // Invalid UTF-8: the copy fails, the connection stays usable.
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        vec![Bytes::from_static(b"m3 v=1 100\n\xff\xfe")],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .as_db_error()
+            .map(|d| d.message().contains("not valid UTF-8"))
+            .unwrap_or(false),
+        "unexpected error: {error}"
+    );
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+/// `COPY FROM STDIN WITH (FORMAT otlp)` ingests one binary OTLP
+/// ExportMetricsServiceRequest through the same pipeline as the OTLP/HTTP
+/// endpoint — and validates binary (format code 1) COPY support, including
+/// payloads split across CopyData chunks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_binary() {
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::any_value;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue};
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric,
+    };
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "copy_otlp_gauge".into(),
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: vec![
+                            NumberDataPoint {
+                                time_unix_nano: 1_700_000_000_000_000_000,
+                                value: Some(Value::AsDouble(1.5)),
+                                attributes: vec![KeyValue {
+                                    key: "host".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(any_value::Value::StringValue("a".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            },
+                            NumberDataPoint {
+                                time_unix_nano: 1_700_000_001_000_000_000,
+                                value: Some(Value::AsDouble(2.5)),
+                                attributes: vec![KeyValue {
+                                    key: "host".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(any_value::Value::StringValue("b".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            },
+                        ],
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = request.encode_to_vec();
+
+    // Feed the binary payload in small chunks: the message spans CopyData
+    // boundaries exactly like a large text payload would.
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp)",
+        body.chunks(9).map(Bytes::copy_from_slice).collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
+
+    let messages = client
+        .simple_query("SELECT host, greptime_value FROM copy_otlp_gauge ORDER BY host")
+        .await
+        .unwrap();
+    let rows: Vec<(String, String)> = messages
+        .iter()
+        .filter_map(|m| {
+            let tokio_postgres::SimpleQueryMessage::Row(row) = m else {
+                return None;
+            };
+            Some((
+                row.get(0).unwrap_or("").to_string(),
+                row.get(1).unwrap_or("").to_string(),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![("a".into(), "1.5".into()), ("b".into(), "2.5".into())]
+    );
+
+    // Garbage bytes fail the copy and the connection stays usable.
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp)",
+        vec![Bytes::from_static(b"\xff\xff\xff\xff")],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .as_db_error()
+            .map(|d| d.message().contains("invalid OTLP payload"))
+            .unwrap_or(false),
+        "unexpected error: {error}"
+    );
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+/// `COPY FROM STDIN WITH (FORMAT otlp, signal 'traces')` ingests one
+/// binary ExportTraceServiceRequest through the same pipeline as the
+/// OTLP/HTTP traces endpoint, honoring the trace-table-name option.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_traces() {
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use prost::Message;
+    use serde_json::json;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp_traces").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request: ExportTraceServiceRequest = serde_json::from_value(json!({
+        "resourceSpans": [{
+            "resource": {"attributes": [
+                {"key": "service.name", "value": {"stringValue": "copy-svc"}}
+            ]},
+            "scopeSpans": [{"spans": [{
+                "traceId": "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                "spanId": "9630f2916e2f7909",
+                "name": "copy-op",
+                "kind": 2,
+                "startTimeUnixNano": "1736480942444376000",
+                "endTimeUnixNano": "1736480942444499000"
+            }]}]
+        }]
+    }))
+    .unwrap();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp, signal 'traces', table_name 'copy_traces', pipeline_name 'greptime_trace_v2')",
+        vec![Bytes::from(request.encode_to_vec())],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT count(*) FROM copy_traces WHERE service_name = 'copy-svc'")
+        .await
+        .unwrap();
+    let count: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(count, vec!["1".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// `COPY FROM STDIN WITH (FORMAT otlp, signal 'logs')` ingests one
+/// binary ExportLogsServiceRequest through the same pipeline as the
+/// OTLP/HTTP logs endpoint, with the default log table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_logs() {
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use prost::Message;
+    use serde_json::json;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp_logs").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request: ExportLogsServiceRequest = serde_json::from_value(json!({
+        "resourceLogs": [{
+            "resource": {"attributes": []},
+            "scopeLogs": [{"logRecords": [{
+                "timeUnixNano": "1736413568497632000",
+                "severityNumber": 9,
+                "severityText": "Info",
+                "body": {"stringValue": "copied via postgres"},
+                "traceId": "f665100a612542b69cc362fe2ae9d3bf",
+                "spanId": "e58f01c4c69f4488"
+            }]}]
+        }]
+    }))
+    .unwrap();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp, signal 'logs')",
+        vec![Bytes::from(request.encode_to_vec())],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT count(*) FROM opentelemetry_logs WHERE body = 'copied via postgres'")
+        .await
+        .unwrap();
+    let count: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(count, vec!["1".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// A metrics COPY honors the header-equivalent options: promoting all
+/// resource attributes adds them as columns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_metrics_options() {
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp_mopts").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![otel_arrow_rust::proto::opentelemetry::metrics::v1::ResourceMetrics {
+            resource: Some(otel_arrow_rust::proto::opentelemetry::resource::v1::Resource {
+                attributes: vec![otel_arrow_rust::proto::opentelemetry::common::v1::KeyValue {
+                    key: "deployment.environment".into(),
+                    value: Some(otel_arrow_rust::proto::opentelemetry::common::v1::AnyValue {
+                        value: Some(
+                            otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value::StringValue("prod".into()),
+                        ),
+                    }),
+                }],
+                ..Default::default()
+            }),
+            scope_metrics: vec![otel_arrow_rust::proto::opentelemetry::metrics::v1::ScopeMetrics {
+                metrics: vec![otel_arrow_rust::proto::opentelemetry::metrics::v1::Metric {
+                    name: "copy_opt_gauge".into(),
+                    data: Some(otel_arrow_rust::proto::opentelemetry::metrics::v1::metric::Data::Gauge(
+                        otel_arrow_rust::proto::opentelemetry::metrics::v1::Gauge {
+                            data_points: vec![otel_arrow_rust::proto::opentelemetry::metrics::v1::NumberDataPoint {
+                                time_unix_nano: 1_700_000_000_000_000_000,
+                                value: Some(otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value::AsDouble(42.0)),
+                                ..Default::default()
+                            }],
+                        },
+                    )),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp, signal 'metrics', promote_all_resource_attrs)",
+        vec![Bytes::from(request.encode_to_vec())],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT count(*) FROM copy_opt_gauge WHERE deployment_environment = 'prod'")
+        .await
+        .unwrap();
+    let count: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(count, vec!["1".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// A payload whose data points are all rejected fails the copy with the
+/// pipeline's reason — the same failure semantics as the HTTP route —
+/// and the connection stays usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_all_rejected() {
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        AggregationTemporality, Histogram, HistogramDataPoint, Metric, ResourceMetrics,
+        ScopeMetrics, metric,
+    };
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp_rej").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // A delta histogram cannot be stored as-is: its single point is
+    // rejected — the same trigger the OTLP suite uses for the HTTP
+    // route's failure outcome.
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "copy_rejected_histogram".into(),
+                    data: Some(metric::Data::Histogram(Histogram {
+                        data_points: vec![HistogramDataPoint {
+                            count: 1,
+                            bucket_counts: vec![1],
+                            explicit_bounds: vec![1.0, 2.0],
+                            ..Default::default()
+                        }],
+                        aggregation_temporality: AggregationTemporality::Delta as i32,
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp)",
+        vec![Bytes::from(request.encode_to_vec())],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .as_db_error()
+            .map(|d| d.message().contains("rejected all"))
+            .unwrap_or(false),
+        "unexpected error: {error}"
+    );
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
 
     server.shutdown().await.unwrap();
 }

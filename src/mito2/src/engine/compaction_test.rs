@@ -2890,16 +2890,29 @@ async fn test_worker_shutdown_fails_picking_waiter() {
 
 #[tokio::test]
 async fn test_compaction_region() {
-    test_compaction_region_with_format(false).await;
-    test_compaction_region_with_format(true).await;
+    for (engine_parallelism, table_parallelism) in [
+        (1, None),
+        (4, None),
+        (1, Some(4)),
+        (4, Some(1)),
+        (1, Some(usize::MAX)),
+    ] {
+        test_compaction_region_with_format(false, engine_parallelism, table_parallelism).await;
+        test_compaction_region_with_format(true, engine_parallelism, table_parallelism).await;
+    }
 }
 
-async fn test_compaction_region_with_format(flat_format: bool) {
+async fn test_compaction_region_with_format(
+    flat_format: bool,
+    output_parallelism: usize,
+    table_parallelism: Option<usize>,
+) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
             default_flat_format: flat_format,
+            experimental_compaction_output_parallelism: output_parallelism,
             ..Default::default()
         })
         .await;
@@ -2916,10 +2929,16 @@ async fn test_compaction_region_with_format(flat_format: bool) {
         )
         .await;
 
-    let request = CreateRequestBuilder::new()
+    let mut builder = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("experimental_sst_float_field_encoding", "byte_stream_split")
-        .build();
+        .insert_option("experimental_sst_float_field_encoding", "byte_stream_split");
+    if let Some(parallelism) = table_parallelism {
+        builder = builder.insert_option(
+            "compaction.experimental_output_parallelism",
+            &parallelism.to_string(),
+        );
+    }
+    let request = builder.build();
 
     let column_schemas = request
         .column_metadatas

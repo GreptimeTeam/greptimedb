@@ -27,7 +27,8 @@ use api::v1::{
 use async_stream::try_stream;
 use async_trait::async_trait;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTargets,
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTarget,
+    PermissionTableTargets,
 };
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
@@ -66,20 +67,6 @@ impl GrpcQueryHandler for Instance {
         request: Request,
         ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        #[cfg(feature = "enterprise")]
-        if let Some(command) = ctx
-            .extension(common_grpc::flow_write::COMMAND_KEY)
-            .map(str::to_string)
-        {
-            if ctx.channel() != session::context::Channel::Internal {
-                return Err(server_error::Error::InvalidQuery {
-                    reason: "flow write commands are only accepted on the internal channel".into(),
-                    location: snafu::Location::new(file!(), line!(), column!()),
-                });
-            }
-            return self.handle_flow_write_request(request, ctx, command).await;
-        }
-
         let result: Result<Output> = async {
             let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
             let interceptor = interceptor_ref.as_ref();
@@ -99,6 +86,20 @@ impl GrpcQueryHandler for Instance {
                         Some(&ctx.current_schema()),
                     )
                     .context(PermissionSnafu)?;
+
+                if let Some(checker) = self.plugins.get::<PermissionCheckerRef>()
+                    && checker.uses_table_targets()
+                {
+                    let targets = checker.grpc_table_targets(
+                        &request,
+                        ctx.current_catalog(),
+                        &ctx.current_schema(),
+                    );
+                    let targets = self.resolve_query_permission_targets(targets, &ctx)
+                        .await.map_err(BoxedError::new).context(ExternalSnafu)?;
+                    self.check_table_permission(&ctx, PermissionReq::GrpcRequest(&request), targets)
+                        .context(PermissionSnafu)?;
+                }
             }
 
             let output = match request {
@@ -452,6 +453,23 @@ impl Instance {
                         .with_context(|| TableNotFoundSnafu {
                             table_name: table_name.to_string(),
                         })?;
+
+                    let target = PermissionTableTarget::new(
+                        &table_name.catalog_name,
+                        &table_name.schema_name,
+                        &table_name.table_name,
+                    )
+                    .with_physical_metric_table(table.table_info().is_physical_table());
+                    plugins.get::<PermissionCheckerRef>().as_ref()
+                        .check_permission_with_table_targets(
+                            ctx.current_user(),
+                            PermissionReq::BulkInsert {
+                                catalog: &table_name.catalog_name,
+                                schema: &table_name.schema_name,
+                                table: &table_name.table_name,
+                            },
+                            PermissionTableTargets::resolved(vec![target]),
+                        ).context(PermissionSnafu)?;
 
                     // Check permissions for the table
                     let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();

@@ -27,10 +27,11 @@ pub(crate) mod v2;
 pub mod validation;
 
 use bytes::Bytes;
+use common_error::ext::BoxedError;
 use common_memory_manager::MemoryGuard;
 use lazy_static::lazy_static;
 use object_pool::Pool;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 
 use crate::error;
 use crate::prom_remote_write::decode::{PromSeriesProcessor, PromWriteRequest};
@@ -70,12 +71,25 @@ pub(crate) async fn decompress_remote_write_body(
     is_zstd: bool,
     body: &[u8],
     limiter: &ServerMemoryLimiter,
+    body_reserved_bytes: u64,
 ) -> crate::error::Result<ChargedBuffer> {
     let decompress = |is_zstd: bool| async move {
         if is_zstd {
-            zstd_decompress_limited(body, MAX_DECOMPRESSED_REQUEST_SIZE, limiter).await
+            zstd_decompress_limited(
+                body,
+                MAX_DECOMPRESSED_REQUEST_SIZE,
+                limiter,
+                body_reserved_bytes,
+            )
+            .await
         } else {
-            snappy_decompress_limited(body, MAX_DECOMPRESSED_REQUEST_SIZE, limiter).await
+            snappy_decompress_limited(
+                body,
+                MAX_DECOMPRESSED_REQUEST_SIZE,
+                limiter,
+                body_reserved_bytes,
+            )
+            .await
         }
     };
 
@@ -112,7 +126,7 @@ pub async fn decode_remote_write_request(
     // Holds the memory permits for the decompressed bytes; the caller must
     // keep them alive as long as the returned `TablesBuilder`, which retains
     // the decompressed buffer as its raw data.
-    let buf = decompress_remote_write_body(is_zstd, &body[..], limiter).await?;
+    let buf = decompress_remote_write_body(is_zstd, &body[..], limiter, 0).await?;
     // Decompression copied the payload out, so the compressed body is no longer needed.
     drop(body);
     let (data, guards) = buf.into_parts();
@@ -123,4 +137,15 @@ pub async fn decode_remote_write_request(
         .context(error::DecodePromRemoteRequestSnafu)?;
     let tables = std::mem::take(&mut request.table_data);
     Ok((tables, guards))
+}
+
+/// Maps memory wait timeouts to 5xx responses so Remote Write senders retry.
+pub(crate) fn map_memory_acquire_timeout(error: error::Error) -> error::Error {
+    match error {
+        error::Error::MemoryLimitExceeded {
+            source: source @ common_memory_manager::Error::MemoryAcquireTimeout { .. },
+            ..
+        } => error::OtherSnafu.into_error(BoxedError::new(source)),
+        error => error,
+    }
 }

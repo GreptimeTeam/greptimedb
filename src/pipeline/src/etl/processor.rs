@@ -25,6 +25,7 @@ pub mod join;
 pub mod json_parse;
 pub mod json_path;
 pub mod letter;
+pub mod logfmt;
 pub mod regex;
 pub mod select;
 pub mod simple_extract;
@@ -45,6 +46,7 @@ use gsub::GsubProcessor;
 use join::JoinProcessor;
 use json_path::JsonPathProcessor;
 use letter::LetterProcessor;
+use logfmt::LogfmtProcessor;
 use regex::RegexProcessor;
 use snafu::{OptionExt, ResultExt};
 use urlencoding::UrlEncodingProcessor;
@@ -143,6 +145,7 @@ pub enum ProcessorKind {
     Date(DateProcessor),
     JsonPath(JsonPathProcessor),
     JsonParse(JsonParseProcessor),
+    Logfmt(LogfmtProcessor),
     SimpleJsonPath(SimpleExtractProcessor),
     Decolorize(DecolorizeProcessor),
     Digest(DigestProcessor),
@@ -226,6 +229,7 @@ fn parse_processor(doc: &yaml_rust::Yaml, allow_vrl_host_access: bool) -> Result
         json_parse::PROCESSOR_JSON_PARSE => {
             ProcessorKind::JsonParse(JsonParseProcessor::try_from(value)?)
         }
+        logfmt::PROCESSOR_LOGFMT => ProcessorKind::Logfmt(LogfmtProcessor::try_from(value)?),
         vrl_processor::PROCESSOR_VRL => {
             ProcessorKind::Vrl(VrlProcessor::from_yaml(value, allow_vrl_host_access)?)
         }

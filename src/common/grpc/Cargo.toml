@@ -7,9 +7,6 @@ license.workspace = true
 [lints]
 workspace = true
 
-[features]
-enterprise = []
-
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true
@@ -35,7 +32,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tower.workspace = true
-uuid.workspace = true
 vec1 = "1.12"
 
 [dev-dependencies]

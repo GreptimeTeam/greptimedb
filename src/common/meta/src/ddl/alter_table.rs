@@ -150,8 +150,6 @@ impl AlterTableProcedure {
         )?;
         self.new_table_info = Some(new_table_info);
 
-        // Reject schema changes that the persisted partition expressions of some
-        // region cannot survive, before any region is altered.
         self.validate_region_partition_exprs().await?;
 
         // Safety: Checked in `AlterTableProcedure::new`.
@@ -248,9 +246,8 @@ impl AlterTableProcedure {
         Ok(Status::executing(true))
     }
 
-    /// Validates the persisted partition expressions of every region against the
-    /// schema proposed by this ALTER TABLE, so an ALTER that would break a region's
-    /// partition predicate is rejected before any region is modified.
+    /// Rejects type changes the persisted partition expressions can't take, before
+    /// any region is altered.
     async fn validate_region_partition_exprs(&self) -> Result<()> {
         // Safety: filled in `fill_table_info`.
         let old_schema = &self
@@ -275,8 +272,7 @@ impl AlterTableProcedure {
             .get_physical_table_route(self.data.table_id())
             .await?;
         if physical_table_id != self.data.table_id() {
-            // Partition expressions are persisted on the regions of the physical
-            // table; the altered schema here belongs to a logical table.
+            // Partition expressions live on the physical table's regions.
             return Ok(());
         }
 

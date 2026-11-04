@@ -15,11 +15,6 @@ headerPath = "licenses/enterprise-header.txt"
 # with the "# enterprise" block in `licenserc.toml`'s `excludes` — both are
 # enforced by `make check-enterprise-license`.
 includes = [
-    "src/common/grpc/src/flow_write.rs",
-    "src/frontend/src/instance/flow_write.rs",
-    "src/datanode/src/region_server/flow_write.rs",
-    "src/operator/src/insert/flow_write.rs",
-    "src/flow/src/batching_mode/frontend_client/flow_write.rs",
     "src/common/meta/src/rpc/ddl/trigger.rs",
     "src/operator/src/expr_helper/trigger.rs",
     "src/sql/src/statements/alter/trigger.rs",

@@ -180,6 +180,18 @@ jobs:
           esac
         fi
         python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$instance_type"
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Validate budgets and shared runtime
       id: runtime
       run: |
@@ -314,6 +326,18 @@ jobs:
         ref: ${{ env.RESOLVED_O11YBENCH_REF }}
         path: o11ybench
         persist-credentials: false
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Check runner and runtime identity
       id: runtime
       run: |

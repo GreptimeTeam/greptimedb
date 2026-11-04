@@ -280,6 +280,23 @@ pub fn as_skipping_index_type(skipping_index_type: PbSkippingIndexType) -> Skipp
     }
 }
 
+/// Validates skipping options received for a JSON2 type hint.
+pub fn json_skipping_options_from_proto(
+    options: crate::v1::JsonSkippingIndexOptions,
+) -> datatypes::error::Result<SkippingIndexOptions> {
+    let index_type = PbSkippingIndexType::try_from(options.index_type).map_err(|_| {
+        datatypes::error::InvalidSkippingIndexOptionSnafu {
+            msg: format!("Unknown skipping index type: {}", options.index_type),
+        }
+        .build()
+    })?;
+    SkippingIndexOptions::new(
+        options.granularity,
+        options.false_positive_rate,
+        as_skipping_index_type(index_type),
+    )
+}
+
 #[cfg(test)]
 mod tests {
 
