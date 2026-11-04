@@ -305,7 +305,22 @@ fn rows(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, i64, f64)> {
                     panic!("expected float");
                 };
                 (
-                    chunk.primary_key.to_vec(),
+                    {
+                        let key = if chunk.metric.is_some() {
+                            &chunk.primary_key.as_slice()[8..]
+                        } else {
+                            chunk.primary_key.as_slice()
+                        };
+                        let (table, tsid) =
+                            mito_codec::row_converter::SparsePrimaryKeyCodec::schemaless()
+                                .decode_ids(key)
+                                .unwrap();
+                        [
+                            table.to_be_bytes().as_slice(),
+                            tsid.to_be_bytes().as_slice(),
+                        ]
+                        .concat()
+                    },
                     chunk.time.timestamp(i).unwrap(),
                     value,
                 )
@@ -415,6 +430,13 @@ async fn prepared_sources_share_discovery_and_read_independently() {
             .any(|(p, _)| p.ends_with(".samples"))
     );
     let left = source.read_series(0..2).unwrap();
+    assert!(left.label_decode_spec().is_none());
+    assert!(same_labels(left.label_source(), &binding));
+    for ordinal in 0..source.num_series() {
+        let info = source.series_info(ordinal).unwrap();
+        assert_eq!(info.primary_key, prepared.candidates[ordinal].key);
+        assert_eq!(info.metric, prepared.candidates[ordinal].metric);
+    }
     let right = source.read_series(0..2).unwrap();
     assert!(
         !reads
@@ -424,7 +446,18 @@ async fn prepared_sources_share_discovery_and_read_independently() {
             .any(|(p, _)| p.ends_with(".samples"))
     );
     let (left, right) = tokio::join!(left.try_collect::<Vec<_>>(), right.try_collect::<Vec<_>>());
-    let expected = rows(&left.unwrap());
+    let left = left.unwrap();
+    let mut decoder = mito_codec::labels::PrimaryKeyLabelDecoder::from_decode_spec(
+        &common_query::series_frame::label_decode_spec(&legacy_binding).unwrap(),
+    )
+    .unwrap();
+    for (actual, expected) in left.iter().zip(&oracle) {
+        assert_eq!(
+            actual.metric.as_ref().unwrap(),
+            &decoder.decode(expected.primary_key.as_slice()).unwrap()
+        );
+    }
+    let expected = rows(&left);
     assert_eq!(rows(&oracle), expected);
     assert_eq!(expected, rows(&right.unwrap()));
     assert_eq!(

@@ -166,21 +166,26 @@ impl RawSeriesStream for RawStream {
     }
 }
 
-/// Restores the label-bearing key after an identity-only merge has established
-/// ordering and finality. The resolver must preserve identity and key ordering.
-pub(crate) fn with_primary_keys(
+/// Attaches shared labels after the identity-only merge establishes ordering and finality.
+/// The resolver must preserve identity and key ordering; output keys are opaque identities.
+pub(crate) fn with_series_labels(
     stream: SendableRawSeriesStream,
-    resolve: impl Fn(Buffer) -> Result<Buffer, BoxedError> + Send + Sync + 'static,
+    resolve: impl Fn(Buffer) -> Result<(Buffer, datatypes::series::SeriesLabels), BoxedError>
+    + Send
+    + Sync
+    + 'static,
 ) -> SendableRawSeriesStream {
     Box::pin(RawStream {
         schema: stream.schema().clone(),
         label_source: stream.label_source().clone(),
-        label_decode_spec: stream.label_decode_spec().cloned(),
+        label_decode_spec: None,
         ordering: stream.ordering(),
         inner: Box::pin(stream.and_then(move |mut chunk| {
             let key = resolve(chunk.primary_key.clone());
             async move {
-                chunk.primary_key = key?;
+                let (key, labels) = key?;
+                chunk.primary_key = key;
+                chunk.metric = Some(labels);
                 Ok(chunk)
             }
         })),
@@ -504,11 +509,16 @@ pub(crate) fn from_stream(
     schema: Arc<SeriesSchema>,
     label_source: RawLabelSource,
     ordering: SeriesOrdering,
+    explicit_labels: bool,
     inner: BoxStream<'static, Result<RawSeriesChunk, BoxedError>>,
 ) -> SendableRawSeriesStream {
     Box::pin(RawStream {
         schema,
-        label_decode_spec: label_decode_spec(&label_source),
+        label_decode_spec: if explicit_labels {
+            None
+        } else {
+            label_decode_spec(&label_source)
+        },
         label_source,
         ordering,
         inner,

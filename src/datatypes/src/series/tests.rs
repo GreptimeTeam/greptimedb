@@ -64,10 +64,10 @@ fn metric_name_edits_retain_shared_labels_and_labels_are_copy_on_write() {
     )
     .unwrap();
     let sibling = metric.clone();
-    assert!(Arc::ptr_eq(&metric.tags, &sibling.tags));
+    assert!(std::ptr::eq(metric.tags(), sibling.tags()));
 
     metric.set("__name__", Arc::from("memory")).unwrap();
-    assert!(Arc::ptr_eq(&metric.tags, &sibling.tags));
+    assert!(std::ptr::eq(metric.tags(), sibling.tags()));
     assert_eq!(sibling.name(), Some("cpu"));
 
     metric.set("host", Arc::from("b")).unwrap();
@@ -107,4 +107,42 @@ fn keep_only_and_remove_all_handle_metric_name_and_ordinary_labels() {
     assert_eq!(metric.get("zone"), Some("west"));
     metric.remove_all(&["zone"]);
     assert!(metric.tags().is_empty());
+}
+
+#[test]
+fn batch_labels_borrow_values_and_retain_owner() {
+    use super::{LabelStorage, SeriesLabelBatch};
+    use arrow::array::{ArrayRef, StringArray};
+    use arrow::record_batch::RecordBatch;
+    let owner = Arc::new(());
+    let weak = Arc::downgrade(&owner);
+    let batch = RecordBatch::try_from_iter(vec![(
+        "host",
+        Arc::new(StringArray::from(vec![Some(""), None, Some("node")])) as ArrayRef,
+    )])
+    .unwrap();
+    let batch =
+        Arc::new(SeriesLabelBatch::try_new(batch, vec![(Arc::from("host"), 0)], owner).unwrap());
+    let empty = SeriesLabels::from_batch(Some(Arc::from("cpu")), batch.clone(), 0).unwrap();
+    let absent = SeriesLabels::from_batch(None, batch.clone(), 1).unwrap();
+    assert!(SeriesLabels::from_batch(None, batch.clone(), 3).is_err());
+    assert_eq!(empty.get("host"), Some(""));
+    assert_eq!(absent.get("host"), None);
+    let LabelStorage::Batch(view) = &empty.tags else {
+        panic!("expected row view")
+    };
+    assert!(view.materialized.get().is_none());
+    let mut clone = empty.clone();
+    clone.set("host", Arc::from("other")).unwrap();
+    assert_eq!(empty.get("host"), Some(""));
+    assert_eq!(clone.get("host"), Some("other"));
+    assert_eq!(
+        empty,
+        SeriesLabels::try_new(Some(Arc::from("cpu")), vec![label("host", "")]).unwrap()
+    );
+    drop(batch);
+    drop(absent);
+    assert!(weak.upgrade().is_some());
+    drop(empty);
+    assert!(weak.upgrade().is_none());
 }

@@ -35,7 +35,7 @@ use datatypes::arrow::buffer::{Buffer, OffsetBuffer};
 use datatypes::arrow::compute::{cast, filter_record_batch};
 use datatypes::arrow::datatypes::{Schema, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::series::SeriesOrdering;
+use datatypes::series::{SeriesLabelBatch, SeriesLabels, SeriesOrdering};
 use datatypes::value::{Value, ValueRef};
 use futures::TryStreamExt;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
@@ -284,6 +284,8 @@ struct Candidate {
     key: Buffer,
     merge_key: Buffer,
     tags: HashMap<u32, Option<String>>,
+    metric: Option<SeriesLabels>,
+    metadata_row: Option<(Arc<RecordBatch>, usize)>,
 }
 
 struct ColumnarPreparedSource {
@@ -351,6 +353,13 @@ impl ColumnarPreparedSource {
             .insert("prepare_series_indexes", indexes.len() as u64);
         let reservation =
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
+        let started = Instant::now();
+        let mut raw = raw;
+        let sample_schema = sample_merge_schema(&context, &mut raw)?;
+        preparation_metrics.add_elapsed("columnar_prepare_schema", started.elapsed());
+        preparation_metrics.bytes.insert("prepare_encoded_keys", 0);
+        preparation_metrics.counts.insert("prepare_batch_series", 0);
+        let direct_labels = sample_schema.is_some();
         let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
         for id in indexes {
             let started = Instant::now();
@@ -453,45 +462,98 @@ impl ColumnarPreparedSource {
                         Ok((*id, strings))
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let shared_batch = Arc::new(batch.clone());
+                let label_batch = if direct_labels {
+                    let RawLabelSource::PrimaryKey { logical_tags, .. } = &labels else {
+                        return Err(invalid("expected bound labels"));
+                    };
+                    let columns = logical_tags
+                        .iter()
+                        .map(|tag| {
+                            let name = tags
+                                .iter()
+                                .find(|(id, _)| *id == tag.column_id)
+                                .ok_or_else(|| invalid("missing bound tag"))?;
+                            Ok((
+                                tag.name.clone(),
+                                batch
+                                    .schema()
+                                    .index_of(&name.1)
+                                    .map_err(|e| invalid(e.to_string()))?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let owner = MemoryConsumer::new("ColumnarSeriesLabelBatch")
+                        .register(&input.scan_memory_pool);
+                    owner
+                        .try_grow(
+                            2 * batch.get_array_memory_size()
+                                + batch.num_rows()
+                                    * (128
+                                        + columns.len()
+                                            * std::mem::size_of::<datatypes::series::Label>()),
+                        )
+                        .map_err(|e| invalid(e.to_string()))?;
+                    Some(Arc::new(
+                        SeriesLabelBatch::try_new(batch.clone(), columns, Arc::new(owner))
+                            .map_err(|e| invalid(e.to_string()))?,
+                    ))
+                } else {
+                    None
+                };
                 for row in 0..batch.num_rows() {
                     let id = MetricSeriesId {
                         table_id: table.value(row),
                         tsid: tsid.value(row),
                     };
-                    // TODO(yingwen): Separate raw-series identity from label representation.
-                    // The PoC formats assume (table_id, tsid) uniqueness; encode once at
-                    // this adapter boundary until RawSeriesChunk no longer needs sparse keys.
+                    // The flat merger still needs the compact sparse ID prefix.
+                    // Explicit-label chunks use a region-qualified identity below.
                     let mut key = Vec::new();
                     let codec = SparsePrimaryKeyCodec::schemaless();
                     codec
                         .encode_internal(id.table_id, id.tsid, &mut key)
                         .map_err(|e| invalid(e.to_string()))?;
                     let merge_key_len = key.len();
-                    codec
-                        .encode_to_vec(
-                            tag_arrays.iter().map(|(id, strings)| {
-                                (
-                                    *id,
-                                    if strings.is_null(row) {
-                                        ValueRef::Null
-                                    } else {
-                                        ValueRef::String(strings.value(row))
-                                    },
-                                )
-                            }),
-                            &mut key,
-                        )
-                        .map_err(|e| invalid(e.to_string()))?;
-                    *preparation_metrics
-                        .bytes
-                        .entry("prepare_encoded_keys")
-                        .or_default() += key.len() as u64;
+                    if !direct_labels {
+                        codec
+                            .encode_to_vec(
+                                tag_arrays.iter().map(|(id, strings)| {
+                                    (
+                                        *id,
+                                        if strings.is_null(row) {
+                                            ValueRef::Null
+                                        } else {
+                                            ValueRef::String(strings.value(row))
+                                        },
+                                    )
+                                }),
+                                &mut key,
+                            )
+                            .map_err(|e| invalid(e.to_string()))?;
+                        *preparation_metrics
+                            .bytes
+                            .entry("prepare_encoded_keys")
+                            .or_default() += key.len() as u64;
+                    }
                     if let Some(previous) = candidates.get(&id) {
                         *preparation_metrics
                             .counts
                             .entry("prepare_duplicate_rows")
                             .or_default() += 1;
-                        if previous.key.as_slice() != key.as_slice() {
+                        let conflict = if let Some((previous_batch, previous_row)) = &previous.metadata_row {
+                            let mut conflict = false;
+                            for ((_, current), (_, name)) in tag_arrays.iter().zip(tags.iter()) {
+                                let previous = previous_batch.column_by_name(name)
+                                    .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+                                    .ok_or_else(|| invalid("incompatible duplicate label metadata"))?;
+                                conflict |= previous.is_null(*previous_row) != current.is_null(row)
+                                    || (!current.is_null(row) && previous.value(*previous_row) != current.value(row));
+                            }
+                            conflict
+                        } else {
+                            previous.key.as_slice() != key.as_slice()
+                        };
+                        if conflict {
                             return Err(invalid(
                                 "conflicting labels for the same table ID and TSID",
                             ));
@@ -500,12 +562,15 @@ impl ColumnarPreparedSource {
                     }
                     // Encode borrowed Arrow strings first. Duplicate identities still undergo
                     // the full label-conflict check, without allocating another owned tag map.
-                    let mut values = HashMap::with_capacity(tag_arrays.len());
-                    for (column_id, strings) in &tag_arrays {
-                        values.insert(
-                            *column_id,
-                            (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
-                        );
+                    let mut values = HashMap::new();
+                    if !direct_labels {
+                        values.reserve(tag_arrays.len());
+                        for (column_id, strings) in &tag_arrays {
+                            values.insert(
+                                *column_id,
+                                (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
+                            );
+                        }
                     }
                     *preparation_metrics
                         .counts
@@ -519,8 +584,33 @@ impl ColumnarPreparedSource {
                     reservation
                         .try_grow(bytes)
                         .map_err(|e| invalid(e.to_string()))?;
-                    let key = Buffer::from(key);
-                    let merge_key = key.slice_with_length(0, merge_key_len);
+                    let merge_key = Buffer::from(key[..merge_key_len].to_vec());
+                    let metric = if let Some(label_batch) = &label_batch {
+                        *preparation_metrics
+                            .counts
+                            .entry("prepare_batch_series")
+                            .or_default() += 1;
+                        let RawLabelSource::PrimaryKey { metric_name, .. } = &labels else {
+                            return Err(invalid("expected bound labels"));
+                        };
+                        Some(
+                            SeriesLabels::from_batch(
+                                Some(metric_name.clone()),
+                                label_batch.clone(),
+                                row,
+                            )
+                            .map_err(|e| invalid(e.to_string()))?,
+                        )
+                    } else {
+                        None
+                    };
+                    let key = if direct_labels {
+                        let mut identity = metadata.region_id.as_u64().to_be_bytes().to_vec();
+                        identity.extend_from_slice(&key);
+                        Buffer::from(identity)
+                    } else {
+                        Buffer::from(key)
+                    };
                     candidates.insert(
                         id,
                         Candidate {
@@ -528,6 +618,8 @@ impl ColumnarPreparedSource {
                             key,
                             merge_key,
                             tags: values,
+                            metric,
+                            metadata_row: direct_labels.then(|| (shared_batch.clone(), row)),
                         },
                     );
                 }
@@ -541,10 +633,6 @@ impl ColumnarPreparedSource {
         let mut candidates: Vec<_> = candidates.into_values().collect();
         candidates.sort_unstable_by(|a, b| a.key.as_slice().cmp(b.key.as_slice()));
         preparation_metrics.add_elapsed("columnar_prepare_sort", started.elapsed());
-        let started = Instant::now();
-        let mut raw = raw;
-        let sample_schema = sample_merge_schema(&context, &mut raw)?;
-        preparation_metrics.add_elapsed("columnar_prepare_schema", started.elapsed());
         Ok(Self {
             context,
             labels,
@@ -572,7 +660,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
             .ok_or_else(|| BoxedError::new(invalid("series ordinal out of bounds")))?;
         Ok(SeriesInfo {
             primary_key: candidate.key.clone(),
-            metric: None,
+            metric: candidate.metric.clone(),
         })
     }
     fn read_series(
@@ -674,13 +762,19 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
         }
         let candidates = self.candidates.clone();
         let reservation = self.reservation.clone();
-        Ok(raw::with_primary_keys(stream, move |key| {
+        Ok(raw::with_series_labels(stream, move |key| {
             // The resolver can outlive the exhausted sample stream.
             let _reservation = &reservation;
             let ordinal = candidates
                 .binary_search_by(|candidate| candidate.merge_key.as_slice().cmp(key.as_slice()))
                 .map_err(|_| BoxedError::new(invalid("unknown merged series identity")))?;
-            Ok(candidates[ordinal].key.clone())
+            Ok((
+                candidates[ordinal].key.clone(),
+                candidates[ordinal]
+                    .metric
+                    .clone()
+                    .ok_or_else(|| BoxedError::new(invalid("identity merge is missing labels")))?,
+            ))
         }))
     }
 }
@@ -688,7 +782,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
 /// Omits tags only when every predicate is enforced either on the series index
 /// or on sample columns. Conjunctions can be separated; mixed disjunctions
 /// retain the ordinary flat adapter.
-fn sample_merge_schema(
+pub(crate) fn sample_merge_schema(
     context: &StreamContext,
     raw: &mut RawScanPreparation,
 ) -> Result<Option<SchemaRef>> {

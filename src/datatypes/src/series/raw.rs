@@ -94,7 +94,9 @@ impl RawTimestamps {
 /// [`RawSeriesChunk::try_new`]; callers crossing a trust boundary must validate input.
 #[derive(Clone, Debug)]
 pub struct RawSeriesChunk {
-    /// Complete encoded identity of the source series, not a TSID or hash alone.
+    /// Complete identity of the source series, not a TSID or hash alone.
+    /// With explicit labels this may be an opaque domain-qualified identity; only
+    /// a stream declaring a label decode specification requires a label-bearing key.
     pub primary_key: Buffer,
     /// `None` denotes an encoded key under bound-label mode; `Some` contains complete
     /// explicit labels and retains their identity.
