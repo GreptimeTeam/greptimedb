@@ -66,13 +66,16 @@ impl Timezone {
     /// Compute timezone from given offset hours and minutes
     /// Return `Err` if given offset exceeds scope
     pub fn hours_mins_opt(offset_hours: i32, offset_mins: u32) -> Result<Self> {
-        let offset_secs = if offset_hours > 0 {
-            offset_hours * 3600 + offset_mins as i32 * 60
-        } else {
-            offset_hours * 3600 - offset_mins as i32 * 60
-        };
+        Self::hours_mins_with_sign(offset_hours, offset_mins, offset_hours < 0)
+    }
 
-        FixedOffset::east_opt(offset_secs)
+    fn hours_mins_with_sign(offset_hours: i32, offset_mins: u32, negative: bool) -> Result<Self> {
+        let minutes = i64::from(offset_mins) * 60;
+        let seconds = i64::from(offset_hours) * 3600 + if negative { -minutes } else { minutes };
+        i32::try_from(seconds)
+            .ok()
+            .filter(|_| offset_mins < 60)
+            .and_then(FixedOffset::east_opt)
             .map(Self::Offset)
             .context(InvalidTimezoneOffsetSnafu {
                 hours: offset_hours,
@@ -94,13 +97,14 @@ impl Timezone {
         if tz_string.eq_ignore_ascii_case("SYSTEM") {
             Ok(Timezone::Named(find_tz_from_env().unwrap_or(Tz::UTC)))
         } else if let Some((hrs, mins)) = tz_string.split_once(':') {
+            let negative = hrs.starts_with('-');
             let hrs = hrs
                 .parse::<i32>()
                 .context(ParseOffsetStrSnafu { raw: tz_string })?;
             let mins = mins
                 .parse::<u32>()
                 .context(ParseOffsetStrSnafu { raw: tz_string })?;
-            Self::hours_mins_opt(hrs, mins)
+            Self::hours_mins_with_sign(hrs, mins, negative)
         } else if let Ok(tz) = Tz::from_str_insensitive(tz_string) {
             Ok(Self::Named(tz))
         } else {
@@ -226,6 +230,50 @@ mod tests {
         assert!(Timezone::from_tz_string(":::::").is_err());
         assert!(Timezone::from_tz_string("Asia/London").is_err());
         assert!(Timezone::from_tz_string("Unknown").is_err());
+    }
+
+    #[test]
+    fn test_zero_hour_offsets_and_invalid_values() {
+        for input in ["+00:30", "00:30", "+0:30", "0:30"] {
+            assert_eq!(
+                1800,
+                Timezone::from_tz_string(input).unwrap().local_minus_utc()
+            );
+        }
+        for input in ["-00:30", "-0:30"] {
+            assert_eq!(
+                -1800,
+                Timezone::from_tz_string(input).unwrap().local_minus_utc()
+            );
+        }
+        assert_eq!(
+            1800,
+            Timezone::hours_mins_opt(0, 30).unwrap().local_minus_utc()
+        );
+        assert_eq!(
+            86340,
+            Timezone::from_tz_string("23:59").unwrap().local_minus_utc()
+        );
+        assert_eq!(
+            -86340,
+            Timezone::from_tz_string("-23:59")
+                .unwrap()
+                .local_minus_utc()
+        );
+        for input in [
+            "1:60",
+            "-0:60",
+            "24:00",
+            "-24:00",
+            "2147483647:00",
+            "-2147483648:00",
+            "0:4294967295",
+        ] {
+            assert!(Timezone::from_tz_string(input).is_err(), "{input}");
+        }
+        assert!(Timezone::hours_mins_opt(i32::MIN, 0).is_err());
+        assert!(Timezone::hours_mins_opt(i32::MAX, 0).is_err());
+        assert!(Timezone::hours_mins_opt(0, u32::MAX).is_err());
     }
 
     #[test]
