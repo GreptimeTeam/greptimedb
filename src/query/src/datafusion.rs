@@ -75,6 +75,7 @@ use crate::options::ScheduledTimeExtension;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
+use crate::region_query::RegionReadLimiter;
 use crate::{QueryEngine, metrics};
 
 /// Query parallelism hint key.
@@ -187,6 +188,18 @@ impl DatafusionQueryEngine {
         } else {
             physical_plan
         };
+
+        // A region read is a remote body that streams until drained, so a query reading several
+        // sources would otherwise run one body per source and partition. Bound the reads of the
+        // plan shape that can hold the budget: the native raw PromQL topology, whose only
+        // multi-input node polls every input at once. A plan that can wait for one input while
+        // another holds a permit (any join, or a union drained input by input) is left unbounded
+        // rather than risk a body budget deadlocking it.
+        if crate::promql::planner::native::native_raw_plan_bounds_region_reads(&physical_plan) {
+            let target_partitions = ctx.state().config().target_partitions();
+            ctx.config_mut()
+                .set_extension(Arc::new(RegionReadLimiter::new(target_partitions)));
+        }
 
         let stream = self.execute_stream(&ctx, &physical_plan)?;
 

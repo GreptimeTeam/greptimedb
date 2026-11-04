@@ -77,7 +77,7 @@ use crate::dist_plan::{
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::options::{FlowQueryExtensions, remote_dyn_filter_pushdown_enabled_from_extensions};
 use crate::query_engine::QueryEngineState;
-use crate::region_query::RegionQueryHandlerRef;
+use crate::region_query::{RegionQueryHandlerRef, RegionReadLimiter};
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
     context.session_config().get_extension()
@@ -670,6 +670,10 @@ impl MergeScanExec {
             &query_ctx,
             &captured_remote_dyn_filters,
         );
+        // The query's own bound on region reads in flight; see [`RegionReadLimiter`].
+        let region_read_limiter = context
+            .session_config()
+            .get_extension::<RegionReadLimiter>();
 
         let stream = Box::pin(stream!({
             let remote_dyn_filter_registry_lease = remote_dyn_filter_registry_lease;
@@ -757,6 +761,12 @@ impl MergeScanExec {
                     );
                 }
 
+                // Hold the permit until this region's body is drained or dropped: the bound
+                // counts reads in flight, whichever scan or partition started them.
+                let _region_read_permit = match region_read_limiter.as_ref() {
+                    Some(limiter) => Some(limiter.acquire().await),
+                    None => None,
+                };
                 let do_get_start = Instant::now();
                 let do_get_result = region_query_handler
                     .do_get(&target, request)

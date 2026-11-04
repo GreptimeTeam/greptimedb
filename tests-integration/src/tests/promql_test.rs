@@ -54,6 +54,7 @@ use table::table::scan::SeriesScanExec;
 use super::test_util::{
     both_instances_cases, check_unordered_output_stream, distributed, standalone,
 };
+use crate::cluster::GreptimeDbClusterBuilder;
 use crate::standalone::GreptimeDbStandaloneBuilder;
 use crate::tests::test_util::MockInstance;
 
@@ -2398,6 +2399,679 @@ async fn native_test_instance_with_options(
         .build()
         .await;
     (standalone, observer)
+}
+
+async fn native_scalar_rows(output: Output) -> Vec<(i64, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("PromQL query returns record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches {
+        let timestamps = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let values = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1, "one result value column");
+        assert_eq!(batch.num_columns(), 2, "scalar output has no labels");
+        let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((timestamps.value(row), values.value(row)));
+        }
+    }
+    rows.sort_by_key(|row| row.0);
+    rows
+}
+
+/// The shape a native distributed plan is asserted on: its fused producer, the region set every
+/// merge scan selects, the routers that reconcile series several regions hold, and the per-series
+/// order every merge scan declares.
+struct NativePlanShape {
+    fused: usize,
+    regions_per_scan: Vec<usize>,
+    routers: usize,
+    /// `SeriesRepartitionExec` nodes inside the subtree of the single `FusedSeriesExec`, i.e. the
+    /// routers that have to reconcile fragments of one series before the fused node reads them.
+    /// A router above the fused node (the coalescer of its output) is not one of them; `routers`
+    /// counts those too.
+    routers_below_fused: usize,
+    /// The `greptime.series.ordering` every merge scan declares, in traversal order. `contiguous`
+    /// means one region holds each series whole; `interleaved` means a series may be split.
+    scan_orderings: Vec<Option<String>>,
+}
+
+/// Every node of the tree rooted at `root`, the root included.
+fn native_plan_nodes(root: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn ExecutionPlan>> {
+    let mut nodes = Vec::new();
+    let mut stack = vec![Arc::clone(root)];
+    while let Some(node) = stack.pop() {
+        stack.extend(node.children().into_iter().map(Arc::clone));
+        nodes.push(node);
+    }
+    nodes
+}
+
+fn native_plan_shape(plan: &Arc<dyn ExecutionPlan>) -> NativePlanShape {
+    let nodes = native_plan_nodes(plan);
+    let mut shape = NativePlanShape {
+        fused: 0,
+        regions_per_scan: Vec::new(),
+        routers: 0,
+        routers_below_fused: 0,
+        scan_orderings: Vec::new(),
+    };
+    for node in &nodes {
+        shape.fused += usize::from(node.name() == "FusedSeriesExec");
+        shape.routers += usize::from(node.name() == "SeriesRepartitionExec");
+        if let Some(scan) = node.downcast_ref::<MergeScanExec>() {
+            shape.regions_per_scan.push(
+                scan.regions()
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+            );
+            shape.scan_orderings.push(
+                scan.schema()
+                    .metadata()
+                    .get("greptime.series.ordering")
+                    .cloned(),
+            );
+        }
+    }
+    for fused in nodes.iter().filter(|node| node.name() == "FusedSeriesExec") {
+        for node in native_plan_nodes(fused).into_iter().skip(1) {
+            shape.routers_below_fused += usize::from(node.name() == "SeriesRepartitionExec");
+        }
+    }
+    shape
+}
+
+fn assert_native_merge_scans(
+    plan: &Arc<dyn ExecutionPlan>,
+    expected_scans: usize,
+    expected_regions: usize,
+) {
+    let shape = native_plan_shape(plan);
+    assert_eq!(shape.fused, 1, "one fused FE plan: {plan:?}");
+    assert_eq!(
+        shape.regions_per_scan.len(),
+        expected_scans,
+        "merge scans: {plan:?}"
+    );
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![expected_regions; expected_scans],
+        "all time partitions must be selected: {plan:?}"
+    );
+    assert!(
+        shape.routers > 0,
+        "fragmented raw inputs need reconciliation: {plan:?}"
+    );
+}
+
+/// The shape every disjoint plan has: one fused producer over one merge scan per selector, and every
+/// scan selecting one region per partition value. Whether a node above the scans has to move frames
+/// is what the two disjoint cases differ in - a global fold gathers, a per-series match does not -
+/// so that stays with the caller.
+fn assert_native_disjoint_shape(
+    plan: &Arc<dyn ExecutionPlan>,
+    expected_scans: usize,
+    expected_regions: usize,
+) -> NativePlanShape {
+    let shape = native_plan_shape(plan);
+    assert_eq!(shape.fused, 1, "one fused FE plan: {plan:?}");
+    assert_eq!(
+        shape.regions_per_scan.len(),
+        expected_scans,
+        "merge scans: {plan:?}"
+    );
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![expected_regions; expected_scans],
+        "every disjoint region must be selected: {plan:?}"
+    );
+    shape
+}
+
+/// The rows of the cross-region fixture, inserted into the logical tables `{prefix}_a`,
+/// `{prefix}_b` and `{prefix}_reset`. The partitioned fixture and its control hold the same rows,
+/// so the two differ only in how the engine has to reach them.
+fn cross_region_fixture_inserts(prefix: &str) -> String {
+    format!(
+        "INSERT INTO {prefix}_a (host, val, ts) VALUES ('x', 2, 60000), ('x', 4, 120000), ('x', 6, 180000), ('x', 8, 240000), ('y', 4, 60000), ('y', 6, 120000), ('y', 8, 180000), ('y', 10, 240000); INSERT INTO {prefix}_b (host, val, ts) VALUES ('x', 1, 60000), ('x', 2, 120000), ('x', 3, 180000), ('x', 4, 240000), ('y', 2, 60000), ('y', 3, 120000), ('y', 4, 180000), ('y', 5, 240000); INSERT INTO {prefix}_reset (host, val, ts) VALUES ('x', 0, 0), ('x', 5, 60000), ('x', 10, 120000), ('x', 1, 180000), ('x', 3, 240000), ('x', 5, 300000), ('y', 0, 0), ('y', 1, 60000), ('y', 2, 120000), ('y', 3, 180000), ('y', 4, 240000), ('y', 5, 300000)"
+    )
+}
+
+/// Real two-datanode TCP acceptance for raw series fragmented by time. Ratios alone can hide
+/// history dropped on both sides, so an absolute increase is checked separately as well.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_cross_region_targets_match_expected_values() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_cross_region")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:00', ts >= '1970-01-01 00:02:00' AND ts < '1970-01-01 00:04:00', ts >= '1970-01-01 00:04:00') ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_a", "dist_native_b", "dist_native_reset"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &cross_region_fixture_inserts("dist_native"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The semantic reference: the same rows in one unpartitioned physical table. The distributed
+    // legacy path evaluates every region fragment on its own, so on the partitioned fixture it is
+    // not an oracle for these expressions and is deliberately not compared here. The engine over
+    // the complete series is the oracle, and the native distributed plan must agree with it.
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_ctl_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in [
+        "dist_native_ctl_a",
+        "dist_native_ctl_b",
+        "dist_native_ctl_reset",
+    ] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_ctl_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &cross_region_fixture_inserts("dist_native_ctl"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    for (expression, expected) in [
+        (
+            "sum(increase(dist_native_a[5m])) / sum(increase(dist_native_b[5m]))",
+            vec![(180_000, 2.0), (240_000, 2.0)],
+        ),
+        (
+            "sum(max(dist_native_a)) / sum(dist_native_b)",
+            vec![(180_000, 8.0 / 7.0), (240_000, 10.0 / 9.0)],
+        ),
+        (
+            "sum(increase(dist_native_b[5m]))",
+            vec![(180_000, 5.0), (240_000, 7.0)],
+        ),
+        (
+            "sum(increase(dist_native_reset[5m]))",
+            vec![(180_000, 14.0), (240_000, 17.0)],
+        ),
+    ] {
+        let query = PromQuery {
+            query: expression.to_string(),
+            start: "180".to_string(),
+            end: "240".to_string(),
+            step: "60s".to_string(),
+            ..PromQuery::default()
+        };
+        // The control tables hold the complete series, so the engine's own evaluation over them
+        // defines the expected values; the native distributed plan has to reproduce them.
+        let control = expression.replace("dist_native_", "dist_native_ctl_");
+        let control_rows = native_scalar_rows(
+            instance
+                .do_promql_query(
+                    &PromQuery {
+                        query: control.clone(),
+                        ..query.clone()
+                    },
+                    native_query_context(false, 2),
+                )
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            control_rows.len(),
+            expected.len(),
+            "the control defines every row: {control}"
+        );
+        for (actual, expected) in control_rows.iter().zip(expected.iter()) {
+            assert_eq!(actual.0, expected.0, "control row timestamp: {control}");
+            assert!(
+                (actual.1 - expected.1).abs() < 1e-9,
+                "control row value: {control}: {control_rows:?}"
+            );
+        }
+
+        cluster.reset_network_do_get_peak();
+        let output = instance
+            .do_promql_query(&query, native_query_context(true, 2))
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+        assert_native_merge_scans(plan, usize::from(expression.contains(" / ")) + 1, 3);
+        let rows = native_scalar_rows(output).await;
+        assert_eq!(
+            cluster.network_do_get_active(),
+            0,
+            "every response body is finished: {expression}"
+        );
+        assert_eq!(
+            cluster.network_do_get_peak_active(),
+            2,
+            "three region streams must use exactly the target-partition bound: {expression}"
+        );
+        assert_eq!(rows.len(), expected.len(), "all rows: {expression}");
+        for (actual, expected) in rows.iter().zip(expected) {
+            assert_eq!(actual.0, expected.0, "{expression}");
+            assert!(
+                (actual.1 - expected.1).abs() < 1e-9,
+                "{expression}: {rows:?}"
+            );
+        }
+    }
+
+    // A per-series operation on the fragmented fixture: every series is split across the three
+    // time partitions, so no region holds a series whole and none can answer for a host alone.
+    // What comes back is per-series rows - two hosts at two timestamps - which a scalar helper
+    // cannot read, so this case compares labels as well as values.
+    let expression = "increase(dist_native_b[5m])";
+    let query = PromQuery {
+        query: expression.to_string(),
+        start: "180".to_string(),
+        end: "240".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let control = expression.replace("dist_native_", "dist_native_ctl_");
+    let control_rows = native_result_rows(
+        instance
+            .do_promql_query(
+                &PromQuery {
+                    query: control.clone(),
+                    ..query.clone()
+                },
+                native_query_context(false, 2),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        control_rows.len(),
+        4,
+        "the control over the complete series defines every row: {control}"
+    );
+
+    cluster.reset_network_do_get_peak();
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .unwrap();
+    let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+    let shape = native_plan_shape(plan);
+    assert_eq!(shape.fused, 1, "one fused FE plan: {plan:?}");
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![3],
+        "the selector reads all three time partitions: {plan:?}"
+    );
+    assert!(
+        shape.routers_below_fused >= 1,
+        "time partitioning splits every series across regions, so the region fragments must be \
+         reconciled before the fused node reads them: {plan:?}"
+    );
+    assert!(
+        shape
+            .scan_orderings
+            .iter()
+            .all(|ordering| ordering.as_deref() == Some("interleaved")),
+        "the frontend cannot prove a series stays in one time partition, so the scans must not \
+         claim contiguous per-series order: {:?}: {plan:?}",
+        shape.scan_orderings
+    );
+    let rows = native_result_rows(output).await;
+    assert_eq!(
+        cluster.network_do_get_active(),
+        0,
+        "every response body is finished: {expression}"
+    );
+    let peak = cluster.network_do_get_peak_active();
+    assert!(
+        (1..=2).contains(&peak),
+        "fragmented region streams stay within the target-partition bound: {expression}: {peak}"
+    );
+    assert_eq!(control_rows, rows, "{expression}");
+}
+
+/// The rows of the disjoint fixture, inserted into the logical tables `{prefix}_a` and
+/// `{prefix}_b`. Both hosts carry the same shape and land in different partitions.
+fn disjoint_fixture_inserts(prefix: &str) -> String {
+    format!(
+        "INSERT INTO {prefix}_a (host, val, ts) VALUES ('a', 2, 60000), ('a', 4, 120000), ('a', 6, 180000), ('a', 8, 240000), ('z', 4, 60000), ('z', 6, 120000), ('z', 8, 180000), ('z', 10, 240000); INSERT INTO {prefix}_b (host, val, ts) VALUES ('a', 1, 60000), ('a', 2, 120000), ('a', 3, 180000), ('a', 4, 240000), ('z', 2, 60000), ('z', 3, 120000), ('z', 4, 180000), ('z', 5, 240000)"
+    )
+}
+
+/// Real two-datanode TCP acceptance for raw series that no region shares: partitioning on the raw
+/// primary key puts every series in exactly one region, so the native plan must read all of them
+/// and reconcile none of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_disjoint_regions_do_not_repartition() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_disjoint")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_disjoint_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm') ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_disjoint_a", "dist_native_disjoint_b"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_disjoint_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &disjoint_fixture_inserts("dist_native_disjoint"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The semantic reference over the complete series, as in the fragmented case: the engine's own
+    // evaluation of the unpartitioned fixture defines the expected values.
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_disjoint_ctl_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_disjoint_ctl_a", "dist_native_disjoint_ctl_b"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_disjoint_ctl_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &disjoint_fixture_inserts("dist_native_disjoint_ctl"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    for (expression, expected, expected_scans) in [
+        (
+            "sum(increase(dist_native_disjoint_a[5m])) / sum(increase(dist_native_disjoint_b[5m]))",
+            vec![(180_000, 2.0), (240_000, 2.0)],
+            2,
+        ),
+        (
+            "sum(increase(dist_native_disjoint_a[5m]))",
+            vec![(180_000, 10.0), (240_000, 14.0)],
+            1,
+        ),
+    ] {
+        let query = PromQuery {
+            query: expression.to_string(),
+            start: "180".to_string(),
+            end: "240".to_string(),
+            step: "60s".to_string(),
+            ..PromQuery::default()
+        };
+        let control = expression.replace("dist_native_disjoint_", "dist_native_disjoint_ctl_");
+        let control_rows = native_scalar_rows(
+            instance
+                .do_promql_query(
+                    &PromQuery {
+                        query: control.clone(),
+                        ..query.clone()
+                    },
+                    native_query_context(false, 2),
+                )
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            control_rows.len(),
+            expected.len(),
+            "the control defines every row: {control}"
+        );
+        for (actual, expected) in control_rows.iter().zip(expected.iter()) {
+            assert_eq!(actual.0, expected.0, "control row timestamp: {control}");
+            assert!(
+                (actual.1 - expected.1).abs() < 1e-9,
+                "control row value: {control}: {control_rows:?}"
+            );
+        }
+
+        cluster.reset_network_do_get_peak();
+        let output = instance
+            .do_promql_query(&query, native_query_context(true, 2))
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+        // A global fold normalizes every input to one partition, so the gather it needs is the
+        // frames of complete series moving, not fragments of one series being put back together.
+        assert_native_disjoint_shape(plan, expected_scans, 2);
+        let rows = native_scalar_rows(output).await;
+        assert_eq!(
+            cluster.network_do_get_active(),
+            0,
+            "every response body is finished: {expression}"
+        );
+        let peak = cluster.network_do_get_peak_active();
+        assert!(
+            (1..=2).contains(&peak),
+            "disjoint region streams stay within the target-partition bound: {expression}: {peak}"
+        );
+        assert_eq!(rows.len(), expected.len(), "all rows: {expression}");
+        for (actual, expected) in rows.iter().zip(expected) {
+            assert_eq!(actual.0, expected.0, "{expression}");
+            assert!(
+                (actual.1 - expected.1).abs() < 1e-9,
+                "{expression}: {rows:?}"
+            );
+        }
+    }
+
+    // A per-series operation reads the two tables host by host: no series crosses a region, so
+    // nothing in the native plan has to put one back together. A global fold above would gather
+    // complete series instead, which is why this case is the one that states the disjoint claim.
+    let expression = "increase(dist_native_disjoint_a[5m]) / increase(dist_native_disjoint_b[5m])";
+    let query = PromQuery {
+        query: expression.to_string(),
+        start: "180".to_string(),
+        end: "240".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let expected = vec![
+        (180_000, "a".to_string(), 2.0),
+        (180_000, "z".to_string(), 2.0),
+        (240_000, "a".to_string(), 2.0),
+        (240_000, "z".to_string(), 2.0),
+    ];
+    let control = expression.replace("dist_native_disjoint_", "dist_native_disjoint_ctl_");
+    let control_rows = native_result_rows(
+        instance
+            .do_promql_query(
+                &PromQuery {
+                    query: control.clone(),
+                    ..query.clone()
+                },
+                native_query_context(false, 2),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        expected, control_rows,
+        "the control over the complete series defines every row: {control}"
+    );
+
+    cluster.reset_network_do_get_peak();
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .unwrap();
+    let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+    let shape = assert_native_disjoint_shape(plan, 2, 2);
+    assert!(
+        shape
+            .scan_orderings
+            .iter()
+            .all(|ordering| ordering.as_deref() == Some("contiguous")),
+        "the frontend proved each series lives in one region, so every merge scan keeps its \
+         declared contiguous per-series order: {:?}: {plan:?}",
+        shape.scan_orderings
+    );
+    // The fused node emits one partition, so each side of the match is gathered to it. That moves
+    // complete series, not fragments of one: no series crosses a region here.
+    assert_eq!(
+        shape.routers_below_fused, 2,
+        "one gather per side of the match below the fused node: {plan:?}"
+    );
+    let rows = native_result_rows(output).await;
+    assert_eq!(
+        cluster.network_do_get_active(),
+        0,
+        "every response body is finished: {expression}"
+    );
+    let peak = cluster.network_do_get_peak_active();
+    assert!(
+        (1..=2).contains(&peak),
+        "disjoint region streams stay within the target-partition bound: {expression}: {peak}"
+    );
+    assert_eq!(expected, rows, "{expression}");
+
+    // The same claim for a per-series operation with nothing to match: each series is complete in
+    // the region that holds it, so the fused node reads the merge scans directly and no router sits
+    // between them.
+    let expression = "increase(dist_native_disjoint_a[5m])";
+    let query = PromQuery {
+        query: expression.to_string(),
+        start: "180".to_string(),
+        end: "240".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let control = expression.replace("dist_native_disjoint_", "dist_native_disjoint_ctl_");
+    let control_rows = native_result_rows(
+        instance
+            .do_promql_query(
+                &PromQuery {
+                    query: control.clone(),
+                    ..query.clone()
+                },
+                native_query_context(false, 2),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        control_rows.len(),
+        4,
+        "the control over the complete series defines every row: {control}"
+    );
+
+    cluster.reset_network_do_get_peak();
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .unwrap();
+    let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+    let shape = assert_native_disjoint_shape(plan, 1, 2);
+    assert!(
+        shape
+            .scan_orderings
+            .iter()
+            .all(|ordering| ordering.as_deref() == Some("contiguous")),
+        "the frontend proved each series lives in one region, so the merge scan keeps its declared \
+         contiguous per-series order: {:?}: {plan:?}",
+        shape.scan_orderings
+    );
+    assert_eq!(
+        shape.routers_below_fused, 0,
+        "each series is complete in one region, so the fused node reads the merge scans directly \
+         and nothing has to reconcile fragments of one: {plan:?}"
+    );
+    let rows = native_result_rows(output).await;
+    assert_eq!(
+        cluster.network_do_get_active(),
+        0,
+        "every response body is finished: {expression}"
+    );
+    let peak = cluster.network_do_get_peak_active();
+    assert!(
+        (1..=2).contains(&peak),
+        "disjoint region streams stay within the target-partition bound: {expression}: {peak}"
+    );
+    assert_eq!(control_rows, rows, "{expression}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -22,8 +22,35 @@ use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use session::ReadPreference;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::error::Result;
+
+/// Caps the region reads one query keeps in flight.
+///
+/// A region read is a `DoGet` whose body streams until that region is drained, so a query
+/// reading several sources would otherwise run one body per source and partition at once.
+/// The bound belongs to the query, not to one scan: its permit count is the query's target
+/// partitions, so two scans of three regions no longer read four bodies at once.
+pub(crate) struct RegionReadLimiter {
+    permits: Semaphore,
+}
+
+impl RegionReadLimiter {
+    pub(crate) fn new(permits: usize) -> Self {
+        Self {
+            permits: Semaphore::new(permits.max(1)),
+        }
+    }
+
+    /// Waits for one region read to be allowed; the read stays counted until the permit drops.
+    pub(crate) async fn acquire(&self) -> SemaphorePermit<'_> {
+        self.permits
+            .acquire()
+            .await
+            .expect("the region read limiter is never closed")
+    }
+}
 
 /// The peer selected to serve a region query.
 ///
