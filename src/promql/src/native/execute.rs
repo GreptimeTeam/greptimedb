@@ -1838,7 +1838,9 @@ impl VectorRuntime {
             return Ok(None);
         }
         self.input.ensure_closed(Reader::Vector)?;
-        let retained = self.input.held;
+        // What a failed assembly leaves the node holding: the input it retains beside the per-point
+        // values it read its parameters into, which outlive the assembly.
+        let retained = self.input.held.saturating_add(self.parameter_bytes);
         let assembly = self
             .input
             .assembly_bytes(&self.schema)
@@ -1995,7 +1997,13 @@ fn vector_series_with_k(
                     ));
                 }
                 select::topk_at(
-                    |point| select::k_param(values[point].unwrap_or(f64::NAN), series.len()),
+                    // A point the parameter series holds no sample at selects nothing, which is
+                    // Prometheus' empty parameter there; a sample that is present and NaN is still
+                    // an error, as [`select::validate_topk_parameters`] rules.
+                    |point| match values[point] {
+                        Some(k) => select::k_param(k, series.len()),
+                        None => Ok(None),
+                    },
                     *top,
                     &grouping(group),
                     schema,
@@ -3995,20 +4003,22 @@ impl RuntimeNode {
                     return Ok(None);
                 }
                 if !*produced {
+                    let len = grid.spec().len as usize;
                     let bytes = grid_chunk_bytes(grid).map_err(|e| state.context(e))?;
+                    // The counts are decided beside the assembled input and read until the answer
+                    // exists, so they are reserved on top of the chunk the node hands over.
+                    let counts_bytes = len.saturating_mul(std::mem::size_of::<u8>());
                     let assembly = retained
                         .assembly_bytes(input_schema)
                         .ok_or_else(vector_overflow)?;
                     state
                         .buffer
-                        .grow(assembly.saturating_add(bytes))
+                        .grow(assembly.saturating_add(bytes).saturating_add(counts_bytes))
                         .map_err(|e| state.context(e))?;
                     let assembled = retained
                         .assemble(input_schema, Reader::Vector)
                         .map_err(|e| state.context(e))?;
                     retained.release();
-                    state.buffer.resize(bytes).map_err(|e| state.context(e))?;
-                    let len = grid.spec().len as usize;
                     let mut values = vec![f64::NAN; len];
                     let mut counts = vec![0u8; len];
                     for series in assembled {
@@ -4033,6 +4043,10 @@ impl RuntimeNode {
                             values[point] = f64::NAN;
                         }
                     }
+                    // The assembled input is consumed and the counts are read, so what this node
+                    // holds from here on is the one chunk the values become.
+                    drop(counts);
+                    state.buffer.resize(bytes).map_err(|e| state.context(e))?;
                     let schema = scalar_schema(Arc::clone(grid));
                     let time =
                         GridRange::try_new(Arc::clone(grid), 0, len).map_err(series_error)?;
@@ -4450,17 +4464,33 @@ impl RuntimeNode {
                             "topk parameter does not cover its grid".into(),
                         ));
                     }
-                    let mut cursor = series.fields.as_slice()[0].cursor();
+                    // The values the parameter is read into are held beside the input for as long
+                    // as the node lives, so the pool admits them before they are allocated.
+                    let bytes = len.saturating_mul(std::mem::size_of::<Option<f64>>());
+                    state
+                        .buffer
+                        .grow(bytes)
+                        .map_err(|error| state.context(error))?;
                     let mut values = Vec::with_capacity(len);
-                    for row in 0..len {
-                        values.push(match cursor.at(row) {
-                            Some(SampleRef::Float(value)) => Some(value),
-                            _ => None,
-                        });
+                    {
+                        let mut cursor = series.fields.as_slice()[0].cursor();
+                        for row in 0..len {
+                            values.push(match cursor.at(row) {
+                                Some(SampleRef::Float(value)) => Some(value),
+                                _ => None,
+                            });
+                        }
                     }
                     select::validate_topk_parameters(&values)
                         .map_err(|error| state.context(error))?;
                     operation.parameter = Some(values);
+                    // The series was the parameter until its values were read off it; what the node
+                    // holds from here on is the values themselves.
+                    drop(series);
+                    operation.parameter_bytes = bytes;
+                    state
+                        .settle_vector(operation)
+                        .map_err(|error| state.context(error))?;
                     parameter.release();
                 }
                 while let Some(chunk) = input.pull(inputs, inputs_finished)? {
@@ -4528,18 +4558,34 @@ impl RuntimeNode {
                                 "histogram parameter does not cover its grid".into(),
                             ));
                         }
-                        let mut cursor = series.fields.as_slice()[0].cursor();
-                        values[index] = Some(
+                        // The values each parameter is read into are held beside the input for as
+                        // long as the node lives, so the pool admits them before they are allocated.
+                        let bytes = len.saturating_mul(std::mem::size_of::<Option<f64>>());
+                        state.buffer.grow(bytes)?;
+                        let collected = {
+                            let mut cursor = series.fields.as_slice()[0].cursor();
                             (0..len)
                                 .map(|row| match cursor.at(row) {
                                     Some(SampleRef::Float(v)) => Some(v),
                                     _ => None,
                                 })
-                                .collect(),
-                        );
+                                .collect::<Vec<Option<f64>>>()
+                        };
+                        values[index] = Some(collected);
+                        // What the node holds for this parameter is its values, not the series they
+                        // were read from.
+                        parameter_bytes[index] = bytes;
+                        drop(series);
                         parameters[index].release();
                     }
                 }
+                // The series the parameters arrived as are gone, so what is left beside the input
+                // is the values they were read into.
+                operation.parameter_bytes = parameter_bytes
+                    .iter()
+                    .copied()
+                    .fold(0usize, usize::saturating_add);
+                state.settle_vector(operation)?;
                 while let Some(chunk) = input.pull(inputs, inputs_finished)? {
                     state.retain_vector(operation, chunk)?;
                 }
@@ -5825,7 +5871,18 @@ impl NodeState {
         let Some(output) = output else {
             return Ok(());
         };
-        self.queue_results(output, false)
+        self.queue_results(output, false, 0)
+    }
+
+    /// Settles a vector node's reservation on what it holds: the input it retains and, for a
+    /// parameterized operator, the per-point values it read its parameters into.
+    ///
+    /// Both outlive every chunk the node is handed: the values are read whole before the input is
+    /// pulled and are released with the node, so a reservation set from the retained input alone
+    /// would drop their bytes while they are still read.
+    fn settle_vector(&mut self, vector: &VectorRuntime) -> Result<()> {
+        let held = vector.input.held.saturating_add(vector.parameter_bytes);
+        self.buffer.resize(held)
     }
 
     /// Retains one chunk of a vector node's input, reserved for before it is retained, as
@@ -5851,8 +5908,9 @@ impl NodeState {
         {
             let _timer = metrics.timer();
             vector.input.retain(chunk, Reader::Vector)?;
-            let retained = vector.input.held;
-            self.buffer.resize(retained)?;
+            // The input this node retains is held beside the parameter values it read whole first,
+            // which this chunk does not replace.
+            self.settle_vector(vector)?;
         }
         metrics.record_input(1, positions);
         Ok(())
@@ -5866,7 +5924,7 @@ impl NodeState {
     ) -> Result<()> {
         let output = vector.compute_with_histogram_parameters(&mut self.buffer, parameters)?;
         if let Some(output) = output {
-            self.queue_results(output, false)?;
+            self.queue_results(output, false, vector.parameter_bytes)?;
         }
         Ok(())
     }
@@ -5877,7 +5935,7 @@ impl NodeState {
         let Some(output) = output else {
             return Ok(());
         };
-        self.queue_results(output, shares_input)
+        self.queue_results(output, shares_input, vector.parameter_bytes)
     }
 
     /// Queues the series a kernel that reads its whole input produced, and settles the reservation
@@ -5889,7 +5947,16 @@ impl NodeState {
     /// the allocations its slices belong to, which would count a buffer once per chunk. The tables
     /// are billed once, to the queue ([`NodeState::queued_tables`]), since several results can
     /// keep one alive.
-    fn queue_results(&mut self, output: Vec<Series>, shares_input: bool) -> Result<()> {
+    ///
+    /// `beside` is what the node keeps past the queue, such as a parameterized operator's per-point
+    /// parameter values: those are read before the kernel runs and released with the node, so the
+    /// reservation covers them beside the results it hands over.
+    fn queue_results(
+        &mut self,
+        output: Vec<Series>,
+        shares_input: bool,
+        beside: usize,
+    ) -> Result<()> {
         let mut tables = HashSet::new();
         // The results are queued the way a node that produces a chunk per input queues what it
         // hands on: the queue is the one source of chunk order and of the bytes queued chunks hold.
@@ -5925,7 +5992,7 @@ impl NodeState {
             .fold(self.queued_tables, |total, (_, bytes)| {
                 total.saturating_add(*bytes)
             });
-        self.buffer.resize(queued)
+        self.buffer.resize(queued.saturating_add(beside))
     }
 
     /// Folds one chunk into this node's aggregate.

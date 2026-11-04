@@ -42,9 +42,9 @@ fn is_resources_exhausted(error: &DataFusionError) -> bool {
 
 use super::{
     BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
-    NodeState, PairKernel, RuntimeNode, RuntimeOp, absorb_rebuilds, evaluated_bytes, grid_end_ms,
-    grid_position, map_chunk, map_workspace_bytes, operand_chunk_bytes, raw_bytes,
-    vector_workspace_bytes,
+    NodeState, PairKernel, Reader, RetainedInput, RuntimeNode, RuntimeOp, absorb_rebuilds,
+    evaluated_bytes, grid_chunk_bytes, grid_end_ms, grid_position, map_chunk, map_workspace_bytes,
+    operand_chunk_bytes, raw_bytes, vector_series_with_k, vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -10694,6 +10694,145 @@ fn parameterized_topk_varies_by_grid_point_and_handles_invalid_k() {
     assert_eq!(counts, [1, 3, 0]);
 }
 
+/// A point the parameter series holds no sample at selects nothing there, as Prometheus' empty
+/// parameter does at that step, and does not abort the points that do hold one; a parameter that is
+/// present and NaN is still an error.
+///
+/// `values` is what the topk arm reads a parameter series into: `None` is a position the series
+/// decided nothing at, `Some(k)` a value it decided.
+#[test]
+fn a_topk_parameter_with_a_gap_selects_nothing_at_that_point() {
+    let grid = grid(0, 1_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // `m{job="a"}` holds 1, 2 and 3, `m{job="b"}` holds 4, 5 and 6, so `topk(1, ...)` keeps `b`.
+    let series: Vec<Series> = ["a", "b"]
+        .iter()
+        .enumerate()
+        .map(|(index, job)| {
+            let values = [1.0, 2.0, 3.0]
+                .into_iter()
+                .map(|value| Some(value + 3.0 * index as f64))
+                .collect::<Vec<Option<f64>>>();
+            evaluated_chunk_of(&schema, named_metric("m", job), 0, values, true).series
+        })
+        .collect();
+    let op = BoundVectorOp::TopK {
+        k: 0.0,
+        top: true,
+        group: Grouping::By(Arc::from([])),
+    };
+    // The parameter has a sample at points 0 and 2 and a gap at point 1, where both series hold one.
+    let kept = vector_series_with_k(
+        &op,
+        &schema,
+        &series,
+        Some(&[Some(1.0), None, Some(1.0)]),
+        None,
+    )
+    .expect("an absent parameter selects nothing rather than failing the query");
+    assert_eq!(kept.len(), 1, "both points keep the same series");
+    assert_eq!(kept[0].metric.get("job"), Some("b"));
+    let mut points: Vec<usize> = kept[0].time.positions().map(|(point, _)| point).collect();
+    points.sort_unstable();
+    assert_eq!(points, vec![0, 2], "the gap at point 1 was not a gap");
+
+    // A parameter sample that is present and NaN is still refused, as a NaN k always is.
+    let error = vector_series_with_k(
+        &op,
+        &schema,
+        &series,
+        Some(&[Some(1.0), Some(f64::NAN), Some(1.0)]),
+        None,
+    )
+    .expect_err("a present NaN parameter was accepted");
+    assert!(error.to_string().contains("NaN"), "{error}");
+}
+
+/// A parameterized `topk` reads its per-point parameter whole before it reads any input, so the
+/// values it reads it into are held beside the input for as long as the node lives: a pool that
+/// admits the parameter series but not the values refuses the query rather than running it over the
+/// budget.
+#[test]
+fn parameterized_topk_reserves_the_values_of_its_parameter() {
+    // `eval_time` hands over one value per grid point: eight bytes a point in the series the node is
+    // handed, sixteen in the values it reads them into.
+    const POINTS: usize = 1 << 18;
+    let grid = grid(0, 1_000, POINTS as u64);
+    let input = evaluated_input(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input.clone()),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(eval_time(None, Arc::clone(&grid))),
+        },
+        output: input.output,
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    // Room for the parameter series and not for the values read off it, and then room for both.
+    for (budget, fits) in [(12 * POINTS, false), (32 * POINTS, true)] {
+        let pool = bounded_pool(budget);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        execution.end_of_input().unwrap();
+        let result = execution.next_chunk();
+        if fits {
+            assert!(
+                result.unwrap().is_none(),
+                "the parameter values were refused a pool that holds them"
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                "the parameter values were not reserved before they were read: {error}"
+            );
+        }
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// A parameterized histogram function reads each parameter whole before it reads its input, so the
+/// values it reads them into are held beside the input for as long as the node lives: a pool that
+/// admits the parameter series but not the values refuses the query rather than running it over the
+/// budget.
+#[test]
+fn parameterized_histogram_reserves_the_values_of_its_parameters() {
+    // As above: eight bytes a point in the series, sixteen in the values read off it.
+    const POINTS: usize = 1 << 18;
+    let grid = grid(0, 1_000, POINTS as u64);
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(evaluated_input(Arc::clone(&grid))),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
+            parameters: vec![eval_time(None, Arc::clone(&grid))],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    for (budget, fits) in [(12 * POINTS, false), (32 * POINTS, true)] {
+        let pool = bounded_pool(budget);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        execution.end_of_input().unwrap();
+        let result = execution.next_chunk();
+        if fits {
+            assert!(
+                result.unwrap().is_none(),
+                "the parameter values were refused a pool that holds them"
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                "the parameter values were not reserved before they were read: {error}"
+            );
+        }
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
 #[test]
 fn parameterized_histogram_rejects_duplicate_labelsets() {
     let grid = grid(0, 1_000, 2);
@@ -11212,6 +11351,72 @@ fn scalar_of_evaluates_above_a_window() {
         decided(&run(&mut execution)),
         vec![(0, Some(2.0)), (1, Some(5.0))]
     );
+}
+
+/// What `scalar()` holds once it has retained `chunk`, and what assembling it, the chunk it answers
+/// with and the counts it decides the answer by add on top.
+fn scalar_of_charge(
+    schema: &Arc<SeriesSchema>,
+    chunk: &EvaluatedChunk,
+) -> (usize, usize, usize, usize) {
+    let mut state = NodeState::new(
+        "native.scalar at root",
+        Arc::new(NodeMetrics::default()),
+        &pool(),
+    );
+    let mut retained = RetainedInput::default();
+    state.buffer.grow(retained.pending(chunk)).unwrap();
+    retained.retain(chunk.clone(), Reader::Vector).unwrap();
+    state.buffer.resize(retained.held).unwrap();
+    let held = state.buffer.reservation.size();
+    let grid = schema.eval_grid.clone().unwrap();
+    let assembly = retained.assembly_bytes(schema).unwrap();
+    let answer = grid_chunk_bytes(&grid).unwrap();
+    let counts = grid.spec().len as usize;
+    (held, assembly, answer, counts)
+}
+
+/// `scalar()` reads the assembled input while the counts it decides the answer by are live, so both
+/// are held beside the assembly: a pool that admits the assembly and the answer but not the counts
+/// refuses the query instead of letting it run over the budget.
+#[test]
+fn scalar_of_reserves_its_counts_while_it_reads_the_assembly() {
+    let points = 10_000usize;
+    let grid = grid(0, 60_000, points as u64);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let chunk = evaluated_chunk(&schema, 0, vec![1.0; points], true);
+    let (retained, assembly, answer, counts) = scalar_of_charge(&schema, &chunk);
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    for (budget, fits) in [
+        // One byte short of the assembly and the answer without the counts: refused only if the
+        // counts are reserved beside them.
+        (retained + assembly + answer + counts - 1, false),
+        // Room for the answer and the counts, but not for the assembly still read beside them:
+        // refused only if the assembly is held while it is consumed.
+        (retained + answer + counts + 1, false),
+        // Exactly what the node holds once it has retained its input, assembled it and built the
+        // answer and the counts.
+        (retained + assembly + answer + counts, true),
+    ] {
+        let pool = bounded_pool(budget);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let input = execution.state().input_ids(0).next().unwrap();
+        execution.push_evaluated(input, chunk.clone()).unwrap();
+        let result = execution.finish();
+        if fits {
+            let chunks = result.expect("the assembly, the answer and the counts fit the pool");
+            assert_eq!(chunks.len(), 1, "one unlabelled answer");
+            assert_eq!(chunks[0].series.time.len(), points);
+            assert_eq!(sample_values(&chunks[0]), vec![Some(1.0); points]);
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                "the counts were not reserved while the assembly was read: {error}"
+            );
+        }
+        assert_eq!(pool.reserved(), 0);
+    }
 }
 
 /// `limitk` takes series in the order its input hands them over, not in label order, and the two
