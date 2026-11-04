@@ -1312,6 +1312,20 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_epoch_above_a_record_ahead_of_the_clock_is_accepted() {
+            let group = new_group();
+            let ctx = TestEnv::new().ctx();
+            // The previous process of the node ran on a faster clock.
+            let recorded = current_time_millis() as u64 + 60_000;
+            record(&ctx, recorded).await;
+
+            let mut restarted = Stream::open(&group, &ctx).await;
+            let res = restarted.send(heartbeat(recorded + 1, "a2")).await;
+            assert!(res.region_lease.is_some());
+            assert_eq!(lease_addr(&ctx).await.as_deref(), Some("a2"));
+        }
+
+        #[tokio::test]
         async fn test_epoch_far_ahead_is_not_recorded() {
             let kv_backend = MemoryKvBackend::new();
             let now = current_time_millis() as u64;

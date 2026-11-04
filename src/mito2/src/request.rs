@@ -526,6 +526,7 @@ impl RequestColumn for RowColumn<'_> {
 /// A column of the batch of a bulk insert.
 struct BulkColumn<'a> {
     array: &'a ArrayRef,
+    field: &'a datatypes::arrow::datatypes::Field,
 }
 
 impl RequestColumn for BulkColumn<'_> {
@@ -538,6 +539,11 @@ impl RequestColumn for BulkColumn<'_> {
                 ArrowDataType::Dictionary(key, value) => key.is_integer() && value.is_string(),
                 actual => actual.is_string(),
             };
+        }
+        if data_type.is_json2() && datatypes::extension::json::is_json2_extension_type(self.field) {
+            return matches!(actual, ArrowDataType::Struct(_) | ArrowDataType::Null)
+                && datatypes::extension::json::json2_remainder_field(self.field).is_ok()
+                && datatypes::types::json_type::JsonNativeType::try_from(actual).is_ok();
         }
         *actual == data_type.as_arrow_type()
     }
@@ -559,7 +565,7 @@ impl RequestColumn for BulkColumn<'_> {
 /// [WriteRequest::check_schema] applies to rows: column names are unique, every
 /// column is a column of the region with its Arrow type and contains nulls only
 /// if the region column is nullable, and a missing column is nullable or has a
-/// default value. Tags may use any string encoding. Sparse batches carry the
+/// default value. Tags may use any string encoding. Sparse batches may carry the
 /// tags in one encoded primary key column instead. Returns whether the batch
 /// misses columns that the writer fills.
 pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -> Result<bool> {
@@ -572,7 +578,7 @@ pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -
             primary_key.replace(array).is_some()
         } else {
             columns
-                .insert(field.name().as_str(), BulkColumn { array })
+                .insert(field.name().as_str(), BulkColumn { array, field })
                 .is_some()
         };
         ensure!(
@@ -583,11 +589,7 @@ pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -
             }
         );
     }
-    if sparse {
-        let primary_key = primary_key.with_context(|| InvalidRequestSnafu {
-            region_id,
-            reason: format!("missing column {PRIMARY_KEY_COLUMN_NAME}"),
-        })?;
+    if let Some(primary_key) = primary_key {
         // The writer casts the encoded primary key to a dictionary of binary.
         let type_matches = match primary_key.data_type() {
             ArrowDataType::Binary => true,
@@ -609,7 +611,7 @@ pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -
     }
     let mut needs_fill = false;
     check_request_columns(region_id, metadata, columns, |column| {
-        if sparse && column.semantic_type == SemanticType::Tag {
+        if primary_key.is_some() && column.semantic_type == SemanticType::Tag {
             Ok(())
         } else {
             needs_fill = true;

@@ -21,44 +21,54 @@
 //! the data stream incrementally and flushes it into the query handler as
 //! [`RowInsertRequests`] batches.
 //!
-//! # Format framework
+//! # Formats
 //!
-//! Each COPY data format is implemented as a [`codec::CopyInCodec`]: a
-//! stateless strategy that validates its options at statement-parse time,
-//! describes the column types it can ingest, and creates the stateful
-//! record parser for one stream. Formats register a builder under every
-//! accepted `FORMAT` name in [`REGISTERED_FORMATS`] — `csv` is the only
-//! implemented format today; PostgreSQL's `text`/`binary` and
-//! GreptimeDB-specific formats alike can be added the same way. See the
-//! `codec` module docs.
+//! The supported formats are the explicit [`codec::CopyFormat`] enum —
+//! `csv` (table-bound, incremental row parsing) and `influxdb`
+//! (table-less, one bounded whole-payload request). Each format states
+//! its own target rule and ingestion shape in the match arms of the
+//! copy lifecycle below; adding a format is a new variant plus its
+//! arms. Builders resolve a `FORMAT` name (and its aliases) through
+//! [`REGISTERED_FORMATS`]. See the `codec` module docs.
 
 mod codec;
 mod csv;
+mod influxdb;
 mod options;
+mod otlp;
 mod parse;
 
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use crate::influxdb::InfluxdbRequest;
+use crate::query_handler::PipelineHandlerRef;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
     Row as GrpcRow, RowInsertRequest, RowInsertRequests, Rows as GrpcRows, SemanticType,
 };
 use async_trait::async_trait;
-use codec::{CopyInCodec, RecordParser};
+use codec::{CopyFormat, RecordParser};
+use common_catalog::consts::{TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY};
+use common_grpc::precision::Precision;
 use common_query::OutputData;
 use common_telemetry::{info, warn};
+use csv::CsvCodec;
 use datafusion::sql::sqlparser::ast::{CopyTarget, Statement as SqlParserStatement};
 use datatypes::data_type::DataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use futures::{Sink, SinkExt, stream};
+use influxdb::InfluxdbOptions;
+use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+use otlp::{OtlpOptions, OtlpSignal};
 use pgwire::api::copy::CopyHandler;
 use pgwire::api::results::{CopyResponse, Response, Tag};
 use pgwire::api::{ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
+use prost::Message;
 use session::context::QueryContextRef;
 use table::metadata::TableInfo;
 
@@ -80,38 +90,44 @@ use crate::postgres::utils::convert_err;
 /// the per-batch fixed costs negligible.
 pub(crate) const COPY_IN_FLUSH_ROWS: usize = 32768;
 
-/// Builds a codec from the format-neutral option set.
-type CodecBuilder = fn(options::CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>>;
+/// Upper bound of a table-less COPY FROM STDIN payload (influxdb line
+/// protocol, OTLP). One COPY statement is one bounded ingestion request
+/// (the whole payload is buffered like one HTTP request body); a larger
+/// import is multiple COPY statements.
+pub(crate) const COPY_IN_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Builds a format from the format-neutral option set.
+type FormatBuilder = fn(options::CopyOptionSet) -> PgWireResult<CopyFormat>;
 
 /// The registered COPY FROM STDIN formats: accepted `FORMAT` name to
 /// builder. `csv` is the only implemented format; the others are
 /// registered so they report a clear "not supported yet" instead of an
 /// unknown-format error.
-const REGISTERED_FORMATS: &[(&str, CodecBuilder)] = &[
+const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("csv", csv::build_csv_codec),
+    ("influxdb", influxdb::build_influxdb_codec),
+    ("influxdb_line", influxdb::build_influxdb_codec),
+    ("otlp", otlp::build_otlp_codec),
+    ("otlp_metrics", otlp::build_otlp_codec),
     ("text", build_unimplemented_text_codec),
     ("txt", build_unimplemented_text_codec),
     ("binary", build_unimplemented_binary_codec),
 ];
 
-fn build_unimplemented_text_codec(
-    _options: options::CopyOptionSet,
-) -> PgWireResult<Arc<dyn CopyInCodec>> {
+fn build_unimplemented_text_codec(_options: options::CopyOptionSet) -> PgWireResult<CopyFormat> {
     Err(unsupported(
         "the text format is not supported yet; use WITH (FORMAT csv)",
     ))
 }
 
-fn build_unimplemented_binary_codec(
-    _options: options::CopyOptionSet,
-) -> PgWireResult<Arc<dyn CopyInCodec>> {
+fn build_unimplemented_binary_codec(_options: options::CopyOptionSet) -> PgWireResult<CopyFormat> {
     Err(unsupported(
         "COPY FROM STDIN WITH (FORMAT binary) is not supported yet",
     ))
 }
 
-/// Resolves the format codec from the parsed options.
-fn resolve_codec(options: &mut options::CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>> {
+/// Resolves the format from the parsed options.
+fn resolve_format(options: &mut options::CopyOptionSet) -> PgWireResult<CopyFormat> {
     let name = options.take_format()?.ok_or_else(|| {
         unsupported(
             "COPY FROM STDIN requires an explicit format in this version; use WITH (FORMAT csv)",
@@ -133,15 +149,15 @@ pub(crate) struct CopyFromStdin {
     table: Vec<String>,
     /// Requested column list; empty means all columns in table order.
     columns: Vec<String>,
-    /// The resolved format codec, validated and ready to run.
-    codec: Arc<dyn CopyInCodec>,
+    /// The resolved format with its validated options.
+    format: CopyFormat,
 }
 
 fn copy_in_error(code: PgErrorCode, message: impl Into<String>) -> PgWireError {
     PgWireError::UserError(Box::new(code.to_err_info(message.into())))
 }
 
-fn unsupported(message: impl Into<String>) -> PgWireError {
+pub(super) fn unsupported(message: impl Into<String>) -> PgWireError {
     copy_in_error(PgErrorCode::Ec0A000, message)
 }
 
@@ -174,11 +190,11 @@ pub(crate) fn copy_from_stdin_from_sql(sql: &str) -> PgWireResult<Option<CopyFro
         parse::CopyInScan::CopyIn(raw) => raw,
     };
     let mut option_set = raw.options;
-    let codec = resolve_codec(&mut option_set)?;
+    let format = resolve_format(&mut option_set)?;
     Ok(Some(CopyFromStdin {
         table: raw.table,
         columns: raw.columns,
-        codec,
+        format,
     }))
 }
 
@@ -221,26 +237,53 @@ fn resolve_table_name(
 }
 
 /// Per-connection state of an in-progress COPY FROM STDIN.
+///
+/// The payload shape follows the codec: table-bound formats (csv) parse
+/// records into rows against the targeted table's columns; table-less
+/// formats (influxdb line protocol) split the stream into complete
+/// lines that each route to their own measurement, and flush through
+/// the handler's line-protocol pipeline — the same one the HTTP write
+/// endpoint uses.
 pub(crate) struct CopyInState {
     query_ctx: QueryContextRef,
-    /// The gRPC column schemas of the targeted columns. Cloned into each
-    /// flushed batch: `Rows.schema` is an owned `Vec` in the proto
-    /// request, so one copy per request is inherent.
-    grpc_schema: Vec<api::v1::ColumnSchema>,
-    table_name: String,
-    parser: Box<dyn RecordParser + Send>,
+    payload: Payload,
     /// The resolved codec's name, for logging.
     codec_name: &'static str,
     /// The wire format code of the resolved codec.
     codec_format_code: i8,
-    /// Parsed rows not yet flushed to the handler.
-    rows: Vec<GrpcRow>,
     rows_written: u64,
+}
+
+enum Payload {
+    /// Table-bound rows: parsed against `grpc_schema` and flushed to
+    /// `table_name` via `copy_in_insert`. The schema is cloned into each
+    /// flushed batch: `Rows.schema` is an owned `Vec` in the proto
+    /// request, so one copy per request is inherent.
+    Table {
+        grpc_schema: Vec<api::v1::ColumnSchema>,
+        table_name: String,
+        parser: Box<dyn RecordParser + Send>,
+        /// Parsed rows not yet flushed to the handler.
+        rows: Vec<GrpcRow>,
+    },
+    /// The whole buffered influxdb line-protocol payload with its
+    /// request precision. One COPY statement is one bounded ingestion
+    /// request, buffered until `CopyDone` — exactly like one HTTP write
+    /// body — and record boundaries belong to the line-protocol parser,
+    /// never to the COPY layer.
+    Influxdb {
+        data: Vec<u8>,
+        precision: Option<Precision>,
+    },
+    /// The whole buffered OTLP payload with its validated options,
+    /// decoded and completed as one request at `CopyDone` through the
+    /// matching OTLP pipeline.
+    Otlp { data: Vec<u8>, options: OtlpOptions },
 }
 
 impl CopyInState {
     fn new(
-        codec: Arc<dyn CopyInCodec>,
+        codec: &CsvCodec,
         columns: Vec<String>,
         table_info: Arc<TableInfo>,
         query_ctx: QueryContextRef,
@@ -249,7 +292,7 @@ impl CopyInState {
         let schema = table_info.meta.schema.clone();
         let timestamp_index = schema.timestamp_index();
 
-        let columns = resolve_columns(codec.as_ref(), columns, &schema, &table_info)?;
+        let columns = resolve_columns(codec, columns, &schema, &table_info)?;
         if let Some(ts_index) = timestamp_index {
             let ts_column = &schema.column_schemas()[ts_index];
             if !columns.iter().any(|column| column.name == ts_column.name) {
@@ -268,14 +311,47 @@ impl CopyInState {
 
         Ok(Self {
             query_ctx,
-            grpc_schema,
-            table_name,
-            parser,
-            codec_name: codec.name(),
-            codec_format_code: codec.format_code(),
-            rows: Vec::with_capacity(COPY_IN_FLUSH_ROWS),
+            payload: Payload::Table {
+                grpc_schema,
+                table_name,
+                parser,
+                rows: Vec::with_capacity(COPY_IN_FLUSH_ROWS),
+            },
+            codec_name: "csv",
+            codec_format_code: 0,
             rows_written: 0,
         })
+    }
+
+    /// State for the influxdb format: the whole payload is buffered and
+    /// completed once at `CopyDone` through the line-protocol pipeline.
+    fn new_influxdb(options: &InfluxdbOptions, query_ctx: QueryContextRef) -> Self {
+        Self {
+            query_ctx,
+            payload: Payload::Influxdb {
+                data: Vec::new(),
+                precision: options.precision,
+            },
+            codec_name: "influxdb",
+            codec_format_code: 0,
+            rows_written: 0,
+        }
+    }
+
+    /// State for the OTLP format: the whole binary payload is buffered
+    /// and completed once at `CopyDone` through the matching OTLP
+    /// pipeline. Binary: the advertised wire format code is 1.
+    fn new_otlp(options: &OtlpOptions, query_ctx: QueryContextRef) -> Self {
+        Self {
+            query_ctx,
+            payload: Payload::Otlp {
+                data: Vec::new(),
+                options: options.clone(),
+            },
+            codec_name: "otlp",
+            codec_format_code: 1,
+            rows_written: 0,
+        }
     }
 
     /// The wire format code advertised to the client.
@@ -283,43 +359,101 @@ impl CopyInState {
         self.codec_format_code
     }
 
-    /// Feeds a `CopyData` chunk into the parser and buffers parsed rows.
+    /// Feeds a `CopyData` chunk into the parser and buffers parsed rows
+    /// (csv) or payload bytes (influxdb).
     fn feed(&mut self, data: &[u8]) -> PgWireResult<()> {
-        self.rows.extend(self.parser.feed(data)?);
+        match &mut self.payload {
+            Payload::Table { parser, rows, .. } => rows.extend(parser.feed(data)?),
+            Payload::Influxdb { data: buffered, .. } | Payload::Otlp { data: buffered, .. } => {
+                if buffered.len() + data.len() > COPY_IN_MAX_PAYLOAD_BYTES {
+                    return Err(bad_copy_data(format!(
+                        "COPY FROM STDIN payload exceeds the {} limit; split the import into multiple COPY statements",
+                        COPY_IN_MAX_PAYLOAD_BYTES
+                    )));
+                }
+                buffered.extend_from_slice(data);
+            }
+        }
         Ok(())
     }
 
     /// Parses the buffered tail at `CopyDone`; a final record without a
     /// trailing newline is accepted.
     fn finish(&mut self) -> PgWireResult<()> {
-        self.rows.extend(self.parser.finish()?);
+        match &mut self.payload {
+            Payload::Table { parser, rows, .. } => rows.extend(parser.finish()?),
+            // The whole payload is one request body; nothing to finalize.
+            Payload::Influxdb { .. } | Payload::Otlp { .. } => {}
+        }
         Ok(())
     }
 
     fn should_flush(&self) -> bool {
-        self.rows.len() >= COPY_IN_FLUSH_ROWS
+        match &self.payload {
+            Payload::Table { rows, .. } => rows.len() >= COPY_IN_FLUSH_ROWS,
+            // Completed once at CopyDone, not mid-stream.
+            Payload::Influxdb { .. } | Payload::Otlp { .. } => false,
+        }
     }
 
     /// Takes the buffered rows as an insert request, if any.
     fn take_requests(&mut self) -> Option<RowInsertRequests> {
-        if self.rows.is_empty() {
+        let Payload::Table {
+            grpc_schema,
+            table_name,
+            rows,
+            ..
+        } = &mut self.payload
+        else {
+            return None;
+        };
+        if rows.is_empty() {
             return None;
         }
         let rows = GrpcRows {
-            schema: self.grpc_schema.clone(),
-            rows: std::mem::take(&mut self.rows),
+            schema: grpc_schema.clone(),
+            rows: std::mem::take(rows),
         };
         Some(RowInsertRequests {
             inserts: vec![RowInsertRequest {
-                table_name: self.table_name.clone(),
+                table_name: table_name.clone(),
                 rows: Some(rows),
             }],
         })
     }
+
+    /// Takes the buffered OTLP payload and its options, if any.
+    fn take_otlp(&mut self) -> Option<(OtlpOptions, Vec<u8>)> {
+        let Payload::Otlp { options, data } = &mut self.payload else {
+            return None;
+        };
+        if data.is_empty() {
+            return None;
+        }
+        Some((options.clone(), std::mem::take(data)))
+    }
+
+    /// Takes the buffered payload as one line-protocol request body, if
+    /// any — the same bytes an HTTP write of the same records would
+    /// carry.
+    fn take_lines(&mut self) -> PgWireResult<Option<InfluxdbRequest>> {
+        let Payload::Influxdb { data, precision } = &mut self.payload else {
+            return Ok(None);
+        };
+        if data.is_empty() {
+            return Ok(None);
+        }
+        let lines = String::from_utf8(std::mem::take(data))
+            .map_err(|e| bad_copy_data(format!("COPY FROM STDIN data is not valid UTF-8: {e}")))?;
+        Ok(Some(InfluxdbRequest {
+            precision: *precision,
+            lines,
+        }))
+    }
 }
 
 fn resolve_columns(
-    codec: &dyn CopyInCodec,
+    codec: &CsvCodec,
     columns: Vec<String>,
     schema: &SchemaRef,
     table_info: &Arc<TableInfo>,
@@ -411,27 +545,78 @@ impl PostgresServerHandlerInner {
         // pending-rows batcher like SQL INSERT when it is enabled for
         // this connection.
         let query_ctx = self.new_query_context();
-        let (catalog, schema, table) = resolve_table_name(&query_ctx, &stmt.table)?;
 
-        let Some(table_info) = self
-            .copy_in_handler
-            .copy_in_table(&catalog, &schema, &table, query_ctx.clone())
-            .await
-            .map_err(convert_err)?
-        else {
-            return Err(copy_in_error(
-                PgErrorCode::Ec42P01,
-                format!("relation \"{}\" does not exist", stmt.table.join(".")),
-            ));
+        // Each format states its own target rule and ingestion shape
+        // explicitly.
+        let state = match &stmt.format {
+            // csv requires a target table: records are parsed against
+            // its columns and inserted in batches.
+            CopyFormat::Csv(codec) => {
+                if stmt.table.is_empty() {
+                    return Err(unsupported(
+                        "format csv requires a table: COPY tbl [(cols)] FROM STDIN WITH (FORMAT csv)",
+                    ));
+                }
+                let (catalog, schema, table) = resolve_table_name(&query_ctx, &stmt.table)?;
+
+                let Some(table_info) = self
+                    .copy_in_handler
+                    .copy_in_table(&catalog, &schema, &table, query_ctx.clone())
+                    .await
+                    .map_err(convert_err)?
+                else {
+                    return Err(copy_in_error(
+                        PgErrorCode::Ec42P01,
+                        format!("relation \"{}\" does not exist", stmt.table.join(".")),
+                    ));
+                };
+
+                // The insert path resolves the bare table name against the
+                // query context, so point the context at the resolved
+                // catalog and schema when the COPY target is qualified.
+                let query_ctx = adjust_query_context(query_ctx, &catalog, &schema);
+
+                CopyInState::new(codec, stmt.columns, table_info, query_ctx, table)?
+            }
+            // influxdb forbids a target table — each line names its own
+            // measurement — and completes through the line-protocol
+            // pipeline the HTTP write endpoints use; the server must be
+            // wired for it.
+            CopyFormat::Influxdb(options) => {
+                if !stmt.table.is_empty() {
+                    return Err(unsupported(format!(
+                        "format influxdb routes each record to its own table; \"COPY {} FROM STDIN\" must not name one",
+                        stmt.table.join(".")
+                    )));
+                }
+                if self.influxdb_handler.is_none() {
+                    return Err(unsupported(
+                        "this server is not wired for the influxdb line protocol format",
+                    ));
+                }
+                CopyInState::new_influxdb(options, query_ctx)
+            }
+            // OTLP forbids a target table too — the payload's resource
+            // metrics route to their own tables — and completes through
+            // the OTLP metrics pipeline; the server must be wired.
+            CopyFormat::Otlp(options) => {
+                if !stmt.table.is_empty() {
+                    return Err(unsupported(format!(
+                        "format otlp routes each record to its own table; \"COPY {} FROM STDIN\" must not name one",
+                        stmt.table.join(".")
+                    )));
+                }
+                if self.otlp_handler.is_none() {
+                    return Err(unsupported("this server is not wired for the otlp format"));
+                }
+                CopyInState::new_otlp(options, query_ctx)
+            }
         };
-
-        // The insert path resolves the bare table name against the query
-        // context, so point the context at the resolved catalog and schema
-        // when the COPY target is qualified.
-        let query_ctx = adjust_query_context(query_ctx, &catalog, &schema);
-
-        let state = CopyInState::new(stmt.codec, stmt.columns, table_info, query_ctx, table)?;
-        let num_columns = state.grpc_schema.len();
+        let num_columns = match &state.payload {
+            Payload::Table { grpc_schema, .. } => grpc_schema.len(),
+            // No fixed column set: the format routes per record.
+            Payload::Influxdb { .. } | Payload::Otlp { .. } => 0,
+        };
         let format_code = state.format_code();
 
         *self.copy_in_state.lock().await = Some(state);
@@ -443,13 +628,42 @@ impl PostgresServerHandlerInner {
         )))
     }
 
-    /// Flushes buffered rows of an in-progress copy. Returns the number of
-    /// rows written by the flushed batch.
+    /// Flushes the buffered payload of an in-progress copy. Returns the
+    /// number of rows written by the flushed batch.
     async fn flush_copy_in(&self, state: &mut CopyInState) -> PgWireResult<u64> {
+        let query_ctx = state.query_ctx.clone();
+        // The buffered influxdb payload is completed through the
+        // line-protocol pipeline — the same handler the HTTP write
+        // endpoints use, so conversion, permissions, interceptors,
+        // timestamp alignment and inserts are identical to an HTTP
+        // write of the same bytes. The context stays this connection's
+        // postgres context.
+        if let Some((options, bytes)) = state.take_otlp() {
+            let Some(otlp_handler) = &self.otlp_handler else {
+                return Err(unsupported("this server is not wired for the otlp format"));
+            };
+            return self
+                .flush_otlp(otlp_handler, options, bytes, query_ctx)
+                .await;
+        }
+        if let Some(request) = state.take_lines()? {
+            let Some(influxdb_handler) = &self.influxdb_handler else {
+                return Err(unsupported(
+                    "this server is not wired for the influxdb line protocol format",
+                ));
+            };
+            let output = influxdb_handler
+                .exec(request, query_ctx)
+                .await
+                .map_err(convert_err)?;
+            return match output.data {
+                OutputData::AffectedRows(rows) => Ok(rows as u64),
+                OutputData::RecordBatches(_) | OutputData::Stream(_) => Ok(0),
+            };
+        }
         let Some(requests) = state.take_requests() else {
             return Ok(0);
         };
-        let query_ctx = state.query_ctx.clone();
         let output = self
             .copy_in_handler
             .copy_in_insert(requests, query_ctx)
@@ -463,6 +677,162 @@ impl PostgresServerHandlerInner {
             }
         }
     }
+
+    /// Completes an OTLP copy through the pipeline the matching
+    /// OTLP/HTTP endpoint uses — the payload is decoded with the same
+    /// protobuf types and handed to the same handler methods with the
+    /// same context preparation, so both ingestion routes are
+    /// identical. The context stays this connection's postgres context
+    /// apart from the signal-specific preparation below.
+    async fn flush_otlp(
+        &self,
+        otlp_handler: &crate::query_handler::OpenTelemetryProtocolHandlerRef,
+        options: OtlpOptions,
+        bytes: Vec<u8>,
+        query_ctx: QueryContextRef,
+    ) -> PgWireResult<u64> {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use pipeline::{GreptimePipelineParams, PipelineWay, SelectInfo};
+        use session::protocol_ctx::{MetricType, OtlpMetricCtx, ProtocolCtx};
+
+        // The HTTP routes derive the pipeline handler from the same
+        // protocol handler via trait upcasting; so does the copy.
+        let pipeline_handler: PipelineHandlerRef = otlp_handler.clone();
+        match options.signal {
+            OtlpSignal::Metrics {
+                promote_all_resource_attrs,
+                resource_attrs,
+                promote_scope_attrs,
+                translation_strategy,
+            } => {
+                // Same context preparation as the HTTP metrics route.
+                let mut ctx = (*query_ctx).clone();
+                ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                    promote_all_resource_attrs,
+                    resource_attrs,
+                    promote_scope_attrs,
+                    with_metric_engine: self.otlp_with_metric_engine,
+                    // Set by the frontend from its config.
+                    resource_info: false,
+                    metric_type: MetricType::Init,
+                    metric_translation_strategy: translation_strategy,
+                }));
+                let request = ExportMetricsServiceRequest::decode(bytes.as_slice())
+                    .map_err(|e| bad_copy_data(format!("invalid OTLP payload: {e}")))?;
+                let outcome = otlp_handler
+                    .metrics(
+                        request,
+                        Arc::new(ctx),
+                        Some((self.memory_limiter.clone(), 0)),
+                    )
+                    .await
+                    .map_err(convert_err)?;
+                // Same failure semantics as the HTTP route: a payload
+                // whose points were all rejected is an error, not a
+                // successful `COPY 0`.
+                if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
+                    return Err(all_rejected_error(
+                        "data points",
+                        outcome.rejected_data_points,
+                        outcome.error_message.as_deref(),
+                    ));
+                }
+                // Rows are the accepted data points.
+                Ok(outcome.accepted_data_points.max(0) as u64)
+            }
+            OtlpSignal::Traces {
+                table_name,
+                pipeline_name,
+                pipeline_version,
+                pipeline_params,
+            } => {
+                let table_name = table_name.unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
+                // Same context preparation as the HTTP traces route.
+                let mut ctx = (*query_ctx).clone();
+                ctx.set_extension(TRACE_TABLE_NAME_SESSION_KEY, &table_name);
+                let pipeline = PipelineWay::from_name_and_default(
+                    pipeline_name.as_deref(),
+                    pipeline_version.as_deref(),
+                    None,
+                )
+                .map_err(convert_err)?;
+                let request = ExportTraceServiceRequest::decode(bytes.as_slice())
+                    .map_err(|e| bad_copy_data(format!("invalid OTLP payload: {e}")))?;
+                let outcome = otlp_handler
+                    .traces(
+                        pipeline_handler,
+                        request,
+                        pipeline,
+                        GreptimePipelineParams::from_params(pipeline_params.as_deref()),
+                        table_name,
+                        Arc::new(ctx),
+                    )
+                    .await
+                    .map_err(convert_err)?;
+                // Same failure semantics as the HTTP route.
+                if outcome.accepted_spans == 0 && outcome.rejected_spans > 0 {
+                    return Err(all_rejected_error(
+                        "spans",
+                        outcome.rejected_spans as i64,
+                        outcome.error_message.as_deref(),
+                    ));
+                }
+                // Rows are the accepted spans.
+                Ok(outcome.accepted_spans as u64)
+            }
+            OtlpSignal::Logs {
+                table_name,
+                pipeline_name,
+                pipeline_version,
+                pipeline_params,
+                extract_keys,
+            } => {
+                let table_name = table_name.unwrap_or_else(|| "opentelemetry_logs".to_string());
+                // Same select semantics as the HTTP extract-keys header.
+                let select_info = match extract_keys.as_deref() {
+                    Some(keys) if !keys.is_empty() => SelectInfo::from(keys.to_string()),
+                    _ => Default::default(),
+                };
+                let pipeline = PipelineWay::from_name_and_default(
+                    pipeline_name.as_deref(),
+                    pipeline_version.as_deref(),
+                    Some(PipelineWay::OtlpLogDirect(Box::new(select_info))),
+                )
+                .map_err(convert_err)?;
+                let request = ExportLogsServiceRequest::decode(bytes.as_slice())
+                    .map_err(|e| bad_copy_data(format!("invalid OTLP payload: {e}")))?;
+                let outputs = otlp_handler
+                    .logs(
+                        pipeline_handler,
+                        request,
+                        pipeline,
+                        GreptimePipelineParams::from_params(pipeline_params.as_deref()),
+                        table_name,
+                        query_ctx,
+                    )
+                    .await
+                    .map_err(convert_err)?;
+                // Rows are the affected rows across the outputs.
+                Ok(outputs
+                    .iter()
+                    .map(|o| match &o.data {
+                        OutputData::AffectedRows(rows) => *rows as u64,
+                        _ => 0,
+                    })
+                    .sum())
+            }
+        }
+    }
+}
+
+/// The error for an OTLP payload whose points/spans were all rejected,
+/// carrying the pipeline's reason when it provided one.
+fn all_rejected_error(kind: &str, rejected: i64, reason: Option<&str>) -> PgWireError {
+    bad_copy_data(match reason {
+        Some(reason) => format!("OTLP ingestion rejected all {rejected} {kind}: {reason}"),
+        None => format!("OTLP ingestion rejected all {rejected} {kind}"),
+    })
 }
 
 fn adjust_query_context(
@@ -587,8 +957,8 @@ mod tests {
             .unwrap();
         assert_eq!(copy.table, vec!["t"]);
         assert!(copy.columns.is_empty());
-        assert_eq!(copy.codec.name(), "csv");
-        assert_eq!(copy.codec.format_code(), 0);
+        assert!(matches!(copy.format, CopyFormat::Csv(_)));
+        // Both formats are textual: format code 0.
     }
 
     #[test]
@@ -599,7 +969,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(copy.columns, vec!["a", "b"]);
-        assert_eq!(copy.codec.name(), "csv");
+        assert!(matches!(copy.format, CopyFormat::Csv(_)));
     }
 
     #[test]

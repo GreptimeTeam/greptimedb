@@ -56,6 +56,33 @@ impl ProcedureContext {
     }
 }
 
+/// Controls how children submitted by [`Status::Suspended`] are handled after a restart.
+///
+/// The policy is captured at submission and persisted with each child's checkpoints.
+/// It does not change parent-child ownership during normal execution. A child without
+/// a persisted checkpoint cannot be recovered, regardless of its policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubprocedureRecovery {
+    /// Does not recover the child. The parent decides whether to resubmit its work.
+    /// This does not roll back side effects or delete the child's persisted records.
+    #[default]
+    Discard,
+    /// Resumes the child's persisted execution or rollback as an independent root.
+    /// Its original id and context are retained, but its parent link is removed.
+    /// Completion no longer notifies the former parent.
+    /// All eligible procedures are loaded and their recovery hooks are called before
+    /// any recovered runner starts. Runner execution is not ordered relative to the
+    /// former parent; callers must prevent conflicting work when the parent recovers.
+    Detach,
+}
+
+impl SubprocedureRecovery {
+    /// Returns whether the child is excluded from recovery.
+    pub(crate) fn is_discard(&self) -> bool {
+        matches!(self, Self::Discard)
+    }
+}
+
 /// Procedure execution status.
 #[derive(Debug)]
 pub enum Status {
@@ -69,6 +96,8 @@ pub enum Status {
     /// The procedure has suspended itself and is waiting for subprocedures.
     Suspended {
         subprocedures: Vec<ProcedureWithId>,
+        /// Recovery policy for every child in this submission, recorded at its first checkpoint.
+        recovery: SubprocedureRecovery,
         /// Whether the framework needs to persist the procedure.
         persist: bool,
     },
@@ -85,9 +114,11 @@ pub enum Status {
 
 impl Status {
     /// Returns a [Status::Suspended] with given `subprocedures` and `persist` flag.
+    /// Children default to [`SubprocedureRecovery::Discard`].
     pub fn suspended(subprocedures: Vec<ProcedureWithId>, persist: bool) -> Status {
         Status::Suspended {
             subprocedures,
+            recovery: SubprocedureRecovery::Discard,
             persist,
         }
     }
@@ -785,12 +816,14 @@ mod tests {
         assert!(status.need_clean_poisons());
 
         let status = Status::Suspended {
+            recovery: SubprocedureRecovery::Discard,
             subprocedures: Vec::new(),
             persist: false,
         };
         assert!(!status.need_persist());
 
         let status = Status::Suspended {
+            recovery: SubprocedureRecovery::Discard,
             subprocedures: Vec::new(),
             persist: true,
         };

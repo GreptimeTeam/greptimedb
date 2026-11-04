@@ -100,7 +100,6 @@ use sqlparser::ast::{
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
-use store_api::mito_engine_options::APPEND_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
@@ -2632,7 +2631,7 @@ pub fn verify_alter(
         .build()
         .context(error::BuildTableMetaSnafu { table_name })?;
 
-    validate_json2_columns_append_mode(&new_meta.schema, &new_meta.options)?;
+    validate_json2_primary_keys(&new_meta.schema, &new_meta.primary_key_indices)?;
 
     Ok(true)
 }
@@ -2682,7 +2681,7 @@ pub fn create_table_info(
     let mut table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
 
-    validate_json2_columns_append_mode(&schema, &table_options)?;
+    validate_json2_primary_keys(&schema, &primary_key_indices)?;
 
     validate_and_normalize_annotations(&mut table_options, &schema, &partition_key_indices)?;
 
@@ -2721,26 +2720,16 @@ pub fn create_table_info(
     Ok(table_info)
 }
 
-fn validate_json2_columns_append_mode(schema: &Schema, table_options: &TableOptions) -> Result<()> {
-    let append_mode = table_options
-        .extra_options
-        .get(APPEND_MODE_KEY)
-        .is_some_and(|value| value == "true");
-
-    for column in schema.column_schemas() {
-        if column.data_type.is_json2() {
-            ensure!(
-                append_mode,
-                InvalidSqlSnafu {
-                    err_msg: format!(
-                        "JSON2 column `{}` requires {}='true'",
-                        column.name, APPEND_MODE_KEY
-                    ),
-                }
-            );
-        }
+fn validate_json2_primary_keys(schema: &Schema, primary_key_indices: &[usize]) -> Result<()> {
+    for &index in primary_key_indices {
+        let column = &schema.column_schemas()[index];
+        ensure!(
+            !column.data_type.is_json2(),
+            InvalidSqlSnafu {
+                err_msg: format!("JSON2 column `{}` cannot be a primary key", column.name),
+            }
+        );
     }
-
     Ok(())
 }
 
@@ -4147,26 +4136,36 @@ WITH ('repartition.column.hint' = ' host ')",
     }
 
     #[test]
-    fn test_json2_requires_append_mode() {
-        let cases = [
-            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX);",
-            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='false');",
-        ];
-
-        for sql in cases {
-            let expr = create_expr_from_sql(sql);
-            let err = create_table_info(&expr, vec![]).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("JSON2 column `payload` requires append_mode='true'"),
-                "{err}"
-            );
+    fn test_json2_supports_non_append_mode() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        for options in [
+            "",
+            "WITH (append_mode='false')",
+            "WITH (append_mode='true')",
+            "WITH (merge_mode='last_non_null')",
+        ] {
+            let expr = create_expr_from_sql(&format!(
+                "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) {options};"
+            ));
+            create_table_info(&expr, vec![])?;
         }
+        Ok(())
+    }
 
+    #[test]
+    fn test_json2_cannot_be_primary_key() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let expr = create_expr_from_sql(
-            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='true');",
+            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX, PRIMARY KEY(payload));",
         );
-        create_table_info(&expr, vec![]).unwrap();
+        let err = create_table_info(&expr, vec![])
+            .err()
+            .ok_or("expected JSON2 primary key rejection")?;
+        assert!(
+            err.to_string()
+                .contains("JSON2 column `payload` cannot be a primary key"),
+            "{err}"
+        );
+        Ok(())
     }
 
     #[test]

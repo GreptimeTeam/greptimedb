@@ -109,7 +109,7 @@ CREATE TABLE bad (
     host STRING PRIMARY KEY COMPRESSION WITH (level = 3)
 ) WITH ('primary_key_encoding' = 'sparse');
 
-Error: 1004(InvalidArguments), Invalid region options, COMPRESSION on tag column host requires flat SST format and dense primary key encoding
+Error: 1004(InvalidArguments), Invalid metadata, sparse primary keys must start with (__table_id, __tsid)
 
 CREATE TABLE compressed_tags (
     ts TIMESTAMP TIME INDEX,

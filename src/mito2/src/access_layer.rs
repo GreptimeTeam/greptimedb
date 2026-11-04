@@ -446,26 +446,29 @@ impl AccessLayer {
                     let parquet_metadata = parquet_metadata.clone();
                     let region_metadata = region_metadata.clone();
                     let cache_manager = cache_manager.clone();
-                    // Compact cache preparation is best-effort. Run the entire operation in one
-                    // detached blocking task so it neither blocks an async worker nor delays the
-                    // SST write.
-                    runtime.spawn_blocking(move || {
-                        match prepare_sst_meta_sync(
-                            &file_path,
-                            Arc::unwrap_or_clone(parquet_metadata),
-                            Some(region_metadata),
-                            page_index_policy,
-                        ) {
+                    // Prepare and cache metadata in the background without delaying the SST write.
+                    let task_runtime = runtime.clone();
+                    runtime.spawn(async move {
+                        let preparation = task_runtime.spawn_blocking(move || {
+                            prepare_sst_meta_sync(
+                                &file_path,
+                                Arc::unwrap_or_clone(parquet_metadata),
+                                Some(region_metadata),
+                                page_index_policy,
+                            )
+                        }).await.context(crate::error::JoinSnafu).and_then(|result| result);
+                        match preparation {
                             Ok(SstMetaPreparation::Prepared(metadata)) => {
-                                cache_manager.put_prepared_sst_meta(file_id, metadata, true);
+                                cache_manager.put_compact_sst_meta(file_id, metadata.compact);
+                                cache_manager.put_sst_meta_data(file_id, metadata.decoded).await;
                             }
                             Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
                                 encoding_error;
                                 "Failed to encode parquet metadata for cache, file: {}",
-                                file_path
+                                file_id.file_id()
                             ),
                             Err(err) => {
-                                warn!(err; "Failed to cache parquet metadata for {}", file_path);
+                                warn!(err; "Failed to cache parquet metadata for {}", file_id.file_id());
                             }
                         }
                     });

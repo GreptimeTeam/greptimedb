@@ -46,10 +46,10 @@ use crate::read::range_cache::{CachedRangeReader, build_range_cache_key};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     BATCH_SIZE_THRESHOLD, MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList,
-    SplitRecordBatchStream, compute_parallel_channel_size, scan_flat_file_ranges,
-    scan_flat_mem_ranges, should_split_flat_batches_for_merge,
+    SplitRecordBatchStream, compute_parallel_channel_size, prepare_flat_mem_stream,
+    scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
-use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
+use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream, spawn_compact_stream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
 use crate::region::options::MergeMode;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
@@ -198,15 +198,19 @@ impl SeqScan {
             partition_ranges.len(),
             sources.len()
         );
-        Self::build_flat_reader_from_sources(
-            stream_ctx,
-            sources,
-            None,
-            None,
-            false,
-            compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE),
-        )
-        .await
+        let channel_size = compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE);
+        let parallelism = stream_ctx.input.compaction_read_parallelism;
+        if parallelism > 1 && sources.len() > 1 {
+            // More permits than inputs cannot increase concurrency. Clamping also
+            // keeps oversized user settings below the semaphore's permit limit.
+            let semaphore = Arc::new(Semaphore::new(parallelism.min(sources.len())));
+            sources = sources
+                .into_iter()
+                .map(|source| spawn_compact_stream(source, channel_size, Some(semaphore.clone())))
+                .collect();
+        }
+        Self::build_flat_reader_from_sources(stream_ctx, sources, None, None, false, channel_size)
+            .await
     }
 
     /// Builds a flat reader to read sources that returns RecordBatch.
@@ -298,13 +302,14 @@ impl SeqScan {
         file_scan_semaphore: Option<Arc<Semaphore>>,
         merge_semaphore: Option<Arc<Semaphore>>,
     ) -> Result<(BoxedRecordBatchStream, usize)> {
-        let cache_key = build_range_cache_key(stream_ctx, part_range).map(|key| {
-            if read_mode == FlatReadMode::CrossRangeMerge {
-                key.for_cross_range_merge()
-            } else {
-                key
-            }
-        });
+        let cache_key =
+            build_range_cache_key(stream_ctx, part_range, Some(&partition_pruner)).map(|key| {
+                if read_mode == FlatReadMode::CrossRangeMerge {
+                    key.for_cross_range_merge()
+                } else {
+                    key
+                }
+            });
         let ctx = stream_ctx.clone();
         let range = *part_range;
         let metrics = part_metrics.clone();
@@ -725,7 +730,7 @@ pub(crate) async fn build_flat_sources(
                 *index,
                 range_meta.time_range,
             );
-            ordered_sources[position] = Some(Box::pin(stream) as _);
+            ordered_sources[position] = Some(prepare_flat_mem_stream(stream_ctx.clone(), stream));
         } else if stream_ctx.is_file_range_index(*index) {
             // Common manifest-level fast-skip shared by SeqScan and UnorderedScan.
             // Compaction should keep reading its selected input ranges completely.

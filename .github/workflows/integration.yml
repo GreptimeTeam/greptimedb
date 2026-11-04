@@ -21,7 +21,7 @@ on:
         default: false
         type: boolean
       fuzz_profile:
-        description: Fuzz profile selected by /ci fuzz
+        description: Fuzz profile for a manual run or /ci fuzz
         required: false
         default: none
         type: choice
@@ -30,7 +30,7 @@ on:
 name: Integration CI
 
 env:
-  CARGO_FUZZ_VERSION: "0.13.2"
+  FUZZ_VERSION: "0.13.2"
   # Fuzz targets require a nightly toolchain (cargo-fuzz needs
   # `-Zsanitizer=fuzzer`). This pin decouples the fuzz workflow from the
   # workspace default in rust-toolchain.toml, so it keeps working when the
@@ -42,8 +42,71 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  github-script-tests:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    name: GitHub Script Tests (Integration CI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/github-script-tests
+
+  # Which jobs this gate skips, and why: .github/ci/README.md.
+  scope:
+    name: CI Scope
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    # ubuntu-slim ships python3, git and curl; this job only classifies.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # `/pulls/{n}` and `/pulls/{n}/files`. An explicit block sets every
+      # unlisted permission to none, and a 403 here would silently widen every
+      # gate instead of classifying.
+      pull-requests: read
+    outputs:
+      any_fuzz: ${{ steps.classify.outputs.any_fuzz }}
+      build_ci_needed: ${{ steps.classify.outputs.build_ci_needed }}
+      fuzz_standalone: ${{ steps.classify.outputs.fuzz_standalone }}
+      fuzz_distributed: ${{ steps.classify.outputs.fuzz_distributed }}
+      fuzz_chaos: ${{ steps.classify.outputs.fuzz_chaos }}
+      fuzz_unstable: ${{ steps.classify.outputs.fuzz_unstable }}
+      export_import_v2: ${{ steps.classify.outputs.export_import_v2 }}
+      sqlness_kvbackend: ${{ steps.classify.outputs.sqlness_kvbackend }}
+    steps:
+      # Rules come from the pull request base (the queue base on merge_group),
+      # so a pull request cannot weaken its own gate. If this job or the Classify
+      # step fails, the outputs stay empty and every gate below treats an absent
+      # value as "run", which keeps CI fail-open.
+      - uses: actions/checkout@v4
+        # A checkout failure leaves the outputs empty, which every gate treats
+        # as "run"; letting the step fail would skip the gates instead.
+        continue-on-error: true
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          persist-credentials: false
+      - name: Classify
+        id: classify
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_SCOPE_FORCE_ALL: ${{ vars.CI_SCOPE_FORCE_ALL || 'false' }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --event "$GITHUB_EVENT_NAME"
+                --github-output "$GITHUB_OUTPUT"
+                --summary "$GITHUB_STEP_SUMMARY")
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            args+=(--pr "${{ github.event.pull_request.number }}"
+                   --head-sha "${{ github.event.pull_request.head.sha }}"
+                   --base-sha "${{ github.event.pull_request.base.sha }}")
+          fi
+          python3 .github/ci/ci_scope.py "${args[@]}"
+
+  build:
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    needs: [github-script-tests]
     name: Build GreptimeDB binaries
     runs-on: ${{ matrix.os }}
     strategy:
@@ -58,6 +121,8 @@ jobs:
         with:
           tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Build Binaries Cache
         id: build-binaries-cache
         uses: Swatinem/rust-cache@v2
@@ -104,9 +169,9 @@ jobs:
           version: current
 
   sqlness:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Sqlness Test (${{ matrix.mode.name }})
-    needs: build
+    needs: [github-script-tests, build]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -116,28 +181,12 @@ jobs:
           - name: "Basic"
             opts: ""
             kafka: false
-            postgres: false
-            mysql: false
           - name: "Remote WAL"
             opts: "-w kafka -k 127.0.0.1:9092"
             kafka: true
-            postgres: false
-            mysql: false
-          - name: "PostgreSQL KvBackend"
-            opts: "--setup-pg postgresql://greptimedb:admin@127.0.0.1:5432/postgres"
-            kafka: false
-            postgres: true
-            mysql: false
-          - name: "MySQL KvBackend"
-            opts: "--setup-mysql mysql://greptimedb:admin@127.0.0.1:3306/mysql"
-            kafka: false
-            postgres: false
-            mysql: true
           - name: "Flat format"
             opts: "--enable-flat-format"
             kafka: false
-            postgres: false
-            mysql: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -148,16 +197,6 @@ jobs:
         name: Setup Kafka
         working-directory: tests-integration/fixtures
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait kafka
-
-      - if: matrix.mode.postgres
-        name: Setup PostgreSQL
-        working-directory: tests-integration/fixtures
-        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait postgres
-
-      - if: matrix.mode.mysql
-        name: Setup MySQL
-        working-directory: tests-integration/fixtures
-        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait mysql
 
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
@@ -183,10 +222,68 @@ jobs:
             /tmp/sqlness*
           retention-days: 3
 
+  sqlness-kvbackend:
+    # The two foreign KV backends are the only sqlness legs that are not
+    # required checks, so they are the only ones this gate may skip. They run
+    # the same cases as the `Basic` leg, so the diff only matters when it can
+    # reach the backend itself; the merge queue runs them regardless.
+    if: ${{ !cancelled() && needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) && needs.build.result == 'success' && needs.scope.outputs.sqlness_kvbackend != 'false' }}
+    name: Sqlness Test (${{ matrix.mode.name }})
+    needs: [github-script-tests, scope, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest ]
+        mode:
+          - name: "Metasrv on PostgreSQL"
+            id: "metasrv-postgres"
+            opts: "--setup-pg postgresql://greptimedb:admin@127.0.0.1:5432/postgres"
+            postgres: true
+            mysql: false
+          - name: "Metasrv on MySQL"
+            id: "metasrv-mysql"
+            opts: "--setup-mysql mysql://greptimedb:admin@127.0.0.1:3306/mysql"
+            postgres: false
+            mysql: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - if: matrix.mode.postgres
+        name: Setup PostgreSQL
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait postgres
+
+      - if: matrix.mode.mysql
+        name: Setup MySQL
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait mysql
+
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Run sqlness
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
+      - name: Upload sqlness logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlness-logs-${{ matrix.mode.name }}
+          path: |
+            /tmp/sqlness*
+          retention-days: 3
+
   export-import-v2-e2e:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    if: ${{ !cancelled() && needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) && needs.build.result == 'success' && needs.scope.outputs.export_import_v2 != 'false' }}
     name: Export/Import V2 E2E Test
-    needs: build
+    needs: [github-script-tests, scope, build]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -197,6 +294,8 @@ jobs:
         with:
           tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -254,9 +353,9 @@ jobs:
           retention-days: 3
 
   run-multi-lang-tests:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Run Multi-language SDK Tests
-    needs: build
+    needs: [github-script-tests, build]
     uses: ./.github/workflows/run-multi-lang-tests.yml
     with:
       artifact-name: bins
@@ -279,9 +378,9 @@ jobs:
         run: python3 .github/scripts/update-compat-versions.py --check --published-only --check-anchors
 
   compat:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || (github.event.action == 'opened' && github.event.pull_request.draft == false)))) }}
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || (github.event.action == 'opened' && github.event.pull_request.draft == false)))) }}
     name: Compatibility Test (recent releases)
-    needs: build
+    needs: [github-script-tests, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -318,9 +417,12 @@ jobs:
           path: /tmp/sqlness-compat*
           retention-days: 3
 
+  # Fuzz runs on opening a ready PR, marking it ready, manual dispatch, and
+  # the scheduled main run. Synchronize events keep the core integration tests.
   prepare-fuzz-targets:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile != 'none') }}
+    if: ${{ !cancelled() && needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile != 'none'))) && needs.scope.outputs.any_fuzz != 'false' }}
     name: Prepare Fuzz Targets
+    needs: [github-script-tests, scope]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -338,18 +440,18 @@ jobs:
         id: fuzz-dependencies-cache
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v1-fuzz-${{ env.CARGO_FUZZ_VERSION }}"
+          prefix-key: "v1-fuzz-${{ env.FUZZ_VERSION }}"
           shared-key: "fuzz-dependencies"
           workspaces: ". -> target"
           cache-targets: "true"
           cache-all-crates: "true"
-          save-if: ${{ github.event_name == 'pull_request' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Look up prebuilt fuzz binaries
         id: fuzz-binaries
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+          key: v1-fuzz-binaries-${{ env.FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Report fuzz cache lookup
         shell: bash
         run: |
@@ -364,7 +466,7 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
         run: |
-          cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+          cargo install cargo-fuzz --version "${FUZZ_VERSION}" --locked
       - name: Build fuzz target binaries
         if: steps.fuzz-binaries.outputs.cache-hit != 'true'
         shell: bash
@@ -413,11 +515,11 @@ jobs:
           build_targets false "${FUZZ_TARGETS}"
           build_targets true "${FUZZ_UNSTABLE_TARGETS}"
       - name: Save prebuilt fuzz binaries
-        if: steps.fuzz-binaries.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/main' && steps.fuzz-binaries.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+          key: v1-fuzz-binaries-${{ env.FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Pack prebuilt fuzz binaries
         shell: bash
         run: |
@@ -433,9 +535,9 @@ jobs:
           if-no-files-found: error
 
   fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') }}
+    if: ${{ !cancelled() && needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all'))) && needs.build.result == 'success' && needs['prepare-fuzz-targets'].result == 'success' && needs.scope.outputs.fuzz_standalone != 'false' }}
     name: Fuzz Test (Standalone, ${{ matrix.group.name }})
-    needs: [build, prepare-fuzz-targets]
+    needs: [github-script-tests, build, prepare-fuzz-targets, scope]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -514,9 +616,9 @@ jobs:
           artifact-name: fuzz-standalone-${{ matrix.group.id }}
 
   unstable-fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') }}
+    if: ${{ !cancelled() && needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all'))) && needs['build-greptime-ci'].result == 'success' && needs['prepare-fuzz-targets'].result == 'success' && needs.scope.outputs.fuzz_unstable != 'false' }}
     name: Unstable Fuzz Test
-    needs: [build-greptime-ci, prepare-fuzz-targets]
+    needs: [github-script-tests, build-greptime-ci, prepare-fuzz-targets, scope]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -574,8 +676,9 @@ jobs:
           artifact-name: fuzz-unstable-standalone
 
   build-greptime-ci:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command && inputs.fuzz_profile != 'none')) }}
+    if: ${{ !cancelled() && needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile != 'none'))) && needs.scope.outputs.build_ci_needed != 'false' }}
     name: Build GreptimeDB binary (profile-CI)
+    needs: [github-script-tests, scope]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -589,6 +692,8 @@ jobs:
         with:
           tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Build Profile-CI Cache
         id: build-greptime-ci-cache
         uses: Swatinem/rust-cache@v2
@@ -597,7 +702,7 @@ jobs:
           shared-key: "build-greptime-ci"
           cache-all-crates: "true"
           cache-workspace-crates: "true"
-          save-if: ${{ github.event_name == 'pull_request' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Report profile-CI cache lookup
         shell: bash
         run: |
@@ -634,10 +739,10 @@ jobs:
           version: current
 
   distributed-fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'distributed' || inputs.fuzz_profile == 'all') }}
+    if: ${{ !cancelled() && needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile == 'distributed' || inputs.fuzz_profile == 'all'))) && needs['build-greptime-ci'].result == 'success' && needs['prepare-fuzz-targets'].result == 'success' && needs.scope.outputs.fuzz_distributed != 'false' }}
     name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
-    needs: [build-greptime-ci, prepare-fuzz-targets]
+    needs: [github-script-tests, build-greptime-ci, prepare-fuzz-targets, scope]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -720,7 +825,7 @@ jobs:
           workspaces: ". -> target"
           cache-targets: "true"
           cache-all-crates: "true"
-          save-if: ${{ github.event_name == 'pull_request' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - if: matrix.mode.kafkaWalHelper
         name: Report Kafka WAL helper cache lookup
         shell: bash
@@ -873,10 +978,10 @@ jobs:
           docker system prune -f
 
   distributed-fuzztest-with-chaos:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'chaos' || inputs.fuzz_profile == 'all') }}
+    if: ${{ !cancelled() && needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile == 'chaos' || inputs.fuzz_profile == 'all'))) && needs['build-greptime-ci'].result == 'success' && needs['prepare-fuzz-targets'].result == 'success' && needs.scope.outputs.fuzz_chaos != 'false' }}
     name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
-    needs: [build-greptime-ci, prepare-fuzz-targets]
+    needs: [github-script-tests, build-greptime-ci, prepare-fuzz-targets, scope]
     timeout-minutes: 60
     strategy:
       fail-fast: false

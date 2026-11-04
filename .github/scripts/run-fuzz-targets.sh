@@ -5,6 +5,7 @@ set -euo pipefail
 FUZZ_ARTIFACT_ROOT="${FUZZ_ARTIFACT_ROOT:-/tmp/greptime-fuzz-artifacts}"
 FUZZ_ARTIFACT_COLLECTOR="${FUZZ_ARTIFACT_COLLECTOR:-.github/scripts/collect-fuzz-target-artifacts.sh}"
 FUZZ_ARTIFACT_COLLECTION_TIMEOUT_SECS="${FUZZ_ARTIFACT_COLLECTION_TIMEOUT_SECS:-180}"
+FUZZ_CORPUS_ROOT="${FUZZ_CORPUS_ROOT:-tests-fuzz/corpus}"
 
 log() {
   printf '[run-fuzz-targets] %s\n' "$*"
@@ -187,19 +188,22 @@ for ((index = 0; index < ${#targets[@]}; index++)); do
   started_epoch="$(date +%s)"
   echo "::group::Fuzz target: ${target}"
   log "run target ${target}"
+  mkdir -p "${FUZZ_CORPUS_ROOT}/${target}"
+  corpus_dir="$(cd -- "${FUZZ_CORPUS_ROOT}/${target}" && pwd)"
+  log "corpus directory: ${corpus_dir}"
   if [[ -n "${FUZZ_BIN_DIR:-}" ]]; then
     fuzz_binary="${FUZZ_BIN_DIR}/${target}"
     if [[ ! -x "${fuzz_binary}" ]]; then
       log "prebuilt fuzz binary does not exist or is not executable: ${fuzz_binary}"
       exit 2
     fi
-    run_args=("${fuzz_binary}" "-max_total_time=${FUZZ_MAX_TOTAL_TIME}" "-artifact_prefix=${target_dir}/libfuzzer/")
+    run_args=("${fuzz_binary}" "${corpus_dir}" "-max_total_time=${FUZZ_MAX_TOTAL_TIME}" "-print_final_stats=1" "-artifact_prefix=${target_dir}/libfuzzer/")
   else
-    run_args=(cargo +"${RUSTUP_TOOLCHAIN:-nightly}" fuzz run "${target}" --fuzz-dir tests-fuzz -D -s none)
+    run_args=(cargo +"${RUSTUP_TOOLCHAIN:-nightly}" fuzz run "${target}" "${corpus_dir}" --fuzz-dir tests-fuzz -D -s none)
     if [[ "${fuzz_unstable}" == true ]]; then
       run_args+=(--features=unstable)
     fi
-    run_args+=(-- "-max_total_time=${FUZZ_MAX_TOTAL_TIME}" "-artifact_prefix=${target_dir}/libfuzzer/")
+    run_args+=(-- "-max_total_time=${FUZZ_MAX_TOTAL_TIME}" "-print_final_stats=1" "-artifact_prefix=${target_dir}/libfuzzer/")
   fi
   if GT_FUZZ_DUMP_DIR="${target_dir}/csv" \
     "${run_args[@]}" 2>&1 | tee "${target_dir}/fuzz.log"; then

@@ -292,10 +292,12 @@ impl RegionEngine for MockRegionEngine {
     fn set_region_role_with_lease(
         &self,
         _region_id: RegionId,
-        _role: RegionRole,
+        role: RegionRole,
+        _sent_at: std::time::Instant,
         _deadline: std::time::Instant,
-    ) -> Result<(), BoxedError> {
-        Ok(())
+    ) -> Result<bool, BoxedError> {
+        // A mocked role stays, so a grant of another role is not applied.
+        Ok(self.mock_role.flatten().is_none_or(|mocked| mocked == role))
     }
 
     async fn set_region_role_state_gracefully(

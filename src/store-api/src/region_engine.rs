@@ -87,6 +87,7 @@ pub struct SetRegionRoleStateRequest {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetRegionRoleStateSuccess {
     File,
+    Relational,
     Mito {
         last_entry_id: entry::Id,
     },
@@ -100,6 +101,11 @@ impl SetRegionRoleStateSuccess {
     /// Returns a [SetRegionRoleStateSuccess::File].
     pub fn file() -> Self {
         Self::File
+    }
+
+    /// Returns a [SetRegionRoleStateSuccess::Relational].
+    pub fn relational() -> Self {
+        Self::Relational
     }
 
     /// Returns a [SetRegionRoleStateSuccess::Mito] with the `last_entry_id`.
@@ -120,7 +126,7 @@ impl SetRegionRoleStateSuccess {
     /// Returns the last entry id of the region.
     pub fn last_entry_id(&self) -> Option<entry::Id> {
         match self {
-            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::File | SetRegionRoleStateSuccess::Relational => None,
             SetRegionRoleStateSuccess::Mito { last_entry_id } => Some(*last_entry_id),
             SetRegionRoleStateSuccess::Metric { last_entry_id, .. } => Some(*last_entry_id),
         }
@@ -129,7 +135,7 @@ impl SetRegionRoleStateSuccess {
     /// Returns the last entry id of the metadata of the region.
     pub fn metadata_last_entry_id(&self) -> Option<entry::Id> {
         match self {
-            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::File | SetRegionRoleStateSuccess::Relational => None,
             SetRegionRoleStateSuccess::Mito { .. } => None,
             SetRegionRoleStateSuccess::Metric {
                 metadata_last_entry_id,
@@ -318,7 +324,8 @@ pub struct ScannerProperties {
     /// The target partitions of the scanner. 0 indicates using the number of partitions as target partitions.
     target_partitions: usize,
 
-    /// Whether the scanner is scanning a logical region.
+    /// Whether the scanner reads one logical metric region, including a physical
+    /// metric region constrained by a table-ID filter.
     logical_region: bool,
 
     /// Region id that should receive query-load metrics for this scanner.
@@ -392,7 +399,8 @@ impl ScannerProperties {
         self.total_rows_is_exact
     }
 
-    /// Returns whether the scanner is scanning a logical region.
+    /// Returns whether the scanner reads one logical metric region, including a
+    /// physical metric region constrained by a table-ID filter.
     pub fn is_logical_region(&self) -> bool {
         self.logical_region
     }
@@ -406,7 +414,7 @@ impl ScannerProperties {
         }
     }
 
-    /// Sets whether the scanner is reading a logical region.
+    /// Sets whether the scanner reads one logical metric region.
     pub fn set_logical_region(&mut self, logical_region: bool) {
         self.logical_region = logical_region;
     }
@@ -535,7 +543,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// The default is a no-op and does not make inherently one-shot sources replayable.
     fn reset_state(&mut self) {}
 
-    /// Sets whether the scanner is reading a logical region.
+    /// Sets whether the scanner reads one logical metric region, including a
+    /// physical metric region constrained by a table-ID filter.
     fn set_logical_region(&mut self, logical_region: bool);
 
     /// Sets the region id that should receive query-load metrics.
@@ -591,6 +600,12 @@ pub struct RegionStatistic {
     #[serde(default)]
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
+    /// Total Parquet bytes committed by flushes since the region opened.
+    ///
+    /// Includes staging flushes, but excludes index files, compaction and imported SSTs.
+    /// Resets when the region instance is recreated; manifest replay does not increment it.
+    #[serde(default)]
+    pub flushed_parquet_bytes: u64,
     /// The total query CPU time of the region since region opened.
     ///
     /// Unit: nanoseconds.
@@ -765,6 +780,48 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn region_statistic_flush_bytes_compatibility() {
+        let legacy_bytes = br#"{
+            "num_rows": 1,
+            "memtable_size": 2,
+            "wal_size": 3,
+            "manifest_size": 4,
+            "sst_size": 5,
+            "sst_num": 6,
+            "index_size": 7,
+            "manifest": {
+                "Mito": {
+                    "manifest_version": 8,
+                    "flushed_entry_id": 9,
+                    "file_removed_cnt": 10
+                }
+            },
+            "written_bytes": 11
+        }"#;
+        let mut statistic = RegionStatistic::deserialize_from_slice(legacy_bytes).unwrap();
+        assert_eq!(statistic.flushed_parquet_bytes, 0);
+        statistic.flushed_parquet_bytes = 1234;
+        let encoded = statistic.serialize_to_vec().unwrap();
+        let decoded = RegionStatistic::deserialize_from_slice(&encoded).unwrap();
+        assert_eq!(decoded.flushed_parquet_bytes, 1234);
+        let legacy: serde_json::Value = serde_json::from_slice(legacy_bytes).unwrap();
+        let mut current: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        for (key, value) in legacy.as_object().unwrap() {
+            assert_eq!(&current[key], value);
+        }
+        current
+            .as_object_mut()
+            .unwrap()
+            .remove("flushed_parquet_bytes");
+        assert_eq!(
+            serde_json::from_value::<RegionStatistic>(current)
+                .unwrap()
+                .flushed_parquet_bytes,
+            0
+        );
+    }
 
     #[test]
     fn region_statistic_deserializes_without_query_stats() {
@@ -1082,7 +1139,9 @@ pub trait RegionEngine: Send + Sync {
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
 
-    /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`.
+    /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`, in reply
+    /// to a heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because
+    /// the region was downgraded or (re)opened after `sent_at`.
     ///
     /// The region must not acknowledge a write whose WAL append completes at or after the
     /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
@@ -1091,8 +1150,9 @@ pub trait RegionEngine: Send + Sync {
         &self,
         region_id: RegionId,
         role: RegionRole,
+        sent_at: Instant,
         deadline: Instant,
-    ) -> Result<(), BoxedError>;
+    ) -> Result<bool, BoxedError>;
 
     /// Syncs the region manifest to the given manifest version.
     async fn sync_region(

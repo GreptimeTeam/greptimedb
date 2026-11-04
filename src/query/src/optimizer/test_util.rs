@@ -107,8 +107,9 @@ impl RegionEngine for MetaRegionEngine {
         &self,
         _region_id: RegionId,
         _role: RegionRole,
+        _sent_at: std::time::Instant,
         _deadline: std::time::Instant,
-    ) -> Result<(), BoxedError> {
+    ) -> Result<bool, BoxedError> {
         unimplemented!()
     }
 

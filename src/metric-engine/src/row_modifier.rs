@@ -196,25 +196,12 @@ impl RowModifier {
             }
             ts_id_gen.finish()
         } else {
-            // Slow path: row contains null, recompute label hash
-            let mut hasher = TsidGenerator::default();
-            // 1. Find out label names with non-null values and get the hash.
-            for (name, value) in iter.primary_keys_with_name() {
-                // The type is checked before. So only null is ignored.
-                if let Some(ValueData::StringValue(_)) = &value.value_data {
-                    hasher.write_str(name);
-                }
-            }
-            let label_name_hash = hasher.finish();
-
-            // 2. Use label name hash as seed and continue with label values.
-            let mut final_hasher = TsidGenerator::new(label_name_hash);
-            for (_, value) in iter.primary_keys_with_name() {
-                if let Some(ValueData::StringValue(value)) = &value.value_data {
-                    final_hasher.write_str(value);
-                }
-            }
-            final_hasher.finish()
+            TsidGenerator::from_sorted_tags(iter.primary_keys_with_name().filter_map(
+                |(name, value)| match &value.value_data {
+                    Some(ValueData::StringValue(value)) => Some((name.as_str(), value.as_str())),
+                    _ => None,
+                },
+            ))
         };
 
         (
@@ -231,6 +218,19 @@ pub struct TsidGenerator {
 }
 
 impl TsidGenerator {
+    /// Computes the metric TSID from non-null tags sorted by name, retaining empty values.
+    pub fn from_sorted_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> u64 {
+        let mut names = Self::default();
+        for (name, _) in tags.clone() {
+            names.write_str(name);
+        }
+        let mut values = Self::new(names.finish());
+        for (_, value) in tags {
+            values.write_str(value);
+        }
+        values.finish()
+    }
+
     pub fn new(label_name_hash: u64) -> Self {
         let mut hasher = FxHasher::default();
         hasher.write_u64(label_name_hash);
@@ -376,7 +376,7 @@ pub struct RowIter<'a> {
 
 impl RowIter<'_> {
     /// Returns the primary keys with their names.
-    fn primary_keys_with_name(&self) -> impl Iterator<Item = (&String, &Value)> {
+    fn primary_keys_with_name(&self) -> impl Iterator<Item = (&String, &Value)> + Clone {
         self.index.indices[..self.index.num_primary_key_column]
             .iter()
             .map(|idx| {
@@ -788,6 +788,34 @@ mod tests {
             tsid1, tsid2,
             "TSID should be same when only difference is null label values"
         );
+    }
+
+    #[test]
+    fn test_sorted_tags_match_metric_rows() {
+        let names = ["b", "a", "absent"];
+        for values in [
+            [Some("B"), Some(""), Some("C")],
+            [Some("B"), Some(""), None],
+            [None, Some("A"), None],
+            [None, None, None],
+        ] {
+            let tags = names
+                .into_iter()
+                .zip(values)
+                .filter_map(|(name, value)| value.map(|value| (name, value)))
+                .collect::<BTreeMap<_, _>>();
+            let tsid =
+                TsidGenerator::from_sorted_tags(tags.iter().map(|(name, value)| (*name, *value)));
+            assert_eq!(
+                tsid,
+                extract_tsid(
+                    create_multi_label_schema(&names),
+                    create_row_with_nulls(&values),
+                    &create_name_to_column_id(&names),
+                    42
+                )
+            );
+        }
     }
 
     #[test]
