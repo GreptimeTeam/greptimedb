@@ -812,7 +812,11 @@ async fn test_kill_process_routes_by_advertised_peer_addr() {
     let mock = mocks::mock_with_memstore().await;
     let meta_client = build_meta_client_for_mock(&mock).await;
 
-    let local_peer_addr = reserve_loopback_addr();
+    // Keep this listener bound for the whole test so the remote server cannot be
+    // assigned the same address; otherwise the remote kill would take the local
+    // branch and fail to find the remote process.
+    let local_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let local_peer_addr = local_listener.local_addr().unwrap();
     let local_manager = Arc::new(ProcessManager::new(
         local_peer_addr.to_string(),
         Some(meta_client),
