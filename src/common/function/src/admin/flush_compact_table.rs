@@ -768,4 +768,63 @@ mod tests {
             .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn test_flush_table_requires_admin_privilege() {
+        use auth::{
+            DefaultPermissionChecker, Identity, Password, PermissionCheckerRef, UserProvider,
+            static_user_provider_from_option,
+        };
+        use common_base::Plugins;
+        use common_error::status_code::StatusCode;
+
+        async fn user(username: &str, mode: &str) -> auth::UserInfoRef {
+            let provider = static_user_provider_from_option(&format!(
+                "static_user_provider:cmd:{username}:{mode}={username}_pwd"
+            ))
+            .unwrap();
+            provider
+                .authenticate(
+                    Identity::UserId(username, None),
+                    Password::PlainText(format!("{username}_pwd").into()),
+                )
+                .await
+                .unwrap()
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(DefaultPermissionChecker::arc());
+
+        let func_args = || datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(StringArray::from(vec![
+                "test",
+            ])))],
+            arg_fields: vec![Arc::new(Field::new("arg_0", DataType::Utf8, false))],
+            return_field: Arc::new(Field::new("result", DataType::UInt64, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+
+        let factory: ScalarFunctionFactory = FlushTableFunction::factory().into();
+
+        let func_ctx =
+            crate::permission::test_function_context(plugins.clone(), user("ro_user", "ro").await);
+        let provider = factory.provide(func_ctx);
+        let f = provider.as_async().unwrap();
+        let error = f.invoke_async_with_args(func_args()).await.unwrap_err();
+        assert_eq!(
+            StatusCode::PermissionDenied,
+            common_query::error::datafusion_status_code::<common_query::error::Error>(&error, None)
+        );
+
+        let func_ctx =
+            crate::permission::test_function_context(plugins, user("rw_user", "rw").await);
+        let provider = factory.provide(func_ctx);
+        let f = provider.as_async().unwrap();
+        let error = f.invoke_async_with_args(func_args()).await.unwrap_err();
+        assert_ne!(
+            StatusCode::PermissionDenied,
+            common_query::error::datafusion_status_code::<common_query::error::Error>(&error, None)
+        );
+    }
 }
