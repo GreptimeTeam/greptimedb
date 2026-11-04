@@ -304,6 +304,35 @@ fn pick_closed_merge_with_budget(
     options: ClosedMergeOptions,
     work_budget: usize,
 ) -> Option<UnitPick> {
+    let [best, _] = pick_closed_merge_candidates(files, mapper, options, work_budget, false);
+    best
+}
+
+/// Discovers file reduction and overlap resolution together, sharing both the
+/// conflict graph and interval traversal. The first slot is file reduction.
+pub(crate) fn pick_closed_merge_by_class(
+    files: &[FileHandle],
+    mapper: &PrimaryKeyRangeMapper,
+    options: ClosedMergeOptions,
+) -> [Option<UnitPick>; 2] {
+    pick_closed_merge_candidates(files, mapper, options, CONFLICT_GRAPH_BUDGET, true)
+}
+
+/// A scored interval retained until the best candidate(s) are materialized.
+struct ClosedMergeCandidate {
+    benefit: u64,
+    size: u64,
+    range: Range<usize>,
+    reduces_files: bool,
+}
+
+fn pick_closed_merge_candidates(
+    files: &[FileHandle],
+    mapper: &PrimaryKeyRangeMapper,
+    options: ClosedMergeOptions,
+    work_budget: usize,
+    per_class: bool,
+) -> [Option<UnitPick>; 2] {
     let limits = options.limits;
     let extents = extents_of(files, mapper);
     let index = ExtentIndex::new(&extents);
@@ -321,13 +350,19 @@ fn pick_closed_merge_with_budget(
     };
     sort_units(&mut units);
     if dense {
-        return pick_dense_closed_merge(&units, files, &extents, &index, options);
+        return [
+            pick_dense_closed_merge(&units, files, &extents, &index, options),
+            None,
+        ];
     }
     let Some(pairs) = split_conflicts(&units, &extents, &index, work_budget) else {
-        return pick_dense_closed_merge(&units, files, &extents, &index, options);
+        return [
+            pick_dense_closed_merge(&units, files, &extents, &index, options),
+            None,
+        ];
     };
 
-    let mut best: Option<(u64, u64, Range<usize>, bool)> = None;
+    let mut best: [Option<ClosedMergeCandidate>; 2] = [None, None];
     for_each_interval(&units, &pairs, limits.max_input_files, |range, stats| {
         if stats.num_files < 2 {
             return;
@@ -345,9 +380,12 @@ fn pick_closed_merge_with_budget(
         {
             return;
         }
+        // Stateless/manual picks compare all intervals in one slot, retaining
+        // their original efficiency ordering and first-interval tie breaker.
+        let best = &mut best[usize::from(per_class && !reduces_files)];
         let benefit = (reduction + stats.conflicts) as u64;
-        let better = best.as_ref().is_none_or(|(best_benefit, best_size, _, _)| {
-            is_more_efficient(benefit, stats.size, *best_benefit, *best_size)
+        let better = best.as_ref().is_none_or(|candidate| {
+            is_more_efficient(benefit, stats.size, candidate.benefit, candidate.size)
         });
         if !better {
             return;
@@ -364,14 +402,21 @@ fn pick_closed_merge_with_budget(
         if units.len() > 1 && !adds_no_conflicts(units, &extents, &index, outputs) {
             return;
         }
-        best = Some((benefit, stats.size, range, reduces_files));
+        *best = Some(ClosedMergeCandidate {
+            benefit,
+            size: stats.size,
+            range,
+            reduces_files,
+        });
     });
 
-    best.map(|(_, _, range, reduces_files)| UnitPick {
-        inputs: collect_inputs(&units[range], files),
-        reduces_files,
-        units: units.len(),
-        dense_fallback: false,
+    best.map(|candidate| {
+        candidate.map(|candidate| UnitPick {
+            inputs: collect_inputs(&units[candidate.range], files),
+            reduces_files: candidate.reduces_files,
+            units: units.len(),
+            dense_fallback: false,
+        })
     })
 }
 
@@ -1708,13 +1753,88 @@ mod tests {
         assert!((2..=16).contains(&pick.inputs.len()));
     }
 
+    #[rstest::rstest]
+    #[case::both(true, true)]
+    #[case::only_reduction(true, false)]
+    #[case::only_overlap(false, true)]
+    #[case::neither(false, false)]
+    fn test_closed_merge_discovers_classes_independently(
+        #[case] allow_reduction: bool,
+        #[case] allow_conflicts: bool,
+    ) {
+        // Two disjoint groups: small neighbors reduce files, while full-size
+        // overlapping peers only resolve conflicts. The input cap prevents a
+        // larger interval from combining the groups into a different candidate.
+        let files = [
+            file(0, 10, b"a", b"b", 4),
+            file(20, 30, b"a", b"b", 4),
+            file(0, 30, b"c", b"d", 16),
+            file(0, 30, b"c", b"d", 16),
+        ];
+        let mapper = primary_key_mapper_for_test();
+        let options = ClosedMergeOptions {
+            limits: PickLimits {
+                max_input_files: 2,
+                ..limits(MAX_OUTPUT)
+            },
+            allow_file_reduction: allow_reduction,
+            allow_conflicts,
+            allow_unbalanced: false,
+        };
+        let [reducing, overlap] = pick_closed_merge_by_class(&files, &mapper, options);
+        assert_eq!(allow_reduction, reducing.is_some());
+        assert_eq!(allow_conflicts, overlap.is_some());
+        if let Some(pick) = reducing {
+            assert!(pick.reduces_files);
+            assert_eq!(ids(&files[..2]), ids(&pick.inputs));
+        }
+        if let Some(pick) = overlap {
+            assert!(!pick.reduces_files);
+            assert_eq!(ids(&files[2..]), ids(&pick.inputs));
+        }
+        let best = pick_closed_merge(&files, &mapper, options);
+        let expected = if allow_reduction {
+            Some(ids(&files[..2]))
+        } else if allow_conflicts {
+            Some(ids(&files[2..]))
+        } else {
+            None
+        };
+        assert_eq!(expected, best.map(|pick| ids(&pick.inputs)));
+    }
+
+    #[rstest::rstest]
+    #[case::empty(0)]
+    #[case::single(1)]
+    fn test_closed_merge_classes_without_enough_inputs(#[case] count: usize) {
+        let files = dense_files(count);
+        let picks = pick_closed_merge_by_class(
+            &files,
+            &primary_key_mapper_for_test(),
+            closed_merge_options(MAX_OUTPUT),
+        );
+        assert!(picks.into_iter().all(|pick| pick.is_none()));
+    }
+
     #[test]
-    fn test_dense_closed_merge_reduces_files() {
+    fn test_closed_merge_classes_share_dense_reduction() {
         let files = dense_files(300);
-        let pick = closed_merge_with_budget(&files, MAX_OUTPUT, 1 << 10).unwrap();
+        let [reducing, overlap] = pick_closed_merge_candidates(
+            &files,
+            &primary_key_mapper_for_test(),
+            closed_merge_options(MAX_OUTPUT),
+            1 << 10,
+            true,
+        );
+        let pick = reducing.unwrap();
         assert!(pick.dense_fallback);
         assert!(pick.reduces_files);
-        assert!((2..=16).contains(&pick.inputs.len()));
+        assert!(overlap.is_none());
+        let legacy = closed_merge_with_budget(&files, MAX_OUTPUT, 1 << 10).unwrap();
+        assert!(legacy.dense_fallback);
+        assert!(legacy.reduces_files);
+        assert!((2..=16).contains(&legacy.inputs.len()));
+        assert_eq!(ids(&legacy.inputs), ids(&pick.inputs));
     }
 
     #[test]
