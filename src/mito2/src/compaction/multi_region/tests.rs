@@ -14,20 +14,30 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use api::v1::OpType;
+use api::v1::{OpType, SemanticType};
 use datatypes::arrow::array::{
-    Array, BinaryArray, BinaryDictionaryBuilder, BooleanArray, DictionaryArray, StringArray,
-    TimestampMillisecondArray, UInt8Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BinaryDictionaryBuilder, BooleanArray, DictionaryArray,
+    StringArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
 };
 use datatypes::arrow::compute::cast;
-use datatypes::arrow::datatypes::{DataType, UInt32Type};
+use datatypes::arrow::datatypes::{DataType, Field, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::{Json2ExtensionType, Json2PhysicalLayout, JsonMetadata};
+use datatypes::json::{JsonSettings, JsonTypeHint};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
+use datatypes::types::json_type::JsonNativeType;
+use datatypes::types::parse_string_to_jsonb;
 use datatypes::value::Value;
+use datatypes::vectors::json::array::JsonArray;
+use datatypes::vectors::json::json2_physical_data_type;
 use futures::TryStreamExt;
 use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use partition::expr::col;
 use partition::multi_dim::MultiDimPartitionRule;
+use serde_json::json;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
@@ -900,6 +910,208 @@ async fn test_mis_sized_partition_mask_is_rejected_before_creating_outputs() {
         "{error:?}"
     );
     assert!(protection.files.lock().unwrap().is_empty());
+}
+
+/// Builds dense-encoded metadata with a JSON2 field written before `ts`, so the
+/// time index stays the last user column as the flat format requires.
+fn json2_compaction_metadata(settings: &JsonSettings, region_id: RegionId) -> RegionMetadataRef {
+    let mut json_schema =
+        ColumnSchema::new("j", ConcreteDataType::json2(JsonNativeType::object()), true);
+    json_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+        settings.clone(),
+    ))));
+    let mut builder = RegionMetadataBuilder::new(region_id);
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "tag_0".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 0,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "tag_1".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "field_0".to_string(),
+                ConcreteDataType::uint64_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Field,
+            column_id: 2,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: json_schema,
+            semantic_type: SemanticType::Field,
+            column_id: 4,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 3,
+        })
+        .primary_key(vec![0, 1])
+        .primary_key_encoding(PrimaryKeyEncoding::Dense);
+    Arc::new(builder.build().unwrap())
+}
+
+fn json2_hint(path: &str, data_type: ConcreteDataType) -> JsonTypeHint {
+    JsonTypeHint {
+        path: vec![path.to_string()],
+        data_type,
+        inverted_index: false,
+        skipping_index: None,
+    }
+}
+
+/// A source SST written with an older JSON2 layout must be rewritten into the
+/// target layout, keeping values that lived in the remainder field.
+#[tokio::test]
+async fn test_json2_rewrite_preserves_values_through_multiregion_compaction() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let source_settings = JsonSettings::try_new(
+        vec![json2_hint("a", ConcreteDataType::int64_datatype())],
+        Some(0),
+    )
+    .unwrap();
+    let target_settings = JsonSettings::try_new(
+        vec![
+            json2_hint("a", ConcreteDataType::int64_datatype()),
+            json2_hint("b", ConcreteDataType::string_datatype()),
+        ],
+        Some(0),
+    )
+    .unwrap();
+    let region_id = RegionId::new(1, 0);
+    let source_metadata = json2_compaction_metadata(&source_settings, region_id);
+    let target_metadata = json2_compaction_metadata(&target_settings, region_id);
+
+    let rows = [json!({"a": 1, "b": "x"}), json!({"a": 2})];
+    let legacy_jsonb = Arc::new(BinaryArray::from_iter_values(
+        rows.iter()
+            .map(|row| parse_string_to_jsonb(&row.to_string()).unwrap())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|value| value.as_slice()),
+    )) as ArrayRef;
+    let legacy_field =
+        Field::new("j", DataType::Binary, true).with_extension_type(Json2ExtensionType::default());
+    let physical = JsonArray::from(&legacy_jsonb)
+        .rewrite_to_v2(&legacy_field, &source_settings, &source_settings)
+        .unwrap();
+
+    // The base batch supplies tags, the primary key and the internal columns.
+    let base = new_record_batch_with_custom_sequence(&["000", "series"], 0, 2, 100);
+    let mut columns = base.columns().to_vec();
+    // `j` sits before `ts`, which must stay immediately before the internal columns.
+    columns.insert(3, physical.clone());
+    let mut options = FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Dense);
+    options
+        .concretized_json_types
+        .insert("j".to_string(), physical.data_type().clone());
+    let source_batch = RecordBatch::try_new(
+        to_flat_sst_arrow_schema(&source_metadata, &options),
+        columns,
+    )
+    .unwrap();
+
+    let info = fixture
+        .layer
+        .write_sst(
+            write_request(
+                source_metadata.clone(),
+                new_flat_source_from_record_batches(vec![source_batch]),
+                &fixture.config,
+                FormatType::Flat,
+            ),
+            &WriteOptions::default(),
+            &mut Metrics::new(WriteType::Flush),
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    let mut source = FileMeta {
+        region_id,
+        file_id: info.file_id,
+        time_range: info.time_range,
+        file_size: info.file_size,
+        num_rows: info.num_rows as u64,
+        num_row_groups: info.num_row_groups,
+        max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+        ..Default::default()
+    };
+    source.sequence = NonZeroU64::new(100);
+
+    let plan = MultiRegionCompactionPlan {
+        partition_rule: Arc::new(
+            MultiDimPartitionRule::try_new(vec!["tag_0".into()], vec![0], vec![], false).unwrap(),
+        ),
+        sources: vec![source.clone()],
+        targets: [(
+            region_id,
+            MultiRegionTarget {
+                metadata: target_metadata.clone(),
+                options: RegionOptions {
+                    append_mode: true,
+                    preserve_row_sequence: true,
+                    sst_format: Some(FormatType::Flat),
+                    ..Default::default()
+                },
+                inputs: [(source.file_id(), source.clone())].into_iter().collect(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        memory_limit: 256 * 1024 * 1024,
+        max_output_file_size: 1024 * 1024,
+        window_start: 0,
+        window_seconds: 3600,
+    };
+    let output = compact_regions(plan, fixture.context(None).0)
+        .await
+        .unwrap();
+
+    let mut observed = Vec::new();
+    for file in output.files[&region_id].clone() {
+        for batch in fixture.read_output(file, target_metadata.clone()).await {
+            let field = batch.schema_ref().field_with_name("j").unwrap().clone();
+            assert!(
+                Json2PhysicalLayout::try_from_root(&field)
+                    .unwrap()
+                    .is_version_2()
+            );
+            assert_eq!(
+                &json2_physical_data_type(&target_settings),
+                field.data_type()
+            );
+            let projected = JsonArray::from(batch.column_by_name("j").unwrap())
+                .project_to_v2(&field, &DataType::Binary)
+                .unwrap();
+            let num_rows = projected.len();
+            let projected = JsonArray::from(&projected);
+            for row in 0..num_rows {
+                observed.push(projected.try_get_value(row).unwrap());
+            }
+        }
+    }
+    assert_eq!(2, observed.len());
+    assert_eq!(Some(1), observed[0]["a"].as_i64());
+    assert_eq!(Some("x"), observed[0]["b"].as_str());
+    assert_eq!(Some(2), observed[1]["a"].as_i64());
+    assert_eq!(2, output.stats.output_rows);
 }
 
 #[tokio::test]
