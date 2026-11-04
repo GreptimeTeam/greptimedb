@@ -297,17 +297,23 @@ impl DummyTableProvider {
         self.scan_request.lock().unwrap().json_type_hint = hint;
     }
 
-    /// Whether this Mito scan still needs a count hint. Optimizer passes may
-    /// revisit the same aggregate; an already hinted provider is left alone.
+    /// Whether this Mito-backed scan still needs a count hint. Optimizer passes
+    /// may revisit the same aggregate; an already hinted provider is left alone.
     pub(crate) fn needs_metadata_count_hint(&self) -> bool {
-        self.engine.name() == "mito" && !self.scan_request.lock().unwrap().metadata_count_hint
+        self.counts_with_mito() && !self.scan_request.lock().unwrap().metadata_count_hint
     }
 
-    /// Requests exact-count preparation from Mito.
+    /// Requests exact-count preparation from engines that scan through Mito.
+    /// The metric engine forwards the request to its data region, whose count
+    /// must absorb the added table-id filter before it is published.
     pub(crate) fn with_metadata_count_hint(&self) {
-        if self.engine.name() == "mito" {
+        if self.counts_with_mito() {
             self.scan_request.lock().unwrap().metadata_count_hint = true;
         }
+    }
+
+    fn counts_with_mito(&self) -> bool {
+        matches!(self.engine.name(), "mito" | "metric")
     }
 
     /// Gets the scan request of the provider.
