@@ -172,7 +172,7 @@ impl AggregateFinalize {
                     .fields()
                     .iter()
                     .filter(|field| field.data_type() == &DataType::Utf8)
-                    .map(|field| field.name().to_string())
+                    .map(|field| field.name().clone())
                     .filter(|tag| !names.iter().any(|name| name.as_ref() == tag))
                     .collect()
             }

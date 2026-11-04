@@ -2475,14 +2475,12 @@ impl ExecutionPlan for FusedSeriesExec {
                             DataFusionError::Plan("FusedSeries output is not samples".into())
                         })?
                         .clone(),
-                    Arc::from(
-                        self.grouping_tags
-                            .as_ref()
-                            .ok_or_else(|| {
-                                DataFusionError::Plan("partial fold has no grouping tags".into())
-                            })?
-                            .clone(),
-                    ),
+                    self.grouping_tags
+                        .as_ref()
+                        .ok_or_else(|| {
+                            DataFusionError::Plan("partial fold has no grouping tags".into())
+                        })?
+                        .clone(),
                     Arc::clone(&export_budget),
                     &context.runtime_env().memory_pool,
                 )
