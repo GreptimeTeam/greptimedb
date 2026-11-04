@@ -89,50 +89,40 @@ TQL EVAL (180, 180, '1m') delta_temporality{otlp_aggregation_temporality!="delta
 | 1970-01-01T00:03:00 | 30.0           | cumulative |                              |
 +---------------------+----------------+------------+------------------------------+
 
--- Generated vector plans retain timestamp broadcast across the temporality marker.
+-- `vector(2)` is one series with no labels, not a scalar: a vector-to-vector operation matches on
+-- the label set, so it matches none of these series and the result is empty. `m * 2` would broadcast;
+-- `vector(2) * m` does not.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') vector(2) * delta_temporality;
 
-+------------+------------------------------+---------------------+----------------------------------------------------+
-| series     | otlp_aggregation_temporality | ts                  | .greptime_value * delta_temporality.greptime_value |
-+------------+------------------------------+---------------------+----------------------------------------------------+
-| cumulative |                              | 1970-01-01T00:03:00 | 60.0                                               |
-| delta      | delta                        | 1970-01-01T00:03:00 | 30.0                                               |
-| single     | delta                        | 1970-01-01T00:03:00 | 14.0                                               |
-+------------+------------------------------+---------------------+----------------------------------------------------+
++----+-------+
+| ts | value |
++----+-------+
++----+-------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') vector(2) * ignoring(otlp_aggregation_temporality) delta_temporality;
 
-+------------+------------------------------+---------------------+----------------------------------------------------+
-| series     | otlp_aggregation_temporality | ts                  | .greptime_value * delta_temporality.greptime_value |
-+------------+------------------------------+---------------------+----------------------------------------------------+
-| cumulative |                              | 1970-01-01T00:03:00 | 60.0                                               |
-| delta      | delta                        | 1970-01-01T00:03:00 | 30.0                                               |
-| single     | delta                        | 1970-01-01T00:03:00 | 14.0                                               |
-+------------+------------------------------+---------------------+----------------------------------------------------+
++----+-------+
+| ts | value |
++----+-------+
++----+-------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') delta_temporality * vector(2);
 
-+------------+------------------------------+---------------------+----------------------------------------------------+
-| series     | otlp_aggregation_temporality | ts                  | delta_temporality.greptime_value * .greptime_value |
-+------------+------------------------------+---------------------+----------------------------------------------------+
-| cumulative |                              | 1970-01-01T00:03:00 | 60.0                                               |
-| delta      | delta                        | 1970-01-01T00:03:00 | 30.0                                               |
-| single     | delta                        | 1970-01-01T00:03:00 | 14.0                                               |
-+------------+------------------------------+---------------------+----------------------------------------------------+
++----+----------------+--------+------------------------------+
+| ts | greptime_value | series | otlp_aggregation_temporality |
++----+----------------+--------+------------------------------+
++----+----------------+--------+------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') delta_temporality * ignoring(otlp_aggregation_temporality) vector(2);
 
-+------------+------------------------------+---------------------+----------------------------------------------------+
-| series     | otlp_aggregation_temporality | ts                  | delta_temporality.greptime_value * .greptime_value |
-+------------+------------------------------+---------------------+----------------------------------------------------+
-| cumulative |                              | 1970-01-01T00:03:00 | 60.0                                               |
-| delta      | delta                        | 1970-01-01T00:03:00 | 30.0                                               |
-| single     | delta                        | 1970-01-01T00:03:00 | 14.0                                               |
-+------------+------------------------------+---------------------+----------------------------------------------------+
++----+----------------+--------+
+| ts | greptime_value | series |
++----+----------------+--------+
++----+----------------+--------+
 
 -- Aggregation preserves or deliberately removes the visible stored marker.
 -- SQLNESS SORT_RESULT 3 1

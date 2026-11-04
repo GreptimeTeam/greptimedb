@@ -40,7 +40,9 @@ TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 TQL EVAL (180, 180, '1m') delta_temporality{otlp_aggregation_temporality=""};
 TQL EVAL (180, 180, '1m') delta_temporality{otlp_aggregation_temporality!="delta"};
 
--- Generated vector plans retain timestamp broadcast across the temporality marker.
+-- `vector(2)` is one series with no labels, not a scalar: a vector-to-vector operation matches on
+-- the label set, so it matches none of these series and the result is empty. `m * 2` would broadcast;
+-- `vector(2) * m` does not.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (180, 180, '1m') vector(2) * delta_temporality;
 -- SQLNESS SORT_RESULT 3 1
