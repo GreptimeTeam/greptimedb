@@ -25,6 +25,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod engine;
 mod eval_schedule;
 pub(crate) mod frontend_client;
+pub(crate) mod simple_delta;
 pub(crate) mod state;
 mod table_creator;
 pub(crate) mod task;

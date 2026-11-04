@@ -23,6 +23,7 @@ use snafu::ResultExt;
 
 use crate::Error;
 use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
+use crate::batching_mode::simple_delta::SinkKeys;
 use crate::batching_mode::utils::FindGroupByFinalName;
 use crate::error::{ConvertColumnSchemaSnafu, DatafusionSnafu};
 
@@ -35,15 +36,19 @@ pub enum QueryType {
 }
 
 // auto created table have a auto added column `update_at`, and optional have a `AUTO_CREATED_PLACEHOLDER_TS_COL` column for time index placeholder if no timestamp column is specified
+// `derived` carries source-key lineage for an opt-in row-local flow and overrides the first-timestamp fallback of `build_by_sql_schema`
 // TODO(discord9): for now no default value is set for auto added column for compatibility reason with streaming mode, but this might change in favor of simpler code?
 pub(super) fn create_table_with_expr(
     plan: &LogicalPlan,
     sink_table_name: &[String; 3],
     query_type: &QueryType,
+    derived: Option<SinkKeys>,
 ) -> Result<CreateTableExpr, Error> {
     let table_def = match query_type {
         &QueryType::Sql => {
             if let Some(def) = build_pk_from_aggr(plan)? {
+                def
+            } else if let Some(def) = build_by_derived_keys(plan, derived) {
                 def
             } else {
                 build_by_sql_schema(plan)?
@@ -151,6 +156,21 @@ fn build_by_sql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
         ts_col: first_time_stamp,
         pks: vec![],
     })
+}
+
+/// Build a keyed sink layout from source-key lineage: the output column carrying the source time
+/// index becomes the time index, and the output columns carrying the source primary keys become
+/// primary keys. Such a sink materializes a source delta key by key.
+fn build_by_derived_keys(plan: &LogicalPlan, derived: Option<SinkKeys>) -> Option<TableDef> {
+    let derived = derived?;
+    let fields = plan.schema().fields();
+    let ts_col = Some(fields.get(derived.time_index)?.name().clone());
+    let pks = derived
+        .primary_keys
+        .iter()
+        .map(|position| fields.get(*position).map(|field| field.name().clone()))
+        .collect::<Option<Vec<_>>>()?;
+    Some(TableDef { ts_col, pks })
 }
 
 /// Return first timestamp column found in output schema and all string columns
@@ -300,6 +320,7 @@ mod test {
                 "sink".to_string(),
             ],
             &QueryType::Tql,
+            None,
         )
         .unwrap();
         let columns = expr
@@ -399,6 +420,7 @@ mod test {
                     "sink".to_string(),
                 ],
                 &QueryType::Tql,
+                None,
             )
             .unwrap();
             let columns = expr
@@ -537,6 +559,7 @@ mod test {
                     tc.sink_table_name.clone(),
                 ],
                 &QueryType::Sql,
+                None,
             )
             .unwrap();
             // TODO(discord9): assert expr
@@ -549,5 +572,47 @@ mod test {
             assert_eq!(tc.primary_keys, expr.primary_keys, "{:?}", tc.sql);
             assert_eq!(tc.time_index, expr.time_index, "{:?}", tc.sql);
         }
+    }
+
+    #[tokio::test]
+    async fn test_sql_sink_uses_derived_sink_keys() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            // `number` is the derived source primary key and `ts` the derived time index, even
+            // though `ts` is not the first column of the output.
+            "SELECT ts, number FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+
+        let expr = create_table_with_expr(
+            &plan,
+            &[
+                "greptime".to_string(),
+                "public".to_string(),
+                "new_table".to_string(),
+            ],
+            &QueryType::Sql,
+            Some(SinkKeys {
+                time_index: 0,
+                primary_keys: vec![1],
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(vec!["number".to_string()], expr.primary_keys);
+        assert_eq!("ts", expr.time_index);
+        let columns = expr
+            .column_defs
+            .iter()
+            .map(|c| try_as_column_schema(c).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!("ts", columns[0].name);
+        assert!(columns[0].is_time_index());
+        assert_eq!("number", columns[1].name);
     }
 }

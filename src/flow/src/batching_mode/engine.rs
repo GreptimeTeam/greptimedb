@@ -33,8 +33,8 @@ use common_runtime::JoinHandle;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::TimeToLive;
-use datafusion_common::tree_node::{TreeNodeRecursion, TreeNodeVisitor};
-use datafusion_expr::LogicalPlan;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion_expr::{Expr, LogicalPlan, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use query::QueryEngineRef;
 use session::context::QueryContext;
@@ -43,6 +43,7 @@ use sql::parsers::utils::is_tql;
 use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use store_api::mito_engine_options::APPEND_MODE_KEY;
 use store_api::storage::{RegionId, TableId};
+use table::TableRef;
 use table::table_reference::TableReference;
 use tokio::sync::{RwLock, oneshot};
 
@@ -50,9 +51,9 @@ use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::eval_schedule::EvalSchedule;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::state::DirtyTimeWindows;
-use crate::batching_mode::task::{BatchingTask, TaskArgs};
+use crate::batching_mode::task::{BatchingTask, TaskArgs, is_merge_mode_last_non_null};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
-use crate::batching_mode::utils::sql_to_df_plan;
+use crate::batching_mode::utils::{gen_plan_with_matching_schema_and_values, sql_to_df_plan};
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
@@ -519,6 +520,135 @@ impl BatchingEngine {
             .is_some_and(|value| value.eq_ignore_ascii_case("true"))
     }
 
+    /// Enforces the sink half of the opt-in row-local incremental-read contract: a delta round is
+    /// written as a keyed materialization, so an append-mode sink would accumulate replayed
+    /// history instead of overwriting the keys it has already materialized. Also called per
+    /// round, because `append_mode` can be switched on after creation.
+    pub(crate) fn ensure_simple_source_delta_sink(
+        task: &BatchingTask,
+        sink: &TableRef,
+    ) -> Result<(), Error> {
+        ensure!(
+            !Self::table_options_enable_append_mode(&sink.table_info().meta.options.extra_options),
+            UnsupportedSnafu {
+                reason: format!(
+                    "Flow {} incremental read requires a non-append sink table, but sink `{}` is append-only. A restarted flow replays a full snapshot, which would duplicate history in an append-mode sink",
+                    task.config.flow_id,
+                    task.config.sink_table_name.join(".")
+                ),
+            }
+        );
+        Ok(())
+    }
+
+    /// Enforces that every sink key column keeps a value derived from the source row. A row-local
+    /// delta flow is written as a keyed materialization, and schema matching fills a sink column
+    /// the query omits with a per-round generated value such as `now()`, so a replay would write
+    /// the same source rows under new keys instead of overwriting them. A key column the rewritten
+    /// plan does produce - including one matched by position, e.g. `ts AS sink_ts` - is a
+    /// deterministic function of the source row and stays allowed, as do generated non-key
+    /// columns.
+    async fn ensure_simple_source_delta_sink_keys_are_produced(
+        task: &BatchingTask,
+        sink: &TableRef,
+        engine: &QueryEngineRef,
+    ) -> Result<(), Error> {
+        let meta = &sink.table_info().meta;
+        let mut key_columns = meta
+            .schema
+            .timestamp_column()
+            .map(|column| column.name.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        key_columns.extend(
+            meta.primary_key_indices
+                .iter()
+                .filter_map(|idx| meta.schema.column_schemas().get(*idx))
+                .map(|column| column.name.clone()),
+        );
+
+        // Judge the plan a round actually executes, i.e. after schema matching: the rewriter may
+        // match a sink key to an output column by position, and it may append a generated value
+        // for a sink column the query omits. This mirrors `validate_sink_table_schema_with_values`.
+        let plan = gen_plan_with_matching_schema_and_values(
+            &task.config.query,
+            task.query_context_snapshot(),
+            engine.clone(),
+            meta.schema.clone(),
+            &meta.primary_key_indices,
+            is_merge_mode_last_non_null(&meta.options.extra_options),
+            &BTreeMap::new(),
+        )
+        .await?;
+
+        let mut missing = Vec::new();
+        let mut generated = Vec::new();
+        for name in key_columns {
+            let Some(expr) = Self::projected_output_expr(&plan, &name) else {
+                missing.push(name);
+                continue;
+            };
+            if !Self::is_replay_stable_expr(expr) {
+                generated.push(name);
+            }
+        }
+
+        ensure!(
+            missing.is_empty(),
+            UnsupportedSnafu {
+                reason: format!(
+                    "Flow {} is a row-local delta flow, so sink `{}` must have every key column produced by the query, otherwise a replay would not overwrite the same rows; the query does not produce key column(s) {}",
+                    task.config.flow_id,
+                    task.config.sink_table_name.join("."),
+                    missing.join(", ")
+                ),
+            }
+        );
+        ensure!(
+            generated.is_empty(),
+            UnsupportedSnafu {
+                reason: format!(
+                    "Flow {} is a row-local delta flow, so sink `{}` must derive every key column from the source row, otherwise a replay would not overwrite the same rows; key column(s) {} would be filled with a value generated per round, such as `now()`, instead of a value derived from the source row",
+                    task.config.flow_id,
+                    task.config.sink_table_name.join("."),
+                    generated.join(", ")
+                ),
+            }
+        );
+        Ok(())
+    }
+
+    /// Returns the expression that produces the output column `name` of `plan`, the plan a round
+    /// executes, or `None` when no projection produces it.
+    fn projected_output_expr<'a>(plan: &'a LogicalPlan, name: &str) -> Option<&'a Expr> {
+        let LogicalPlan::Projection(projection) = plan else {
+            return None;
+        };
+        projection
+            .expr
+            .iter()
+            .find(|expr| expr.qualified_name().1 == name)
+    }
+
+    /// Returns whether `expr` yields the same value for the same source row in every round, i.e.
+    /// it holds no stable or volatile scalar function such as `now()`. A column reference (also
+    /// through an alias), a literal and an immutable computation all qualify; only a scalar
+    /// function whose signature is not `Volatility::Immutable` can return a different value on
+    /// the next round for the same source row.
+    fn is_replay_stable_expr(expr: &Expr) -> bool {
+        let mut is_replay_stable = true;
+        let _ = expr.apply(|expr| {
+            if let Expr::ScalarFunction(function) = expr
+                && function.func.signature().volatility != Volatility::Immutable
+            {
+                is_replay_stable = false;
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        });
+        is_replay_stable
+    }
+
     /// SQL flows without a usable time-window expression can only run as an
     /// explicit full-query flow, so require `EVAL INTERVAL` at creation time.
     fn ensure_sql_flow_has_twe_or_eval_interval(
@@ -632,7 +762,9 @@ impl BatchingEngine {
             self.batch_opts_for_flow_options(&flow_options, exact_sequence_range_required)?;
 
         let mut source_table_names = Vec::with_capacity(2);
+        let mut source_table_ids_seen = Vec::with_capacity(2);
         for src_id in source_table_ids {
+            source_table_ids_seen.push(src_id);
             // also check table option to see if ttl!=instant
             let table_name = get_table_name(self.table_meta.table_info_manager(), &src_id).await?;
             let table_info = get_table_info(self.table_meta.table_info_manager(), &src_id).await?;
@@ -658,6 +790,18 @@ impl BatchingEngine {
         let (tx, rx) = oneshot::channel();
 
         let plan = sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, true).await?;
+        // The retained task plan is judged for row-local delta eligibility, so it must match what
+        // a round executes: `gen_plan_with_matching_schema_and_values` replans the SQL without the
+        // flow optimizer, where `now()` and other stable expressions are still time-dependent.
+        // The optimized plan above remains the source for TQL/time-window/table analysis.
+        // Only the opt-in row-local delta feature needs that replan; every other flow keeps the
+        // optimized plan so that leaving the option off stays byte-identical to the previous
+        // behavior, without an extra fallible planning pass.
+        let retained_plan = if batch_opts.experimental_enable_incremental_read {
+            sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, false).await?
+        } else {
+            plan.clone()
+        };
 
         if is_tql {
             self.check_is_tql_table(&plan, &query_ctx).await?;
@@ -719,7 +863,10 @@ impl BatchingEngine {
         let task_args = TaskArgs {
             flow_id,
             query: &sql,
-            plan,
+            // Eligibility must be judged on the plan that is actually executed. Each round
+            // replans the SQL without the flow optimizer, so constant folding in the optimized
+            // plan must not hide time-dependent expressions such as `now()`.
+            plan: retained_plan,
             time_window_expr: phy_expr,
             expire_after,
             sink_table_name,
@@ -751,9 +898,54 @@ impl BatchingEngine {
         let engine = self.query_engine.clone();
         let frontend = self.frontend_client.clone();
 
+        // Opt-in row-local delta reads replay a full snapshot on restart or fallback, so an
+        // append-mode sink would duplicate history instead of overwriting its keys. An
+        // auto-created sink must also keep every source key, because a delta round is written as
+        // a keyed materialization of the source rows. The key contract is validated before the
+        // sink is created so a rejected flow leaves no keyless sink behind.
+        if task.config.simple_source_delta {
+            ensure!(
+                task.sequence_range_capable().await?,
+                UnsupportedSnafu {
+                    reason: format!(
+                        "Flow {flow_id} is a row-local delta flow, which requires exact sequence-range reads, but source table `{}` lacks the Mito preserve_row_sequence capability",
+                        task.config
+                            .source_table_names
+                            .iter()
+                            .map(|name| name.join("."))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            );
+        }
+        if task.config.simple_source_delta && !task.sink_table_exists().await? {
+            task.ensure_derivable_sink_keys(&engine).await?;
+        }
+
         // Create the sink before asking an optional extension to own execution.
         // The default path retains the OSS schema validation.
         let table = task.check_or_create_sink_table(&engine, &frontend).await?;
+        if task.config.simple_source_delta {
+            Self::ensure_simple_source_delta_sink(&task, &table)?;
+            Self::ensure_simple_source_delta_sink_keys_are_produced(&task, &table, &engine).await?;
+        }
+        // A source whose table id equals the sink id scans without incremental bounds, so delta
+        // coverage would silently become an unbounded full scan. DDL already rejects equal
+        // source/sink names; this keeps the fail-closed guarantee local to the flow. It is only
+        // needed by the opt-in row-local delta path, so other flows see no new rejection.
+        if task.config.simple_source_delta {
+            let sink_table_id = table.table_info().table_id();
+            ensure!(
+                !source_table_ids_seen.contains(&sink_table_id),
+                UnsupportedSnafu {
+                    reason: format!(
+                        "Flow {flow_id} cannot use its own sink table `{}`(id={sink_table_id}) as a source: such a scan bypasses incremental bounds",
+                        task.config.sink_table_name.join(".")
+                    ),
+                }
+            );
+        }
         let execution = if let Some(factory) = &self.execution_factory {
             factory.create(&task, table, &engine, &frontend).await?
         } else {
@@ -1108,14 +1300,21 @@ mod tests {
     use common_recordbatch::RecordBatch;
     use common_time::timestamp::TimeUnit;
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{TimestampMillisecondVector, UInt32Vector, VectorRef};
+    use datatypes::vectors::{
+        Float64Vector, StringVector, TimestampMillisecondVector, UInt32Vector, VectorRef,
+    };
     use query::options::QueryOptions;
     use session::context::QueryContext;
     use tokio::sync::Notify;
 
     use super::*;
     use crate::ExecuteOnceOutcome;
+    use crate::adapter::AUTO_CREATED_UPDATE_AT_TS_COL;
     use crate::test_utils::create_test_query_engine;
+    use datatypes::schema::SchemaBuilder;
+    use store_api::mito_engine_options::PRESERVE_ROW_SEQUENCE;
+    use table::metadata::FilterPushDownType;
+    use table::test_util::MemTable;
 
     struct DropNotify(Option<oneshot::Sender<()>>);
 
@@ -1208,7 +1407,15 @@ mod tests {
                 schema: "public".to_string(),
                 table_name: name.to_string(),
                 table_id: 9000,
-                table: table::test_util::MemTable::table(name, recordbatch),
+                // Keep the table's own id equal to the registered id so a fixture sink is never
+                // confused with the test source table (id 1).
+                table: table::test_util::MemTable::new_with_catalog(
+                    name,
+                    recordbatch,
+                    9000,
+                    "greptime".to_string(),
+                    "public".to_string(),
+                ),
             })
             .unwrap();
     }
@@ -1234,7 +1441,13 @@ mod tests {
                 schema: "public".to_string(),
                 table_name: name.to_string(),
                 table_id: 9001,
-                table: table::test_util::MemTable::table(name, recordbatch),
+                table: table::test_util::MemTable::new_with_catalog(
+                    name,
+                    recordbatch,
+                    9001,
+                    "greptime".to_string(),
+                    "public".to_string(),
+                ),
             })
             .unwrap();
     }
@@ -1722,6 +1935,533 @@ GROUP BY l.number, time_window
         .unwrap();
 
         (task, tx)
+    }
+
+    /// Builds a task for the opt-in row-local delta path from the test query engine.
+    async fn new_simple_delta_task(
+        query: &str,
+        sink_name: &str,
+        incremental: bool,
+    ) -> (BatchingTask, QueryEngineRef) {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), query, true)
+            .await
+            .unwrap();
+        let (_tx, rx) = oneshot::channel();
+        let batch_opts = Arc::new(BatchingModeOptions {
+            experimental_enable_incremental_read: incremental,
+            ..Default::default()
+        });
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 1,
+            query,
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                sink_name.to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts,
+            flow_eval_interval: Some(Duration::from_secs(60)),
+            eval_schedule: None,
+        })
+        .unwrap();
+        (task, query_engine)
+    }
+
+    /// Builds a sink table ref whose extra options match `extra_options`.
+    fn sink_with_extra_options(
+        name: &str,
+        extra_options: HashMap<String, String>,
+    ) -> table::TableRef {
+        use table::metadata::FilterPushDownType;
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(UInt32Vector::from_slice([1_u32])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let table = table::test_util::MemTable::table(name, recordbatch);
+        let mut info = (*table.table_info()).clone();
+        info.meta.options.extra_options = extra_options;
+        Arc::new(table::Table::new(
+            Arc::new(info),
+            FilterPushDownType::Unsupported,
+            table.data_source(),
+        ))
+    }
+
+    /// Registers a non-append sink shaped like a flow sink: `number`, then `update_at` right
+    /// before the trailing time-index column, which a query that omits it would have to
+    /// synthesize per round.
+    fn sink_with_synthesizable_time_index(name: &str, primary_keys: Vec<usize>) -> table::TableRef {
+        let schema = SchemaBuilder::try_from(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(
+                AUTO_CREATED_UPDATE_AT_TS_COL,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "sink_ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+        let recordbatch = RecordBatch::new(
+            Arc::new(schema),
+            vec![
+                Arc::new(UInt32Vector::from_slice([1_u32])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let table = table::test_util::MemTable::table(name, recordbatch);
+        let mut info = (*table.table_info()).clone();
+        info.meta.primary_key_indices = primary_keys;
+        Arc::new(table::Table::new(
+            Arc::new(info),
+            FilterPushDownType::Unsupported,
+            table.data_source(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_rejects_sink_key_not_produced_by_query() {
+        // The sink's time index `sink_ts` is a key column the query does not produce, so the
+        // rewriter fills it with `now()` and a replay would not overwrite the same rows.
+        let (task, query_engine) =
+            new_simple_delta_task("SELECT number, ts FROM numbers_with_ts", "delta_sink", true)
+                .await;
+        assert!(task.config.simple_source_delta);
+        let sink = sink_with_synthesizable_time_index("delta_sink", vec![]);
+        let err = BatchingEngine::ensure_simple_source_delta_sink_keys_are_produced(
+            &task,
+            &sink,
+            &query_engine,
+        )
+        .await
+        .expect_err("a sink key column filled with `now()` must be rejected");
+        assert!(
+            err.to_string()
+                .contains("key column(s) sink_ts would be filled with a value generated per round"),
+            "{err}"
+        );
+
+        // A query that produces every sink column, including the key column, is accepted.
+        let (producing_task, query_engine) = new_simple_delta_task(
+            "SELECT number, ts AS update_at, ts AS sink_ts FROM numbers_with_ts",
+            "delta_sink",
+            true,
+        )
+        .await;
+        BatchingEngine::ensure_simple_source_delta_sink_keys_are_produced(
+            &producing_task,
+            &sink,
+            &query_engine,
+        )
+        .await
+        .expect("a query producing every sink key column is accepted");
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_accepts_sink_key_matched_by_position() {
+        // The sink's time index `sink_ts` is not a name the query produces, but schema matching
+        // maps the extra output column `ts` to it by position, so the key stays a deterministic
+        // function of the source row and a replay still overwrites the same rows.
+        let engine = new_test_engine_with_execution(None).await;
+        const SOURCE_ID: TableId = 9600;
+        const SINK_ID: TableId = 9601;
+        let source = MemTable::new_with_catalog(
+            "positional_source",
+            RecordBatch::new(
+                Arc::new(Schema::new(vec![
+                    ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+                    ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                ])),
+                vec![
+                    Arc::new(StringVector::from_slice(&["host_a"])) as VectorRef,
+                    Arc::new(Float64Vector::from_slice([1.0])) as VectorRef,
+                    Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+                ],
+            )
+            .unwrap(),
+            SOURCE_ID,
+            "greptime".to_string(),
+            "public".to_string(),
+        );
+        // The delta path requires an append-only source that preserves row sequences.
+        let mut source_info = (*source.table_info()).clone();
+        source_info.meta.options.extra_options = HashMap::from([
+            (APPEND_MODE_KEY.to_string(), "true".to_string()),
+            (PRESERVE_ROW_SEQUENCE.to_string(), "true".to_string()),
+        ]);
+        let source = Arc::new(table::Table::new(
+            Arc::new(source_info),
+            FilterPushDownType::Unsupported,
+            source.data_source(),
+        ));
+        let sink = MemTable::new_with_catalog(
+            "positional_sink",
+            RecordBatch::new(
+                Arc::new(Schema::new(vec![
+                    ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+                    ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true),
+                    ColumnSchema::new(
+                        "sink_ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                ])),
+                vec![
+                    Arc::new(StringVector::from_slice(&["host_a"])) as VectorRef,
+                    Arc::new(Float64Vector::from_slice([1.0])) as VectorRef,
+                    Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+                ],
+            )
+            .unwrap(),
+            SINK_ID,
+            "greptime".to_string(),
+            "public".to_string(),
+        );
+        let mut sink_info = (*sink.table_info()).clone();
+        sink_info.meta.primary_key_indices = vec![0];
+        let sink = Arc::new(table::Table::new(
+            Arc::new(sink_info),
+            FilterPushDownType::Unsupported,
+            sink.data_source(),
+        ));
+        let catalog_manager = engine
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap();
+        for (table_name, table_id, table) in [
+            ("positional_source", SOURCE_ID, source),
+            ("positional_sink", SINK_ID, sink),
+        ] {
+            catalog_manager
+                .register_table_sync(RegisterTableRequest {
+                    catalog: "greptime".to_string(),
+                    schema: "public".to_string(),
+                    table_name: table_name.to_string(),
+                    table_id,
+                    table,
+                })
+                .unwrap();
+        }
+        let mut source_meta = new_test_table_info_with_name(SOURCE_ID, "positional_source");
+        source_meta.meta.options.extra_options =
+            HashMap::from([(APPEND_MODE_KEY.to_string(), "true".to_string())]);
+        engine
+            .table_meta
+            .create_table_metadata(
+                source_meta,
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // A long interval keeps the created flow from running a round during the test.
+        let mut args = flow_create_args(12, "positional_sink");
+        args.source_table_ids = vec![SOURCE_ID];
+        args.sql = "SELECT host, val, ts FROM positional_source".to_string();
+        args.eval_interval = Some(86_400);
+        args.flow_options = HashMap::from([(
+            FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+            "true".to_string(),
+        )]);
+        engine
+            .create_flow_inner(args)
+            .await
+            .expect("a sink key column matched to an output column by position must be accepted");
+        assert!(engine.flow_exist_inner(12).await);
+        engine.remove_flow_inner(12).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_allows_generated_non_key_timestamp() {
+        // `update_at` is neither the time index nor a primary key, so a per-round generated value
+        // does not affect row identity and must stay allowed.
+        let (task, query_engine) =
+            new_simple_delta_task("SELECT number, ts FROM numbers_with_ts", "delta_sink", true)
+                .await;
+        let sink = sink_with_synthesizable_time_index("delta_sink", vec![]);
+        assert!(
+            sink.table_info().meta.schema.timestamp_column().is_some(),
+            "the fixture sink must have a real time index"
+        );
+        BatchingEngine::ensure_simple_source_delta_sink_keys_are_produced(
+            &task,
+            &sink,
+            &query_engine,
+        )
+        .await
+        .expect_err("the unproduced time index is still a key");
+
+        // Drop the time index from the fixture: only the non-key trailing timestamp remains.
+        let mut info = sink.table_info().as_ref().clone();
+        info.meta.schema = Arc::new(
+            SchemaBuilder::try_from(vec![
+                ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                ColumnSchema::new(
+                    AUTO_CREATED_UPDATE_AT_TS_COL,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    true,
+                ),
+            ])
+            .unwrap()
+            .build()
+            .unwrap(),
+        );
+        let sink = Arc::new(table::Table::new(
+            Arc::new(info),
+            FilterPushDownType::Unsupported,
+            sink.data_source(),
+        ));
+        BatchingEngine::ensure_simple_source_delta_sink_keys_are_produced(
+            &task,
+            &sink,
+            &query_engine,
+        )
+        .await
+        .expect("a generated non-key timestamp column must not be a key requirement");
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_rejects_sink_table_as_source() {
+        let engine = new_test_engine_with_execution(None).await;
+        const SELF_SINK_ID: TableId = 9500;
+        let recordbatch = RecordBatch::new(
+            Arc::new(Schema::new(vec![
+                ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            ])),
+            vec![
+                Arc::new(UInt32Vector::from_slice([1_u32])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let source = MemTable::new_with_catalog(
+            "self_source",
+            recordbatch.clone(),
+            SELF_SINK_ID,
+            "greptime".to_string(),
+            "public".to_string(),
+        );
+        // The rejection only protects the row-local delta guarantee, so this flow must opt in, and
+        // the delta path requires an append-only source that preserves row sequences.
+        let mut source_info = (*source.table_info()).clone();
+        source_info.meta.options.extra_options = HashMap::from([
+            (APPEND_MODE_KEY.to_string(), "true".to_string()),
+            (PRESERVE_ROW_SEQUENCE.to_string(), "true".to_string()),
+        ]);
+        let source = Arc::new(table::Table::new(
+            Arc::new(source_info),
+            FilterPushDownType::Unsupported,
+            source.data_source(),
+        ));
+        let catalog_manager = engine
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "self_source".to_string(),
+                table_id: SELF_SINK_ID,
+                table: source,
+            })
+            .unwrap();
+        // The sink stays non-append, which is what makes the delta round idempotent.
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "self_sink".to_string(),
+                table_id: SELF_SINK_ID,
+                table: MemTable::new_with_catalog(
+                    "self_sink",
+                    recordbatch,
+                    SELF_SINK_ID,
+                    "greptime".to_string(),
+                    "public".to_string(),
+                ),
+            })
+            .unwrap();
+        let mut source_meta = new_test_table_info_with_name(SELF_SINK_ID, "self_source");
+        source_meta.meta.options.extra_options =
+            HashMap::from([(APPEND_MODE_KEY.to_string(), "true".to_string())]);
+        engine
+            .table_meta
+            .create_table_metadata(
+                source_meta,
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // A sink whose table id also appears as a source would be scanned without incremental
+        // bounds, so delta coverage must fail closed at creation time.
+        let mut args = flow_create_args(11, "self_sink");
+        args.source_table_ids = vec![SELF_SINK_ID];
+        args.flow_options = HashMap::from([(
+            FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+            "true".to_string(),
+        )]);
+        let err = engine
+            .create_flow_inner(args)
+            .await
+            .expect_err("a flow may not read its own sink table as a source");
+        assert!(
+            err.to_string().contains("cannot use its own sink table"),
+            "{err}"
+        );
+        assert!(!engine.flow_exist_inner(11).await);
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_rejects_append_mode_sink() {
+        let (task, _) =
+            new_simple_delta_task("SELECT number, ts FROM numbers_with_ts", "delta_sink", true)
+                .await;
+        assert!(task.config.simple_source_delta);
+
+        let append_sink = sink_with_extra_options(
+            "delta_sink",
+            HashMap::from([(APPEND_MODE_KEY.to_string(), "true".to_string())]),
+        );
+        let err = BatchingEngine::ensure_simple_source_delta_sink(&task, &append_sink)
+            .expect_err("an append-mode sink must be rejected for a row-local delta flow");
+        assert!(
+            err.to_string()
+                .contains("incremental read requires a non-append sink table"),
+            "{err}"
+        );
+
+        let keyed_sink = sink_with_extra_options("delta_sink", HashMap::new());
+        BatchingEngine::ensure_simple_source_delta_sink(&task, &keyed_sink)
+            .expect("a non-append sink is accepted");
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_rejects_append_mode_sink_each_round() {
+        // `append_mode` can be switched on after creation (`ALTER TABLE ... SET (append_mode='true')`),
+        // so the sink contract must be revalidated when a round plan is generated, not only at
+        // create time.
+        let (task, query_engine) =
+            new_simple_delta_task("SELECT number, ts FROM numbers_with_ts", "delta_sink", true)
+                .await;
+        assert!(task.config.simple_source_delta);
+
+        let append_sink = sink_with_extra_options(
+            "delta_sink",
+            HashMap::from([(APPEND_MODE_KEY.to_string(), "true".to_string())]),
+        );
+        query_engine
+            .engine_state()
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .expect("test catalog manager is a memory catalog")
+            .register_table_sync(RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "delta_sink".to_string(),
+                table_id: 9501,
+                table: append_sink,
+            })
+            .unwrap();
+
+        let err = match task
+            .gen_insert_plan_with_values_unlocked(&query_engine, None, &BTreeMap::new(), false)
+            .await
+        {
+            Ok(_) => panic!("an append-mode sink must be rejected at round generation"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("incremental read requires a non-append sink table"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_requires_derivable_sink_keys() {
+        // Dropping the source time index makes the auto-created sink keyless for a delta round.
+        let (task, query_engine) =
+            new_simple_delta_task("SELECT number FROM numbers_with_ts", "delta_sink", true).await;
+        assert!(task.config.simple_source_delta);
+
+        let err = task
+            .ensure_derivable_sink_keys(&query_engine)
+            .await
+            .expect_err("a projection without the source time index has no derivable sink keys");
+        assert!(
+            err.to_string()
+                .contains("Create a compatible keyed sink table explicitly"),
+            "{err}"
+        );
+
+        let (keyed_task, keyed_engine) =
+            new_simple_delta_task("SELECT number, ts FROM numbers_with_ts", "delta_sink", true)
+                .await;
+        keyed_task
+            .ensure_derivable_sink_keys(&keyed_engine)
+            .await
+            .expect("a projection keeping the source keys is accepted");
     }
 
     #[tokio::test]

@@ -118,6 +118,8 @@ impl BatchingTask {
     /// rewritten delta-LEFT-JOIN-sink merge plan or the original plan. In
     /// particular, plain GROUP BY queries with no aggregate merge columns are
     /// incremental safe without a rewrite, so they return `Some(original_plan)`.
+    /// Opt-in row-local single-source flows (`simple_source_delta`) are also
+    /// incremental safe unchanged.
     pub(super) async fn prepare_plan_for_incremental(
         &self,
         engine: &QueryEngineRef,
@@ -151,6 +153,12 @@ impl BatchingTask {
         // until separately supported, and incremental mode is permanently
         // disabled for this flow.
         let Some(analysis) = analyze_incremental_aggregate_plan(&inner_plan)? else {
+            // A row-local single-source projection/filter is already safe to execute unfiltered:
+            // source correctness comes from the sequence-range scan, and sink primary-key write
+            // semantics make replayed rows idempotent.
+            if self.config.simple_source_delta {
+                return Ok(Some(plan.clone()));
+            }
             warn!(
                 "Flow {} incremental mode but plan is not an aggregate query; \
                  permanently disabling incremental for this flow",
@@ -304,6 +312,17 @@ impl BatchingTask {
                 return Err(UnexpectedSnafu {
                     reason: format!(
                         "Flow {} requires exact sequence-range reads, but source capability was revoked",
+                        self.config.flow_id
+                    ),
+                }
+                .build());
+            }
+            // A row-local delta flow cannot use the memtable-only fallback: rows flushed to SST
+            // between rounds would be silently skipped, losing data from a plain projection.
+            if self.config.simple_source_delta && !capable {
+                return Err(UnexpectedSnafu {
+                    reason: format!(
+                        "Flow {} is a row-local delta flow, which requires exact sequence-range reads, but a source table lacks the Mito preserve_row_sequence capability",
                         self.config.flow_id
                     ),
                 }

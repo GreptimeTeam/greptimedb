@@ -72,7 +72,7 @@ pub(crate) mod util;
 /// Converts a retained plan's output to logical schemas. Only a direct source
 /// column (optionally wrapped in an alias) carries source semantics; computed
 /// expressions deliberately use the physical output field metadata instead.
-fn output_column_schemas(
+pub(crate) fn output_column_schemas(
     plan: &LogicalPlan,
     source_schema: &SchemaRef,
 ) -> Result<(Vec<ColumnSchema>, Vec<Option<usize>>), Error> {

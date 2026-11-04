@@ -43,7 +43,7 @@ use query::options::{
 };
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::parsers::utils::is_tql;
 use store_api::mito_engine_options::MERGE_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -55,8 +55,10 @@ use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::checkpoint::checkpoint_mode_label;
+use crate::batching_mode::engine::BatchingEngine;
 use crate::batching_mode::eval_schedule::{EvalSchedule, select_due_scheduled_times};
 use crate::batching_mode::frontend_client::{FrontendClient, PeerDesc};
+use crate::batching_mode::simple_delta;
 use crate::batching_mode::state::{
     CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState, to_df_literal,
 };
@@ -69,7 +71,7 @@ use crate::batching_mode::utils::{
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
     DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu, SubstraitEncodeLogicalPlanSnafu,
-    UnexpectedSnafu,
+    UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
@@ -160,6 +162,10 @@ pub struct TaskConfig {
     pub query_type: QueryType,
     pub batch_opts: Arc<BatchingModeOptions>,
     pub exact_sequence_range_required: bool,
+    /// Whether this flow opted in to row-local source delta reads, i.e. incremental
+    /// reads are enabled and the plan is a single-source, row-local projection/filter
+    /// over a table scan with no time window.
+    pub simple_source_delta: bool,
     pub flow_eval_interval: Option<Duration>,
     /// Typed schedule configuration, pre-parsed at task creation time.
     pub eval_schedule: Option<EvalSchedule>,
@@ -176,7 +182,7 @@ fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<Quer
     })
 }
 
-fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
+pub(crate) fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
     options
         .get(MERGE_MODE_KEY)
         .map(|mode| mode.eq_ignore_ascii_case("last_non_null"))
@@ -418,6 +424,16 @@ impl BatchingTask {
             state.disable_incremental();
         }
 
+        let query_type = determine_query_type(query, &query_ctx)?;
+        // Opt-in row-local delta reads need a window-less SQL plan over exactly one source whose
+        // every expression is a deterministic function of the scanned row. The flag is opt-in
+        // only, so a flow that never enabled incremental reads keeps its previous behavior.
+        let simple_source_delta = batch_opts.experimental_enable_incremental_read
+            && matches!(query_type, QueryType::Sql)
+            && time_window_expr.is_none()
+            && source_table_names.len() == 1
+            && simple_delta::is_simple_source_delta_plan(&plan);
+
         Ok(Self {
             config: Arc::new(TaskConfig {
                 flow_id,
@@ -428,8 +444,9 @@ impl BatchingTask {
                 source_table_names: source_table_names.into_iter().collect(),
                 catalog_manager,
                 output_schema: plan.schema().clone(),
-                query_type: determine_query_type(query, &query_ctx)?,
+                query_type,
                 exact_sequence_range_required,
+                simple_source_delta,
                 batch_opts,
                 flow_eval_interval,
                 eval_schedule,
@@ -533,6 +550,34 @@ impl BatchingTask {
         )
         .await?;
         Ok(table)
+    }
+
+    /// Whether the sink table already exists, i.e. whether this flow will not auto-create it.
+    pub(crate) async fn sink_table_exists(&self) -> Result<bool, Error> {
+        self.is_table_exist(&self.config.sink_table_name).await
+    }
+
+    /// Enforces the sink contract of opt-in row-local incremental reads for a sink this flow has
+    /// just auto-created: a delta round is a keyed materialization, so the sink must keep the
+    /// source time index and every source primary key as direct columns or rows sharing a source
+    /// row's key would silently collapse. An explicitly provided sink owns its own key design.
+    pub(crate) async fn ensure_derivable_sink_keys(
+        &self,
+        engine: &QueryEngineRef,
+    ) -> Result<(), Error> {
+        let query_ctx = self.state.read().unwrap().query_ctx.clone();
+        let plan = sql_to_df_plan(query_ctx, engine.clone(), &self.config.query, true).await?;
+        ensure!(
+            self.derive_sink_keys(&plan).await?.is_some(),
+            UnsupportedSnafu {
+                reason: format!(
+                    "Flow {} incremental read requires the auto-created sink to keep the source time index and every source primary key as direct columns, but sink `{}` does not. Create a compatible keyed sink table explicitly",
+                    self.config.flow_id,
+                    self.config.sink_table_name.join(".")
+                ),
+            }
+        );
+        Ok(())
     }
 
     /// Returns a forked snapshot of the task query context for extension-owned planning.
@@ -1068,6 +1113,13 @@ impl BatchingTask {
         )
         .await?;
 
+        // `ALTER TABLE ... SET (append_mode = 'true')` is allowed after creation, so the sink
+        // contract that makes a delta round idempotent must be revalidated before every plan and
+        // write, not only when the flow was created.
+        if self.config.simple_source_delta {
+            BatchingEngine::ensure_simple_source_delta_sink(self, &table)?;
+        }
+
         let table_meta = &table.table_info().meta;
         let merge_mode_last_non_null =
             is_merge_mode_last_non_null(&table_meta.options.extra_options);
@@ -1265,6 +1317,22 @@ impl BatchingTask {
         let extensions = self
             .build_flow_query_extensions(incremental_safe, coverage.is_incremental_delta())
             .await?;
+        // A delta round of an opt-in row-local flow is only correct with incremental scan
+        // extensions. Without them the plan would run as an unfiltered full snapshot that the
+        // delta cursor does not account for, so skip the round and retry it later instead.
+        if self.config.simple_source_delta
+            && coverage.is_incremental_delta()
+            && !extensions
+                .iter()
+                .any(|(key, _)| *key == FLOW_INCREMENTAL_MODE)
+        {
+            warn!(
+                "Flow {flow_id} built a delta plan without {FLOW_INCREMENTAL_MODE}; \
+                 restored dirty signal instead of executing an unfiltered full snapshot"
+            );
+            self.restore_dirty_windows(dirty_restore);
+            return Ok(None);
+        }
         let frontend_extensions = self.frontend_extensions();
         let extension_refs = extensions
             .iter()
@@ -1550,7 +1618,10 @@ impl BatchingTask {
 
     #[allow(clippy::too_many_arguments)]
     /// Build an unfiltered plan only when the live dirty signal was present;
-    /// otherwise skip this round without querying.
+    /// otherwise skip this round without querying. `run_when_clean` runs the
+    /// round anyway: the row-local delta path cannot depend on the dirty
+    /// notification, which can arrive before the source write commits or be
+    /// dropped, so an empty sequence range is its natural no-op.
     async fn gen_unfiltered_plan_info_if_dirty(
         &self,
         engine: QueryEngineRef,
@@ -1561,9 +1632,10 @@ impl BatchingTask {
         values: &BTreeMap<String, ScalarValue>,
         retention_filter: Option<(&str, Timestamp, &'static str)>,
         coverage: QueryCoverage,
+        run_when_clean: bool,
     ) -> Result<Option<PlanInfo>, Error> {
         let (is_dirty, dirty_windows_to_restore) = self.drain_dirty_windows_signal();
-        if !is_dirty {
+        if !is_dirty && !run_when_clean {
             debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
             return Ok(None);
         }
@@ -1956,7 +2028,46 @@ impl BatchingTask {
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
         let plan =
             sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, true).await?;
-        create_table_with_expr(&plan, &self.config.sink_table_name, &self.config.query_type)
+        let derived = if self.config.simple_source_delta {
+            self.derive_sink_keys(&plan).await?
+        } else {
+            None
+        };
+        create_table_with_expr(
+            &plan,
+            &self.config.sink_table_name,
+            &self.config.query_type,
+            derived,
+        )
+    }
+
+    /// Derives the auto-created sink keys from the single source table's time index and primary
+    /// keys. Only direct column/alias lineage counts, so a computed projection column never
+    /// inherits a source key. `None` means the projection does not retain every source key.
+    async fn derive_sink_keys(
+        &self,
+        plan: &LogicalPlan,
+    ) -> Result<Option<simple_delta::SinkKeys>, Error> {
+        let Some(source_name) = self.config.source_table_names.iter().next() else {
+            return Ok(None);
+        };
+        let table = match self
+            .config
+            .catalog_manager
+            .table(&source_name[0], &source_name[1], &source_name[2], None)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        {
+            Some(table) => table,
+            None => return Ok(None),
+        };
+        let info = table.table_info();
+        Ok(simple_delta::derive_sink_keys(
+            plan,
+            &info.meta.schema,
+            &info.meta.primary_key_indices,
+        ))
     }
 
     /// Incremental delta scans are unfiltered by dirty windows; the sequence
@@ -2036,6 +2147,31 @@ impl BatchingTask {
                 .fail();
             }
             _ => {
+                // Opt-in row-local flows read only the source delta since the last checkpoint.
+                // The first round runs as a full snapshot and advances the cursor from the
+                // terminal per-region scan watermarks.
+                if !force_full_snapshot
+                    && self.config.simple_source_delta
+                    && self.should_use_unfiltered_incremental_delta()
+                {
+                    // The dirty notification is only bookkeeping here: it is dispatched before
+                    // the source write commits and may be dropped with the mirror, so the round
+                    // must run regardless and let an empty sequence range be the natural no-op.
+                    return self
+                        .gen_unfiltered_plan_info_if_dirty(
+                            engine,
+                            query_ctx,
+                            sink_table_schema.clone(),
+                            primary_key_indices,
+                            allow_partial,
+                            values,
+                            None,
+                            QueryCoverage::IncrementalDelta,
+                            true,
+                        )
+                        .await;
+                }
+
                 // Explicit full-query flows (TQL and evaluation-interval SQL
                 // plans whose shape cannot be safely dirty-window pruned) are
                 // allowed to run as unfiltered full snapshots. This is distinct
@@ -2139,6 +2275,7 @@ impl BatchingTask {
                     values,
                     retention_filter,
                     QueryCoverage::IncrementalDelta,
+                    false,
                 )
                 .await;
         }
@@ -2221,3 +2358,690 @@ impl BatchingTask {
 
 #[cfg(test)]
 mod test;
+
+/// Tests for the opt-in row-local source delta path (`simple_source_delta`).
+#[cfg(test)]
+mod simple_source_delta_tests {
+    use std::collections::HashMap;
+
+    use catalog::RegisterTableRequest;
+    use catalog::memory::MemoryCatalogManager;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_recordbatch::RecordBatch;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
+    use pretty_assertions::assert_eq;
+    use query::options::{
+        FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, QueryOptions,
+    };
+    use session::context::QueryContext;
+    use table::Table;
+    use table::metadata::FilterPushDownType;
+    use table::test_util::MemTable;
+
+    use super::*;
+    use crate::batching_mode::time_window::find_time_window_expr;
+    use crate::test_utils::create_test_query_engine;
+
+    /// Builds a task for `query` with the incremental-read option switched on or off.
+    async fn new_simple_delta_task(
+        query: &str,
+        plan_query: &str,
+        eval_interval: Option<Duration>,
+        incremental: bool,
+    ) -> (BatchingTask, Arc<Schema>, QueryEngineRef) {
+        new_simple_delta_task_with_optimize(query, plan_query, eval_interval, incremental, true)
+            .await
+    }
+
+    /// Same as [`Self::new_simple_delta_task`], but with an explicit flow-optimizer setting so a
+    /// test can plan the way the engine retains its task plan.
+    async fn new_simple_delta_task_with_optimize(
+        query: &str,
+        plan_query: &str,
+        eval_interval: Option<Duration>,
+        incremental: bool,
+        optimize: bool,
+    ) -> (BatchingTask, Arc<Schema>, QueryEngineRef) {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), plan_query, optimize)
+            .await
+            .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let batch_opts = Arc::new(BatchingModeOptions {
+            experimental_enable_incremental_read: incremental,
+            ..Default::default()
+        });
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 1,
+            query,
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "simple_delta_sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts,
+            flow_eval_interval: eval_interval,
+            eval_schedule: None,
+        })
+        .unwrap();
+        (task, source_sink_schema(), query_engine)
+    }
+
+    /// Builds a task whose retained plan carries a real time-window expression.
+    async fn new_windowed_task(incremental: bool) -> (BatchingTask, Arc<Schema>, QueryEngineRef) {
+        // A windowed flow needs the time window in the output, so it is an aggregate here; the
+        // point is that it never becomes a source delta and keeps its scoped repair.
+        let query = "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number";
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), query, true)
+            .await
+            .unwrap();
+        let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+            &plan,
+            query_engine.engine_state().catalog_manager().clone(),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        let time_window_expr = time_window_expr.map(|expr| {
+            TimeWindowExpr::from_expr(
+                &expr,
+                &column_name,
+                &df_schema,
+                &query_engine.engine_state().session_state(),
+            )
+            .unwrap()
+        });
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let batch_opts = Arc::new(BatchingModeOptions {
+            experimental_enable_incremental_read: incremental,
+            ..Default::default()
+        });
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 1,
+            query,
+            plan,
+            time_window_expr,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "simple_delta_sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts,
+            flow_eval_interval: None,
+            eval_schedule: None,
+        })
+        .unwrap();
+        (
+            task,
+            Arc::new(Schema::new(vec![
+                ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+                ColumnSchema::new(
+                    "time_window",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            ])),
+            query_engine,
+        )
+    }
+
+    fn source_sink_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]))
+    }
+
+    fn add_dirty_window(task: &BatchingTask) {
+        task.state
+            .write()
+            .unwrap()
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+
+    /// Marks the task as having a proven checkpoint so delta coverage is eligible.
+    fn mark_incremental_with_dirty_window(task: &BatchingTask) {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+
+    fn dml_plan(plan: LogicalPlan, sink_table: TableRef) -> LogicalPlan {
+        LogicalPlan::Dml(DmlStatement::new(
+            datafusion_common::TableReference::bare("simple_delta_sink"),
+            Arc::new(DefaultTableSource::new(Arc::new(
+                DfTableProviderAdapter::new(sink_table),
+            ))),
+            WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+            Arc::new(plan),
+        ))
+    }
+
+    async fn sink_table(query_engine: &QueryEngineRef) -> TableRef {
+        get_table_info_df_schema(
+            query_engine.engine_state().catalog_manager().clone(),
+            [
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ],
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_flag_requires_row_local_single_source_sql() {
+        for (case, query, expect) in [
+            (
+                "plain projection",
+                "SELECT number, ts FROM numbers_with_ts",
+                true,
+            ),
+            (
+                "projection with filter",
+                "SELECT number, ts FROM numbers_with_ts WHERE number > 1",
+                true,
+            ),
+            (
+                "aggregate",
+                "SELECT max(number) AS number, ts FROM numbers_with_ts GROUP BY ts",
+                false,
+            ),
+            (
+                "join",
+                "SELECT a.number, a.ts FROM numbers_with_ts a JOIN numbers b ON a.number = b.number",
+                false,
+            ),
+        ] {
+            let (task, _, _) =
+                new_simple_delta_task(query, query, Some(Duration::from_secs(60)), true).await;
+            assert_eq!(
+                expect, task.config.simple_source_delta,
+                "{case} simple_source_delta mismatch"
+            );
+        }
+
+        // A plan with a time-window expression keeps its scoped dirty-window repair path.
+        let (task, _, _) = new_windowed_task(true).await;
+        assert!(!task.config.simple_source_delta);
+    }
+
+    /// Registers a `number`/`ts` sink table so `sink_table_id()` can resolve it.
+    fn register_sink(query_engine: &QueryEngineRef, name: &str) {
+        let recordbatch = RecordBatch::new(
+            source_sink_schema(),
+            vec![
+                Arc::new(datatypes::vectors::UInt32Vector::from_slice([1_u32])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let table = MemTable::table(name, recordbatch);
+        let catalog_manager = query_engine.engine_state().catalog_manager();
+        let memory_catalog = catalog_manager
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap();
+        memory_catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: name.to_string(),
+                table_id: 9103,
+                table,
+            })
+            .unwrap();
+    }
+
+    /// Registers `simple_delta_source` (primary key `host`, time index `ts`, plus `other_ts`)
+    /// whose `ts` is not the first output column, so derived and legacy sink layouts differ.
+    fn register_simple_delta_source(query_engine: &QueryEngineRef) {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "other_ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(datatypes::vectors::StringVector::from_slice(&["a"])) as VectorRef,
+            Arc::new(TimestampMillisecondVector::from_slice([1_i64])) as VectorRef,
+            Arc::new(TimestampMillisecondVector::from_slice([2_i64])) as VectorRef,
+        ];
+        let recordbatch = RecordBatch::new(schema, columns).unwrap();
+        let table = MemTable::table("simple_delta_source", recordbatch);
+        // `MemTable::table` declares no primary key; give the source one on `host` so a derived
+        // sink layout is distinguishable from the legacy first-timestamp/no-key layout.
+        let mut info = (*table.table_info()).clone();
+        info.meta.primary_key_indices = vec![0];
+        let table = Arc::new(Table::new(
+            Arc::new(info),
+            FilterPushDownType::Unsupported,
+            table.data_source(),
+        ));
+        let catalog_manager = query_engine.engine_state().catalog_manager();
+        let memory_catalog = catalog_manager
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap();
+        memory_catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "simple_delta_source".to_string(),
+                table_id: 9102,
+                table,
+            })
+            .unwrap();
+    }
+
+    /// Builds a task over `simple_delta_source` where the projection keeps both source keys.
+    async fn new_source_key_task(incremental: bool) -> (BatchingTask, QueryEngineRef) {
+        let query = "SELECT ts, host FROM simple_delta_source";
+        let query_engine = create_test_query_engine();
+        register_simple_delta_source(&query_engine);
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), query, true)
+            .await
+            .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let batch_opts = Arc::new(BatchingModeOptions {
+            experimental_enable_incremental_read: incremental,
+            ..Default::default()
+        });
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 1,
+            query,
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "simple_delta_sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "simple_delta_source".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts,
+            flow_eval_interval: Some(Duration::from_secs(60)),
+            eval_schedule: None,
+        })
+        .unwrap();
+        (task, query_engine)
+    }
+
+    #[tokio::test]
+    async fn test_row_local_delta_is_opt_in_only() {
+        // Without the incremental-read option the flow must keep its previous behavior, including
+        // the auto-created sink layout: first timestamp column as time index and no primary keys.
+        let (task, query_engine) = new_source_key_task(false).await;
+        assert!(
+            !task.config.simple_source_delta,
+            "the row-local delta path must stay opt-in"
+        );
+
+        let expr = task.gen_create_table_expr(query_engine).await.unwrap();
+        assert!(
+            expr.primary_keys.is_empty(),
+            "an opt-out flow keeps the legacy keyless sink layout, got {:?}",
+            expr.primary_keys
+        );
+        assert_eq!("ts", expr.time_index);
+
+        // The same query with the option enabled derives the source keys instead.
+        let (task, query_engine) = new_source_key_task(true).await;
+        assert!(task.config.simple_source_delta);
+        let expr = task.gen_create_table_expr(query_engine).await.unwrap();
+        assert_eq!(vec!["host".to_string()], expr.primary_keys);
+        assert_eq!("ts", expr.time_index);
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_rejects_time_dependent_filter() {
+        // The engine retains the unoptimized plan because that is what a round executes. Here
+        // `now()` must stay a stable scalar function instead of being constant-folded into a
+        // literal, which would wrongly look like a deterministic row-local predicate.
+        let (time_dependent, _, _) = new_simple_delta_task_with_optimize(
+            "SELECT number, ts FROM numbers_with_ts WHERE ts <= now()",
+            "SELECT number, ts FROM numbers_with_ts WHERE ts <= now()",
+            Some(Duration::from_secs(60)),
+            true,
+            false,
+        )
+        .await;
+        assert!(
+            !time_dependent.config.simple_source_delta,
+            "a time-dependent filter must not be a row-local delta plan"
+        );
+
+        // The same planning path still classifies a genuinely row-local predicate.
+        let (row_local, _, _) = new_simple_delta_task_with_optimize(
+            "SELECT number, ts FROM numbers_with_ts WHERE number > 1",
+            "SELECT number, ts FROM numbers_with_ts WHERE number > 1",
+            Some(Duration::from_secs(60)),
+            true,
+            false,
+        )
+        .await;
+        assert!(
+            row_local.config.simple_source_delta,
+            "a row-local predicate must still be classified"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_row_local_delta_rejects_memtable_only_fallback() {
+        // `numbers_with_ts` is a mito table without `preserve_row_sequence`, so it only supports
+        // the historical memtable-only incremental mode.
+        let (task, _, _) = new_simple_delta_task(
+            "SELECT number, ts FROM numbers_with_ts",
+            "SELECT number, ts FROM numbers_with_ts",
+            Some(Duration::from_secs(60)),
+            true,
+        )
+        .await;
+        assert!(task.config.simple_source_delta);
+        mark_incremental_with_dirty_window(&task);
+
+        let err = task
+            .build_flow_query_extensions(true, true)
+            .await
+            .expect_err("a row-local delta flow must not fall back to memtable-only reads");
+        let message = err.to_string();
+        assert!(
+            message.contains("row-local delta flow, which requires exact sequence-range reads"),
+            "{message}"
+        );
+        assert!(message.contains("preserve_row_sequence"), "{message}");
+
+        // The historical aggregate path is unchanged: it still selects memtable-only.
+        let (aggregate_task, _, query_engine) = new_windowed_task(true).await;
+        register_sink(&query_engine, "simple_delta_sink");
+        mark_incremental_with_dirty_window(&aggregate_task);
+        let extensions = aggregate_task
+            .build_flow_query_extensions(true, true)
+            .await
+            .expect("an aggregate flow keeps the memtable-only fallback");
+        assert!(
+            extensions
+                .iter()
+                .any(|(key, value)| *key == FLOW_INCREMENTAL_MODE
+                    && value == FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY),
+            "{extensions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_routes_incremental_state_to_delta() {
+        let (task, sink_schema, query_engine) = new_simple_delta_task(
+            "SELECT number, ts FROM numbers_with_ts",
+            "SELECT number, ts FROM numbers_with_ts",
+            Some(Duration::from_secs(60)),
+            true,
+        )
+        .await;
+
+        // First round: no proven checkpoint yet, so it runs as a full snapshot.
+        add_dirty_window(&task);
+        let first = task
+            .gen_query_with_time_window(query_engine.clone(), &sink_schema, &[], false, None)
+            .await
+            .unwrap()
+            .expect("first round should generate a plan");
+        assert!(
+            matches!(first.coverage, QueryCoverage::UnfilteredFull),
+            "first round must be a full snapshot"
+        );
+
+        // Once watermarks proved a checkpoint, a new dirty signal runs as a source delta.
+        mark_incremental_with_dirty_window(&task);
+        let delta = task
+            .gen_query_with_time_window(query_engine.clone(), &sink_schema, &[], false, None)
+            .await
+            .unwrap()
+            .expect("incremental round should generate a plan");
+        assert!(
+            matches!(delta.coverage, QueryCoverage::IncrementalDelta),
+            "incremental round must use IncrementalDelta"
+        );
+        assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+
+        // The dirty notification can be dropped or arrive before the source write commits, so a
+        // clean delta round must still produce a plan: the empty sequence range is the no-op.
+        let clean = task
+            .gen_query_with_time_window(query_engine.clone(), &sink_schema, &[], false, None)
+            .await
+            .unwrap()
+            .expect("a clean delta round must still generate a plan");
+        assert!(
+            matches!(clean.coverage, QueryCoverage::IncrementalDelta),
+            "a clean delta round must stay an IncrementalDelta plan, got {}",
+            clean.plan
+        );
+        assert!(
+            task.state.read().unwrap().dirty_time_windows.is_empty(),
+            "the empty dirty signal must stay consumed"
+        );
+
+        // A forced full snapshot (durable recovery) stays a full snapshot.
+        add_dirty_window(&task);
+        let forced = task
+            .gen_query_with_time_window_with_values(
+                query_engine,
+                &sink_schema,
+                &[],
+                false,
+                None,
+                &BTreeMap::new(),
+                true,
+            )
+            .await
+            .unwrap()
+            .expect("forced full snapshot should generate a plan");
+        assert!(
+            matches!(forced.coverage, QueryCoverage::UnfilteredFull),
+            "forced full snapshot must not become a delta"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_windowed_plan_is_not_a_source_delta() {
+        // A windowed plan carries a time-window expression, so it is never a source delta and
+        // keeps its previous routing: scoped dirty-window repair when incremental reads are off,
+        // and the existing aggregate-delta path when they are on.
+        let (task, sink_schema, query_engine) = new_windowed_task(false).await;
+        assert!(!task.config.simple_source_delta);
+        mark_incremental_with_dirty_window(&task);
+        {
+            // Rewind the task to a non-incremental state without changing the query shape.
+            let mut state = task.state.write().unwrap();
+            state.disable_incremental();
+        }
+        let repair = task
+            .gen_query_with_time_window(query_engine.clone(), &sink_schema, &[], false, Some(1))
+            .await
+            .unwrap()
+            .expect("windowed round should generate a plan");
+        assert!(
+            matches!(repair.coverage, QueryCoverage::ScopedBaseRepair),
+            "a non-incremental windowed flow keeps its scoped repair, got {}",
+            repair.plan
+        );
+        assert!(repair.plan.to_string().contains("Filter:"));
+
+        let (incremental_task, sink_schema, query_engine) = new_windowed_task(true).await;
+        assert!(!incremental_task.config.simple_source_delta);
+        mark_incremental_with_dirty_window(&incremental_task);
+        let delta = incremental_task
+            .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+            .await
+            .unwrap()
+            .expect("windowed incremental round should generate a plan");
+        assert!(
+            matches!(delta.coverage, QueryCoverage::IncrementalDelta),
+            "a windowed flow keeps the existing aggregate-delta path, got {}",
+            delta.plan
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_plan_for_incremental_keeps_simple_plan() {
+        let (task, _, query_engine) = new_simple_delta_task(
+            "SELECT number, ts FROM numbers_with_ts",
+            "SELECT number, ts FROM numbers_with_ts",
+            Some(Duration::from_secs(60)),
+            true,
+        )
+        .await;
+        mark_incremental_with_dirty_window(&task);
+
+        let plan = sql_to_df_plan(
+            QueryContext::arc(),
+            query_engine.clone(),
+            "SELECT number, ts FROM numbers_with_ts",
+            false,
+        )
+        .await
+        .unwrap();
+        let dml = dml_plan(plan.clone(), sink_table(&query_engine).await);
+        let prepared = task
+            .prepare_plan_for_incremental(&query_engine, &dml)
+            .await
+            .unwrap()
+            .expect("a row-local plan is incremental safe unchanged");
+        assert_eq!(dml, prepared);
+        assert!(
+            !task.state.read().unwrap().is_incremental_disabled(),
+            "a supported simple plan must not disable incremental mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_plan_for_incremental_disables_join_plan() {
+        let query =
+            "SELECT a.number, a.ts FROM numbers_with_ts a JOIN numbers b ON a.number = b.number";
+        let (task, _, query_engine) =
+            new_simple_delta_task(query, query, Some(Duration::from_secs(60)), true).await;
+        mark_incremental_with_dirty_window(&task);
+
+        let plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), query, false)
+            .await
+            .unwrap();
+        let dml = dml_plan(plan, sink_table(&query_engine).await);
+        let prepared = task
+            .prepare_plan_for_incremental(&query_engine, &dml)
+            .await
+            .unwrap();
+        assert!(prepared.is_none(), "a join plan is not incremental safe");
+        assert!(
+            task.state.read().unwrap().is_incremental_disabled(),
+            "an unsupported non-aggregate plan keeps the existing disable path"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_fails_closed_without_incremental_extensions() {
+        let (task, _, query_engine) = new_simple_delta_task(
+            "SELECT number, ts FROM numbers_with_ts",
+            "SELECT number, ts FROM numbers_with_ts",
+            Some(Duration::from_secs(60)),
+            true,
+        )
+        .await;
+        // Incremental mode without any proven checkpoint: the extension list carries no
+        // `FLOW_INCREMENTAL_MODE`, so a delta round must not execute.
+        {
+            let mut state = task.state.write().unwrap();
+            state.advance_checkpoints(HashMap::new());
+            assert!(state.checkpoints().is_empty());
+            state
+                .dirty_time_windows
+                .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        }
+        let dirty = task.state.read().unwrap().dirty_time_windows.clone();
+
+        let plan = sql_to_df_plan(
+            QueryContext::arc(),
+            query_engine.clone(),
+            "SELECT number, ts FROM numbers_with_ts",
+            false,
+        )
+        .await
+        .unwrap();
+        let dml = dml_plan(plan, sink_table(&query_engine).await);
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+        let frontend_client = Arc::new(frontend_client);
+
+        let result = task
+            .execute_plan_unlocked(
+                &query_engine,
+                &frontend_client,
+                &dml,
+                &DirtyRestore::Unscoped(dirty),
+                &QueryCoverage::IncrementalDelta,
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "a delta round without incremental extensions must not execute"
+        );
+        let state = task.state.read().unwrap();
+        assert_eq!(1, state.dirty_time_windows.len(), "dirty work is restored");
+        assert_eq!(
+            CheckpointMode::Incremental,
+            state.checkpoint_mode(),
+            "skipping the round keeps incremental retryable"
+        );
+    }
+}
