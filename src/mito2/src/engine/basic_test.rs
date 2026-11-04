@@ -2291,3 +2291,103 @@ async fn test_manifest_scan_table_filter() {
     );
     drop(guard);
 }
+
+#[tokio::test]
+async fn test_region_manifest_size_metrics_lifecycle() {
+    use store_api::region_request::{RegionCloseRequest, RegionDropRequest};
+
+    use crate::metrics::RegionManifestSizeMetrics;
+
+    let mut env = TestEnv::with_prefix("manifest-size-metrics").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let metrics = RegionManifestSizeMetrics::new();
+    let registry = prometheus::Registry::new();
+    registry.register(Box::new(metrics.clone())).unwrap();
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    // With reporting disabled, even an open region creates no time series.
+    assert!(registry.gather().is_empty());
+    engine
+        .inner
+        .workers
+        .register_manifest_size_metrics(&metrics);
+    engine
+        .inner
+        .workers
+        .register_manifest_size_metrics(&metrics);
+    let assert_sample = || {
+        let families = registry.gather();
+        assert_eq!(families.len(), 1);
+        assert_eq!(
+            families[0].name(),
+            "greptime_mito_region_manifest_size_bytes"
+        );
+        assert_eq!(families[0].get_metric().len(), 1);
+        let metric = &families[0].get_metric()[0];
+        assert_eq!(metric.get_label().len(), 1);
+        assert_eq!(metric.get_label()[0].name(), "region_id");
+        assert_eq!(
+            metric.get_label()[0].value(),
+            region_id.as_u64().to_string()
+        );
+        assert_eq!(
+            metric.get_gauge().as_ref().unwrap().value(),
+            engine
+                .get_region(region_id)
+                .unwrap()
+                .region_statistic()
+                .manifest_size as f64,
+        );
+    };
+    assert_sample();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    assert_sample();
+
+    // A query retaining the old region must not retain its exported series.
+    let old_region = engine.get_region(region_id).unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert!(registry.gather().is_empty());
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    assert_sample();
+    drop(old_region);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(registry.gather().is_empty());
+    engine
+        .handle_request(RegionId::new(2, 1), RegionRequest::Create(request))
+        .await
+        .unwrap();
+    assert_eq!(registry.gather()[0].get_metric().len(), 1);
+    engine.stop().await.unwrap();
+    assert!(registry.gather().is_empty());
+}

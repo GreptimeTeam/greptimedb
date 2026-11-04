@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use lazy_static::lazy_static;
+use prometheus::core::{Collector, Desc};
 use prometheus::*;
 use puffin::puffin_manager::stager::StagerNotifier;
+
+use crate::region::{RegionMap, RegionMapRef};
 
 /// Stage label.
 pub const STAGE_LABEL: &str = "stage";
@@ -35,6 +39,69 @@ pub const PARTITION_LABEL: &str = "partition";
 pub const STAGING_TYPE: &str = "index_staging";
 /// Recycle bin type label.
 pub const RECYCLE_TYPE: &str = "recycle_bin";
+
+/// Samples manifest sizes from live worker region maps without retaining regions.
+#[derive(Clone)]
+pub(crate) struct RegionManifestSizeMetrics {
+    gauges: IntGaugeVec,
+    regions: Arc<Mutex<Vec<Weak<RegionMap>>>>,
+}
+
+impl RegionManifestSizeMetrics {
+    pub(crate) fn new() -> Self {
+        Self {
+            gauges: IntGaugeVec::new(
+                Opts::new(
+                    "greptime_mito_region_manifest_size_bytes",
+                    "Manifest size in bytes, using the same accounting as region_statistics.manifest_size",
+                ),
+                &["region_id"],
+            ).unwrap(),
+            regions: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn register_regions(&self, regions: &RegionMapRef) {
+        let mut sources = self.regions.lock().unwrap();
+        let regions = Arc::downgrade(regions);
+        sources.retain(|source| source.strong_count() > 0);
+        if !sources.iter().any(|source| source.ptr_eq(&regions)) {
+            sources.push(regions);
+        }
+    }
+}
+
+impl Collector for RegionManifestSizeMetrics {
+    fn desc(&self) -> Vec<&Desc> {
+        self.gauges.desc()
+    }
+
+    fn collect(&self) -> Vec<prometheus::proto::MetricFamily> {
+        // Serialize scrapes and discard labels for regions closed since the last scrape.
+        let mut sources = self.regions.lock().unwrap();
+        self.gauges.reset();
+        sources.retain(|source| {
+            let Some(regions) = source.upgrade() else {
+                return false;
+            };
+            for region in regions.list_regions() {
+                self.gauges
+                    .with_label_values(&[&region.region_id.as_u64().to_string()])
+                    .set(region.manifest_size() as i64);
+            }
+            true
+        });
+        self.gauges.collect()
+    }
+}
+
+lazy_static! {
+    pub(crate) static ref REGION_MANIFEST_SIZE: RegionManifestSizeMetrics = {
+        let metrics = RegionManifestSizeMetrics::new();
+        prometheus::register(Box::new(metrics.clone())).unwrap();
+        metrics
+    };
+}
 
 // Write metrics.
 lazy_static! {

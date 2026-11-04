@@ -836,6 +836,9 @@ impl DatanodeBuilder {
                 builder.try_build().await.context(BuildMitoEngineSnafu)?
             }
         };
+        if opts.logging.enable_per_region_metrics {
+            mito_engine.enable_per_region_metrics();
+        }
         Ok(mito_engine)
     }
 

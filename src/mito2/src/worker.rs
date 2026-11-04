@@ -306,6 +306,16 @@ impl WorkerGroup {
         })
     }
 
+    /// Registers only resident regions for per-region manifest size sampling.
+    pub(crate) fn register_manifest_size_metrics(
+        &self,
+        metrics: &crate::metrics::RegionManifestSizeMetrics,
+    ) {
+        for worker in &self.workers {
+            metrics.register_regions(&worker.regions);
+        }
+    }
+
     /// Stops the worker group.
     pub(crate) async fn stop(&self) -> Result<()> {
         info!("Stop region worker group");

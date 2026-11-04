@@ -906,6 +906,10 @@ max_log_dir_size = "0B"
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"
 
+## Whether to enable per-region metrics. These metrics can have high cardinality.
+## Default to false.
+enable_per_region_metrics = false
+
 ## Additional OTLP headers, only valid when using OTLP http
 [logging.otlp_headers]
 ## @toml2docs:none-default

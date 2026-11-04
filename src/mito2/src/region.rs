@@ -711,6 +711,11 @@ impl MitoRegion {
         }
     }
 
+    /// Returns the current manifest byte count without computing other region statistics.
+    pub(crate) fn manifest_size(&self) -> u64 {
+        self.stats.total_manifest_size()
+    }
+
     /// Returns the region statistic.
     pub(crate) fn region_statistic(&self) -> RegionStatistic {
         let version = self.version();
@@ -722,7 +727,7 @@ impl MitoRegion {
         let flushed_entry_id = version.flushed_entry_id;
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
-        let manifest_usage = self.stats.total_manifest_size();
+        let manifest_usage = self.manifest_size();
         let num_rows = version.ssts.owned_num_rows(self.region_id) + version.memtables.num_rows();
         let num_files = version.ssts.owned_num_files(self.region_id);
         let manifest_version = self.stats.manifest_version();
