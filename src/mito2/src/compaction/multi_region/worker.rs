@@ -60,9 +60,13 @@ pub(crate) async fn execute(
         workers.push(AbortOnDropHandle::new(common_runtime::spawn_compact(
             async move {
                 let stream = async_stream::try_stream! {
-                    while let Message::Batch(batch) = receiver.recv().await.context(InvalidMultiRegionCompactionSnafu {
-                        reason: "Source channel closed without Finish",
-                    })? {
+                    while let Message::Batch(batch) = receiver
+                        .recv()
+                        .await
+                        .context(InvalidMultiRegionCompactionSnafu {
+                            reason: "Source channel closed without Finish",
+                        })?
+                    {
                         yield batch;
                     }
                 };
@@ -92,12 +96,21 @@ pub(crate) async fn execute(
             biased;
             Some(result) = workers.next(), if !workers.is_empty() => {
                 let (id, files, infos) = result.context(crate::error::JoinSnafu)??;
-                output.stats.output_rows += files.iter().map(|file| file.num_rows).sum::<u64>();
-                output.stats.output_bytes += files.iter().map(|file| file.file_size + file.index_file_size).sum::<u64>();
+                output.stats.output_rows += files
+                    .iter()
+                    .map(|file| file.num_rows)
+                    .sum::<u64>();
+                output.stats.output_bytes += files
+                    .iter()
+                    .map(|file| file.file_size + file.index_file_size)
+                    .sum::<u64>();
                 output.files.insert(id, files);
                 output.sst_infos.insert(id, infos);
             }
-            result = &mut scan, if !scan_finished => { result?; scan_finished = true; }
+            result = &mut scan, if !scan_finished => {
+                result?;
+                scan_finished = true;
+            }
         }
     }
     output.stats.source_files = counters.files.load(Ordering::Relaxed);
