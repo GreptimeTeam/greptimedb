@@ -139,6 +139,68 @@ async fn test_late_region_is_not_hidden_behind_an_existing_fifo_backlog() {
 }
 
 #[tokio::test]
+async fn test_backlog_weight_cap_limits_service_boost() {
+    // Oracle for the capped backlog weight. After region A is served once, its
+    // next batch is already queued while a six-unit region B backlog advances:
+    // B must get exactly two admissions before A returns. A constant weight of
+    // one returns A after the first B unit, while an uncapped weight drains the
+    // whole B backlog first.
+    let executor = Arc::new(ManualExecutor::default());
+    let coordinator = Arc::new(CompactionCoordinator::new(executor.clone(), 1));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let a = RegionId::from_u64(1);
+    let b = RegionId::from_u64(2);
+    coordinator.schedule(a, unit(100, 1, &tx)).unwrap();
+    for id in 10..16 {
+        coordinator.schedule(b, unit(100, id, &tx)).unwrap();
+    }
+    for id in 2..5 {
+        coordinator.schedule(a, unit(100, id, &tx)).unwrap();
+    }
+    executor.run_next().await;
+    assert_eq!(1, recv(&mut rx).await);
+    let mut started = Vec::new();
+    for _ in 0..9 {
+        executor.run_next().await;
+        started.push(recv(&mut rx).await);
+    }
+    assert_eq!(vec![10, 11, 2, 12, 3, 13, 4, 14, 15], started);
+    assert_eq!(0, executor.len());
+    coordinator.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_zero_byte_work_pays_minimum_service() {
+    // Oracle for the minimum positive charge: a zero-byte backlog must still
+    // accrue service, so region A returns after two B admissions. Dropping the
+    // minimum, or scaling the weight without a cap, makes those units free and
+    // drains the whole B backlog first.
+    let executor = Arc::new(ManualExecutor::default());
+    let coordinator = Arc::new(CompactionCoordinator::new(executor.clone(), 1));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let a = RegionId::from_u64(1);
+    let b = RegionId::from_u64(2);
+    coordinator.schedule(a, unit(1, 1, &tx)).unwrap();
+    executor.run_next().await;
+    assert_eq!(1, recv(&mut rx).await);
+    coordinator.schedule(a, unit(1, 2, &tx)).unwrap();
+    for id in 10..20 {
+        coordinator.schedule(b, unit(0, id, &tx)).unwrap();
+    }
+    coordinator.schedule(a, unit(1, 3, &tx)).unwrap();
+    executor.run_next().await;
+    assert_eq!(2, recv(&mut rx).await);
+    let mut started = Vec::new();
+    for _ in 0..11 {
+        executor.run_next().await;
+        started.push(recv(&mut rx).await);
+    }
+    assert_eq!(vec![10, 11, 3, 12, 13, 14, 15, 16, 17, 18, 19], started);
+    assert_eq!(0, executor.len());
+    coordinator.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_fairness_accounts_for_bytes_instead_of_task_counts() {
     let executor = Arc::new(ManualExecutor::default());
     let coordinator = Arc::new(CompactionCoordinator::new(executor.clone(), 1));
