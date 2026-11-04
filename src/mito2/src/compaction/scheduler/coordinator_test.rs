@@ -224,6 +224,40 @@ async fn test_fairness_accounts_for_bytes_instead_of_task_counts() {
 }
 
 #[tokio::test]
+async fn test_idle_region_service_is_clamped_to_virtual_time() {
+    // Oracle for the idle floor. Region A is served once, then sleeps while the
+    // busy region B advances virtual time past A's stale service. When A returns
+    // with a three-unit batch, its debt must start at that floor, so B's last
+    // queued unit interleaves after one A unit instead of after all three.
+    let executor = Arc::new(ManualExecutor::default());
+    let coordinator = Arc::new(CompactionCoordinator::new(executor.clone(), 1));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let a = RegionId::from_u64(1);
+    let b = RegionId::from_u64(2);
+    coordinator.schedule(a, unit(100, 1, &tx)).unwrap();
+    for id in 10..16 {
+        coordinator.schedule(b, unit(100, id, &tx)).unwrap();
+    }
+    executor.run_next().await;
+    assert_eq!(1, recv(&mut rx).await);
+    for expected in 10..14 {
+        executor.run_next().await;
+        assert_eq!(expected, recv(&mut rx).await);
+    }
+    for id in [2, 3, 4] {
+        coordinator.schedule(a, unit(100, id, &tx)).unwrap();
+    }
+    let mut started = Vec::new();
+    for _ in 0..5 {
+        executor.run_next().await;
+        started.push(recv(&mut rx).await);
+    }
+    assert_eq!(vec![14, 2, 15, 3, 4], started);
+    assert_eq!(0, executor.len());
+    coordinator.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_unpolled_cancellation_refunds_service_before_next_admission() {
     let executor = Arc::new(ManualExecutor::default());
     let coordinator = Arc::new(CompactionCoordinator::new(executor.clone(), 1));
