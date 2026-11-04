@@ -1024,7 +1024,6 @@ pub struct CacheManager {
     sst_meta_cache: Option<SstMetaCache>,
     /// Shared decoded SST and native-reader metadata acceleration tier.
     sst_decoded_meta_cache: Option<SstDecodedMetaCache>,
-    columnar_admission_locks: Arc<[tokio::sync::Mutex<()>; 32]>,
     /// Cache for vectors.
     vector_cache: Option<VectorCache>,
     /// Cache for SST byte ranges.
@@ -1675,9 +1674,6 @@ impl CacheManagerBuilder {
         CacheManager {
             sst_meta_cache,
             sst_decoded_meta_cache,
-            columnar_admission_locks: Arc::new(std::array::from_fn(
-                |_| tokio::sync::Mutex::new(()),
-            )),
             vector_cache,
             page_cache,
             write_cache: self.write_cache,
