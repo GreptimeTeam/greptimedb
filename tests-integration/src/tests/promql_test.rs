@@ -5302,7 +5302,7 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // selector, over the scan bound to that selector's metric.
         fn scan_metric(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> Option<String> {
             if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
-                return match scan.label_source() {
+                return match scan.scan_binding() {
                     store_api::region_engine::RawLabelSource::PrimaryKey {
                         metric_name, ..
                     } => Some(metric_name.to_string()),
