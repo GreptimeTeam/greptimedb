@@ -44,7 +44,7 @@ use std::collections::VecDeque;
 use std::fmt::{self, Formatter};
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
@@ -698,17 +698,6 @@ impl FusedSeries {
         tree_inputs(&self.tree)
             .iter()
             .any(|input| matches!(input.output, NativeType::AggregateState(_)))
-    }
-
-    /// Whether this node's output carries the metric name its sources report.
-    ///
-    /// A nameless selector declares `__name__` without binding one name: the sources fill it in.
-    /// A `Final` half inherits that arrangement from the producer it reads, which is why the proof
-    /// has to cross the state boundary rather than stop at a scan.
-    fn publishes_source_metric_name(&self) -> bool {
-        self.binding.tags.iter().any(|tag| tag == METRIC_NAME)
-            && (self.binding.metric_name.is_some()
-                || self.children().iter().all(source_names_its_metric))
     }
 
     /// The compiled tree this node runs.
@@ -1401,94 +1390,6 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
     }
 }
 
-/// How many region boundaries a metric name proof may cross.
-///
-/// The distributed planner answers each region's series with one boundary, so an input that reads
-/// discovered metrics is at most one boundary above the sources it reads. A boundary inside a
-/// boundary is not a shape the planner produces, so the proof refuses it instead of following it.
-const METRIC_NAME_PROOF_BOUNDARIES: u8 = 1;
-
-/// The plan a region boundary runs in its region, as the crate that owns the node reports it.
-///
-/// A boundary carries its child to a region and reports no inputs, so no ordinary traversal - and no
-/// crate that only sees a [`LogicalPlan`] - reaches the plan the region runs. The node that does this
-/// is defined above this crate, since the distributed planner that draws it depends on this one, so
-/// that crate registers the one accessor that opens it. A boundary nobody answers for names nothing,
-/// which is the conservative answer.
-static REGION_BOUNDARY_ACCESSOR: OnceLock<fn(&LogicalPlan) -> Option<&LogicalPlan>> =
-    OnceLock::new();
-
-/// Registers what a region boundary hides, so that [`source_names_its_metric`] can look behind one.
-///
-/// Called by the crate that defines the boundary node, which is the crate that plans regions; the
-/// first registration wins. Without it, this crate treats a boundary as a node that names no metric.
-pub fn set_region_boundary_accessor(accessor: fn(&LogicalPlan) -> Option<&LogicalPlan>) {
-    let _ = REGION_BOUNDARY_ACCESSOR.set(accessor);
-}
-
-/// What `plan` runs in its region, when `plan` is a region boundary.
-fn region_boundary_plan(plan: &LogicalPlan) -> Option<&LogicalPlan> {
-    REGION_BOUNDARY_ACCESSOR
-        .get()
-        .and_then(|accessor| accessor(plan))
-}
-
-/// Whether this input reports the metric each of its rows came from, by naming it itself.
-///
-/// A discovered selector binds one source per metric, so the name comes from the sources rather
-/// than from a single name on the node. A source can also be read through a region boundary: the
-/// boundary forwards the frames its region produced, so it names each series' metric exactly when
-/// the plan the region runs does, and the proof continues there - through the projection the
-/// boundary's answer travels under, which republishes the frame's own columns.
-fn source_names_its_metric(plan: &LogicalPlan) -> bool {
-    source_names_its_metric_across(plan, 0)
-}
-
-/// [`source_names_its_metric`] after `boundaries` region boundaries have been crossed.
-fn source_names_its_metric_across(plan: &LogicalPlan, boundaries: u8) -> bool {
-    match plan {
-        LogicalPlan::Extension(extension) => {
-            if let Some(source) = extension
-                .node
-                .as_any()
-                .downcast_ref::<super::RawSeriesSource>()
-            {
-                return !source.metric_name().is_empty();
-            }
-            // A split's final half reads its producer's state, and the producer is the node that
-            // named the metric: it either bound one name or was itself built over sources that do.
-            if let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>() {
-                return fused.publishes_source_metric_name();
-            }
-            // One region boundary is what a region's answer arrives behind, so the proof asks what
-            // the region runs and applies the same rules there. A bare scan behind the boundary
-            // names no metric, and a boundary behind a boundary keeps no proof at all.
-            if boundaries == METRIC_NAME_PROOF_BOUNDARIES {
-                return false;
-            }
-            region_boundary_plan(plan)
-                .is_some_and(|remote| source_names_its_metric_across(remote, boundaries + 1))
-        }
-        LogicalPlan::Union(union) => union
-            .inputs
-            .iter()
-            .all(|input| source_names_its_metric_across(input, boundaries)),
-        // A region's answer leaves the boundary under the projection that republishes the frame's
-        // own columns, which renames nothing the frame carries and so names what the frame names.
-        // A computed expression is an ordinary plan and keeps no proof.
-        LogicalPlan::Projection(projection)
-            if projection.expr.iter().all(|expr| match expr {
-                Expr::Column(_) => true,
-                Expr::Alias(alias) => matches!(alias.expr.as_ref(), Expr::Column(_)),
-                _ => false,
-            }) =>
-        {
-            source_names_its_metric_across(&projection.input, boundaries)
-        }
-        _ => false,
-    }
-}
-
 /// Whether matching operands can be segmented as independent single-source computations and
 /// at least one fails to preserve the requested key.
 ///
@@ -1729,15 +1630,6 @@ fn validate_binding(
     binding: &FusedSeriesBinding,
     children: &[LogicalPlan],
 ) -> DataFusionResult<()> {
-    // A `__name__` tag is filled either by one bound metric name or by the sources themselves.
-    if binding.tags.iter().any(|tag| tag == METRIC_NAME)
-        && binding.metric_name.is_none()
-        && !children.iter().all(source_names_its_metric)
-    {
-        return Err(DataFusionError::Plan(format!(
-            "FusedSeries declares {METRIC_NAME:?} but binds no metric name"
-        )));
-    }
     let schemas = collect_source_schemas(tree)?;
     // A tree built without its constructor carries no proof of its contracts, and one without an
     // input has no scan to refuse it later.

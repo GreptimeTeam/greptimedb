@@ -362,30 +362,6 @@ pub struct MergeScanLogicalPlan {
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
 }
 
-/// Answers what plan a region boundary runs, for the crates this one is layered above.
-///
-/// A boundary takes its child to a region and reports no inputs, so an ordinary traversal - and any
-/// crate that only sees a [`LogicalPlan`] - cannot reach the plan the region runs. `promql` has to:
-/// a native producer proves the metric each series came from by its input's sources, and a discovered
-/// selector's sources arrive behind one boundary per region. The node is defined here, so the answer
-/// is given from here, and only for this node: anything else is no boundary at all.
-fn hidden_plan(plan: &LogicalPlan) -> Option<&LogicalPlan> {
-    let LogicalPlan::Extension(extension) = plan else {
-        return None;
-    };
-    extension
-        .node
-        .as_any()
-        .downcast_ref::<MergeScanLogicalPlan>()
-        .map(MergeScanLogicalPlan::input)
-}
-
-/// Tells the crates below this one what a region boundary hides. Idempotent: the first boundary
-/// registers the answer and every later one finds it already given.
-fn tell_what_a_boundary_hides() {
-    promql::extension_plan::set_region_boundary_accessor(hidden_plan);
-}
-
 impl PartialOrd for MergeScanLogicalPlan {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         let Self {
@@ -453,9 +429,6 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 impl MergeScanLogicalPlan {
     /// Creates a merge scan with the input plan's schema.
     pub fn new(input: LogicalPlan, is_placeholder: bool) -> Self {
-        // A boundary is the only thing that can say what it hides, and the crates below this one
-        // cannot name this node. Opening the first boundary tells them how to ask.
-        tell_what_a_boundary_hides();
         Self {
             output_schema: input.schema().clone(),
             input,

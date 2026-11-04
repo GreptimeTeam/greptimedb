@@ -3109,6 +3109,53 @@ async fn native_promql_discovery_over_two_metrics_under_an_aggregate_sums_both()
         values,
         "sum over both discovered metrics' `api` series"
     );
+
+    // Grouping by the metric name must keep the two metrics apart even though their ordinary
+    // labels are identical: two groups, each named after its own metric.
+    let output = instance
+        .do_promql_query(
+            &PromQuery {
+                query: r#"sum by (__name__) ({job="api"})"#.to_string(),
+                ..query
+            },
+            native_query_context(true, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        other => panic!("a PromQL query returns record batches: {other:?}"),
+    };
+    let mut groups = Vec::new();
+    for batch in batches.iter() {
+        let names = batch
+            .column_by_name("__name__")
+            .expect("a grouping by the metric name reports that column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let values = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(1, values.len(), "expected one value column");
+        let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            groups.push((names.value(row).to_string(), values.value(row)));
+        }
+    }
+    groups.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        vec![
+            ("discovery_two_api".to_string(), 2.0),
+            ("discovery_two_web".to_string(), 3.0),
+        ],
+        groups,
+        "each discovered metric stays its own group"
+    );
 }
 
 /// Compare value and response ordering for native routes added for common PromQL shapes.

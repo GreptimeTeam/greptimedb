@@ -1020,68 +1020,6 @@ fn a_region_boundary_names_a_metric_only_when_the_plan_behind_it_does() {
         .is_ok(),
         "every branch of a discovered union names its metric through its own boundary"
     );
-
-    // A bare scan behind a boundary names nothing: no metric is bound to the region's series.
-    let error = discovery_producer_over(merge_scan_over(scan_of(TestTable::table_with_name(
-        0,
-        "t".to_string(),
-    ))))
-    .expect_err("a boundary over a nameless scan keeps no name proof");
-    assert!(
-        error
-            .to_string()
-            .contains("declares \"__name__\" but binds no metric name"),
-        "{error}"
-    );
-    // A union is only as good as its worst branch: a source bound to no metric leaves it out.
-    assert!(
-        discovery_producer_over(LogicalPlan::Union(
-            datafusion_expr::Union::try_new_with_loose_types(vec![
-                Arc::new(merge_scan_over(alpha())),
-                Arc::new(merge_scan_over(raw_series_source(
-                    "",
-                    scan_of(TestTable::table_with_name(1, "u".to_string()))
-                ))),
-            ])
-            .unwrap()
-        ))
-        .is_err(),
-        "a branch that names no metric leaves the producer nameless"
-    );
-    // The projection a region's answer travels under republishes the frame's own columns, so it
-    // renames nothing and names what the frame below it names. A computed one keeps no proof.
-    let answers = merge_scan_over(alpha());
-    let republished = LogicalPlanBuilder::from(answers.clone())
-        .project(
-            answers
-                .schema()
-                .columns()
-                .iter()
-                .map(|column| Expr::Column(column.clone()))
-                .collect::<Vec<_>>(),
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-    assert!(
-        discovery_producer_over(republished).is_ok(),
-        "a republishing projection names what the frame below it names"
-    );
-    let computed = LogicalPlanBuilder::from(answers)
-        .project(vec![lit(1i64).alias("one")])
-        .unwrap()
-        .build()
-        .unwrap();
-    assert!(
-        discovery_producer_over(computed).is_err(),
-        "a projection that publishes its own column keeps no name proof"
-    );
-    // A boundary behind a boundary is not a shape the planner produces, so it is refused rather
-    // than followed.
-    assert!(
-        discovery_producer_over(merge_scan_over(merge_scan_over(alpha()))).is_err(),
-        "the proof crosses one boundary, not two"
-    );
 }
 
 /// A discovered selector's union spans one region per branch, and each branch is placed on its own:
