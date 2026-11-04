@@ -140,6 +140,21 @@ fn batch_labels_borrow_values_and_retain_owner() {
         empty,
         SeriesLabels::try_new(Some(Arc::from("cpu")), vec![label("host", "")]).unwrap()
     );
+    // Representation changes must preserve keyed collections and persisted labels.
+    let owned = SeriesLabels::try_new(Some(Arc::from("cpu")), vec![label("host", "")]).unwrap();
+    let hash = |labels: &SeriesLabels| {
+        use std::hash::{Hash, Hasher};
+        let mut state = std::collections::hash_map::DefaultHasher::new();
+        labels.hash(&mut state);
+        state.finish()
+    };
+    assert_eq!(hash(&owned), hash(&empty));
+    let encoded = serde_json::to_string(&empty).unwrap();
+    assert_eq!(encoded, serde_json::to_string(&owned).unwrap());
+    assert_eq!(
+        empty,
+        serde_json::from_str::<SeriesLabels>(&encoded).unwrap()
+    );
     drop(batch);
     drop(absent);
     assert!(weak.upgrade().is_some());

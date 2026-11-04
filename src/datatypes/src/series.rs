@@ -131,6 +131,41 @@ impl SeriesLabelBatch {
         })
     }
 
+    /// Estimates retained buffers and one row view per batch row, including lazy
+    /// owned-label materialization. Shared buffers are conservatively counted per
+    /// array. Additional independent views of a row need their own reservation.
+    /// This is a reservation estimate, not an allocator-exact accounting contract.
+    pub fn estimated_size(&self) -> usize {
+        let arc_header = 2 * std::mem::size_of::<usize>();
+        let row_views = self
+            .batch
+            .num_rows()
+            .saturating_mul(std::mem::size_of::<BatchLabels>() + arc_header);
+        let mut bytes = self
+            .batch
+            .get_array_memory_size()
+            .saturating_add(std::mem::size_of::<Self>() + arc_header)
+            .saturating_add(
+                self.columns
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(Arc<str>, usize)>()),
+            )
+            .saturating_add(row_views);
+        for (name, column) in &self.columns {
+            bytes = bytes.saturating_add(name.len() + arc_header);
+            for row in 0..self.batch.num_rows() {
+                if let Some(value) = self.value(*column, row) {
+                    // Vec-to-Arc conversion may temporarily retain both label arrays.
+                    bytes = bytes
+                        .saturating_add(2 * std::mem::size_of::<Label>())
+                        .saturating_add(value.len())
+                        .saturating_add(arc_header + std::mem::align_of::<usize>());
+                }
+            }
+        }
+        bytes.saturating_add(self.batch.num_rows().saturating_mul(arc_header))
+    }
+
     fn value(&self, column: usize, row: usize) -> Option<&str> {
         let strings = self
             .batch

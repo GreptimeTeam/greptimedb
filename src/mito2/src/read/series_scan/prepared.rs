@@ -483,21 +483,17 @@ impl ColumnarPreparedSource {
                             ))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    let owner = MemoryConsumer::new("ColumnarSeriesLabelBatch")
-                        .register(&input.scan_memory_pool);
+                    let owner = Arc::new(
+                        MemoryConsumer::new("ColumnarSeriesLabelBatch")
+                            .register(&input.scan_memory_pool),
+                    );
+                    let label_batch =
+                        SeriesLabelBatch::try_new(batch.clone(), columns, owner.clone())
+                            .map_err(|e| invalid(e.to_string()))?;
                     owner
-                        .try_grow(
-                            2 * batch.get_array_memory_size()
-                                + batch.num_rows()
-                                    * (128
-                                        + columns.len()
-                                            * std::mem::size_of::<datatypes::series::Label>()),
-                        )
-                        .map_err(|e| invalid(e.to_string()))?;
-                    Some(Arc::new(
-                        SeriesLabelBatch::try_new(batch.clone(), columns, Arc::new(owner))
-                            .map_err(|e| invalid(e.to_string()))?,
-                    ))
+                        .try_grow(label_batch.estimated_size())
+                        .context(crate::error::ScanMemoryExhaustedSnafu)?;
+                    Some(Arc::new(label_batch))
                 } else {
                     None
                 };
@@ -540,14 +536,20 @@ impl ColumnarPreparedSource {
                             .counts
                             .entry("prepare_duplicate_rows")
                             .or_default() += 1;
-                        let conflict = if let Some((previous_batch, previous_row)) = &previous.metadata_row {
+                        let conflict = if let Some((previous_batch, previous_row)) =
+                            &previous.metadata_row
+                        {
                             let mut conflict = false;
                             for ((_, current), (_, name)) in tag_arrays.iter().zip(tags.iter()) {
-                                let previous = previous_batch.column_by_name(name)
+                                let previous = previous_batch
+                                    .column_by_name(name)
                                     .and_then(|array| array.as_any().downcast_ref::<StringArray>())
-                                    .ok_or_else(|| invalid("incompatible duplicate label metadata"))?;
+                                    .ok_or_else(|| {
+                                        invalid("incompatible duplicate label metadata")
+                                    })?;
                                 conflict |= previous.is_null(*previous_row) != current.is_null(row)
-                                    || (!current.is_null(row) && previous.value(*previous_row) != current.value(row));
+                                    || (!current.is_null(row)
+                                        && previous.value(*previous_row) != current.value(row));
                             }
                             conflict
                         } else {
