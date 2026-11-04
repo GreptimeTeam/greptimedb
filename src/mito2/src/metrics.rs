@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use lazy_static::lazy_static;
-use prometheus::core::{Collector, Desc};
 use prometheus::*;
 use puffin::puffin_manager::stager::StagerNotifier;
 use store_api::metrics::REGION_LABEL;
-
-use crate::region::{RegionMap, RegionMapRef};
+use store_api::storage::RegionId;
 
 /// Stage label.
 pub const STAGE_LABEL: &str = "stage";
@@ -41,67 +40,139 @@ pub const STAGING_TYPE: &str = "index_staging";
 /// Recycle bin type label.
 pub const RECYCLE_TYPE: &str = "recycle_bin";
 
-/// Samples manifest sizes from live worker region maps without retaining regions.
-#[derive(Clone)]
-pub(crate) struct RegionManifestSizeMetrics {
-    gauges: IntGaugeVec,
-    regions: Arc<Mutex<Vec<Weak<RegionMap>>>>,
-}
-
-impl RegionManifestSizeMetrics {
-    pub(crate) fn new() -> Self {
-        Self {
-            gauges: IntGaugeVec::new(
-                Opts::new(
-                    "greptime_mito_region_manifest_size_bytes",
-                    "Manifest size in bytes, using the same accounting as region_statistics.manifest_size",
-                ),
-                &[REGION_LABEL],
-            ).unwrap(),
-            regions: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub(crate) fn register_regions(&self, regions: &RegionMapRef) {
-        let mut sources = self.regions.lock().unwrap();
-        let regions = Arc::downgrade(regions);
-        sources.retain(|source| source.strong_count() > 0);
-        if !sources.iter().any(|source| source.ptr_eq(&regions)) {
-            sources.push(regions);
-        }
-    }
-}
-
-impl Collector for RegionManifestSizeMetrics {
-    fn desc(&self) -> Vec<&Desc> {
-        self.gauges.desc()
-    }
-
-    fn collect(&self) -> Vec<prometheus::proto::MetricFamily> {
-        // Serialize scrapes and discard labels for regions closed since the last scrape.
-        let mut sources = self.regions.lock().unwrap();
-        self.gauges.reset();
-        sources.retain(|source| {
-            let Some(regions) = source.upgrade() else {
-                return false;
-            };
-            for region in regions.list_regions() {
-                self.gauges
-                    .with_label_values(&[&region.region_id.as_u64().to_string()])
-                    .set(region.manifest_size() as i64);
-            }
-            true
-        });
-        self.gauges.collect()
-    }
-}
-
 lazy_static! {
-    pub(crate) static ref REGION_MANIFEST_SIZE: RegionManifestSizeMetrics = {
-        let metrics = RegionManifestSizeMetrics::new();
-        prometheus::register(Box::new(metrics.clone())).unwrap();
-        metrics
-    };
+    /// Manifest size of each live region in bytes, from the region statistics counter.
+    pub(crate) static ref REGION_MANIFEST_SIZE: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_region_manifest_size_bytes",
+        "mito region manifest size in bytes",
+        &[REGION_LABEL]
+    ).unwrap();
+}
+
+/// Publishes the manifest size of `region_id`.
+pub(crate) fn set_region_manifest_size(region_id: RegionId, size: u64) {
+    let region_id = region_id.as_u64().to_string();
+    REGION_MANIFEST_SIZE
+        .with_label_values(&[&region_id])
+        .set(size as i64);
+}
+
+/// Removes the per-region series. Idempotent.
+pub(crate) fn remove_region_manifest_size(region_id: RegionId) {
+    let region_id = region_id.as_u64().to_string();
+    let _ = REGION_MANIFEST_SIZE.remove_label_values(&[&region_id]);
+}
+
+/// Shared publishing state of one region's manifest size gauge.
+///
+/// Publishing can run on any runtime thread: the worker, the background
+/// checkpoint task (`common_runtime::spawn_global`), or the inventory
+/// reconciliation task. Arming, disarming and publishing therefore share one
+/// mutex, so a late publish can neither resurrect a series removed by
+/// close/drop nor overwrite a successor instance's value.
+#[derive(Debug)]
+struct MetricState {
+    armed: bool,
+    /// Test-only pause point between the armed check and the gauge write.
+
+    #[cfg(test)]
+    hook: Option<TestHook>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct TestHook(Arc<dyn Fn() + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for TestHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TestHook")
+    }
+}
+
+#[cfg(test)]
+impl TestHook {
+    pub(crate) fn new(hook: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(hook))
+    }
+
+    fn call(&self) {
+        (self.0)();
+    }
+}
+
+/// Publishing state of one region's manifest size gauge.
+///
+/// Clones share publication rights. Only the instance in the live map may publish;
+/// a replacement revokes the old instance's rights before publishing its size.
+#[derive(Debug, Clone)]
+pub(crate) struct RegionManifestSizeMetric {
+    region_id: RegionId,
+    state: Arc<Mutex<MetricState>>,
+}
+
+impl RegionManifestSizeMetric {
+    pub(crate) fn new(region_id: RegionId) -> Self {
+        Self {
+            region_id,
+            state: Arc::new(Mutex::new(MetricState {
+                armed: false,
+                #[cfg(test)]
+                hook: None,
+            })),
+        }
+    }
+
+    /// Installs a pause hook used by the deterministic concurrency tests.
+    #[cfg(test)]
+    pub(crate) fn set_test_hook(&self, hook: Option<TestHook>) {
+        self.lock().hook = hook;
+    }
+
+    fn lock(&self) -> MutexGuard<'_, MetricState> {
+        // Metrics must keep working after an unrelated panic poisons the lock.
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Starts publishing and reports the current total.
+    ///
+    /// The total is read while holding the lock: a concurrent writer that
+    /// skipped publishing because the gauge was not armed yet cannot be lost.
+    /// Does not call [`Self::publish`] to avoid taking the lock twice.
+    pub(crate) fn arm(&self, total: &AtomicU64) {
+        let mut state = self.lock();
+        state.armed = true;
+        let total = total.load(Ordering::Relaxed);
+        self.write(&state, total);
+    }
+
+    /// Stops publishing. Called when the instance leaves the live map or is replaced.
+    ///
+    /// Must run before `remove_region_manifest_size`.
+    pub(crate) fn disarm(&self) {
+        self.lock().armed = false;
+    }
+
+    /// Writes `total` when armed.
+    ///
+    /// Callers must hold the size tracker's write lock so a concurrent publisher
+    /// cannot publish an older total afterwards.
+    pub(crate) fn publish(&self, total: u64) {
+        let state = self.lock();
+        if state.armed {
+            self.write(&state, total);
+        }
+    }
+
+    /// Writes the gauge. The caller keeps the state lock alive across this call,
+    /// so the pause hook (and the write) cannot interleave with arm/disarm.
+    fn write(&self, _state: &MetricState, total: u64) {
+        #[cfg(test)]
+        if let Some(hook) = &_state.hook {
+            hook.call();
+        }
+        set_region_manifest_size(self.region_id, total);
+    }
 }
 
 // Write metrics.
@@ -919,8 +990,32 @@ pub(crate) fn cache_page_fetch_metrics(
     }
 }
 
+/// Looks up a sample without creating a series. Region ids must be unique per test.
+#[cfg(test)]
+pub(crate) fn manifest_metric_sample(region_id: RegionId) -> Option<i64> {
+    use prometheus::core::Collector;
+    let label = region_id.as_u64().to_string();
+    let samples: Vec<_> = REGION_MANIFEST_SIZE
+        .collect()
+        .into_iter()
+        .flat_map(|family| family.get_metric().to_vec())
+        .filter(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|pair| pair.name() == REGION_LABEL && pair.value() == label)
+        })
+        .collect();
+    assert!(samples.len() <= 1);
+    samples
+        .first()
+        .map(|metric| metric.get_gauge().as_ref().unwrap().value() as i64)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use super::*;
     use common_cache::paged::{PageEvent, PageFetchStats};
 
@@ -1009,5 +1104,66 @@ mod tests {
                 expected
             );
         }
+    }
+    #[rstest::rstest]
+    #[case::remove(false)]
+    #[case::replace(true)]
+    fn publishing_holds_lock_through_gauge_write(#[case] replace: bool) {
+        let id = RegionId::new(u32::MAX, if replace { 21 } else { 20 });
+        remove_region_manifest_size(id);
+        let old = RegionManifestSizeMetric::new(id);
+        old.arm(&AtomicU64::new(10));
+        let new = RegionManifestSizeMetric::new(id);
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        let go_rx = Mutex::new(go_rx);
+        old.set_test_hook(Some(TestHook::new(move || {
+            paused_tx.send(()).unwrap();
+            go_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        })));
+        let publisher = std::thread::spawn({
+            let old = old.clone();
+            move || old.publish(11)
+        });
+        paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Directly prove the lock is held at the gauge write boundary. This fails
+        // deterministically if publication releases its guard before writing.
+        let held = matches!(
+            old.state.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        );
+        let (started_tx, started_rx) = mpsc::channel();
+        let successor = std::thread::spawn({
+            let old = old.clone();
+            let new = new.clone();
+            move || {
+                started_tx.send(()).unwrap();
+                old.disarm();
+                if replace {
+                    new.arm(&AtomicU64::new(20));
+                } else {
+                    remove_region_manifest_size(id);
+                }
+            }
+        });
+        let started = started_rx.recv_timeout(Duration::from_secs(5));
+        // Release before assertions so a failing assertion cannot strand threads.
+        go_tx.send(()).unwrap();
+        publisher.join().unwrap();
+        successor.join().unwrap();
+        assert!(
+            held,
+            "publication must hold the descriptor lock through the write"
+        );
+        started.unwrap();
+        old.set_test_hook(None);
+        old.publish(1);
+        assert_eq!(manifest_metric_sample(id), replace.then_some(20));
+        new.disarm();
+        remove_region_manifest_size(id);
     }
 }

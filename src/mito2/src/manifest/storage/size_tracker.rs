@@ -19,6 +19,8 @@ use std::sync::{Arc, RwLock};
 
 use store_api::ManifestVersion;
 
+use crate::metrics::RegionManifestSizeMetric;
+
 /// Key to identify a manifest file.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub(crate) enum FileKey {
@@ -67,6 +69,7 @@ impl Tracker for NoopTracker {
 pub(crate) struct SizeTracker {
     inventory: Arc<RwLock<Inventory>>,
     total_size: Arc<AtomicU64>,
+    metric: Option<RegionManifestSizeMetric>,
 }
 
 #[derive(Debug, Default)]
@@ -77,10 +80,11 @@ struct Inventory {
 
 impl SizeTracker {
     /// Returns a new [SizeTracker].
-    pub fn new(total_size: Arc<AtomicU64>) -> Self {
+    pub fn new(total_size: Arc<AtomicU64>, metric: Option<RegionManifestSizeMetric>) -> Self {
         Self {
             inventory: Arc::default(),
             total_size,
+            metric,
         }
     }
 
@@ -129,6 +133,14 @@ impl SizeTracker {
         });
         self.total_size
             .store(inventory.file_sizes.values().sum(), Ordering::Relaxed);
+        self.publish_locked();
+    }
+
+    /// Called with the inventory write lock held, preserving publication order.
+    fn publish_locked(&self) {
+        if let Some(metric) = &self.metric {
+            metric.publish(self.total_size.load(Ordering::Relaxed));
+        }
     }
 
     fn record(&self, key: FileKey, size: u64) {
@@ -149,12 +161,76 @@ impl SizeTracker {
             self.total_size.fetch_sub(old_size, Ordering::Relaxed);
         }
         self.total_size.fetch_add(size, Ordering::Relaxed);
+        self.publish_locked();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use store_api::storage::RegionId;
+
     use super::*;
+    use crate::metrics::{manifest_metric_sample, remove_region_manifest_size};
+
+    #[test]
+    fn manifest_metric_tracks_mutations_and_arming() {
+        let id = RegionId::new(u32::MAX, 30);
+        remove_region_manifest_size(id);
+        let total = Arc::new(AtomicU64::new(0));
+        let metric = RegionManifestSizeMetric::new(id);
+        let tracker = SizeTracker::new(total.clone(), Some(metric.clone()));
+        tracker.manifest_tracker().record(0, 10);
+        assert_eq!(manifest_metric_sample(id), None);
+        metric.arm(&total);
+        assert_eq!(manifest_metric_sample(id), Some(10));
+        tracker.manifest_tracker().record(0, 20);
+        tracker.checkpoint_tracker().record(1, 30);
+        assert_eq!(manifest_metric_sample(id), Some(tracker.total() as i64));
+        assert_eq!(tracker.total(), 50);
+        tracker.retain_after(1);
+        assert_eq!(manifest_metric_sample(id), Some(30));
+        // Late reads and stale retention cannot resurrect superseded bytes or gauges.
+        tracker.manifest_tracker().record(0, 999);
+        tracker.retain_after(0);
+        assert_eq!(manifest_metric_sample(id), Some(30));
+        // An unregistered opener with the same id has no right to publish.
+        let candidate = RegionManifestSizeMetric::new(id);
+        let candidate_tracker = SizeTracker::new(Arc::new(AtomicU64::new(0)), Some(candidate));
+        candidate_tracker.manifest_tracker().record(2, 999);
+        assert_eq!(manifest_metric_sample(id), Some(30));
+        tracker.retain_after(2);
+        assert_eq!(manifest_metric_sample(id), Some(0));
+        metric.disarm();
+        remove_region_manifest_size(id);
+        tracker.manifest_tracker().record(3, 99);
+        assert_eq!(manifest_metric_sample(id), None);
+    }
+
+    #[test]
+    fn manifest_metric_publishes_with_inventory_locked() {
+        use crate::metrics::TestHook;
+        let id = RegionId::new(u32::MAX, 31);
+        remove_region_manifest_size(id);
+        let total = Arc::new(AtomicU64::new(0));
+        let metric = RegionManifestSizeMetric::new(id);
+        let tracker = SizeTracker::new(total.clone(), Some(metric.clone()));
+        metric.arm(&total);
+        let sizes = tracker.inventory.clone();
+        metric.set_test_hook(Some(TestHook::new(move || {
+            assert!(
+                matches!(sizes.try_write(), Err(std::sync::TryLockError::WouldBlock)),
+                "inventory must remain locked through gauge publication"
+            );
+        })));
+        tracker.manifest_tracker().record(0, 10);
+        tracker.manifest_tracker().record(0, 20);
+        tracker.checkpoint_tracker().record(1, 30);
+        tracker.retain_after(1);
+        tracker.retain_after(2);
+        assert_eq!(manifest_metric_sample(id), Some(tracker.total() as i64));
+        metric.disarm();
+        remove_region_manifest_size(id);
+    }
 
     #[test]
     fn retain_checkpoint_and_later_deltas() {

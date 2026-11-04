@@ -171,6 +171,14 @@ pub(crate) struct RegionOpener {
 }
 
 impl RegionOpener {
+    /// Creates publication state without touching an existing live instance's series.
+    pub(crate) fn with_region_metrics(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.stats = ManifestStats::with_region_metrics(self.region_id);
+        }
+        self
+    }
+
     /// Returns a new opener.
     // TODO(LFC): Reduce the number of arguments.
     #[allow(clippy::too_many_arguments)]

@@ -144,6 +144,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.file_ref_manager.clone(),
             self.partition_expr_fetcher.clone(),
         )
+        .with_region_metrics(
+            self.per_region_metrics
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
         .cache(Some(self.cache_manager.clone()))
         .series_index_store(self.series_index_store.clone())
         .series_index_purger(self.series_index_purger.clone())

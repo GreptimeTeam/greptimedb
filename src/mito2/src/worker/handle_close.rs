@@ -76,6 +76,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.remove_region(region_id) else {
             return;
         };
+        region.disarm_region_manifest_size();
+        crate::metrics::remove_region_manifest_size(region_id);
         region.stop().await;
         self.fail_region_stalled_requests_as_not_found(&region_id);
         self.reject_region_edit_queue_as_not_found(region_id);

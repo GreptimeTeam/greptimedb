@@ -254,6 +254,19 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
+    /// Publishes the current size when this instance enters the live map.
+    pub(crate) fn arm_region_manifest_size(&self) {
+        if let Some(metric) = self.stats.metric() {
+            metric.arm(&self.stats.total_manifest_size);
+        }
+    }
+    /// Revokes publication before removal or replacement of this instance.
+    pub(crate) fn disarm_region_manifest_size(&self) {
+        if let Some(metric) = self.stats.metric() {
+            metric.disarm();
+        }
+    }
+
     /// Returns the current immutable series-index snapshot.
     pub(crate) fn series_index_version(&self) -> Arc<SeriesIndexVersion> {
         self.series_index_version_control.current()
@@ -2063,12 +2076,24 @@ pub(crate) type CatchupRegionsRef = Arc<CatchupRegions>;
 /// Manifest stats.
 #[derive(Default, Debug, Clone)]
 pub struct ManifestStats {
+    metric: Option<crate::metrics::RegionManifestSizeMetric>,
     pub(crate) total_manifest_size: Arc<AtomicU64>,
     pub(crate) manifest_version: Arc<AtomicU64>,
     pub(crate) file_removed_cnt: Arc<AtomicU64>,
 }
 
 impl ManifestStats {
+    /// Creates an unarmed descriptor; opening a region does not publish a series.
+    pub(crate) fn with_region_metrics(region_id: RegionId) -> Self {
+        Self {
+            metric: Some(crate::metrics::RegionManifestSizeMetric::new(region_id)),
+            ..Default::default()
+        }
+    }
+    pub(crate) fn metric(&self) -> Option<&crate::metrics::RegionManifestSizeMetric> {
+        self.metric.as_ref()
+    }
+
     fn total_manifest_size(&self) -> u64 {
         self.total_manifest_size.load(Ordering::Relaxed)
     }

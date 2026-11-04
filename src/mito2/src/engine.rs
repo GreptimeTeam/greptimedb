@@ -100,6 +100,7 @@ mod puffin_index;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use api::region::RegionResponse;
@@ -237,6 +238,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         // Extract the region hook before `plugins` is moved into the WorkerGroup,
         // so the engine (and thus the GC worker) can fire `on_region_gc`.
         let region_hook = self.plugins.get::<RegionHookRef>();
+        let per_region_metrics = Arc::new(AtomicBool::new(false));
         let workers = WorkerGroup::start(
             self.data_home,
             config.clone(),
@@ -246,6 +248,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             self.file_ref_manager,
             self.partition_expr_fetcher.clone(),
             self.plugins,
+            per_region_metrics.clone(),
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
@@ -264,6 +267,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             .build();
 
         let inner = EngineInner {
+            per_region_metrics,
             workers,
             config,
             wal_raw_entry_reader,
@@ -315,11 +319,11 @@ impl MitoEngine {
         builder.try_build().await
     }
 
-    /// Enables manifest size metrics for regions currently hosted by this engine.
+    /// Enables manifest size metrics for subsequent region creates and opens.
+    ///
+    /// Existing regions and openers already in progress are not enabled retroactively.
     pub fn enable_region_manifest_size_metrics(&self) {
-        self.inner
-            .workers
-            .register_manifest_size_metrics(&crate::metrics::REGION_MANIFEST_SIZE);
+        self.inner.per_region_metrics.store(true, Ordering::Relaxed);
     }
 
     pub fn mito_config(&self) -> &MitoConfig {
@@ -814,6 +818,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
 
 /// Inner struct of [MitoEngine].
 struct EngineInner {
+    per_region_metrics: Arc<AtomicBool>,
     /// Region workers group.
     workers: WorkerGroup,
     /// Config of the engine.
@@ -1766,6 +1771,7 @@ impl MitoEngine {
                 SCAN_REQUESTS_REJECTED_TOTAL.inc();
             })
             .build();
+        let per_region_metrics = Arc::new(AtomicBool::new(false));
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
@@ -1779,12 +1785,14 @@ impl MitoEngine {
                     file_ref_manager,
                     time_provider,
                     partition_expr_fetcher,
+                    per_region_metrics.clone(),
                 )
                 .await?,
                 config,
                 wal_raw_entry_reader,
                 scan_memory_tracker,
                 region_hook: None,
+                per_region_metrics,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),

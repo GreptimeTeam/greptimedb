@@ -70,6 +70,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.file_ref_manager.clone(),
             self.partition_expr_fetcher.clone(),
         )
+        .with_region_metrics(
+            self.per_region_metrics
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
         .metadata_builder(builder)
         .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))

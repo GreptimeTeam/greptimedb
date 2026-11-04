@@ -183,6 +183,7 @@ impl WorkerGroup {
         file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
+        per_region_metrics: Arc<AtomicBool>,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = Arc::new(
@@ -258,6 +259,7 @@ impl WorkerGroup {
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
+                    per_region_metrics: per_region_metrics.clone(),
                     config: config.clone(),
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
@@ -304,16 +306,6 @@ impl WorkerGroup {
             intermediate_manager,
             schema_metadata_manager,
         })
-    }
-
-    /// Registers only resident regions for per-region manifest size sampling.
-    pub(crate) fn register_manifest_size_metrics(
-        &self,
-        metrics: &crate::metrics::RegionManifestSizeMetrics,
-    ) {
-        for worker in &self.workers {
-            metrics.register_regions(&worker.regions);
-        }
     }
 
     /// Stops the worker group.
@@ -465,6 +457,7 @@ impl WorkerGroup {
         file_ref_manager: FileReferenceManagerRef,
         time_provider: TimeProviderRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
+        per_region_metrics: Arc<AtomicBool>,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
@@ -533,6 +526,7 @@ impl WorkerGroup {
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
+                    per_region_metrics: per_region_metrics.clone(),
                     config: config.clone(),
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
@@ -644,6 +638,7 @@ pub(crate) fn worker_init_check_delay() -> Duration {
 
 /// Worker start config.
 struct WorkerStarter<S> {
+    per_region_metrics: Arc<AtomicBool>,
     id: WorkerId,
     config: Arc<MitoConfig>,
     log_store: Arc<S>,
@@ -722,6 +717,7 @@ impl<S: LogStore> WorkerStarter<S> {
         let now = self.time_provider.current_time_millis();
         let id_string = self.id.to_string();
         let mut worker_thread = RegionWorkerLoop {
+            per_region_metrics: self.per_region_metrics,
             id: self.id,
             config: self.config.clone(),
             regions: regions.clone(),
@@ -1030,6 +1026,7 @@ impl StalledRequests {
 
 /// Background worker loop to handle requests.
 struct RegionWorkerLoop<S> {
+    per_region_metrics: Arc<AtomicBool>,
     /// Id of the worker.
     id: WorkerId,
     /// Engine config.
@@ -1115,9 +1112,14 @@ struct RegionWorkerLoop<S> {
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Publishes a loaded region together with its resident compaction state.
     fn register_region(&mut self, region: MitoRegionRef) {
+        if let Some(old) = self.regions.get_region(region.region_id) {
+            old.disarm_region_manifest_size();
+        }
+
         self.compaction_scheduler
             .register_region(&region.version_control, &region.access_layer);
-        self.regions.insert_region(region);
+        self.regions.insert_region(region.clone());
+        region.arm_region_manifest_size();
     }
 
     /// Starts the worker loop.
@@ -1575,6 +1577,8 @@ impl<S> RegionWorkerLoop<S> {
         // Closes remaining regions.
         let regions = self.regions.list_regions();
         for region in regions {
+            region.disarm_region_manifest_size();
+            crate::metrics::remove_region_manifest_size(region.region_id);
             region.stop().await;
         }
 

@@ -735,6 +735,7 @@ impl TestEnv {
                 self.file_ref_manager.clone(),
                 self.partition_expr_fetcher.clone(),
                 Plugins::new(),
+                Arc::new(AtomicBool::new(false)),
             )
             .await
             .unwrap(),
@@ -747,6 +748,7 @@ impl TestEnv {
                 self.file_ref_manager.clone(),
                 self.partition_expr_fetcher.clone(),
                 Plugins::new(),
+                Arc::new(AtomicBool::new(false)),
             )
             .await
             .unwrap(),
