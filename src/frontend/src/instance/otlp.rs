@@ -211,7 +211,19 @@ impl OpenTelemetryProtocolHandler for Instance {
                         )
                     })?;
             limiter.check_request_fits(bytes, held_bytes)?;
-            let reservation = Arc::new(limiter.acquire(bytes).await?);
+            // Holding body permits while waiting for expansion can stall concurrent requests.
+            let reservation = Arc::new(if held_bytes > 0 {
+                limiter.try_acquire(bytes).ok_or_else(|| {
+                    error::MemoryLimitExceededSnafu.into_error(
+                        common_memory_manager::Error::MemoryLimitExceeded {
+                            requested_bytes: bytes,
+                            limit_bytes: limiter.limit_bytes(),
+                        },
+                    )
+                })?
+            } else {
+                limiter.acquire(bytes).await?
+            });
             let mut ctx = ctx.fork();
             // Queued and detached writes retain the reservation after caller cancellation.
             ctx.set_write_progress(Arc::new(WriteProgress::with_reservation(reservation)));

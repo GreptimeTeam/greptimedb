@@ -1977,6 +1977,51 @@ WITH(
         let limiter = ServerMemoryLimiter::new(
             limit,
             OnExhaustedPolicy::Wait {
+                timeout: Duration::from_secs(30),
+            },
+        );
+        let body = limiter.acquire(limit / 2).await.unwrap();
+        let concurrent_body = limiter.acquire(limit / 2).await.unwrap();
+        // Body permits cannot be released while their requests wait for expansion.
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            instance.metrics(
+                request.clone(),
+                ctx.clone(),
+                Some((limiter.clone(), body.granted_bytes())),
+            ),
+        )
+        .await
+        .expect("requests holding body permits must not wait for expansion")
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            servers::error::Error::MemoryLimitExceeded {
+                source: common_memory_manager::Error::MemoryLimitExceeded { .. },
+                ..
+            }
+        ));
+        assert_eq!(limiter.used_bytes(), limit);
+        drop(concurrent_body);
+        assert_eq!(
+            instance
+                .metrics(
+                    request.clone(),
+                    ctx.clone(),
+                    Some((limiter.clone(), body.granted_bytes())),
+                )
+                .await
+                .unwrap()
+                .accepted_data_points,
+            1
+        );
+        assert_eq!(limiter.used_bytes(), body.granted_bytes());
+        drop(body);
+        assert_eq!(limiter.used_bytes(), 0);
+
+        let limiter = ServerMemoryLimiter::new(
+            limit,
+            OnExhaustedPolicy::Wait {
                 timeout: Duration::from_millis(100),
             },
         );
