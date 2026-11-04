@@ -53,6 +53,15 @@ pub(crate) struct PickHistory {
     waiting: HashMap<PickKey, Instant>,
 }
 
+/// Ascending fairness order: promoted work, oldest age, class, then newest window.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PickPriority {
+    not_promoted: bool,
+    since: Option<Instant>,
+    class: PickClass,
+    window: Reverse<i64>,
+}
+
 impl PickHistory {
     /// Refreshes all eligible identities before selection limits hide any work.
     /// Preserves surviving ages and drops absent keys without changing selection.
@@ -67,17 +76,18 @@ impl PickHistory {
     /// Returns an ascending sort key: promoted work first, oldest waiting first.
     /// Below [`PROMOTION_DELAY`], age does not affect class/newest-window ordering.
     /// One shared `now` keeps the comparator consistent across the entire sort.
-    fn priority(
-        &self,
-        key: PickKey,
-        now: Instant,
-    ) -> (bool, Option<Instant>, PickClass, Reverse<i64>) {
+    fn priority(&self, key: PickKey, now: Instant) -> PickPriority {
         let overdue = self
             .waiting
             .get(&key)
             .copied()
             .filter(|since| now.saturating_duration_since(*since) >= PROMOTION_DELAY);
-        (overdue.is_none(), overdue, key.class, Reverse(key.window))
+        PickPriority {
+            not_promoted: overdue.is_none(),
+            since: overdue,
+            class: key.class,
+            window: Reverse(key.window),
+        }
     }
 
     /// Consumes the fairness turn for `key`. Only an accepted plan installs the
@@ -107,7 +117,7 @@ impl PickHistory {
     /// plan installs this private snapshot; execution never updates waiting ages.
     pub(crate) fn acknowledge(&mut self, keys: impl Iterator<Item = PickKey>, now: Instant) {
         for key in keys {
-            let priority = if self.priority(key, now).1.is_some() {
+            let priority = if self.priority(key, now).since.is_some() {
                 "promoted"
             } else {
                 "normal"
@@ -132,13 +142,9 @@ impl PickHistory {
         self.serve(key, now);
     }
 
-    /// Inspects ordering without exposing the production policy helper.
-    pub(crate) fn priority_for_test(
-        &self,
-        key: PickKey,
-        now: Instant,
-    ) -> (bool, Option<Instant>, PickClass, Reverse<i64>) {
-        self.priority(key, now)
+    /// Inspects promoted ages without exposing the private priority representation.
+    pub(crate) fn promoted_since_for_test(&self, key: PickKey, now: Instant) -> Option<Instant> {
+        self.priority(key, now).since
     }
 }
 

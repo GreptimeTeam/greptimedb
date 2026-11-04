@@ -3421,7 +3421,7 @@ mod tests {
         assert_eq!(0, output_window(&first.outputs[0]));
         assert_eq!(
             Some(waiting_since),
-            history.priority_for_test(younger, start).1
+            history.promoted_since_for_test(younger, start)
         );
 
         // No completion acknowledgement: selecting the older window already

@@ -362,7 +362,7 @@ mod tests {
             for (window, key) in keys.into_iter().enumerate() {
                 assert_eq!(
                     (!attempted_windows.contains(&window)).then_some(waiting_since),
-                    history.priority_for_test(key, now).1,
+                    history.promoted_since_for_test(key, now),
                     "window {window}"
                 );
             }
@@ -451,9 +451,7 @@ mod tests {
             );
             assert_eq!(
                 Some(start),
-                history
-                    .priority_for_test(old, start + Duration::from_secs(120))
-                    .1
+                history.promoted_since_for_test(old, start + Duration::from_secs(120))
             );
         }
 
@@ -472,7 +470,11 @@ mod tests {
                 .iter()
                 .all(|file| file.level() == 1)
         );
-        assert!(history.priority_for_test(old, Instant::now()).1.is_none());
+        assert!(
+            history
+                .promoted_since_for_test(old, Instant::now())
+                .is_none()
+        );
     }
 
     // Cover absent/unknown boundaries and strict inequality without arithmetic

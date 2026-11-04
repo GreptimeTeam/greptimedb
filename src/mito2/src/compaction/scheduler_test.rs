@@ -436,22 +436,22 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
     let later = start + Duration::from_secs(120);
     let priority = scheduler.region_status[&id]
         .pick_history
-        .priority_for_test(key, later);
-    assert!(priority.1.is_some());
+        .promoted_since_for_test(key, later);
+    assert!(priority.is_some());
     scheduler.region_status.get_mut(&id).unwrap().become_idle();
     scheduler.register_region(&version, &env.access_layer);
     assert_eq!(
         priority,
         scheduler.region_status[&id]
             .pick_history
-            .priority_for_test(key, later)
+            .promoted_since_for_test(key, later)
     );
     scheduler.on_compaction_failed(id, Arc::new(InvalidSchedulerStateSnafu.build()));
     assert_eq!(
         priority,
         scheduler.region_status[&id]
             .pick_history
-            .priority_for_test(key, later)
+            .promoted_since_for_test(key, later)
     );
     let manifest = env
         .mock_manifest_context(version.current().version.metadata.clone())
@@ -468,21 +468,20 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
         Some(scheduler.region_status[&id].pick_history.clone()),
     );
     let history = request.pick_history.as_mut().unwrap();
-    assert_eq!(priority, history.priority_for_test(key, later));
+    assert_eq!(priority, history.promoted_since_for_test(key, later));
     history.observe_for_test(std::iter::empty(), later);
     assert_eq!(
         priority,
         scheduler.region_status[&id]
             .pick_history
-            .priority_for_test(key, later)
+            .promoted_since_for_test(key, later)
     );
     let replacement = Arc::new(VersionControlBuilder::new().build());
     scheduler.register_region(&replacement, &env.access_layer);
     assert!(
         scheduler.region_status[&id]
             .pick_history
-            .priority_for_test(key, later)
-            .1
+            .promoted_since_for_test(key, later)
             .is_none()
     );
 }
@@ -518,7 +517,12 @@ async fn test_empty_plan_prunes_history_but_failed_plan_preserves_it(#[case] fai
     status.start_picking_with_trigger(7, CompactionTrigger::Automatic);
     let mut planned_history = status.pick_history.clone();
     planned_history.observe_for_test(std::iter::empty(), now);
-    assert!(status.pick_history.priority_for_test(key, now).1.is_some());
+    assert!(
+        status
+            .pick_history
+            .promoted_since_for_test(key, now)
+            .is_some()
+    );
     let result = if failed {
         CompactionPlanningResult::Error(Arc::new(InvalidSchedulerStateSnafu.build()))
     } else {
@@ -539,8 +543,7 @@ async fn test_empty_plan_prunes_history_but_failed_plan_preserves_it(#[case] fai
         failed,
         scheduler.region_status[&id]
             .pick_history
-            .priority_for_test(key, now)
-            .1
+            .promoted_since_for_test(key, now)
             .is_some()
     );
 }
@@ -1016,7 +1019,7 @@ async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
     let (mut finished, manifest_ctx, schema_metadata_manager) =
         begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
     let history = &scheduler.region_status[&region_id].pick_history;
-    assert!(history.priority_for_test(key, now).1.is_some());
+    assert!(history.promoted_since_for_test(key, now).is_some());
     let (waiter_tx, mut waiter_rx) = oneshot::channel();
     scheduler
         .region_status
@@ -1030,7 +1033,7 @@ async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
         .await;
 
     let history = &scheduler.region_status[&region_id].pick_history;
-    assert!(history.priority_for_test(key, now).1.is_some());
+    assert!(history.promoted_since_for_test(key, now).is_some());
     assert_eq!(job_scheduler.num_jobs(), 0);
     assert_eq!(scheduler.region_status[&region_id].active.waiters.len(), 1);
     assert_matches!(
@@ -1067,7 +1070,7 @@ async fn test_cancelled_prepared_plan_preserves_resident_history() {
     let (finished, manifest, schemas) =
         begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
     let history = &scheduler.region_status[&id].pick_history;
-    assert!(history.priority_for_test(key, now).1.is_some());
+    assert!(history.promoted_since_for_test(key, now).is_some());
     scheduler
         .region_status
         .get_mut(&id)
@@ -1077,7 +1080,7 @@ async fn test_cancelled_prepared_plan_preserves_resident_history() {
         .handle_compaction_pick_finished(finished, &manifest, schemas)
         .await;
     let history = &scheduler.region_status[&id].pick_history;
-    assert!(history.priority_for_test(key, now).1.is_some());
+    assert!(history.promoted_since_for_test(key, now).is_some());
     assert_eq!(0, executor.num_jobs());
 }
 
@@ -1131,8 +1134,7 @@ async fn test_pick_result_installs_history_after_unrelated_flush() {
         Some(old_age),
         scheduler.region_status[&region_id]
             .pick_history
-            .priority_for_test(selected_key, start)
-            .1
+            .promoted_since_for_test(selected_key, start)
     );
     let selected = selected_files(&finished);
     apply_edit(
@@ -1150,12 +1152,21 @@ async fn test_pick_result_installs_history_after_unrelated_flush() {
     assert!(selected.iter().all(FileHandle::compacting));
     let history = &scheduler.region_status[&region_id].pick_history;
     let future = std::time::Instant::now() + Duration::from_secs(120);
-    assert!(history.priority_for_test(selected_key, future).1.unwrap() >= start);
+    assert!(
+        history
+            .promoted_since_for_test(selected_key, future)
+            .unwrap()
+            >= start
+    );
     assert_eq!(
         Some(waiting_age),
-        history.priority_for_test(waiting_key, future).1
+        history.promoted_since_for_test(waiting_key, future)
     );
-    assert!(history.priority_for_test(obsolete_key, future).1.is_none());
+    assert!(
+        history
+            .promoted_since_for_test(obsolete_key, future)
+            .is_none()
+    );
 }
 
 #[tokio::test]
