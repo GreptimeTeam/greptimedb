@@ -383,7 +383,7 @@ pub(crate) async fn build_sample_windows(
         .column_schema
         .name
         .clone();
-    let coverage = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::<
+    let coverage = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
         store_api::storage::FileId,
         std::collections::BTreeSet<i64>,
     >::new()));
@@ -412,11 +412,15 @@ pub(crate) async fn build_sample_windows(
                     let batch = match &compat { Some(compat) => compat.compat(batch)?, None => batch };
                     let column = batch.column_by_name(&timestamp_name).context(UnexpectedSnafu { reason: "missing daily sample timestamp" })?;
                     let (values, unit) = timestamp_array_to_primitive(column).context(UnexpectedSnafu { reason: "invalid daily sample timestamp" })?;
-                    {
-                        let mut coverage = coverage.lock();
+                    // Keep the lock and its possible poison error outside the stream's awaits.
+                    (|| -> Result<()> {
+                        let mut coverage = coverage.lock().map_err(|_| UnexpectedSnafu {
+                            reason: "daily coverage lock poisoned",
+                        }.build())?;
                         coverage.entry(source_id).or_default().extend(values.values().iter()
                             .map(|v| sample_day(common_time::Timestamp::new(*v, unit.into()))));
-                    }
+                        Ok(())
+                    })()?;
                     yield batch;
                 }
             }
@@ -496,6 +500,12 @@ pub(crate) async fn build_sample_windows(
     }
     let mut source_windows: std::collections::HashMap<_, Vec<_>> = coverage
         .lock()
+        .map_err(|_| {
+            UnexpectedSnafu {
+                reason: "daily coverage lock poisoned",
+            }
+            .build()
+        })?
         .iter()
         .map(|(id, days)| (*id, days.iter().copied().collect()))
         .collect();

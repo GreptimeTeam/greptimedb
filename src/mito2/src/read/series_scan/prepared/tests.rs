@@ -612,7 +612,9 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     build(&engine, &region).await;
     // A partial-day query still uses grouped samples when other sources were time-pruned.
     let mut bounded_request = request.clone();
-    bounded_request.filters.push(col("ts").gt_eq(lit(1500_i64)));
+    bounded_request.filters.push(col("ts").gt_eq(lit(
+        datafusion_common::ScalarValue::TimestampMillisecond(Some(1500), None),
+    )));
     let bounded = engine
         .handle_query(region.region_id, bounded_request)
         .await

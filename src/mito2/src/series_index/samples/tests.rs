@@ -824,15 +824,22 @@ async fn real_samples_reconcile_reopen_and_retire(
     );
     assert!(Arc::ptr_eq(&before, &region.series_index_version()));
     assert_eq!(catalog, store.read(&catalog_path).await.unwrap().to_bytes());
-    let cleanup = purges.try_recv().unwrap().objects.unwrap();
-    assert_eq!(cleanup.len(), 2);
-    assert!(cleanup.iter().all(|path| {
-        !old.entry()
-            .artifact
-            .objects
-            .iter()
-            .any(|object| object.path == *path)
-    }));
+    let rebuilt_days = before
+        .samples
+        .values()
+        .filter(|h| h.entry().source_file_ids == old.entry().source_file_ids)
+        .count();
+    for _ in 0..rebuilt_days {
+        let cleanup = purges.try_recv().unwrap().objects.unwrap();
+        assert_eq!(cleanup.len(), 2);
+        assert!(cleanup.iter().all(|path| before.samples.values().all(|h| {
+            h.entry()
+                .artifact
+                .objects
+                .iter()
+                .all(|object| object.path != *path)
+        })));
+    }
     assert!(purges.try_recv().is_err());
     use store_api::region_engine::RegionEngine;
     engine.stop().await.unwrap();
