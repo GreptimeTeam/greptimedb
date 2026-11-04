@@ -44,13 +44,14 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema,
 };
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use store_api::region_engine::{
-    BoundTag, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
+    BoundTag, RawLabelSource, RawSeriesKeyRange, RawSeriesStream, SendableRawSeriesStream,
 };
 
 use super::{
-    ensure_frame_matches_label_source, label_decode_spec, pack_raw_series, series_frame_ordering,
+    RAW_SCAN_KEY_RANGE_KEY, ensure_frame_matches_label_source, label_decode_spec, pack_raw_series,
+    pack_raw_series_with_key_range, raw_series_scan_key_range, series_frame_ordering,
     unpack_raw_series,
 };
 
@@ -3457,4 +3458,133 @@ fn typed_schema_entry_points_refuse_the_content_they_cannot_describe() {
         .is_ok(),
         "contiguous is the one ordering an evaluated frame can honour"
     );
+}
+
+/// The candidate range of a locally initialized partition is sealed into the frame schema before
+/// any batch exists: the stream schema declares it, every batch repeats it, and an empty stream
+/// still declares it.
+#[tokio::test]
+async fn pack_declares_a_scan_key_range_on_every_batch_and_for_an_empty_stream() {
+    let key_range = RawSeriesKeyRange {
+        min: Buffer::from(b"a".to_vec()),
+        max: Buffer::from(b"b".to_vec()),
+    };
+    for chunks in [
+        vec![
+            chunk_with(b"a", &[1], vec![Some(1.0)], Some(metric()), false),
+            chunk_with(b"a", &[2], vec![Some(2.0)], Some(metric()), true),
+            chunk_with(b"b", &[3], vec![Some(3.0)], Some(metric()), true),
+        ],
+        vec![],
+    ] {
+        let is_empty = chunks.is_empty();
+        let (input, _, _) = raw(chunks, SeriesOrdering::KeyThenTime);
+        let mut packed = pack_raw_series_with_key_range(input, Some(key_range.clone())).unwrap();
+        let declared = packed.schema();
+        assert_eq!(
+            Some(key_range.clone()),
+            raw_series_scan_key_range(&declared).unwrap(),
+            "the declared range is readable before the first poll"
+        );
+        assert_eq!(
+            SeriesOrdering::KeyThenTime,
+            series_frame_ordering(&declared).unwrap(),
+            "the execution annotation does not disturb the frame contract"
+        );
+        let mut batches = Vec::new();
+        while let Some(batch) = packed.next().await {
+            let batch = batch.unwrap();
+            assert_eq!(
+                batch.schema(),
+                declared,
+                "every batch declares the same annotated schema"
+            );
+            batches.push(batch);
+        }
+        assert_eq!(is_empty, batches.is_empty());
+        if !is_empty {
+            assert_eq!(1, batches.len());
+        }
+    }
+}
+
+/// An annotated frame is still an ordinary raw frame: the annotation is outside the reserved
+/// metadata namespace, so a consumer that does not trust it decodes the frame unchanged.
+#[tokio::test]
+async fn unpack_ignores_the_scan_key_range_annotation() {
+    let key_range = RawSeriesKeyRange {
+        min: Buffer::from(b"a".to_vec()),
+        max: Buffer::from(b"b".to_vec()),
+    };
+    let (input, _, _) = raw(
+        vec![
+            chunk_with(b"a", &[1], vec![Some(1.0)], Some(metric()), false),
+            chunk_with(b"a", &[2], vec![Some(2.0)], Some(metric()), true),
+        ],
+        SeriesOrdering::KeyThenTime,
+    );
+    let packed = pack_raw_series_with_key_range(input, Some(key_range)).unwrap();
+    let chunks: Vec<_> = unpack_raw_series(packed, Some(schema()))
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(2, chunks.len());
+    assert_eq!(b"a".as_slice(), chunks[0].primary_key.as_slice());
+    assert!(chunks[1].is_last);
+}
+
+/// A frame without the annotation states no range, and a stream that was not initialized locally
+/// must not be read as if it did.
+#[tokio::test]
+async fn pack_without_a_scan_key_range_declares_none() {
+    let (input, _, _) = raw(
+        vec![chunk_with(
+            b"a",
+            &[1],
+            vec![Some(1.0)],
+            Some(metric()),
+            true,
+        )],
+        SeriesOrdering::KeyThenTime,
+    );
+    let packed = pack_raw_series(input).unwrap();
+    assert_eq!(
+        None,
+        raw_series_scan_key_range(&packed.schema()).unwrap(),
+        "an uninitialized stream states no range"
+    );
+}
+
+/// A present but unreadable annotation is an error, never a silent "no range": the consumer must
+/// not keep waiting as if the producer had said nothing.
+#[test]
+fn malformed_scan_key_range_annotations_are_errors() {
+    let (input, _, _) = raw(vec![], SeriesOrdering::KeyThenTime);
+    let packed = pack_raw_series_with_key_range(
+        input,
+        Some(RawSeriesKeyRange {
+            min: Buffer::from(b"a".to_vec()),
+            max: Buffer::from(b"b".to_vec()),
+        }),
+    )
+    .unwrap();
+    let fields = packed.schema().fields().clone();
+    for (case, text) in [
+        ("truncated", "v1:61"),
+        ("extra part", "v1:61:62:63"),
+        ("unknown version", "v2:61:62"),
+        ("odd hex", "v1:6:62"),
+        ("non hex", "v1:zz:62"),
+        ("reversed", "v1:62:61"),
+        ("empty", ""),
+    ] {
+        let mut metadata = packed.schema().metadata().clone();
+        metadata.insert(RAW_SCAN_KEY_RANGE_KEY.to_string(), text.to_string());
+        let schema = Arc::new(Schema::new_with_metadata(fields.clone(), metadata));
+        assert!(
+            raw_series_scan_key_range(&schema).is_err(),
+            "{case}: a malformed annotation must be refused"
+        );
+    }
 }

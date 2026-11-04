@@ -19,6 +19,7 @@ mod raw;
 
 use std::collections::HashSet;
 use std::fmt;
+use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -49,8 +50,9 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScanner,
-    ScannerProperties, SendableRawSeriesStream,
+    InitializedRawSeriesScan, PartitionRange, PrepareRequest, PreparedSeriesSource,
+    QueryScanContext, RawLabelSource, RawSeriesKeyRange, RegionScanner, ScannerProperties,
+    SendableRawSeriesStream,
 };
 use store_api::storage::consts::{ReservedColumnId, is_internal_column};
 use table::predicate::Predicate;
@@ -868,11 +870,60 @@ fn new_candidate_channel_list(
     (senders, receivers, active_receivers)
 }
 
+/// The ordinal slice of a prepared source that one scan partition reads.
+///
+/// The reader and the key bound of a partition both use this definition, because a bound is only
+/// evidence for the slice the reader actually emits. It is total: a zero count, fewer series than
+/// partitions, an uneven split, and a partition index outside the partition count all produce an
+/// in-bounds, possibly empty slice.
+fn partition_series_range(num_series: usize, partitions: usize, partition: usize) -> Range<usize> {
+    let ordinal_at = |index: usize| {
+        if partitions == 0 {
+            return 0;
+        }
+        (num_series as u128 * index as u128 / partitions as u128) as usize
+    };
+    let start = ordinal_at(partition).min(num_series);
+    let end = ordinal_at(partition.saturating_add(1)).min(num_series);
+    start..end.max(start)
+}
+
+/// The conservative key range of the candidates one partition's ordinal slice covers.
+///
+/// The prepared source sorts its selected series by complete primary key, so the first and last
+/// ordinals of a nonempty slice are that slice's smallest and largest keys and bound every key it
+/// can emit. The range is conservative: a candidate with no samples after filtering stays inside it.
+/// An empty slice covers no candidate and therefore states no range, which is neither an absence
+/// claim about keys nor an end of stream.
+fn partition_key_range(
+    source: &dyn PreparedSeriesSource,
+    range: &Range<usize>,
+) -> Result<Option<RawSeriesKeyRange>, BoxedError> {
+    if range.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(RawSeriesKeyRange {
+        min: source.series_info(range.start)?.primary_key,
+        max: source.series_info(range.end - 1)?.primary_key,
+    }))
+}
+
+/// The pieces a prepared-columnar partition needs before its reader can be created.
+///
+/// The preparation future is already the scanner-wide one: it awaits the same `Preparation` cell
+/// every other reader of this scanner uses, so initialization resolves that work once.
+struct PreparedPartition {
+    prepared: futures::future::BoxFuture<
+        'static,
+        Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError>,
+    >,
+    partitions: usize,
+}
+
 impl RegionScanner for SeriesScan {
     fn name(&self) -> &str {
         "SeriesScan"
     }
-
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }
@@ -926,7 +977,7 @@ impl RegionScanner for SeriesScan {
             return Ok(None);
         };
         if prepared_columnar {
-            let partitions = self.properties.num_partitions().max(1);
+            let partitions = self.series_partitions();
             if partition >= partitions {
                 return Err(BoxedError::new(
                     PartitionOutOfRangeSnafu {
@@ -941,10 +992,8 @@ impl RegionScanner for SeriesScan {
             let labels = label_source.clone();
             let stream = async_stream::try_stream! {
                 let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
-                let n = source.num_series() as u128;
-                let start = (n * partition as u128 / partitions as u128) as usize;
-                let end = (n * (partition + 1) as u128 / partitions as u128) as usize;
-                let mut reader = source.read_series(start..end)?;
+                let range = partition_series_range(source.num_series(), partitions, partition);
+                let mut reader = source.read_series(range)?;
                 while let Some(chunk) = reader.try_next().await? { yield chunk; }
             };
             return Ok(Some(raw::from_stream(
@@ -976,6 +1025,45 @@ impl RegionScanner for SeriesScan {
             preparation.predicates,
             ordering,
         )))
+    }
+
+    /// Resolves the prepared-columnar reader before anything is packed and reports its key range.
+    ///
+    /// This is the initialized form of the same prepared reader `scan_series_partition` builds: the
+    /// preparation future, the ordinal slice, and the reader are the same ones, only resolved here
+    /// rather than on the first poll of a packed stream. The range is computed from the slice's
+    /// first and last selected candidates, so it is fixed before the caller seals a schema.
+    ///
+    /// `Ok(None)` means the prepared-columnar reader is not selected for this binding - ordinary
+    /// storage sources, memtables, and incomplete coverage - and the caller keeps
+    /// `scan_series_partition` with its existing behavior and carries no range.
+    fn initialize_series_partition(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+        label_source: &RawLabelSource,
+    ) -> futures::future::BoxFuture<'static, Result<Option<InitializedRawSeriesScan>, BoxedError>>
+    {
+        let prepared = match self.prepared_partition(ctx, metrics_set, partition, label_source) {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return Box::pin(async { Ok(None) }),
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move {
+            let source = prepared.prepared.await?.ok_or_else(|| {
+                BoxedError::new(
+                    InvalidRecordBatchSnafu {
+                        reason: "columnar prepared capability disappeared",
+                    }
+                    .build(),
+                )
+            })?;
+            let range = partition_series_range(source.num_series(), prepared.partitions, partition);
+            let key_range = partition_key_range(source.as_ref(), &range)?;
+            let stream = source.read_series(range)?;
+            Ok(Some(InitializedRawSeriesScan { stream, key_range }))
+        })
     }
 
     fn prepare_series(
@@ -1126,6 +1214,50 @@ impl SeriesScan {
     /// Returns the scan mode for tests.
     pub(crate) fn mode(&self) -> &'static str {
         self.mode.as_str()
+    }
+}
+
+impl SeriesScan {
+    /// The number of output partitions this scanner prepared.
+    ///
+    /// Zero prepared ranges still describe one output partition, which is the same collapse
+    /// [`crate::read::series_scan::SeriesScan::raw_series_ordering`] consumers already see.
+    fn series_partitions(&self) -> usize {
+        self.properties.num_partitions().max(1)
+    }
+
+    /// Resolves the prepared-columnar partition, or `None` when it is not selected.
+    ///
+    /// `Err` is reserved for a partition index the scanner did not prepare, matching
+    /// `scan_series_partition`. Everything else that can go wrong happens while the returned
+    /// preparation future is awaited, because that is the work initialization must not skip.
+    fn prepared_partition(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+        label_source: &RawLabelSource,
+    ) -> Result<Option<PreparedPartition>, BoxedError> {
+        let Some((_, prepared_columnar)) = self.prepare_raw_scan(label_source)? else {
+            return Ok(None);
+        };
+        if !prepared_columnar {
+            return Ok(None);
+        }
+        let partitions = self.series_partitions();
+        if partition >= partitions {
+            return Err(BoxedError::new(
+                PartitionOutOfRangeSnafu {
+                    given: partition,
+                    all: partitions,
+                }
+                .build(),
+            ));
+        }
+        Ok(Some(PreparedPartition {
+            prepared: self.prepare_series(ctx, metrics_set, label_source),
+            partitions,
+        }))
     }
 }
 
