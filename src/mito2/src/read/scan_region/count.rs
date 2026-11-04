@@ -39,15 +39,35 @@ use crate::read::scan_region::ScanInput;
 use crate::read::scan_region::count::overlap::{Extent, find_overlaps};
 use crate::sst::file::FileHandle;
 
-/// Returns the exact number of rows the scan yields, or `None` if it cannot
-/// be proven. Reads no SST data: candidates come from the manifest, and in a
-/// deduplicating region their Parquet metadata is read through the SST
-/// metadata caches to rule out deletions.
-pub(crate) async fn prepare(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
+/// What the manifest and SST statistics prove about the row count of a
+/// hinted scalar COUNT scan.
+pub(crate) enum MetadataCount {
+    /// The whole scan yields exactly this many rows.
+    Exact(usize),
+    /// Some files are exact; the rest of the sources must still be scanned.
+    Split(StatisticsSplitPlan),
+}
+
+/// Disjoint source sets for an exact part and a residual scan of one read view.
+pub(crate) struct StatisticsSplitPlan {
+    /// Files whose rows are all yielded exactly once, without other sources.
+    pub(crate) exact_files: Vec<FileHandle>,
+    /// Sum of the manifest row counts of `exact_files`.
+    pub(crate) exact_rows: usize,
+    /// Other files intersecting the query time range. Memtables always stay
+    /// in the residual scan.
+    pub(crate) remaining_files: Vec<FileHandle>,
+    /// Physical source rows of the residual scan, if all are known.
+    pub(crate) remaining_rows: Option<usize>,
+}
+
+/// Classifies the sources of a hinted scalar COUNT scan once. Returns `None`
+/// when no file is exact, so the scan stays unchanged. Reads no SST data:
+/// candidates come from the manifest, and in a deduplicating region their
+/// Parquet metadata is read through the SST metadata caches to rule out
+/// deletions.
+pub(crate) async fn prepare(input: &ScanInput, request: &ScanRequest) -> Option<MetadataCount> {
     let classification = classify(input, request)?;
-    if !classification.remaining.is_empty() || !input.memtables.is_empty() {
-        return None;
-    }
     let no_deletes = read_no_deletes(input, &classification).await;
     resolve(input, classification, &no_deletes)
 }
@@ -57,10 +77,30 @@ fn resolve(
     input: &ScanInput,
     mut classification: Classification,
     no_deletes: &[bool],
-) -> Option<usize> {
+) -> Option<MetadataCount> {
     classification.retain_exact(input, no_deletes);
-    (classification.remaining.is_empty() && input.memtables.is_empty())
-        .then_some(classification.exact_rows)
+    if classification.remaining.is_empty() && input.memtables.is_empty() {
+        return Some(MetadataCount::Exact(classification.exact_rows));
+    }
+    if classification.exact.is_empty() {
+        return None;
+    }
+    let files = |indexes: &[usize]| -> Vec<FileHandle> {
+        indexes.iter().map(|&i| input.files[i].clone()).collect()
+    };
+    // Zero is unknown in legacy manifests.
+    let remaining_rows = classification
+        .remaining
+        .iter()
+        .map(|&i| Some(input.files[i].num_rows()).filter(|&rows| rows > 0))
+        .chain(input.memtables.iter().map(|m| Some(m.stats().num_rows)))
+        .try_fold(0usize, |total, rows| total.checked_add(rows?));
+    Some(MetadataCount::Split(StatisticsSplitPlan {
+        exact_files: files(&classification.exact),
+        exact_rows: classification.exact_rows,
+        remaining_files: files(&classification.remaining),
+        remaining_rows,
+    }))
 }
 
 /// Returns, for each exact candidate, whether it holds no deletion markers.
@@ -454,10 +494,18 @@ mod tests {
             .collect()
     }
 
-    fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
+    /// [`prepare`] with the test's deletion evidence.
+    fn counted(input: &ScanInput, request: &ScanRequest) -> Option<MetadataCount> {
         let classification = classify(input, request)?;
         let no_deletes = evidence(input, &classification);
         resolve(input, classification, &no_deletes)
+    }
+
+    fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
+        match counted(input, request)? {
+            MetadataCount::Exact(rows) => Some(rows),
+            MetadataCount::Split(_) => None,
+        }
     }
 
     fn classified(input: &ScanInput, request: &ScanRequest) -> Classification {
@@ -700,5 +748,36 @@ mod tests {
             vec![put, put, put, delete]
         )));
         assert!(!has_no_deletes(&metadata("other", vec![put; 4])));
+    }
+
+    #[tokio::test]
+    async fn test_metadata_count_split_plan() {
+        let split = |files| async move {
+            match counted(&input(files, &[]).await, &ScanRequest::default()) {
+                Some(MetadataCount::Split(plan)) => Some((
+                    plan.exact_files.len(),
+                    plan.exact_rows,
+                    plan.remaining_files.len(),
+                    plan.remaining_rows,
+                )),
+                Some(MetadataCount::Exact(_)) => panic!("unexpected exact count"),
+                None => None,
+            }
+        };
+        // The second file holds a deletion.
+        assert_eq!(
+            split(vec![file(0, 10, 3, true), file(20, 30, 2, false)]).await,
+            Some((1, 3, 1, Some(2)))
+        );
+        // An unknown residual count is only an estimate, never a reason to fail.
+        assert_eq!(
+            split(vec![file(0, 10, 3, true), file(20, 30, 0, false)]).await,
+            Some((1, 3, 1, None))
+        );
+        // Without an exact file the scan stays unchanged.
+        assert_eq!(
+            split(vec![file(0, 10, 3, false), file(20, 30, 2, false)]).await,
+            None
+        );
     }
 }

@@ -182,6 +182,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
 |_|_MergeScanExec: REDACTED
 |_|_|
+| physical_plan after partial_metadata_count_| SAME TEXT AS ABOVE_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
 | physical_plan after join_selection_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
@@ -341,6 +342,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
 |_|_MergeScanExec: REDACTED
 |_|_|
+| physical_plan after partial_metadata_count_| SAME TEXT AS ABOVE_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
 | physical_plan after join_selection_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
@@ -530,6 +532,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
 |_|_MergeScanExec: REDACTED
 |_|_|
+| physical_plan after partial_metadata_count_| SAME TEXT AS ABOVE_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
 | physical_plan after join_selection_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|

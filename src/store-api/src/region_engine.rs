@@ -512,12 +512,30 @@ impl Default for QueryScanContext {
     }
 }
 
+/// Two source-disjoint scanners sharing the original scan read view.
+#[derive(Debug)]
+pub struct StatisticsSplit {
+    /// Sources with a proven exact query-visible row count.
+    pub exact: RegionScannerRef,
+    /// All remaining sources, merged and deduplicated together.
+    pub inexact: RegionScannerRef,
+    /// Physical source-row estimate for the remaining scan, never an exact answer.
+    pub inexact_rows: Option<usize>,
+}
+
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
 /// You can use this trait to implement an [`ExecutionPlan`](datafusion_physical_plan::ExecutionPlan).
 pub trait RegionScanner: Debug + DisplayAs + Send {
     fn name(&self) -> &str;
+
+    /// Takes the source split an engine prepared for a scalar COUNT against
+    /// the original read view. On success the caller must replace this
+    /// scanner with both parts.
+    fn take_statistics_split(&mut self) -> Option<StatisticsSplit> {
+        None
+    }
 
     /// Returns the properties of the scanner.
     fn properties(&self) -> &ScannerProperties;

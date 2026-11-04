@@ -59,6 +59,11 @@ use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
 
+mod statistics;
+pub use statistics::{
+    ExactRegionScanExec, InexactRegionScanExec, PartialCountRule, statistics_scan_plan,
+};
+
 /// The name of [`RegionScanExec`] plan node.
 pub const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
 
