@@ -2055,11 +2055,6 @@ async fn do_single_instant_function_call(fn_name: &'static str, plan_name: &str)
     assert_eq!(plan.display_indent_schema().to_string(), expected);
 }
 
-/// Plans `query` with the native fused-series route on or off.
-///
-/// The table is the one [`build_test_table_provider`] builds — one tag `tag_0`, the millisecond
-/// time index `timestamp`, one field `field_0` — which is the shape the selector context resolves
-/// to a raw series schema of one field.
 /// A discovered selector reports each series' identity as a `__name__` tag, and the operator
 /// decides whether that survives. The first case is the whole point of the feature: two metrics
 /// whose ordinary labels are equal are told apart by name alone.
@@ -2136,8 +2131,160 @@ async fn native_metric_discovery_prepares_one_source_per_metric() {
         1,
         "the sources live under one union input: {plan:?}"
     );
+    // Each of the two sources names the metric it reads, which is the identity the union's frames
+    // carry into the node.
+    let [LogicalPlan::Union(union)] = fused.children() else {
+        panic!("the discovered sources are not under one union input: {plan:?}");
+    };
+    let names = union
+        .inputs
+        .iter()
+        .map(|child| match child.as_ref() {
+            LogicalPlan::Extension(extension) => extension
+                .node
+                .as_any()
+                .downcast_ref::<RawSeriesSource>()
+                .expect("a union child is a discovered source")
+                .metric_name()
+                .to_string(),
+            other => panic!("a union child is not a source: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec!["alpha_total".to_string(), "beta_total".to_string()],
+        "{plan:?}"
+    );
 }
 
+/// The typed empty input a discovered selector that matched no metric is planned as, executed.
+///
+/// The fixture's two metric tables carry one tag `tag_0` and no `job` column, so a `job` matcher
+/// that rejects the empty string matches neither: the planner has no scan to bind, which is the
+/// case these tests are about.
+async fn execute_no_match_discovery(query: &str) -> (LogicalPlan, Vec<RecordBatch>) {
+    // One evaluation instant, so a shape that answers a row rather than none answers exactly one.
+    let stmt = EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH,
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(1),
+    };
+    let plan = PromPlanner::stmt_to_plan_with_annotations(
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+        &stmt,
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    execute(plan, &build_query_engine_state()).await
+}
+
+/// The rows `batches` hold.
+fn batch_rows(batches: &[RecordBatch]) -> usize {
+    batches.iter().map(|batch| batch.num_rows()).sum()
+}
+
+/// A nameless selector that matches no metric table answers with the empty vector, not with an
+/// error.
+///
+/// Every case checks the plan is the native one, so an operator this route declined would fail
+/// here instead of quietly passing as a plan the existing planner built. What the empty input owes
+/// is that the operators above it keep their own answer for zero series: an ungrouped fold has no
+/// group to report - `sum` does not answer 0 - and a step or a reordering has nothing to read.
+///
+/// A `vector(N)` operand beside the empty input is not asserted here, because these statements
+/// are about the empty input rather than about vector matching. What they answer over a selector
+/// that matches no metric was recorded by probe: `{job="api"} * vector(2)`,
+/// `vector(2) * {job="api"}` and `{job="api"} + vector(2)` each answer no rows - also Prometheus'
+/// answer, since a vector operand matches by label set and one side holds no series - and
+/// `vector(2) or {job="api"}` and `{job="api"} or vector(2)` each answer the vector's own row.
+#[tokio::test]
+async fn native_metric_discovery_without_a_matching_metric_answers_with_no_rows() {
+    for query in [
+        // The selection itself, with and without the modifiers a selector can carry.
+        "{job=\"api\"}",
+        "{job=\"api\"} @ 300",
+        "{job=\"api\"} offset 5m",
+        "{job=\"api\"} @ 300 offset -1m",
+        // A step reads samples rather than carrying one forward.
+        "rate({job=\"api\"}[5m])",
+        "abs({job=\"api\"})",
+        // A comparison keeps the kept side's samples, and there are none.
+        "{job=\"api\"} > 0",
+        "{job=\"api\"} * 2",
+        // A whole-vector operation has no vector to reorder or to select from.
+        "sort({job=\"api\"})",
+        "topk(3, {job=\"api\"})",
+        "limitk(2, {job=\"api\"})",
+        // An ungrouped fold over zero series has no group, so it reports no row at all.
+        "sum({job=\"api\"})",
+        "count({job=\"api\"})",
+        "avg({job=\"api\"})",
+        "max({job=\"api\"})",
+        // A grouping keeps its label columns, and still has no group to report.
+        "sum by (tag_0) ({job=\"api\"})",
+    ] {
+        let (plan, batches) = execute_no_match_discovery(query).await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a selector that matches no metric: {plan:?}"
+        );
+    }
+}
+
+/// The two shapes whose answer over zero series is a row rather than none.
+///
+/// `absent` reports the absence of what it reads as one series holding 1, and `or` keeps the right
+/// side where the left has nothing. Both are the reason the empty input has to be a series frame
+/// the runtime executes rather than a plan that simply produces nothing.
+#[tokio::test]
+async fn native_metric_discovery_without_a_matching_metric_answers_absent_and_or() {
+    // `absent` labels its one series from the selector's equality matchers, which is what the
+    // existing planner's `Absent` node does with the same matchers, and the value is reported
+    // under the name the empty input's one field has.
+    let (plan, batches) = execute_no_match_discovery("absent({job=\"api\"})").await;
+    assert!(find_fused_series(&plan).is_some(), "{plan:?}");
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(vec![1.0], numeric_values(&batches, "value"), "{plan:?}");
+    assert_eq!(
+        vec!["api".to_string()],
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let job = batch
+                    .column_by_name("job")
+                    .expect("absent reports the selector's equality labels")
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                (0..batch.num_rows()).map(|row| job.value(row).to_string())
+            })
+            .collect::<Vec<_>>(),
+        "{plan:?}"
+    );
+
+    // `vector(1)` has no labels of its own, so the row it contributes holds none. This is the set
+    // operator `or`, which the native route answers over an empty side.
+    let (plan, batches) = execute_no_match_discovery("{job=\"api\"} or vector(1)").await;
+    assert!(find_fused_series(&plan).is_some(), "{plan:?}");
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(vec![1.0], numeric_values(&batches, "value"), "{plan:?}");
+}
+
+/// Plans `query` with the native fused-series route on or off.
+///
+/// The table is the one [`build_test_table_provider`] builds — one tag `tag_0`, the millisecond
+/// time index `timestamp`, one field `field_0` — which is the shape the selector context resolves
+/// to a raw series schema of one field.
 async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan {
     let table_provider = build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
