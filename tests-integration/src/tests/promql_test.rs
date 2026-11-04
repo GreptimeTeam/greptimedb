@@ -3243,6 +3243,59 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
     // not counted against it.
     let peak = cluster.network_do_get_peak_active();
     assert!((1..=3).contains(&peak), "region reads stay bounded: {peak}");
+
+    // An aggregate over a discovered selector reads the metric name from each source's own frames,
+    // not from one bound metric. Folding without grouping adds them; grouping by the name must keep
+    // the two metrics apart even though their ordinary labels are identical.
+    for (expression, expected) in [
+        (r#"sum(increase({host="a"}[5m]))"#, vec![10.0, 14.0]),
+        (
+            r#"sum by (__name__, site) (increase({host="a"}[5m]))"#,
+            vec![5.0, 5.0, 7.0, 7.0],
+        ),
+    ] {
+        let output = instance
+            .do_promql_query(
+                &PromQuery {
+                    query: expression.to_string(),
+                    start: "180".to_string(),
+                    end: "240".to_string(),
+                    step: "60s".to_string(),
+                    ..PromQuery::default()
+                },
+                native_query_context(true, 2),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+        assert_eq!(
+            native_plan_shape(plan).fused,
+            1,
+            "a discovery aggregate stays native: {plan:?}"
+        );
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("PromQL returns record batches"),
+        };
+        let mut rows = Vec::new();
+        for batch in batches {
+            let values = batch
+                .columns()
+                .iter()
+                .find(|column| column.data_type() == &DataType::Float64)
+                .expect("one value column")
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                rows.push(values.value(row));
+            }
+        }
+        rows.sort_by(f64::total_cmp);
+        assert_eq!(expected, rows, "{expression}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

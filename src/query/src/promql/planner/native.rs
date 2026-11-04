@@ -1063,6 +1063,7 @@ impl PromPlanner {
                 (metric.clone(), time_index.clone(), tags.clone())
             })
             .collect::<Vec<_>>();
+        let discovers_metrics = prepared.iter().any(|input| input.2.is_none());
         let children = prepared
             .into_iter()
             .map(|(scan, schema, metric, _, tags, _)| {
@@ -1209,6 +1210,9 @@ impl PromPlanner {
         {
             return Ok(None);
         }
+        // A discovered selector already reads every metric, so one selector is several inputs: the
+        // multi-input refusals above apply to its tree too, including the order-dependent refusal.
+        let multi_input = multi_input || (self_contained && discovers_metrics);
         // A tree that ends in a canonical merge answers one series per label set, and the pieces of
         // one set were spread over the scan's partitions by the rewrite that created them. Lowering
         // that boundary keeps the scan width: each partition merges the pieces it holds and exports
@@ -3310,7 +3314,8 @@ mod tests {
 
         // No `FusedSeriesExec`: nothing here reads regions the way the budget assumes.
         assert!(!native_raw_plan_bounds_region_reads(&scan()));
-        // A union drains its inputs one after another, so a body budget could stall it.
+        // A discovered selector's union is not the admitted topology: only the single fused node
+        // takes the query-wide budget, so this plan keeps its per-scan bounds.
         let union = datafusion::physical_plan::union::UnionExec::try_new(vec![scan(), scan()])
             .expect("two inputs");
         assert!(!native_raw_plan_bounds_region_reads(&union));
