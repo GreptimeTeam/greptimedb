@@ -259,8 +259,11 @@ impl SharedSource {
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<SourceEvent>> + Send>> {
         use futures::TryStreamExt;
         Box::pin(async_stream::try_stream! {
-            let streams = (0..self.sources.len()).map(|index| self.clone().source_batches(index)).collect();
-            let mut merged = FlatMergeReader::new(self.merge_schema.clone(), streams, BATCH_SIZE, None).await?;
+            let streams = (0..self.sources.len())
+                .map(|index| self.clone().source_batches(index))
+                .collect();
+            let mut merged =
+                FlatMergeReader::new(self.merge_schema.clone(), streams, BATCH_SIZE, None).await?;
             let mut groups = KeyGroups::new(self.limits.group);
             while let Some(batch) = merged.next_batch().await? {
                 self.check_cancelled()?;
@@ -284,7 +287,9 @@ impl SharedSource {
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<SourceEvent>> + Send>> {
         Box::pin(async_stream::try_stream! {
             let router = self.clone();
-            let mut routed = common_runtime::spawn_blocking_compact(move || router.route(batches)).await.context(crate::error::JoinSnafu)??;
+            let mut routed = common_runtime::spawn_blocking_compact(move || router.route(batches))
+                .await
+                .context(crate::error::JoinSnafu)??;
             loop {
                 let router = self.clone();
                 let (event, next) = common_runtime::spawn_blocking_compact(move || {
@@ -305,12 +310,22 @@ impl SharedSource {
             let mut raw_meta = file.clone();
             raw_meta.sequence = None;
             raw_meta.preserve_row_sequence = true;
-            let builder = self.layer.read_sst(FileHandle::new(raw_meta, Arc::new(NoopFilePurger)))
-                .cache(self.cache.clone()).batch_size(BATCH_SIZE).expected_metadata(Some(self.metadata.clone()))
-                .json2_rewrite_targets(self.json2_targets.clone()).compaction(false).page_index_policy(PageIndexPolicy::Skip);
+            let builder = self
+                .layer
+                .read_sst(FileHandle::new(raw_meta, Arc::new(NoopFilePurger)))
+                .cache(self.cache.clone())
+                .batch_size(BATCH_SIZE)
+                .expected_metadata(Some(self.metadata.clone()))
+                .json2_rewrite_targets(self.json2_targets.clone())
+                .compaction(false)
+                .page_index_policy(PageIndexPolicy::Skip);
             let mut rows = 0u64;
-            if let Some((input, selection)) = builder.build_reader_input(&mut ReaderMetrics::default()).await? {
-                let compat = FlatCompatBatch::try_new(&self.mapper, input.read_format(), false)?.map(Arc::new);
+            let input = builder
+                .build_reader_input(&mut ReaderMetrics::default())
+                .await?;
+            if let Some((input, selection)) = input {
+                let compat = FlatCompatBatch::try_new(&self.mapper, input.read_format(), false)?
+                    .map(Arc::new);
                 let mut reader = ParquetReader::new(Arc::new(input), selection).await?;
                 let mut last_key = None;
                 while let Some(batch) = reader.next_record_batch().await? {
@@ -319,11 +334,22 @@ impl SharedSource {
                     let compat = compat.clone();
                     let (batch, previous) = common_runtime::spawn_blocking_compact(move || {
                         preparing.check_cancelled()?;
-                        let batch = if let Some(compat) = compat { compat.compat(batch)? } else { batch };
+                        let batch = match compat {
+                            Some(compat) => compat.compat(batch)?,
+                            None => batch,
+                        };
                         let batch = compact_dictionaries(batch)?;
-                        ensure!(batch.get_array_memory_size() <= preparing.limits.batch, MultiRegionCompactionResourceSnafu {
-                            reason: format!("Decoded source batch uses {} bytes, budget is {}", batch.get_array_memory_size(), preparing.limits.batch),
-                        });
+                        let batch_bytes = batch.get_array_memory_size();
+                        ensure!(
+                            batch_bytes <= preparing.limits.batch,
+                            MultiRegionCompactionResourceSnafu {
+                                reason: format!(
+                                    "Decoded source batch uses {} bytes, budget is {}",
+                                    batch_bytes,
+                                    preparing.limits.batch,
+                                ),
+                            }
+                        );
                         preparing.validate_batch(&batch, &mut last_key)?;
                         let batch = preparing.annotate(batch, index)?;
                         Ok::<_, crate::error::Error>((batch, last_key))
@@ -333,11 +359,16 @@ impl SharedSource {
                     self.counters.rows.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
                     yield batch;
                 }
-                self.counters.store_page_bytes.fetch_add(reader.fetched_store_page_bytes()?, Ordering::Relaxed);
+                self.counters
+                    .store_page_bytes
+                    .fetch_add(reader.fetched_store_page_bytes()?, Ordering::Relaxed);
             }
             let expected = self.expected_rows[index];
             if expected < 0 || rows != expected as u64 {
-                Err(InvalidMultiRegionCompactionSnafu { reason: "Shared source scan did not cover its complete footer row count" }.build())?;
+                Err(InvalidMultiRegionCompactionSnafu {
+                    reason: "Shared source scan did not cover its complete footer row count",
+                }
+                .build())?;
             }
             self.counters.files.fetch_add(1, Ordering::Relaxed);
         })
