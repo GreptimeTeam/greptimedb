@@ -22,6 +22,7 @@ use sql::statements::statement::Statement;
 
 use crate::function::FunctionContext;
 
+/// Checks ADMIN statement privileges for an `admin_fn`-generated UDF.
 pub fn ensure_admin_privilege(
     func_ctx: &FunctionContext,
     fn_name: &str,
