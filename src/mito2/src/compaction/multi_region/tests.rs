@@ -2368,3 +2368,102 @@ async fn cancelled_execution_does_not_create_output() {
     ));
     assert!(protection.files.lock().unwrap().is_empty());
 }
+
+/// Mutations applied to a valid plan to reach each `validate_plan` rejection.
+#[derive(Clone, Copy, Debug)]
+enum InvalidPlan {
+    NoSources,
+    TinyBudget,
+    ZeroFileSize,
+    ZeroWindow,
+    OversizedControl,
+    NoTargets,
+    WindowOverflow,
+    UnalignedWindow,
+    SourceOutsideWindow,
+    DuplicateSource,
+    ForeignTable,
+    MissingInput,
+    InconsistentSchema,
+}
+
+#[rstest::rstest]
+#[case(InvalidPlan::NoSources, "Invalid sources or execution budgets")]
+#[case(InvalidPlan::TinyBudget, "Invalid sources or execution budgets")]
+#[case(InvalidPlan::ZeroFileSize, "Invalid sources or execution budgets")]
+#[case(InvalidPlan::ZeroWindow, "Invalid sources or execution budgets")]
+#[case(InvalidPlan::OversizedControl, "control state exceeds the task budget")]
+#[case(InvalidPlan::NoTargets, "No routing targets")]
+#[case(InvalidPlan::WindowOverflow, "Task window overflow")]
+#[case(InvalidPlan::UnalignedWindow, "not aligned")]
+#[case(InvalidPlan::SourceOutsideWindow, "not wholly inside the task window")]
+#[case(
+    InvalidPlan::DuplicateSource,
+    "unique source files from one physical table"
+)]
+#[case(
+    InvalidPlan::ForeignTable,
+    "unique source files from one physical table"
+)]
+#[case(
+    InvalidPlan::MissingInput,
+    "effective metadata of every selected source"
+)]
+#[case(InvalidPlan::InconsistentSchema, "consistent physical-table snapshot")]
+#[tokio::test]
+async fn test_invalid_plan_is_rejected_before_creating_outputs(
+    #[case] invalid: InvalidPlan,
+    #[case] reason: &'static str,
+) {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let mut plan = fixture.plan(2);
+    match invalid {
+        InvalidPlan::NoSources => plan.sources.clear(),
+        InvalidPlan::TinyBudget => plan.memory_limit = 1024 * 1024 - 1,
+        InvalidPlan::ZeroFileSize => plan.max_output_file_size = 0,
+        InvalidPlan::ZeroWindow => plan.window_seconds = 0,
+        InvalidPlan::OversizedControl => {
+            plan.memory_limit = 1024 * 1024;
+            let source = plan.sources[0].clone();
+            let extra = plan.memory_limit / std::mem::size_of::<FileMeta>() + 1;
+            plan.sources = vec![source; extra];
+        }
+        InvalidPlan::NoTargets => plan.targets.clear(),
+        InvalidPlan::WindowOverflow => {
+            plan.window_start = i64::MAX - plan.window_seconds + 1;
+        }
+        InvalidPlan::UnalignedWindow => plan.window_start += 1,
+        InvalidPlan::SourceOutsideWindow => {
+            plan.sources[0].time_range = (
+                Timestamp::new_second(plan.window_seconds),
+                Timestamp::new_second(plan.window_seconds + 1),
+            );
+        }
+        InvalidPlan::DuplicateSource => {
+            let source = plan.sources[0].clone();
+            plan.sources.push(source);
+        }
+        InvalidPlan::ForeignTable => {
+            plan.sources[0].region_id = RegionId::new(2, 0);
+        }
+        InvalidPlan::MissingInput => {
+            let target = plan.targets.values_mut().next().unwrap();
+            target.inputs.clear();
+        }
+        InvalidPlan::InconsistentSchema => {
+            let target = plan.targets.values_mut().next().unwrap();
+            Arc::make_mut(&mut target.metadata).column_metadatas.pop();
+        }
+    }
+    let (context, protection) = fixture.context(None);
+    let error = tokio::time::timeout(Duration::from_secs(30), compact_regions(plan, context))
+        .await
+        .expect("invalid plan hung instead of failing")
+        .err()
+        .expect("invalid plan must be rejected");
+    assert!(
+        format!("{error:?}").contains(reason),
+        "expected `{reason}`, got {error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+}
