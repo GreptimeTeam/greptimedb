@@ -104,6 +104,7 @@ jobs:
           mkdir -p bins
           cp target/debug/greptime bins/
           cp target/debug/sqlness-runner bins/
+          chmod +x bins/greptime bins/sqlness-runner
       - uses: actions/upload-artifact@v4
         with:
           name: narthex-native-bins
@@ -125,14 +126,20 @@ jobs:
         with:
           name: narthex-native-bins
           path: bins
+      - name: Restore the executable bit
+        # An artifact does not carry file modes, so a downloaded binary is not executable.
+        run: chmod +x bins/greptime bins/sqlness-runner
       - name: Run the standalone environment on the native route
         run: |
+          set -o pipefail
           RUST_BACKTRACE=1 ./bins/sqlness-runner bare \
             -c tests/cases \
             --bins-dir ./bins \
             --enable-native-promql \
             --env-filter '^standalone$' \
             --preserve-state 2>&1 | tee "$RUNNER_TEMP/sqlness-native.log"
+          # `tee` would otherwise hide a runner that never started.
+          grep -q 'All sqlness tests passed' "$RUNNER_TEMP/sqlness-native.log"
       - name: Record what the run changed
         if: always()
         # sqlness compares a case against its checked-in `.result` and writes what it just produced
@@ -170,6 +177,9 @@ jobs:
         with:
           name: narthex-native-bins
           path: bins
+      - name: Restore the executable bit
+        # An artifact does not carry file modes, so a downloaded binary is not executable.
+        run: chmod +x bins/greptime
       - uses: actions/setup-go@v5
         with:
           go-version-file: tests/narthex-compat/go.mod
