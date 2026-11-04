@@ -3004,16 +3004,14 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Window {
                         input: Box::new(child),
-                        window: Some({
-                            let mut evaluator = RangeEvaluator::try_new(
-                                &input_schema,
-                                Arc::clone(&op.output_grid),
-                                op.window,
-                                op.function,
-                            )?;
-                            evaluator.set_annotations(None);
-                            evaluator
-                        }),
+                        // The collector arrives through `set_annotations` before the first pull;
+                        // a fresh evaluator records nothing until then.
+                        window: Some(RangeEvaluator::try_new(
+                            &input_schema,
+                            Arc::clone(&op.output_grid),
+                            op.window,
+                            op.function,
+                        )?),
                         merge,
                         state,
                     },

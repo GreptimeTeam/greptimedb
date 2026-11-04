@@ -478,6 +478,11 @@ impl NativeNode {
                     }
                 }
             }
+            // An aggregate folds float state only: the admission gate keeps a histogram from
+            // entering one, so whatever a histogram statement aggregates answers floats. Naming it
+            // here is what lets `sum(count_over_time(h[5m]))` - a float built from histograms -
+            // declare a float column instead of keeping the existing plan.
+            NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
             _ => None,
         }
     }

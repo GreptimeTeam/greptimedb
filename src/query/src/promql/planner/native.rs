@@ -1012,6 +1012,22 @@ impl PromPlanner {
         if any_partitioned && contains_canonical_merge(root) {
             return Ok(None);
         }
+        // The kind the tree's root answers with, which every output column follows. It is not the
+        // kind the inputs carry: `count_over_time`, `histogram_count` and `timestamp` reduce a
+        // histogram to a float, while a selector, a histogram-answering range function and a label
+        // rewrite pass it on.
+        //
+        // Only a histogram statement can answer a histogram column, so only then does the walk
+        // have to name one; a float statement keeps the float schema it always had, and a shape
+        // whose kind cannot be named keeps the existing plan rather than declaring a column the
+        // first batch might not fill.
+        let root_kind = match statement_kind {
+            Some(FieldKind::Histogram) => match root.output_field_kind(FieldKind::Histogram) {
+                Some(root_kind) => root_kind,
+                None => return Ok(None),
+            },
+            Some(FieldKind::Float) | None => FieldKind::Float,
+        };
         // The split is only ever a one-child plan: it exports each partition's leaf state and merges
         // them above the region. A tree over two metric logical tables of ONE physical table is not
         // split, because a node whose locality is `SinglePartition` normalizes every input to one
@@ -1088,7 +1104,7 @@ impl PromPlanner {
                 &time,
                 &tags,
                 &metric,
-                statement_kind,
+                root_kind,
             )
         {
             return Ok(Some((plan, single_input_context)));
@@ -1113,14 +1129,16 @@ impl PromPlanner {
                 None
             };
             if let Some((partial, final_tree)) = split {
-                // The partial stage may introduce labels before aggregation. The final tree
-                // consumes state, so derive output columns from the complete tree.
-                let Some(output_schema) = Self::fused_root_schema(
-                    &tree,
-                    &source_tags,
-                    &time,
-                    statement_kind.unwrap_or(FieldKind::Float),
-                )
+                // The split's output is the suffix's, and the state it exports is float: the gate
+                // above already declines a histogram entering an aggregate, and this declines a
+                // histogram answer whose aggregate sits elsewhere, because the merge folds float
+                // state. The partial stage may introduce labels before aggregation, so the columns
+                // come from the complete tree rather than from the suffix alone.
+                if root_kind != FieldKind::Float {
+                    return Ok(None);
+                }
+                let Some(output_schema) =
+                    Self::fused_root_schema(&tree, &source_tags, &time, root_kind)
                 else {
                     return Ok(None);
                 };
@@ -1166,7 +1184,7 @@ impl PromPlanner {
                 &segment_metric,
                 FusedOutputFormat::PlainRows,
                 contains_canonical_merge(root),
-                statement_kind,
+                root_kind,
             ))
             .await?;
             if let Some(plan) = plan {
@@ -1206,12 +1224,7 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        let output_schema = fused_output_schema(
-            &root_fields,
-            &output_tags,
-            &time,
-            statement_kind.unwrap_or(FieldKind::Float),
-        )?;
+        let output_schema = fused_output_schema(&root_fields, &output_tags, &time, root_kind)?;
         // Across tables the region scans are bound by their `RawSeriesSource` children, and this is
         // also the binding a node over more than one input needs: such a node reads frames that
         // already carry their own labels, so it binds neither tags nor one metric name of its own -
@@ -1255,7 +1268,7 @@ impl PromPlanner {
         tree: &NativeTree,
         source_tags: &[Vec<String>],
         time: &str,
-        statement_kind: Option<FieldKind>,
+        root_kind: FieldKind,
     ) -> Option<DFSchemaRef> {
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
@@ -1270,13 +1283,11 @@ impl PromPlanner {
         if !columns.clone().all(|name| column_names.insert(name)) {
             return None;
         }
-        fused_output_schema(
-            &root_fields,
-            &output_tags,
-            time,
-            statement_kind.unwrap_or(FieldKind::Float),
-        )
-        .ok()
+        // The kind is the one the statement's own root answers, derived before segmentation cut
+        // anything. It cannot be recomputed here: a cut prefix is replaced by an input leaf whose
+        // samples are already evaluated, so walking this tree would read every such leaf as the
+        // kind its scan carried.
+        fused_output_schema(&root_fields, &output_tags, time, root_kind).ok()
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -1658,7 +1669,7 @@ fn canonical_boundary_plan(
     time_index: &str,
     tags: &[String],
     metric: &Option<Arc<str>>,
-    statement_kind: Option<FieldKind>,
+    root_kind: FieldKind,
 ) -> Option<LogicalPlan> {
     let (plan, _) = canonical_boundary_stages(
         prom_expr,
@@ -1670,7 +1681,7 @@ fn canonical_boundary_plan(
         tags,
         metric,
         FusedOutputFormat::PlainRows,
-        statement_kind,
+        root_kind,
     )?;
     Some(plan)
 }
@@ -1690,7 +1701,7 @@ fn canonical_boundary_stages(
     tags: &[String],
     metric: &Option<Arc<str>>,
     format: FusedOutputFormat,
-    statement_kind: Option<FieldKind>,
+    root_kind: FieldKind,
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let NativeExpr::Merge { input } = &tree.root().expr else {
         return None;
@@ -1708,13 +1719,7 @@ fn canonical_boundary_stages(
         .map(|field| field.name.to_string())
         .collect::<Vec<_>>();
     let output_tags = fused_output_tags(tree.root(), source_tags)?;
-    let output_schema = fused_output_schema(
-        &fields,
-        &output_tags,
-        time_index,
-        statement_kind.unwrap_or(FieldKind::Float),
-    )
-    .ok()?;
+    let output_schema = fused_output_schema(&fields, &output_tags, time_index, root_kind).ok()?;
 
     // The producer: the statement's own tree, run per partition, exporting a frame.
     let producer = FusedSeries::try_new_canonical_producer(
@@ -1804,7 +1809,7 @@ fn build_evaluated_segment(
     per_source: &[(Option<Arc<str>>, String, Vec<String>)],
     grid: &Arc<EvalGrid>,
     time_index: &str,
-    statement_kind: Option<FieldKind>,
+    root_kind: FieldKind,
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
@@ -1864,7 +1869,7 @@ fn build_evaluated_segment(
             &[],
             &None,
             FusedOutputFormat::SeriesFrame,
-            statement_kind,
+            root_kind,
         )?;
         return Some((plan, tags));
     }
@@ -2003,7 +2008,7 @@ async fn segment_tree(
     metric: &Option<Arc<str>>,
     format: FusedOutputFormat,
     canonical_segmentation: bool,
-    statement_kind: Option<FieldKind>,
+    root_kind: FieldKind,
 ) -> Result<Option<LogicalPlan>> {
     if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
         return Ok(None);
@@ -2073,7 +2078,7 @@ async fn segment_tree(
                     metric,
                     FusedOutputFormat::SeriesFrame,
                     canonical_segmentation,
-                    statement_kind,
+                    root_kind,
                 ))
                 .await?;
                 match plan {
@@ -2103,7 +2108,7 @@ async fn segment_tree(
                     per_source,
                     grid,
                     time_index,
-                    statement_kind,
+                    root_kind,
                 )
             });
             let Some((plan, cut_tags)) = built else {
@@ -2178,7 +2183,7 @@ async fn segment_tree(
             tags,
             metric,
             format,
-            statement_kind,
+            root_kind,
         )
         .map(|(plan, _)| plan));
     }
@@ -2193,7 +2198,7 @@ async fn segment_tree(
     let output_schema = match format {
         FusedOutputFormat::PlainRows => {
             let Some(schema) =
-                PromPlanner::fused_root_schema(&parent, &child_tags, time_index, statement_kind)
+                PromPlanner::fused_root_schema(&parent, &child_tags, time_index, root_kind)
             else {
                 return Ok(None);
             };

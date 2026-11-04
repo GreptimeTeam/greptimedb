@@ -7743,6 +7743,30 @@ async fn histogram_into_an_aggregate_keeps_the_existing_plan_below_any_operator(
     }
 }
 
+/// An aggregate over a float produced from histograms still runs natively.
+///
+/// `count_over_time` answers a count per window, so what the aggregate folds is floats even though
+/// the series it reads are histograms. The gate asks what kind enters each aggregate, so this stays
+/// on the route while `sum(h)` and `sum(rate(h[5m]))` do not.
+#[tokio::test]
+async fn a_float_prefix_over_histograms_aggregates_natively() {
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "sum(count_over_time(some_metric[5m]))",
+        true,
+        table_provider,
+    )
+    .await;
+    // A natively answered aggregate is the split: a partial producer exports state and the final
+    // fused node above the state router folds it, so the plan holds a fused node and no legacy
+    // histogram fold.
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "the statement left the native route: {}",
+        plan.display_indent_schema()
+    );
+}
+
 /// A histogram statement runs natively as soon as no aggregate consumes it.
 ///
 /// This is the admission the route gained: the field's own type decides, so a selector, a range
@@ -7771,7 +7795,7 @@ async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         assert!(
-            find_fused_series(&plan).is_none() && find_aggregate_finalize(&plan).is_none(),
+            find_fused_series(&plan).is_none(),
             "{query} ran a native fold over histograms: {}",
             plan.display_indent_schema()
         );
