@@ -855,6 +855,7 @@ async fn prefetch_blocks(
     let mut columns = Vec::new();
     let mut bytes = 0usize;
     let mut last_range: Option<std::ops::Range<u64>> = None;
+    let mut payload_ranges = Vec::new();
     let mut end = start;
     for block in blocks.iter().skip(start).take(MAX_BLOCKS) {
         if !matches(block.bounds(), request) {
@@ -900,7 +901,20 @@ async fn prefetch_blocks(
                 next_range = Some(range);
             }
         }
-        if next_bytes > MAX_READ_BYTES as usize {
+        let previous_len = payload_ranges.len();
+        for column in &selected {
+            payload_ranges.push(column.payload.offset..column.payload.end()?);
+        }
+        let fetch_bytes = if reader.cache.is_some() {
+            aligned_payload_ranges(&payload_ranges, reader.end)
+                .iter()
+                .map(|range| (range.end - range.start) as usize)
+                .sum()
+        } else {
+            next_bytes
+        };
+        if fetch_bytes > MAX_READ_BYTES as usize {
+            payload_ranges.truncate(previous_len);
             break;
         }
         bytes = next_bytes;

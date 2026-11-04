@@ -1845,6 +1845,7 @@ impl PageRangeCache {
 
                         if let Some(cache) = weak_cache.upgrade()
                             && !matches!(cause, RemovalCause::Replaced)
+                            && matches!(k.group_key(), PageFragmentGroupKey::Parquet { .. })
                         {
                             cache.remove_index_entry(*k);
                         }
