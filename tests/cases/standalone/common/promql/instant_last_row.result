@@ -516,13 +516,13 @@ TQL EVAL (0, 20, '10s') instant_last_range_control;
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 20, '10s') last_over_time(instant_last_range_control[11s]);
 
-+---------------------+-----------------------------------+--------+
-| ts                  | prom_last_over_time(ts_range,val) | series |
-+---------------------+-----------------------------------+--------+
-| 1970-01-01T00:00:00 | 0.0                               | range  |
-| 1970-01-01T00:00:10 | 10.0                              | range  |
-| 1970-01-01T00:00:20 | 20.0                              | range  |
-+---------------------+-----------------------------------+--------+
++---------------------+------+--------+
+| ts                  | val  | series |
++---------------------+------+--------+
+| 1970-01-01T00:00:00 | 0.0  | range  |
+| 1970-01-01T00:00:10 | 10.0 | range  |
+| 1970-01-01T00:00:20 | 20.0 | range  |
++---------------------+------+--------+
 
 -- At 10s, rate is 10/11 because counter-zero extrapolation stops at 0s;
 -- at 20s it is 1. The 0s window has only one sample.

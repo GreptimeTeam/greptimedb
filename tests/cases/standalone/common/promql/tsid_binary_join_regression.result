@@ -122,16 +122,18 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -158,29 +160,40 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid
 | 0_| 0_|_FusedSeriesExec: (tsid_binary_join_left + tsid_binary_join_right) / tsid_binary_join_left_|
 |_|_| NativeTree_|
 |_|_|_root Binary / ignoring [] one-to-one_|
-|_|_|_left Binary + ignoring [] one-to-one_|
+|_|_|_left Input evaluated samples source=0, contiguous_|
+|_|_|_right Input evaluated samples source=1, contiguous REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Binary + ignoring [] one-to-one_|
 |_|_|_left Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous_|
-|_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=2, contiguous REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_| output: series_frame REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Instant lookback 300000ms offset 0 on grid 0/5000x2_|
+|_|_|_input Input raw samples source=0, contiguous_|
+|_|_| output: series_frame REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -206,49 +219,72 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (ts
 | 0_| 0_|_FusedSeriesExec: ((tsid_binary_join_left + tsid_binary_join_right) * (tsid_binary_join_left - tsid_binary_join_third)) / (tsid_binary_join_left + 2)_|
 |_|_| NativeTree_|
 |_|_|_root Binary / ignoring [] one-to-one_|
-|_|_|_left Binary * ignoring [] one-to-one_|
-|_|_|_left Binary + ignoring [] one-to-one_|
+|_|_|_left Input evaluated samples source=1, contiguous_|
+|_|_|_right Input evaluated samples source=0, contiguous REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Binary * ignoring [] one-to-one_|
+|_|_|_left Input evaluated samples source=0, contiguous_|
+|_|_|_right Input evaluated samples source=1, contiguous_|
+|_|_| output: series_frame REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Binary + ignoring [] one-to-one_|
 |_|_|_left Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous_|
-|_|_|_right Binary - ignoring [] one-to-one_|
+|_|_| output: series_frame REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Binary - ignoring [] one-to-one_|
 |_|_|_left Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=2, contiguous_|
+|_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=3, contiguous_|
-|_|_|_right Binary + ignoring [] one-to-one_|
+|_|_|_input Input raw samples source=1, contiguous_|
+|_|_| output: series_frame REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Binary + ignoring [] one-to-one_|
 |_|_|_left Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=4, contiguous_|
-|_|_|_right Scalar 2 REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+|_|_|_input Input raw samples source=0, contiguous_|
+|_|_|_right Scalar 2_|
+|_|_| output: series_frame REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -278,16 +314,18 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -317,16 +355,18 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -357,16 +397,18 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -396,16 +438,18 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -432,30 +476,41 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsi
 |_|_| NativeTree_|
 |_|_|_root Binary * ignoring [] one-to-one_|
 |_|_|_left Binary / ignoring [] one-to-one_|
-|_|_|_left Binary > ignoring [] one-to-one_|
+|_|_|_left Input evaluated samples source=0, contiguous_|
+|_|_|_right Input evaluated samples source=1, contiguous_|
+|_|_|_right Scalar 100 REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Binary > ignoring [] one-to-one_|
 |_|_|_left Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous_|
-|_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=2, contiguous_|
-|_|_|_right Scalar 100 REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_| output: series_frame REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Instant lookback 300000ms offset 0 on grid 0/5000x2_|
+|_|_|_input Input raw samples source=0, contiguous_|
+|_|_| output: series_frame REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -480,38 +535,58 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 | 0_| 0_|_FusedSeriesExec: ((tsid_binary_join_left > bool tsid_binary_join_right) + tsid_binary_join_left) / tsid_binary_join_left_|
 |_|_| NativeTree_|
 |_|_|_root Binary / ignoring [] one-to-one_|
-|_|_|_left Binary + ignoring [] one-to-one_|
-|_|_|_left Binary > bool ignoring [] one-to-one_|
+|_|_|_left Input evaluated samples source=1, contiguous_|
+|_|_|_right Input evaluated samples source=0, contiguous REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Binary + ignoring [] one-to-one_|
+|_|_|_left Input evaluated samples source=0, contiguous_|
+|_|_|_right Input evaluated samples source=1, contiguous_|
+|_|_| output: series_frame REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Binary > bool ignoring [] one-to-one_|
 |_|_|_left Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous_|
-|_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=2, contiguous_|
-|_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=3, contiguous REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_| output: series_frame REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Instant lookback 300000ms offset 0 on grid 0/5000x2_|
+|_|_|_input Input raw samples source=0, contiguous_|
+|_|_| output: series_frame REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Instant lookback 300000ms offset 0 on grid 0/5000x2_|
+|_|_|_input Input raw samples source=0, contiguous_|
+|_|_| output: series_frame REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -538,28 +613,40 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 |_|_| NativeTree_|
 |_|_|_root Binary / ignoring [] one-to-one_|
 |_|_|_left Set or ignoring []_|
-|_|_|_left Instant lookback 300000ms offset 0 on grid 0/5000x2_|
+|_|_|_left Input evaluated samples source=0, contiguous_|
+|_|_|_right Input evaluated samples source=1, contiguous_|
+|_|_|_right Input evaluated samples source=2, contiguous REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=0, contiguous_|
-|_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=1, contiguous_|
-|_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=2, contiguous REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+|_|_| output: series_frame REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Instant lookback 300000ms offset 0 on grid 0/5000x2_|
+|_|_|_input Input raw samples source=0, contiguous_|
+|_|_| output: series_frame REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Instant lookback 300000ms offset 0 on grid 0/5000x2_|
+|_|_|_input Input raw samples source=0, contiguous_|
+|_|_| output: series_frame REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -585,29 +672,40 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left / ignoring(host) group_left tsid
 | 0_| 0_|_FusedSeriesExec: (tsid_binary_join_left / ignoring (host) group_left () tsid_binary_join_right) / tsid_binary_join_left_|
 |_|_| NativeTree_|
 |_|_|_root Binary / ignoring [] one-to-one_|
-|_|_|_left Binary / ignoring [host] many-to-one []_|
+|_|_|_left Input evaluated samples source=0, contiguous_|
+|_|_|_right Input evaluated samples source=1, contiguous REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Binary / ignoring [host] many-to-one []_|
 |_|_|_left Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=0, contiguous_|
 |_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
 |_|_|_input Input raw samples source=1, contiguous_|
-|_|_|_right Instant lookback 300000ms offset 0 on grid 0/5000x2_|
-|_|_|_input Input raw samples source=2, contiguous REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_| output: series_frame REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 0_|_RawSeriesSourceExec REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment_|
+|_|_| NativeTree_|
+|_|_|_root Instant lookback 300000ms offset 0 on grid 0/5000x2_|
+|_|_|_input Input raw samples source=0, contiguous_|
+|_|_| output: series_frame REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
@@ -726,14 +824,14 @@ TQL EVAL (0, 5, '5s') rate(tsid_binary_join_left[5s]) / tsid_binary_join_left;
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 5, '5s') sum by (host, job) (time() - tsid_binary_join_left);
 
-+-------+------+---------------------+-------------------------------------------------------------------+
-| host  | job  | ts                  | sum(.time / Float64(1000) - tsid_binary_join_left.greptime_value) |
-+-------+------+---------------------+-------------------------------------------------------------------+
-| host1 | job1 | 1970-01-01T00:00:00 | -12.0                                                             |
-| host1 | job1 | 1970-01-01T00:00:05 | -10.0                                                             |
-| host2 | job2 | 1970-01-01T00:00:00 | -18.0                                                             |
-| host2 | job2 | 1970-01-01T00:00:05 | -16.0                                                             |
-+-------+------+---------------------+-------------------------------------------------------------------+
++---------------------+----------------+-------+------+
+| ts                  | greptime_value | host  | job  |
++---------------------+----------------+-------+------+
+| 1970-01-01T00:00:00 | -12.0          | host1 | job1 |
+| 1970-01-01T00:00:00 | -18.0          | host2 | job2 |
+| 1970-01-01T00:00:05 | -10.0          | host1 | job1 |
+| 1970-01-01T00:00:05 | -16.0          | host2 | job2 |
++---------------------+----------------+-------+------+
 
 DROP TABLE tsid_binary_join_third;
 
