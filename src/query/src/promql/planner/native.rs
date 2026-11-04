@@ -2624,7 +2624,7 @@ mod tests {
     #[test]
     fn recursive_segmentation_rewrites_nested_cuts_with_dense_inputs() {
         let tree = compiled_test_tree("sum(abs(rate(x[1m])))");
-        let segment = cut_segments(tree.root(), false);
+        let segment = cut_segments(tree.root(), true);
         assert!(!segment.cut.is_empty());
         assert_eq!(segment.cut.len(), 1);
         assert_eq!(vec![0], input_sources(&segment.cut[0]));
