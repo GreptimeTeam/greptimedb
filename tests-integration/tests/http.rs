@@ -5459,7 +5459,8 @@ pub async fn test_prometheus_remote_write_with_ttl_hint(store_type: StorageType)
         "did not expect retention ttl in SHOW CREATE TABLE output for logical table, got: {resp}"
     );
 
-    // Once the physical table exists, a retention hint cannot be applied and must fail.
+    // When the physical table already exists, the retention hint applies only on creation
+    // and is ignored on subsequent writes, returning 204 without altering physical table TTL.
     let write_request = WriteRequest {
         timeseries: vec![TimeSeries {
             labels: vec![
@@ -5489,11 +5490,18 @@ pub async fn test_prometheus_remote_write_with_ttl_hint(store_type: StorageType)
         .body(compressed_request)
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // The physical table's TTL remains unchanged.
+    let res = client
+        .get("/v1/sql?sql=show create table greptime_physical_table")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
     let resp = res.text().await;
     assert!(
-        resp.contains("already exists"),
-        "expected retention TTL rejection when the physical table exists, got: {resp}"
+        resp.contains("ttl = '7d'") || resp.contains("ttl = '7days'"),
+        "expected ttl = '7d' in SHOW CREATE TABLE output for physical table to remain unchanged, got: {resp}"
     );
 
     guard.remove_all().await;

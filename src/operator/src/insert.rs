@@ -1734,15 +1734,6 @@ impl Inserter {
             .get_table(catalog_name, &schema_name, &physical_table)
             .await?
         {
-            // The normal case: `greptime_physical_table` already exists, so a
-            // retention hint cannot be stored anywhere. Reject it instead of
-            // stripping it from the logical table.
-            if retention_ttl_hint(ctx).is_some() {
-                return InvalidInsertRequestSnafu {
-                    reason: retention_ttl_hint_on_existing_physical_table_reason(&physical_table),
-                }
-                .fail();
-            }
             return Ok(table);
         }
 
@@ -2399,12 +2390,6 @@ pub fn ensure_no_retention_ttl_on_logical_table(
         return RetentionTtlOnLogicalTableSnafu.fail();
     }
     Ok(())
-}
-
-pub fn retention_ttl_hint_on_existing_physical_table_reason(physical_table: &str) -> String {
-    format!(
-        "Retention TTL hint cannot be applied because physical table `{physical_table}` already exists; set `{TTL_KEY}` when that physical table is created"
-    )
 }
 
 /// Retention TTL from an ingest hint. `ttl=instant` is excluded: it stays on

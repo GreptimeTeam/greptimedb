@@ -103,7 +103,6 @@ use store_api::metric_engine_consts::{
 
 use store_api::mito_engine_options::TTL_KEY;
 
-
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
