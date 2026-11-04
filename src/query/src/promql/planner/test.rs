@@ -2602,6 +2602,39 @@ async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
     assert!(plan.display_indent().to_string().contains("FusedSeries"));
 }
 
+/// A label rewrite that collapses the partition column cannot be answered by one region.
+///
+/// The canonical boundary's router only collects the pieces its own region's producer holds, so a
+/// table split into several regions would answer a canonical label set from whichever region held a
+/// piece of it. The route therefore declines that tree - and only that tree: `rate` on the same
+/// partitioned table keeps fusing, which the test above asserts. Declining means the existing
+/// planner's plan, exactly.
+#[tokio::test]
+async fn native_fused_partitioned_table_label_rewrite_falls_back() {
+    let query = r#"label_replace(some_metric, "tag_0", "same", "tag_0", ".*")"#;
+    let native =
+        build_native_fused_plan_with_provider(query, true, native_engine_provider(vec![0]).await)
+            .await;
+    let fallback =
+        build_native_fused_plan_with_provider(query, false, native_engine_provider(vec![0]).await)
+            .await;
+    assert!(
+        find_fused_series(&native).is_none(),
+        "a collapsing rewrite over a partitioned table must keep the existing plan: {}",
+        native.display_indent()
+    );
+    assert!(
+        !native.display_indent().to_string().contains("FusedSeries"),
+        "{}",
+        native.display_indent()
+    );
+    assert_eq!(
+        native.display_indent().to_string(),
+        fallback.display_indent().to_string(),
+        "the native setting must plan exactly what the existing planner plans"
+    );
+}
+
 /// Metric logical scans retain their table-id restriction on the direct fused scan input.
 #[tokio::test]
 async fn native_fused_metric_engine_table_is_accepted() {

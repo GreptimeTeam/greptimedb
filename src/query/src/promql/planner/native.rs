@@ -114,17 +114,24 @@ pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
 /// `Interleaved`, so a tree compiled here runs on either scanner.
 const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
-/// One prepared occurrence of a selector: its scan, raw-series layout and reporting columns.
 /// What one discovered metric contributes: the shared schema, its time column, the tags the union
 /// reports, and the one metric name the single-source shape carries.
 type DiscoveredSelectorMetadata = (Arc<SeriesSchema>, String, Vec<String>, Arc<str>);
 
+/// One prepared occurrence of a selector: its scan, raw-series layout and reporting columns.
+///
+/// `partitioned` says whether the table behind that scan is split into regions along a partition
+/// column. Nothing in the scan itself carries this: a partition is a placement fact about the
+/// table, and the canonical route has to know it before it can claim a label-set answer covers the
+/// whole query rather than one region's share of it.
 type PreparedInput = (
     LogicalPlan,
     Arc<SeriesSchema>,
     Option<Arc<str>>,
     String,
     Vec<String>,
+    // `partitioned`: whether this input's table is split into regions along a partition column.
+    bool,
 );
 
 pub(crate) fn hybrid_binary_admitted(
@@ -313,6 +320,10 @@ impl PromPlanner {
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
+        // A table split along a partition column lives in more than one region. The canonical
+        // boundary's router only collects the pieces its own region's producer holds, so the caller
+        // needs this fact to tell a whole-query label-set answer from one region's share of it.
+        let partitioned = table_meta.partition_column_names().next().is_some();
         // An engine without a raw-series scanner has no frame to give this node, and by the
         // time the physical planner asks, the logical plan is already this node: the refusal
         // there is a planning error, not a fallback. So the engine is checked here, where the
@@ -393,6 +404,7 @@ impl PromPlanner {
             Some(Arc::from(metric)),
             time,
             tags,
+            partitioned,
         )))
     }
 
@@ -594,12 +606,15 @@ impl PromPlanner {
                     // input, so the compiled tree still reads what the planner prepared.
                     let mut sources = Vec::with_capacity(metrics.len());
                     let mut selector_metadata: Option<DiscoveredSelectorMetadata> = None;
+                    // The union reads every discovered metric's region, so one partitioned metric
+                    // makes the whole input partitioned.
+                    let mut discovered_partitioned = false;
                     for table in metrics {
                         self.ctx.table_name = Some(table.table_info().name.clone());
                         if self.setup_context().await?.is_some() {
                             return Ok(None);
                         }
-                        let Some((scan, schema, metric, time, mut tags)) = self
+                        let Some((scan, schema, metric, time, mut tags, partitioned)) = self
                             .prepare_one_scan(
                                 matchers.clone(),
                                 1,
@@ -611,6 +626,7 @@ impl PromPlanner {
                         else {
                             return Ok(None);
                         };
+                        discovered_partitioned |= partitioned;
                         let Some(metric) = metric else {
                             return Ok(None);
                         };
@@ -680,7 +696,7 @@ impl PromPlanner {
                             None,
                         )
                     };
-                    prepared.push((union, schema, metric, time, tags));
+                    prepared.push((union, schema, metric, time, tags, discovered_partitioned));
                     continue;
                 }
                 let matchers =
@@ -723,7 +739,7 @@ impl PromPlanner {
         let cross_table =
             !same_table_scans(prepared.iter().map(|(scan, ..)| scan)) || logical_ids_differ;
         // The first input names the output's time index and, on one table, binds every scan.
-        let Some((_, series_schema, metric, time, tags)) = prepared.first() else {
+        let Some((_, series_schema, metric, time, tags, _)) = prepared.first() else {
             return Ok(None);
         };
         let (series_schema, metric, time, tags) = (
@@ -796,7 +812,7 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
-        for (index, (compiled_input, (scan, _, _, time, _))) in
+        for (index, (compiled_input, (scan, _, _, time, _, _))) in
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
             if compiled_input.source_index != index {
@@ -899,8 +915,13 @@ impl PromPlanner {
         }
         let source_tags = prepared
             .iter()
-            .map(|(_, _, _, _, tags)| tags.clone())
+            .map(|(_, _, _, _, tags, _)| tags.clone())
             .collect::<Vec<_>>();
+        // Whether any input's table is split into regions along a partition column. The canonical
+        // boundary is the only part of this route that claims a whole-query label-set answer, and a
+        // region-local producer cannot see the pieces another region holds, so this fact decides
+        // whether that boundary may be claimed at all.
+        let any_partitioned = prepared.iter().any(|input| input.5);
         // A segment carries one source's identity. Keeping each occurrence's scan and metadata
         // aligned here lets the cutting step name that source independently of selector count.
         let bare_scans = prepared
@@ -909,13 +930,13 @@ impl PromPlanner {
             .collect::<Vec<_>>();
         let per_source = prepared
             .iter()
-            .map(|(_, _, metric, time_index, tags)| {
+            .map(|(_, _, metric, time_index, tags, _)| {
                 (metric.clone(), time_index.clone(), tags.clone())
             })
             .collect::<Vec<_>>();
         let children = prepared
             .into_iter()
-            .map(|(scan, schema, metric, _, tags)| {
+            .map(|(scan, schema, metric, _, tags, _)| {
                 // A discovered selector already carries its own sources: a single metric is one
                 // `RawSeriesSource`, several are a `Union` of them, and each names the metric it
                 // reads. Wrapping either again would nest a source in a source.
@@ -958,6 +979,17 @@ impl PromPlanner {
             Err(_) => return Ok(None),
         };
         let root = tree.root();
+        // A canonical boundary routes each label set to one owner above its own producer, and a
+        // region-local producer only sees the partitions of the region it runs in. A table split
+        // along a partition column is planned region by region, so each region would answer a
+        // canonical label set from the piece it holds while the consumer above has no collection of
+        // the other regions' pieces. Without a proof that this query reads one region, decline the
+        // route instead of claiming a global canonical answer; the existing planner reads every
+        // region and reports what Prometheus reports. A tree with no canonical merge claims no such
+        // answer, so it is untouched: a per-series query on a partitioned table keeps fusing.
+        if any_partitioned && contains_canonical_merge(root) {
+            return Ok(None);
+        }
         // The split is only ever a one-child plan: it exports each partition's leaf state and merges
         // them above the region. A tree over two metric logical tables of ONE physical table is not
         // split, because a node whose locality is `SinglePartition` normalizes every input to one

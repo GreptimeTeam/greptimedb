@@ -4947,6 +4947,45 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");
     }
+
+    // A rewrite that overwrites the partition column cannot be answered from one region. The series
+    // `h0` and `h2` live in different regions of `native_partitioned_pair`, so collapsing `host` to
+    // one value gives two series of one label set a value at the same evaluation point - the error
+    // Prometheus reports. A native route plans one canonical producer per region, and that producer
+    // only collects the pieces its own region holds, so it could never see the collision: the route
+    // has to decline, and the existing planner - which reads both regions - is what answers.
+    let collapsing = r#"label_replace(native_partitioned_pair, "host", "same", "host", ".*")"#;
+    let collapsing_sql = format!("TQL EVAL (5, 5, '1s') {collapsing}");
+    observer.clear();
+    let native = instance
+        .do_query(&collapsing_sql, native_query_context(true, 4))
+        .await
+        .remove(0);
+    assert!(
+        observer.fused().is_none(),
+        "a collapsing rewrite over a partitioned table must not plan a fused node: {:?}",
+        observer.fused().map(|plan| display_plan_tree(&plan))
+    );
+    let native_error = match native {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        native_error.contains("cannot contain metrics with the same labelset"),
+        "the existing planner answers this shape and reports the overlap: {native_error}"
+    );
+    let legacy = instance
+        .do_query(&collapsing_sql, native_query_context(false, 4))
+        .await
+        .remove(0);
+    let legacy_error = match legacy {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        legacy_error.contains("cannot contain metrics with the same labelset"),
+        "the native setting answers what the existing planner answers: {legacy_error}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
