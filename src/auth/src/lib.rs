@@ -27,8 +27,9 @@ pub use common::{
     PG_SCRAM_SHA256_KEY_LEN, Password, PgScramSha256Verifier, auth_mysql, auth_mysql_with_verifier,
     format_mysql_native_password_verifier, format_pbkdf2_sha256_password_verifier,
     format_pg_scram_sha256_password_verifier, mysql_native_password_hash,
-    parse_pg_scram_sha256_password_verifier, static_user_provider_from_option,
-    user_provider_from_option, userinfo_by_name, validate_mysql_native_password_verifier,
+    parse_pg_scram_sha256_password_verifier, redact_user_provider_option,
+    serialize_user_provider_option, static_user_provider_from_option, user_provider_from_option,
+    userinfo_by_name, validate_mysql_native_password_verifier,
 };
 pub use permission::{
     ALL_ACTIONS, AccessMode, DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE,

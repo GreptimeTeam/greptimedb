@@ -19,6 +19,7 @@ use std::time::Duration;
 use cmd::options::GreptimeOptions;
 use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
+use common_base::secrets::ExposeSecret;
 use common_config::{Configurable, DEFAULT_DATA_HOME, ENV_VAR_SEP};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_runtime::global::RuntimeOptions;
@@ -778,15 +779,52 @@ fn test_load_standalone_user_provider_from_config() {
             .unwrap();
 
     assert_eq!(
-        options.component.user_provider.as_deref(),
+        options
+            .component
+            .user_provider
+            .as_ref()
+            .map(|value| value.expose_secret().as_str()),
         Some(user_provider)
     );
 
     let frontend_options = options.component.frontend_options();
     assert_eq!(
-        frontend_options.user_provider.as_deref(),
+        frontend_options
+            .user_provider
+            .as_ref()
+            .map(|value| value.expose_secret().as_str()),
         Some(user_provider)
     );
+}
+
+#[test]
+fn test_load_standalone_user_provider_cmd_from_config_is_redacted_in_config_dump() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    let user_provider = "static_user_provider:cmd:alice=secret";
+    std::fs::write(
+        config.path(),
+        format!("user_provider = \"{user_provider}\"\n"),
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+
+    // Loading keeps the original value for authentication...
+    assert_eq!(
+        options
+            .component
+            .user_provider
+            .as_ref()
+            .map(|value| value.expose_secret().as_str()),
+        Some(user_provider)
+    );
+
+    // ...while a config dump (e.g. `/config`) only exposes the redacted form.
+    let serialized = options.to_toml().unwrap();
+    assert!(serialized.contains("user_provider = \"[REDACTED]\""));
+    assert!(!serialized.contains("secret"));
 }
 
 #[test]

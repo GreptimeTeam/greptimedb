@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use snafu::OptionExt;
 
+use crate::common::REDACTED_USER_PROVIDER_OPTION;
 use crate::error::{InvalidConfigSnafu, Result};
 use crate::user_provider::{
     PgAuthInfo, UserInfoMap, authenticate_with_credential, load_credential_from_file,
@@ -31,7 +32,7 @@ pub struct StaticUserProvider {
 impl StaticUserProvider {
     pub(crate) fn new(value: &str) -> Result<Self> {
         let (mode, content) = value.split_once(':').context(InvalidConfigSnafu {
-            value: value.to_string(),
+            value: REDACTED_USER_PROVIDER_OPTION,
             msg: "StaticUserProviderOption must be in format `<option>:<value>`",
         })?;
         match mode {
@@ -43,7 +44,7 @@ impl StaticUserProvider {
                 .split(',')
                 .map(|kv| {
                    parse_credential_line(kv).context(InvalidConfigSnafu {
-                        value: kv.to_string(),
+                        value: REDACTED_USER_PROVIDER_OPTION,
                         msg: "StaticUserProviderOption cmd values must be in format `user=pwd[,user=pwd]`",
                     })
                 })
@@ -53,7 +54,7 @@ impl StaticUserProvider {
                     StaticUserProvider { users }
                 }),
             _ => InvalidConfigSnafu {
-                value: mode.to_string(),
+                value: REDACTED_USER_PROVIDER_OPTION,
                 msg: "StaticUserProviderOption must be in format `file:<path>` or `cmd:<values>`",
             }
                 .fail(),

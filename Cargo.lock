@@ -14715,6 +14715,7 @@ version = "1.3.0"
 dependencies = [
  "api",
  "async-trait",
+ "auth",
  "catalog",
  "client",
  "common-base",
