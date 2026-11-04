@@ -1640,6 +1640,17 @@ async fn streaming_merge_preserves_overlapping_versions_and_field_routing(
     assert_eq!(output.stats.source_rows, output.stats.output_rows);
     assert!(output.stats.estimated_memory_bytes <= memory_limit as u64);
     assert!(output.stats.peak_group_bytes <= (memory_limit / 16) as u64);
+    assert!(
+        output.stats.peak_group_bytes > 0,
+        "retained equal-key groups were never charged"
+    );
+    let expected_output_bytes: u64 = output
+        .files
+        .values()
+        .flatten()
+        .map(|file| file.file_size + file.index_file_size)
+        .sum();
+    assert_eq!(expected_output_bytes, output.stats.output_bytes);
     assert_eq!(
         targets.keys().collect::<Vec<_>>(),
         output.files.keys().collect::<Vec<_>>()
