@@ -45,6 +45,7 @@ use crate::manifest::storage::delta::DeltaStorage;
 use crate::manifest::storage::size_tracker::{CheckpointTracker, DeltaTracker, SizeTracker};
 use crate::manifest::storage::staging::StagingStorage;
 use crate::manifest::storage::utils::remove_from_cache;
+use crate::metrics::RegionManifestSizeMetric;
 
 lazy_static! {
     static ref DELTA_RE: Regex = Regex::new("^\\d+\\.json").unwrap();
@@ -192,7 +193,7 @@ impl ManifestObjectStore {
         object_store: ObjectStore,
         compress_type: CompressionType,
         total_manifest_size: Arc<AtomicU64>,
-        metric: Option<crate::metrics::RegionManifestSizeMetric>,
+        metric: Option<RegionManifestSizeMetric>,
         manifest_cache: Option<ManifestCache>,
     ) -> Self {
         common_telemetry::info!("Create manifest store, cache: {}", manifest_cache.is_some());

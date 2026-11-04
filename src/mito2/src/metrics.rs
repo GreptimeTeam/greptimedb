@@ -65,16 +65,14 @@ pub(crate) fn remove_region_manifest_size(region_id: RegionId) {
 
 /// Shared publishing state of one region's manifest size gauge.
 ///
-/// Publishing can run on any runtime thread: the worker, the background
-/// checkpoint task (`common_runtime::spawn_global`), or the inventory
-/// reconciliation task. Arming, disarming and publishing therefore share one
+/// Publishing can run on the worker or the background checkpoint task
+/// (`common_runtime::spawn_global`). Arming, disarming and publishing share one
 /// mutex, so a late publish can neither resurrect a series removed by
 /// close/drop nor overwrite a successor instance's value.
 #[derive(Debug)]
 struct MetricState {
     armed: bool,
     /// Test-only pause point between the armed check and the gauge write.
-
     #[cfg(test)]
     hook: Option<TestHook>,
 }
@@ -991,6 +989,8 @@ pub(crate) fn cache_page_fetch_metrics(
 }
 
 /// Looks up a sample without creating a series. Region ids must be unique per test.
+///
+/// Shared by the engine lifecycle, size tracker, and metrics tests.
 #[cfg(test)]
 pub(crate) fn manifest_metric_sample(region_id: RegionId) -> Option<i64> {
     use prometheus::core::Collector;
