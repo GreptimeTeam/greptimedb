@@ -2481,34 +2481,65 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     )
     .await;
 
-    // The shapes the native compiler declines, each declined for its own reason, and each checked on
-    // the plans that really ran: none may hold a fused producer or a frontend merge, and both routes
-    // must answer what the fixture derives by hand.
-    //
-    // `scalar` reports the one value present at a point only when exactly one series is present at
-    // it, so the five counter series make it NaN; a route that folded one partition at a time would
-    // report the number of whichever partition held a single series, so the NaN also says the whole
-    // vector was read at once. A subquery evaluates its own body on a grid of its own: it reads
-    // across series and cannot be answered by a producer per partition, so it keeps the existing
-    // plan. The subquery's window
-    // spans the two inner points `EVAL_SECS - 1` and `EVAL_SECS`, at each of which the same
-    // extrapolated rate answers 15 - both samples stay further from the window's ends than the 66s
-    // threshold - so the maximum is 15 as well.
-    let fallback_cases = [
-        case(
-            format!("scalar({COUNTER_TABLE})"),
-            &[(&[], f64::NAN)],
-            false,
-        ),
-        case(
-            format!("max_over_time((sum(rate({COUNTER_TABLE}[5m])))[2s:1s])"),
-            &[(&[], 15.0)],
-            false,
-        ),
-    ];
-    for case in &fallback_cases {
-        check_fallback_case(&instance, &observer, case).await;
-    }
+    // A shape the native compiler declines, checked on the plans that really ran: it may hold
+    // neither a fused producer nor a frontend merge, and both routes must answer what the fixture
+    // derives by hand. A subquery evaluates its own body on a grid of its own: it reads across
+    // series and cannot be answered by a producer per partition, so it keeps the existing plan. The
+    // subquery's window spans the two inner points `EVAL_SECS - 1` and `EVAL_SECS`, at each of
+    // which the same extrapolated rate answers 15 - both samples stay further from the window's
+    // ends than the 66s threshold - so the maximum is 15 as well.
+    let fallback_case = case(
+        format!("max_over_time((sum(rate({COUNTER_TABLE}[5m])))[2s:1s])"),
+        &[(&[], 15.0)],
+        false,
+    );
+    check_fallback_case(&instance, &observer, &fallback_case).await;
+
+    // `scalar` reads the whole vector and the native route answers it, so it is no longer one of
+    // the declined shapes. `scalar` reports the one value present at a point only when exactly one
+    // series is present at it, so the five counter series make it NaN; a route that folded one
+    // partition at a time would report the value of whichever partition held a single series, so
+    // the NaN also says the whole vector was read at once. The native run must therefore hold a
+    // fused producer and no frontend merge, and answer the same rows the existing plan answers.
+    let scalar_case = case(
+        format!("scalar({COUNTER_TABLE})"),
+        &[(&[], f64::NAN)],
+        false,
+    );
+    let scalar_query = tql_eval(&scalar_case.promql);
+    let (legacy, legacy_capture) =
+        run_query(&instance, &scalar_case.promql, false, &observer).await;
+    assert!(
+        legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty(),
+        "`{scalar_query}`: the legacy run must not plan a native node, but it planned {} fused \
+         producers and {} frontend merges",
+        legacy_capture.fused.len(),
+        legacy_capture.finalize.len()
+    );
+    assert_rows(&legacy.rows, &scalar_case.expected, "legacy `scalar`");
+    let mark = observer.mark();
+    let (native, capture) = run_query(&instance, &scalar_case.promql, true, &observer).await;
+    assert!(
+        observer.mark() > mark,
+        "`{scalar_query}`: the native run handed no plan to the observer, so nothing about the \
+         plan that ran was observed"
+    );
+    assert!(
+        !capture.fused.is_empty(),
+        "`{scalar_query}`: `scalar` over a scan runs the native route, but the plans that ran held \
+         no fused producer"
+    );
+    assert!(
+        capture.finalize.is_empty(),
+        "`{scalar_query}`: `scalar` needs no frontend merge, but {} ran",
+        capture.finalize.len()
+    );
+    assert_rows(&native.rows, &scalar_case.expected, "native `scalar`");
+    assert_rows(
+        &native.rows,
+        &legacy.rows,
+        "native `scalar` against the existing plan",
+    );
 }
 
 /// Histogram functions above the cut merge Partial state before evaluating the complete buckets.

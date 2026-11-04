@@ -1301,6 +1301,20 @@ fn a_closing_chunk_that_keeps_no_value_is_handed_over_empty() {
     assert_eq!(chunk.series.metric.get("job"), Some("a"));
 }
 
+fn scalar_of(input: NativeNode) -> NativeNode {
+    let grid = input
+        .output
+        .grid()
+        .expect("scalar() needs evaluated input")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(input),
+        },
+        output: NativeType::Scalar(grid),
+    }
+}
+
 fn sample_values(chunk: &EvaluatedChunk) -> Vec<Option<f64>> {
     field_values(chunk, 0)
 }
@@ -1407,6 +1421,7 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
         out.push(Arc::downgrade(&node.metrics));
         match &node.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
+            RuntimeOp::ScalarOf { input, .. } => walk(input, out),
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Merge { input, .. }
@@ -1418,6 +1433,20 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 walk(left, out);
                 walk(right, out);
+            }
+            RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                walk(input, out);
+                walk(parameter, out);
+            }
+            RuntimeOp::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                walk(input, out);
+                for parameter in parameters {
+                    walk(parameter, out);
+                }
             }
             RuntimeOp::ParameterizedMap {
                 input, parameters, ..
@@ -5980,6 +6009,99 @@ fn binary_runtime_indices_are_assigned_in_preorder() {
     assert_eq!(inner_binary.node_index, 1);
 }
 
+#[test]
+fn dynamic_nodes_propagate_binary_indices_and_duplicate_evidence() {
+    let grid = grid(0, 60_000, 2);
+    let binary = || {
+        binary_of(
+            evaluated_input(Arc::clone(&grid)),
+            evaluated_input(Arc::clone(&grid)),
+            binary_matching(BinaryOp::Add),
+        )
+    };
+    let input = binary();
+    let topk = NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(scalar_of(binary())),
+        },
+    };
+    let input = binary();
+    let histogram = NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(HistogramFunction::Fraction {
+                lower: 0.0,
+                upper: 0.0,
+            }),
+            parameters: vec![scalar_of(binary()), scalar_of(binary())],
+        },
+    };
+    let tree =
+        NativeTree::try_new(binary_of(topk, histogram, binary_matching(BinaryOp::Add))).unwrap();
+    let pool = pool();
+    let evidence = Arc::new(crate::vector_match::DuplicateEvidence::new(&pool, 2));
+    let execution =
+        NativeExecutionState::try_new(&tree, pool, Some(Arc::clone(&evidence))).unwrap();
+
+    let RuntimeOp::Binary {
+        left,
+        right,
+        binary: Some(root),
+        ..
+    } = &execution.root.op
+    else {
+        panic!("expected root binary");
+    };
+    let RuntimeOp::ParameterizedTopK {
+        input: topk_input,
+        parameter: topk_parameter,
+        ..
+    } = &left.op
+    else {
+        panic!("expected topk");
+    };
+    let RuntimeOp::ParameterizedHistogram {
+        input: histogram_input,
+        parameters: histogram_parameters,
+        ..
+    } = &right.op
+    else {
+        panic!("expected histogram");
+    };
+    let binary_at = |node: &RuntimeNode| {
+        let RuntimeOp::Binary {
+            binary: Some(binary),
+            ..
+        } = &node.op
+        else {
+            panic!("expected vector binary");
+        };
+        assert!(Arc::ptr_eq(binary.evidence.as_ref().unwrap(), &evidence));
+        binary.node_index
+    };
+    let scalar_binary_at = |node: &RuntimeNode| {
+        let RuntimeOp::ScalarOf { input, .. } = &node.op else {
+            panic!("expected scalar() parameter");
+        };
+        binary_at(input)
+    };
+    assert!(Arc::ptr_eq(root.evidence.as_ref().unwrap(), &evidence));
+    assert_eq!(root.node_index, 0);
+    assert_eq!(binary_at(topk_input), 1);
+    assert_eq!(scalar_binary_at(topk_parameter), 2);
+    assert_eq!(binary_at(histogram_input), 3);
+    assert_eq!(scalar_binary_at(&histogram_parameters[0]), 4);
+    assert_eq!(scalar_binary_at(&histogram_parameters[1]), 5);
+}
+
 /// A source of evaluated chunks over `count` float fields.
 fn evaluated_input_of(count: usize, grid: Arc<EvalGrid>) -> NativeNode {
     let output = NativeType::Samples(Arc::new(SeriesSchema {
@@ -10494,6 +10616,602 @@ fn topk_ranks_whole_series_at_each_point() {
     assert!(chunks.iter().all(|chunk| chunk.is_last));
     assert_eq!(chunks[0].series.metric.name(), Some("m"));
     assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn parameterized_topk_varies_by_grid_point_and_handles_invalid_k() {
+    let grid = grid(1_000, 2_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let output = input.output.clone();
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: {
+                let t = eval_time(None, Arc::clone(&grid));
+                let t_squared = scalar_binary(t.clone(), t.clone(), binary_matching(BinaryOp::Mul));
+                let quadratic = scalar_binary(
+                    t_squared,
+                    scalar(-0.625, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Mul),
+                );
+                let linear = scalar_binary(
+                    t,
+                    scalar(3.5, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Mul),
+                );
+                Box::new(scalar_binary(
+                    scalar_binary(quadratic, linear, binary_matching(BinaryOp::Add)),
+                    scalar(-1.875, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Add),
+                ))
+            },
+        },
+        output,
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    for (index, value) in (1..=5).enumerate() {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("m", &format!("{index}")),
+                    0,
+                    vec![Some(value as f64), Some(value as f64), Some(value as f64)],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|c| c.series.time.row_of(0).is_some())
+            .count(),
+        1
+    );
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|c| c.series.time.row_of(1).is_some())
+            .count(),
+        3
+    );
+    let mut counts = [0usize; 3];
+    for chunk in &chunks {
+        for (point, _) in chunk.series.time.positions() {
+            counts[point] += 1;
+        }
+    }
+    assert_eq!(counts, [1, 3, 0]);
+}
+
+#[test]
+fn parameterized_histogram_rejects_duplicate_labelsets() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+            parameters: vec![scalar(0.5, Arc::clone(&grid))],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    for host in [None, Some("")] {
+        let mut labels = vec![Label {
+            name: "le".into(),
+            value: "2".into(),
+        }];
+        if let Some(host) = host {
+            labels.push(Label {
+                name: "host".into(),
+                value: host.into(),
+            });
+        }
+        let metric = SeriesLabels::try_new(Some("m".into()), labels).unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0), Some(2.0)], true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("same labelset"), "{error}");
+}
+
+#[test]
+fn parameterized_histogram_quantile_uses_each_grid_point_parameter() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
+            parameters: vec![scalar_binary(
+                scalar_binary(
+                    eval_time(None, Arc::clone(&grid)),
+                    scalar(0.4, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Mul),
+                ),
+                scalar(0.5, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Add),
+            )],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    for (le, counts) in [
+        ("1", vec![Some(1.0), Some(1.0)]),
+        ("2", vec![Some(9.0), Some(9.0)]),
+        ("+Inf", vec![Some(10.0), Some(10.0)]),
+    ] {
+        let metric = SeriesLabels::try_new(
+            Some("m".into()),
+            vec![Label {
+                name: "le".into(),
+                value: le.into(),
+            }],
+        )
+        .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, counts, true),
+            )
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    // The buckets are `le=1 → 1`, `le=2 → 9` and `+Inf → 10`, so the population is 10 and each
+    // answer is a value, not the phi that produced it:
+    //   phi = 0.5: rank 5 lies above the `le=1` bucket and interpolates inside `(1, 2]`:
+    //     1 + (5 - 1) / (9 - 1) * (2 - 1) = 1.5
+    //   phi = 0.9: rank 9 is the top of the `le=2` bucket: 1 + (9 - 1) / 8 = 2.0
+    assert_eq!(decided(&chunks), vec![(0, Some(1.5)), (1, Some(2.0))]);
+}
+
+/// A literal argument of a parameterized histogram call is materialized from its bound value: a
+/// constant node produces no chunk, so a consumer that pulls it finds nothing to read.
+///
+/// `histogram_fraction(0, <dynamic>, m)` is the statement that reported `histogram parameter
+/// produced no scalar` before the constant was read off its binding. The same statement with the
+/// literal `0` written as an expression that evaluates to zero answers the same rows, so this
+/// compares the two rather than a hand-computed fraction: the literal is honoured, not skipped.
+#[test]
+fn parameterized_histogram_reads_its_literal_parameter_without_a_chunk() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let fraction = |lower: NativeNode| NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(evaluated_input(Arc::clone(&grid))),
+            op: BoundVectorOp::Histogram(HistogramFunction::Fraction {
+                lower: 0.0,
+                upper: 0.0,
+            }),
+            parameters: vec![
+                lower,
+                scalar_binary(
+                    eval_time(None, Arc::clone(&grid)),
+                    scalar(1.0 / 150.0, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Mul),
+                ),
+            ],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    // Zero written as data rather than as a literal, so it hands a chunk over.
+    let zero_from_time = scalar_binary(
+        eval_time(None, Arc::clone(&grid)),
+        scalar(0.0, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Mul),
+    );
+    let run_fraction = |root: NativeNode| {
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool());
+        for (le, counts) in [
+            ("1", vec![Some(1.0), Some(1.0)]),
+            ("2", vec![Some(3.0), Some(3.0)]),
+            ("+Inf", vec![Some(4.0), Some(4.0)]),
+        ] {
+            let metric = SeriesLabels::try_new(
+                Some("m".into()),
+                vec![Label {
+                    name: "le".into(),
+                    value: le.into(),
+                }],
+            )
+            .unwrap();
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(&schema, metric, 0, counts, true),
+                )
+                .unwrap();
+        }
+        decided(&run(&mut execution))
+    };
+    let literal = run_fraction(fraction(scalar(0.0, Arc::clone(&grid))));
+    let dynamic = run_fraction(fraction(zero_from_time));
+    assert_eq!(literal.len(), 2, "one row per grid point: {literal:?}");
+    assert_eq!(
+        literal, dynamic,
+        "a literal parameter reads as its binding does"
+    );
+}
+
+/// The same buckets with a constant `phi` answer the same value at every point, so the two values
+/// the parameterized run above reports are the parameter read per point rather than once.
+#[test]
+fn constant_histogram_quantile_answers_every_point_with_its_one_phi() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    for (le, counts) in [
+        ("1", vec![Some(1.0), Some(1.0)]),
+        ("2", vec![Some(9.0), Some(9.0)]),
+        ("+Inf", vec![Some(10.0), Some(10.0)]),
+    ] {
+        let metric = SeriesLabels::try_new(
+            Some("m".into()),
+            vec![Label {
+                name: "le".into(),
+                value: le.into(),
+            }],
+        )
+        .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, counts, true),
+            )
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(decided(&chunks), vec![(0, Some(1.5)), (1, Some(1.5))]);
+}
+
+#[test]
+fn parameterized_topk_rejects_nan_and_overflow_parameters() {
+    for (grid, parameter) in [
+        {
+            let grid = grid(0, 1_000, 1);
+            let time = eval_time(None, Arc::clone(&grid));
+            let zero = scalar_binary(time.clone(), time, binary_matching(BinaryOp::Sub));
+            let nan = scalar_binary(zero.clone(), zero, binary_matching(BinaryOp::Div));
+            (grid, nan)
+        },
+        {
+            let grid = grid(1_000, 1_000, 1);
+            let huge = scalar_binary(
+                eval_time(None, Arc::clone(&grid)),
+                scalar(1e30, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Mul),
+            );
+            (grid, huge)
+        },
+    ] {
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let input = evaluated_input(Arc::clone(&grid));
+        let root = NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(input.clone()),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(parameter),
+            },
+            output: input.output,
+        };
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool());
+        for index in 0..5 {
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(
+                        &schema,
+                        named_metric("m", &index.to_string()),
+                        0,
+                        vec![Some(index as f64)],
+                        true,
+                    ),
+                )
+                .unwrap();
+        }
+        execution.end_of_input().unwrap();
+        let error = execution.next_chunk().unwrap_err();
+        assert!(
+            error.to_string().contains("NaN") || error.to_string().contains("overflows int64"),
+            "{error}"
+        );
+    }
+}
+
+/// The full parameter grid is validated before selecting any point, including a negative k whose
+/// underflow would otherwise be hidden by a later valid value.
+#[test]
+fn parameterized_topk_validates_parameters_even_when_input_is_empty() {
+    for (grid, parameter, error) in [
+        {
+            let grid = grid(0, 1_000, 1);
+            let time = eval_time(None, Arc::clone(&grid));
+            let zero = scalar_binary(time.clone(), time, binary_matching(BinaryOp::Sub));
+            let nan = scalar_binary(zero.clone(), zero, binary_matching(BinaryOp::Div));
+            (grid, nan, true)
+        },
+        {
+            let grid = grid(0, 1_000, 1);
+            let huge = scalar_binary(
+                eval_time(None, Arc::clone(&grid)),
+                scalar(1e30, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Add),
+            );
+            (grid, huge, true)
+        },
+        {
+            let grid = grid(0, 1_000, 1);
+            let zero = scalar_binary(
+                eval_time(None, Arc::clone(&grid)),
+                eval_time(None, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Sub),
+            );
+            (grid, zero, false)
+        },
+    ] {
+        let input = evaluated_input(Arc::clone(&grid));
+        let root = NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(input.clone()),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(parameter),
+            },
+            output: input.output,
+        };
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool());
+        execution.end_of_input().unwrap();
+        let result = execution.next_chunk();
+        if error {
+            let err = result.unwrap_err();
+            assert!(
+                err.to_string().contains("NaN") || err.to_string().contains("overflows int64"),
+                "{err}"
+            );
+        } else {
+            assert!(result.unwrap().is_none());
+        }
+    }
+}
+
+#[test]
+fn parameterized_topk_rejects_underflow_across_grid() {
+    let grid = grid(1_000, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let parameter = scalar_binary(
+        scalar_binary(
+            scalar_binary(
+                eval_time(None, Arc::clone(&grid)),
+                scalar(1e19, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Mul),
+            ),
+            scalar(-2e19, Arc::clone(&grid)),
+            binary_matching(BinaryOp::Add),
+        ),
+        scalar(2.0, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input.clone()),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(parameter),
+        },
+        output: input.output,
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    let metric = named_metric("x", "a");
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric, 0, vec![Some(2.0), Some(2.0)], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("underflows int64"), "{error}");
+}
+
+#[test]
+fn scalar_of_reads_one_series_value_at_each_point() {
+    let grid = grid(0, 1_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "a"),
+                0,
+                vec![Some(1.0), Some(2.0), Some(3.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(1.0)), (1, Some(2.0)), (2, Some(3.0))]
+    );
+}
+
+#[test]
+fn scalar_of_ignores_histogram_when_one_float_is_present() {
+    let grid = grid(0, 1_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("float", "float"),
+                0,
+                vec![Some(7.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = Arc::new(builder.finish().unwrap());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histogram_chunk_of(
+                &schema,
+                named_metric("histogram", "histogram"),
+                0,
+                vec![Some(index)],
+                &table,
+                true,
+            ),
+        )
+        .unwrap();
+    assert_eq!(decided(&run(&mut execution)), vec![(0, Some(7.0))]);
+}
+
+#[test]
+fn scalar_of_reads_one_value_per_point_from_the_whole_vector() {
+    let grid = grid(0, 1_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(input)).unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "a"),
+                0,
+                vec![Some(1.0), Some(2.0), None, Some(4.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("b", "b"),
+                0,
+                vec![None, Some(3.0), None, None],
+                true,
+            ),
+        )
+        .unwrap();
+    let chunks = run(&mut execution);
+    let values = decided(&chunks);
+    assert_eq!(values[0], (0, Some(1.0)));
+    assert_eq!(values[3], (3, Some(4.0)));
+    assert!(values[1].1.is_some_and(f64::is_nan));
+    assert!(values[2].1.is_some_and(f64::is_nan));
+}
+
+#[test]
+fn scalar_of_reads_the_only_present_series_at_each_point() {
+    let grid = grid(0, 1_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "a"),
+                0,
+                vec![Some(1.0), None, None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("b", "b"),
+                0,
+                vec![None, Some(2.0), None],
+                true,
+            ),
+        )
+        .unwrap();
+    let values = decided(&run(&mut execution));
+    assert_eq!(values[0], (0, Some(1.0)));
+    assert_eq!(values[1], (1, Some(2.0)));
+    assert!(values[2].1.is_some_and(f64::is_nan));
+}
+
+#[test]
+fn scalar_of_evaluates_above_a_window() {
+    let grid = grid(0, 1_000, 2);
+    let input = instant(input(), 5_000, 0, Arc::clone(&grid));
+    let window = window_with(
+        input,
+        RangeFunction::SumOverTime,
+        2_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    );
+    let tree = NativeTree::try_new(scalar_of(window)).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[-1_000, 0, 1_000], &[1.0, 2.0, 3.0], true),
+        )
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(2.0)), (1, Some(5.0))]
+    );
 }
 
 /// `limitk` takes series in the order its input hands them over, not in label order, and the two

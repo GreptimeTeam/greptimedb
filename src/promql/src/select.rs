@@ -70,13 +70,22 @@ pub fn topk(
     schema: &SeriesSchema,
     series: &[Series],
 ) -> Result<Vec<Series>> {
+    let k = k_param(k, series.len())?;
+    topk_at(|_| Ok(k), top, grouping, schema, series)
+}
+
+/// `topk`/`bottomk` with `k` evaluated independently at each grid point.
+pub fn topk_at(
+    k_at: impl Fn(usize) -> Result<Option<usize>>,
+    top: bool,
+    grouping: &Grouping,
+    schema: &SeriesSchema,
+    series: &[Series],
+) -> Result<Vec<Series>> {
     single_field(schema, "topk/bottomk")?;
     // Validates the series against the schema and its grid; the walk below visits the carried
     // positions, not the whole grid.
     grid_points(schema, series)?;
-    let Some(k) = k_param(k, series.len())? else {
-        return Ok(Vec::new());
-    };
     let mut order: Vec<usize> = (0..series.len()).collect();
     order.sort_by(|&a, &b| compare_labels(&series[a].metric, &series[b].metric));
     let mut groups: HashMap<GroupKey, Vec<usize>> = HashMap::new();
@@ -112,6 +121,9 @@ pub fn topk(
             }
             // Members are in label order, so a stable sort hands ties to the earlier label set.
             candidates.sort_by(|a, b| rank(a.2, b.2, top));
+            let Some(k) = k_at(point)? else {
+                continue;
+            };
             for &(member, row, _) in candidates.iter().take(k) {
                 selected[member].push((point, row));
             }
@@ -525,7 +537,7 @@ fn rank(a: f64, b: f64, top: bool) -> Ordering {
 /// The `k` of `topk`, `bottomk` and `limitk` as Prometheus reads it: nothing for `k` below 1, an
 /// error for NaN or a value out of int64, otherwise `k` truncated and capped at the number of
 /// input series.
-fn k_param(k: f64, series: usize) -> Result<Option<usize>> {
+pub(crate) fn k_param(k: f64, series: usize) -> Result<Option<usize>> {
     if k < 1.0 {
         return Ok(None);
     }
@@ -539,6 +551,39 @@ fn k_param(k: f64, series: usize) -> Result<Option<usize>> {
         )));
     }
     Ok(Some(k.trunc().min(series as f64) as usize))
+}
+
+/// Validates the complete parameter series for Prometheus topk/bottomk/limitk semantics.
+pub(crate) fn validate_topk_parameters(values: &[Option<f64>]) -> Result<()> {
+    let values: Vec<_> = values.iter().flatten().copied().collect();
+    let Some(max) = values.iter().copied().reduce(|a, b| {
+        if a.is_nan() || b.is_nan() {
+            f64::NAN
+        } else {
+            a.max(b)
+        }
+    }) else {
+        return Ok(());
+    };
+    if max < 1.0 {
+        return Ok(());
+    }
+    if values.iter().any(|value| value.is_nan()) {
+        return Err(DataFusionError::Execution("Parameter value is NaN".into()));
+    }
+    let min = values.iter().copied().reduce(f64::min).unwrap();
+    if min <= -9_223_372_036_854_775_808.0 {
+        return Err(DataFusionError::Execution(format!(
+            "Scalar value {min} underflows int64"
+        )));
+    }
+    let max = values.iter().copied().reduce(f64::max).unwrap();
+    if max >= 9_223_372_036_854_774_784.0 {
+        return Err(DataFusionError::Execution(format!(
+            "Scalar value {max} overflows int64"
+        )));
+    }
+    Ok(())
 }
 
 /// Label pairs identifying a group; empty values are absent, as in Prometheus.

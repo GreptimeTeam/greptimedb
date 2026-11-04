@@ -1680,7 +1680,22 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input } => collect(input, inputs),
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => collect(input, inputs),
+            NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                collect(input, inputs);
+                for parameter in parameters {
+                    collect(parameter, inputs);
+                }
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                collect(input, inputs);
+                collect(parameter, inputs);
+            }
             NativeExpr::ParameterizedMap {
                 input, parameters, ..
             } => {
@@ -2071,6 +2086,7 @@ fn native_tree_has_vector_binary(node: &NativeNode) -> bool {
                 || native_tree_has_vector_binary(right)
         }
         NativeExpr::VectorOf { input }
+        | NativeExpr::ScalarOf { input }
         | NativeExpr::Instant { input, .. }
         | NativeExpr::Merge { input }
         | NativeExpr::Window { input, .. }
@@ -2078,7 +2094,13 @@ fn native_tree_has_vector_binary(node: &NativeNode) -> bool {
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
         | NativeExpr::Vector { input, .. } => native_tree_has_vector_binary(input),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => native_tree_has_vector_binary(input) || native_tree_has_vector_binary(parameter),
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        }
+        | NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => {
             native_tree_has_vector_binary(input)

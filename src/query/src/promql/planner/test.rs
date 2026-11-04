@@ -3490,6 +3490,21 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                     sources(left, out);
                     sources(right, out);
                 }
+                NativeExpr::ParameterizedTopK {
+                    input, parameter, ..
+                } => {
+                    sources(input, out);
+                    sources(parameter, out);
+                }
+                NativeExpr::ParameterizedHistogram {
+                    input, parameters, ..
+                } => {
+                    sources(input, out);
+                    for parameter in parameters {
+                        sources(parameter, out);
+                    }
+                }
+                NativeExpr::ScalarOf { input } => sources(input, out),
                 NativeExpr::Scalar(_)
                 | NativeExpr::EvalTime { .. }
                 | NativeExpr::VectorOf { .. }
@@ -12946,5 +12961,57 @@ async fn eval_times_before_epoch() {
     // represent this SystemTime.
     if let Some(too_early) = UNIX_EPOCH.checked_sub(Duration::from_secs(10_000_000_000_000_000)) {
         assert!(plan(too_early, too_early).await.is_err());
+    }
+}
+
+/// A grouping by the metric name inside `scalar()` cannot reach the output: the scalar clears the
+/// labels, so the walk must stop there instead of refusing the statement.
+///
+/// Refusing it is not a quiet fallback - the existing planner takes both operands as vector inputs
+/// and reports `MultipleVector`, so a valid query fails outright.
+#[tokio::test]
+async fn native_fused_scalar_clears_metric_name_grouping() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "a".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "b".to_string()),
+    ];
+    let query = "clamp_min(b, scalar(sum by (__name__) (a)))";
+    let provider = build_test_table_provider_with_tsid(&tables, 2, 1).await;
+    let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+    assert_eq!(fused.inputs().len(), 2, "{query}");
+}
+
+/// Count-values output includes its generated label after grouping across logical tables.
+#[tokio::test]
+async fn native_fused_metric_engine_count_values_output_labels() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "a".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "b".to_string()),
+    ];
+    for (query, expected_tags) in [
+        (r#"count_values("sample", a or b)"#, vec!["sample"]),
+        (
+            r#"count_values("sample", a or b) by (tag_0)"#,
+            vec!["sample", "tag_0"],
+        ),
+        (
+            r#"count_values("sample", a or b) without (sample)"#,
+            vec!["tag_0", "tag_1"],
+        ),
+    ] {
+        let provider = build_test_table_provider_with_tsid(&tables, 2, 1).await;
+        let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        assert_eq!(fused.inputs().len(), 2, "{query}");
+        let mut expected = expected_tags
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        expected.push("timestamp".to_string());
+        // The value column keeps the compiled tree's field name rather than the expression text.
+        expected.push("field_0".to_string());
+        expected.sort();
+        assert_eq!(sorted_column_names(&plan), expected, "{query}");
     }
 }

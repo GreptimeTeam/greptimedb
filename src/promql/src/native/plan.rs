@@ -488,6 +488,14 @@ impl NativeNode {
                 let left_kind = kind_of(left)?;
                 (left_kind == kind_of(right)?).then_some(left_kind)
             }
+            // `scalar()` answers one float per grid point, whatever its input holds.
+            NativeExpr::ScalarOf { .. } => Some(FieldKind::Float),
+            // A ranking hands on the series it selected, so the field keeps the kind it read; its
+            // parameter is a scalar, which carries no samples of its own.
+            NativeExpr::ParameterizedTopK { input, .. } => kind_of(input),
+            // `histogram_quantile` and `histogram_fraction` reduce a histogram to one float per
+            // sample whatever their arguments are, constant or per point.
+            NativeExpr::ParameterizedHistogram { .. } => Some(FieldKind::Float),
             // An aggregate folds float state only: the admission gate keeps a histogram from
             // entering one, so whatever a histogram statement aggregates answers floats. Naming it
             // here is what lets `sum(count_over_time(h[5m]))` - a float built from histograms -
@@ -800,6 +808,9 @@ pub enum NativeExpr {
     /// the evaluation timestamp truncated to whole seconds, which the float `time()` does not carry
     /// exactly for every timestamp.
     EvalTime { date: Option<DateFunction> },
+    /// `scalar(v)`: at each grid point, the sole sample value or NaN when the vector has zero or
+    /// more than one sample.
+    ScalarOf { input: Box<NativeNode> },
     /// `vector(s)`: the scalar as one series without labels.
     VectorOf { input: Box<NativeNode> },
     /// An instant selection over its input.
@@ -824,6 +835,21 @@ pub enum NativeExpr {
     ParameterizedMap {
         input: Box<NativeNode>,
         op: ParameterizedOp,
+        parameters: Vec<NativeNode>,
+    },
+    /// `topk`/`bottomk` whose `k` is evaluated at every grid point instead of bound as a constant.
+    ///
+    /// `op` is still the `TopK` the constant path binds; its `k` is unused here, because the value
+    /// this node selects with is the parameter's, read once per point.
+    ParameterizedTopK {
+        input: Box<NativeNode>,
+        op: BoundVectorOp,
+        parameter: Box<NativeNode>,
+    },
+    /// A classic histogram vector operation whose arguments vary on the output grid.
+    ParameterizedHistogram {
+        input: Box<NativeNode>,
+        op: BoundVectorOp,
         parameters: Vec<NativeNode>,
     },
     /// The timestamp of an evaluated input, in seconds.
@@ -1020,6 +1046,9 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
         | NativeExpr::Map { input, .. }
         | NativeExpr::ParameterizedMap { input, .. }
         | NativeExpr::Timestamp { input } => reads_across_series(input),
+        // `scalar()` needs the whole vector: which series carries the one value at a point decides
+        // the answer, so the node reads across series.
+        NativeExpr::ScalarOf { .. } => true,
         NativeExpr::Binary { left, right, .. } => {
             let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
             if scalar(left) || scalar(right) {
@@ -1029,6 +1058,9 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
                 true
             }
         }
+        // A parameterized operation reads its parameter too, and a `k` that changes per point
+        // decides which series survive.
+        NativeExpr::ParameterizedTopK { .. } | NativeExpr::ParameterizedHistogram { .. } => true,
         NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
@@ -1128,6 +1160,7 @@ fn ensure_native_node_depth(root: &NativeNode) -> Result<()> {
         }
         match &node.expr {
             NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input }
             | NativeExpr::Instant { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Window { input, .. }
@@ -1135,7 +1168,16 @@ fn ensure_native_node_depth(root: &NativeNode) -> Result<()> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. } => visit(input, depth + 1),
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                visit(input, depth + 1)?;
+                visit(parameter, depth + 1)
+            }
             NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            }
+            | NativeExpr::ParameterizedHistogram {
                 input, parameters, ..
             } => {
                 visit(input, depth + 1)?;
@@ -1174,6 +1216,18 @@ impl NativeNode {
             NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
                 if !matches!(self.output, NativeType::Scalar(_)) {
                     return Err(invalid("a scalar node does not produce a scalar"));
+                }
+            }
+            NativeExpr::ScalarOf { input } => {
+                input.validate()?;
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid("scalar() consumes an evaluated vector"));
+                };
+                let NativeType::Scalar(output_grid) = &self.output else {
+                    return Err(invalid("scalar() does not produce a scalar"));
+                };
+                if output_grid.spec() != input_grid.spec() {
+                    return Err(invalid("scalar() output is not on its input's grid"));
                 }
             }
             NativeExpr::VectorOf { input } => {
@@ -1312,6 +1366,72 @@ impl NativeNode {
                 ensure_samples(&self.output, "a parameterized map")?;
                 ensure_same_fields(&input.output, &self.output, "a parameterized map")?;
                 ensure_grid(&self.output, input_grid, "a parameterized map")?;
+            }
+            NativeExpr::ParameterizedTopK {
+                input,
+                op,
+                parameter,
+            } => {
+                input.validate()?;
+                parameter.validate()?;
+                if !matches!(op, BoundVectorOp::TopK { .. }) {
+                    return Err(invalid("a parameterized topk operation is not TopK"));
+                }
+                let Some((_, output_grid)) = evaluated_vector(&self.output) else {
+                    return Err(invalid(
+                        "a parameterized topk does not produce an evaluated vector",
+                    ));
+                };
+                if !matches!(&parameter.output, NativeType::Scalar(grid) if grid.spec() == output_grid.spec())
+                {
+                    return Err(invalid(
+                        "a topk parameter is not a scalar on its output grid",
+                    ));
+                }
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid("a parameterized topk consumes a non-vector"));
+                };
+                ensure_same_fields(&input.output, &self.output, "a vector operation")?;
+                ensure_grid(&input.output, input_grid, "a vector operation")?;
+                ensure_grid(&self.output, input_grid, "a vector operation")?;
+            }
+            NativeExpr::ParameterizedHistogram {
+                input,
+                op,
+                parameters,
+            } => {
+                input.validate()?;
+                if !matches!(op, BoundVectorOp::Histogram(_)) {
+                    return Err(invalid(
+                        "a parameterized histogram operation is not Histogram",
+                    ));
+                }
+                let expected = match op {
+                    BoundVectorOp::Histogram(HistogramFunction::Quantile(_)) => 1,
+                    BoundVectorOp::Histogram(HistogramFunction::Fraction { .. }) => 2,
+                    _ => {
+                        return Err(invalid(
+                            "parameterized histogram operation is not Histogram",
+                        ));
+                    }
+                };
+                if parameters.len() != expected {
+                    return Err(invalid("parameterized histogram has the wrong arity"));
+                }
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid("a parameterized histogram consumes a non-vector"));
+                };
+                for parameter in parameters {
+                    parameter.validate()?;
+                    if !matches!(&parameter.output, NativeType::Scalar(grid) if grid.spec() == input_grid.spec())
+                    {
+                        return Err(invalid(
+                            "a histogram parameter is not a scalar on its input grid",
+                        ));
+                    }
+                }
+                ensure_same_fields(&input.output, &self.output, "a vector operation")?;
+                ensure_grid(&self.output, input_grid, "a vector operation")?;
             }
             NativeExpr::Vector { input, .. } => {
                 input.validate()?;

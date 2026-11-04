@@ -405,6 +405,67 @@ fn evaluated_of(schema: &SeriesSchema, grid: &Arc<EvalGrid>) -> NativeType {
     }))
 }
 
+#[test]
+fn duplicate_evidence_detects_binaries_in_dynamic_nodes() {
+    use crate::histogram_eval::HistogramFunction;
+    use crate::native::plan::BoundVectorOp;
+
+    let grid = grid();
+    let binary = binary_tree(raw_schema(), raw_schema()).root().clone();
+    let scalar_of = |input| NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(input),
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let no_binary = instant_of(0, &grid);
+    let literal = scalar_tree(Arc::clone(&grid), 1.0).root().clone();
+    let topk = |input: NativeNode, parameter| NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(parameter),
+        },
+    };
+    let histogram = |input: NativeNode, parameters| NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(HistogramFunction::Fraction {
+                lower: 0.0,
+                upper: 0.0,
+            }),
+            parameters,
+        },
+    };
+    let has_binary = super::native_tree_has_vector_binary;
+    assert!(has_binary(&scalar_of(binary.clone())));
+    assert!(!has_binary(&scalar_of(no_binary.clone())));
+    assert!(has_binary(&topk(binary.clone(), literal.clone())));
+    assert!(has_binary(&topk(
+        no_binary.clone(),
+        scalar_of(binary.clone())
+    )));
+    assert!(!has_binary(&topk(no_binary.clone(), literal.clone())));
+    assert!(has_binary(&histogram(
+        binary.clone(),
+        vec![literal.clone(), literal.clone()]
+    )));
+    assert!(has_binary(&histogram(
+        no_binary.clone(),
+        vec![literal.clone(), scalar_of(binary)]
+    )));
+    assert!(!has_binary(&histogram(
+        no_binary,
+        vec![literal.clone(), literal]
+    )));
+}
+
 /// `tree` with the orderings its input nodes declare replaced, in the order the nodes are reached.
 ///
 /// The fixtures here declare `Contiguous`, which is what the plans below them present, so a test
@@ -428,7 +489,8 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input } => {
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => {
                 **input = rewrite(input, orderings, seen);
             }
             NativeExpr::Binary { left, right, .. }
@@ -440,6 +502,20 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             } => {
                 **left = rewrite(left, orderings, seen);
                 **right = rewrite(right, orderings, seen);
+            }
+            NativeExpr::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                **input = rewrite(input, orderings, seen);
+                for parameter in parameters {
+                    *parameter = rewrite(parameter, orderings, seen);
+                }
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                **input = rewrite(input, orderings, seen);
+                **parameter = rewrite(parameter, orderings, seen);
             }
             NativeExpr::ParameterizedMap {
                 input, parameters, ..

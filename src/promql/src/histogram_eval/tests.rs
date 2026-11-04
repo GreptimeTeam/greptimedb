@@ -24,8 +24,9 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 
 use super::float_histogram::{AddOutcome, FloatHistogram};
 use super::{
-    HistogramAggregate, HistogramFunction, NativeHistogramFunction, aggregate_histograms,
-    evaluate_histograms, histogram_quantiles, histogram_string, map_native_histogram,
+    HistogramAggregate, HistogramFunction, HistogramParameters, NativeHistogramFunction,
+    aggregate_histograms, evaluate_histograms, evaluate_histograms_with_annotations,
+    histogram_quantiles, histogram_string, map_native_histogram,
 };
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
@@ -99,6 +100,110 @@ fn assert_outcome(
             true
         }
         (actual, expected) => panic!("case {:?}: {actual:?} is not {expected:?}", case.spec),
+    }
+}
+
+#[test]
+fn classic_histograms_accept_per_point_parameters() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 2).unwrap()).unwrap());
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let mut input = Vec::new();
+    for (le, counts) in [
+        ("1", [5.0_f64, 5.0]),
+        ("2", [9.0_f64, 9.0]),
+        ("+Inf", [10.0_f64, 10.0]),
+    ] {
+        let labels = Labels::from([
+            ("le".to_string(), le.to_string()),
+            ("__name__".to_string(), "bucket".to_string()),
+        ]);
+        input.push(
+            mixed_series(
+                &schema,
+                &labels,
+                &BTreeMap::from([(0, counts[0].to_bits()), (1, counts[1].to_bits())]),
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+    }
+    let q = [Some(0.5), Some(0.9)];
+    let result = evaluate_histograms_with_annotations(
+        HistogramFunction::Quantile(0.0),
+        &schema,
+        &input,
+        Some(HistogramParameters {
+            quantile: Some(&q),
+            lower: None,
+            upper: None,
+        }),
+        None,
+    )
+    .unwrap();
+    let points = points_by_labels(result);
+    let actual = points.values().next().unwrap();
+    let at = |q| {
+        let r = evaluate_histograms(HistogramFunction::Quantile(q), &schema, &input).unwrap();
+        points_by_labels(r).values().next().unwrap().clone()
+    };
+    assert_eq!(actual[&0], at(0.5)[&0]);
+    assert_eq!(actual[&1], at(0.9)[&1]);
+    assert_ne!(actual[&0], actual[&1]);
+    for q in [f64::NAN, -1.0, 2.0] {
+        let dynamic = evaluate_histograms_with_annotations(
+            HistogramFunction::Quantile(0.0),
+            &schema,
+            &input,
+            Some(HistogramParameters {
+                quantile: Some(&[Some(q), Some(q)]),
+                lower: None,
+                upper: None,
+            }),
+            None,
+        )
+        .unwrap();
+        let constant =
+            evaluate_histograms(HistogramFunction::Quantile(q), &schema, &input).unwrap();
+        assert_eq!(points_by_labels(dynamic), points_by_labels(constant));
+    }
+    let lower = [Some(0.5), Some(1.5)];
+    let upper = [Some(1.5), Some(2.5)];
+    let dynamic = evaluate_histograms_with_annotations(
+        HistogramFunction::Fraction {
+            lower: 0.0,
+            upper: 1.0,
+        },
+        &schema,
+        &input,
+        Some(HistogramParameters {
+            quantile: None,
+            lower: Some(&lower),
+            upper: Some(&upper),
+        }),
+        None,
+    )
+    .unwrap();
+    let points = points_by_labels(dynamic);
+    for i in 0..2 {
+        let constant = evaluate_histograms(
+            HistogramFunction::Fraction {
+                lower: lower[i].unwrap(),
+                upper: upper[i].unwrap(),
+            },
+            &schema,
+            &input,
+        )
+        .unwrap();
+        assert_eq!(
+            points.values().next().unwrap()[&i],
+            points_by_labels(constant).values().next().unwrap()[&i]
+        );
     }
 }
 

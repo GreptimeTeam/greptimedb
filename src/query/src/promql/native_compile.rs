@@ -463,7 +463,8 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::VectorOf { input } => check(input, inputs, next),
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => check(input, inputs, next),
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
             | NativeExpr::Info {
@@ -472,6 +473,17 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
                 ..
             } => check(left, inputs, next) && check(right, inputs, next),
             NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                check(input, inputs, next)
+                    && parameters
+                        .iter()
+                        .all(|parameter| check(parameter, inputs, next))
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => check(input, inputs, next) && check(parameter, inputs, next),
+            NativeExpr::ParameterizedHistogram {
                 input, parameters, ..
             } => {
                 check(input, inputs, next)
@@ -926,6 +938,23 @@ fn vector_aggregate(context: &Context, aggregate: &AggregateExpr) -> Result<Nati
         ))
     })?;
     let group = grouping(modifier.as_ref());
+    if matches!(op.id(), token::T_TOPK | token::T_BOTTOMK) && constant_value(param).is_none() {
+        let input = compile_expr(context, expr)?;
+        let output = input.output.clone();
+        let parameter = compile_expr(context, param)?;
+        return Ok(NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(input),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: op.id() == token::T_TOPK,
+                    group,
+                },
+                parameter: Box::new(parameter),
+            },
+            output,
+        });
+    }
     let bound = match op.id() {
         token::T_TOPK | token::T_BOTTOMK => BoundVectorOp::TopK {
             k: constant_argument(&name, param, 0)?,
@@ -1287,6 +1316,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     if let Some(signature) = range_signature(func.name) {
         return window_call(context, func.name, signature, &args.args);
     }
+    if let Some(node) = parameterized_histogram_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
     if let Some((op, vector)) = vector_op(func.name, &args.args)? {
         return vector_call(context, func.name, op, vector);
     }
@@ -1342,6 +1374,24 @@ fn scalar_call(
             &grid(),
             &context.value_field,
         ),
+        ("scalar", [vector]) => {
+            if vector.value_type() != ValueType::Vector {
+                return Err(not_implemented("scalar() requires a vector argument"));
+            }
+            let input = compile_expr(context, vector)?;
+            let NativeType::Samples(schema) = &input.output else {
+                return Err(not_implemented("scalar() requires an evaluated vector"));
+            };
+            let Some(input_grid) = schema.eval_grid.clone() else {
+                return Err(not_implemented("scalar() requires an evaluated vector"));
+            };
+            NativeNode {
+                expr: NativeExpr::ScalarOf {
+                    input: Box::new(input),
+                },
+                output: NativeType::Scalar(input_grid),
+            }
+        }
         (name, []) => match math_signature(name) {
             Some(MathSignature::Unary(MathOp::Date(date))) => {
                 vector_of(eval_time(Some(date)), &grid(), &context.value_field)
@@ -1524,6 +1574,61 @@ fn vector_call(
         },
         output,
     })
+}
+
+/// Compiles a classic histogram call with at least one varying scalar argument.
+fn parameterized_histogram_call(
+    context: &Context,
+    name: &str,
+    arguments: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    if !matches!(name, "histogram_quantile" | "histogram_fraction") {
+        return Ok(None);
+    }
+    let Some((vector, args)) = arguments.split_last() else {
+        return Ok(None);
+    };
+    let expected = if name == "histogram_quantile" { 1 } else { 2 };
+    if args.len() != expected || args.iter().all(|arg| constant_value(arg).is_some()) {
+        return Ok(None);
+    }
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose vector argument is `{vector}` is not a vector"
+        )));
+    }
+    let function = if name == "histogram_quantile" {
+        HistogramFunction::Quantile(
+            args.first()
+                .and_then(|arg| constant_value(arg))
+                .unwrap_or(0.0),
+        )
+    } else {
+        HistogramFunction::Fraction {
+            lower: args
+                .first()
+                .and_then(|arg| constant_value(arg))
+                .unwrap_or(0.0),
+            upper: args
+                .get(1)
+                .and_then(|arg| constant_value(arg))
+                .unwrap_or(0.0),
+        }
+    };
+    let input = compile_expr(context, vector)?;
+    let output = input.output.clone();
+    let parameters = args
+        .iter()
+        .map(|arg| compile_expr(context, arg))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(function),
+            parameters,
+        },
+        output,
+    }))
 }
 
 /// The vector operation a sort, `absent` or a classic histogram function binds, and the vector it reads,

@@ -2712,6 +2712,24 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
                     .iter()
                     .any(|node| aggregate_reads_histogram(node, input_kind))
         }
+        // `scalar()` reads a whole vector and answers one value, and the two dynamic nodes read
+        // their parameters beside their input: an aggregate under any of them is still an
+        // aggregate this tree would run, so the walk descends into every child it has.
+        NativeExpr::ScalarOf { input } => aggregate_reads_histogram(input, input_kind),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => {
+            aggregate_reads_histogram(input, input_kind)
+                || aggregate_reads_histogram(parameter, input_kind)
+        }
+        NativeExpr::ParameterizedHistogram {
+            input, parameters, ..
+        } => {
+            aggregate_reads_histogram(input, input_kind)
+                || parameters
+                    .iter()
+                    .any(|node| aggregate_reads_histogram(node, input_kind))
+        }
         NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
             aggregate_reads_histogram(left, input_kind)
                 || aggregate_reads_histogram(right, input_kind)
