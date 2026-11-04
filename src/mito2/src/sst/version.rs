@@ -100,7 +100,7 @@ impl SstVersion {
                         }
                     } else {
                         // include case like old file have no index or index is outdated
-                        *f = FileHandle::new(file.clone(), file_purger.clone());
+                        *f = f.with_updated_index(file.clone());
                     }
                 })
                 .or_insert_with(|| {
@@ -350,6 +350,42 @@ mod tests {
     fn time_range_is_none_without_files() {
         let version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
         assert_eq!(version.time_range(), None);
+    }
+
+    #[rstest::rstest]
+    fn test_index_replacement_shares_retirement_with_old_readers(
+        #[values(false, true)] retire_before_update: bool,
+    ) {
+        let purger = new_noop_file_purger();
+        let meta = FileMeta {
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        version.add_files(purger.clone(), [meta.clone()].into_iter());
+        let old_snapshot = version.clone();
+        let old_reader = old_snapshot.levels()[0].files[&meta.file_id].clone();
+        let independent = FileHandle::new(meta.clone(), purger.clone());
+        if retire_before_update {
+            old_reader.mark_deleted();
+        }
+        let mut updated = meta.clone();
+        updated.index_version = 1;
+        updated
+            .available_indexes
+            .push(crate::sst::file::IndexType::InvertedIndex);
+        version.add_files(purger, [updated.clone()].into_iter());
+        let new_reader = version.levels()[0].files[&meta.file_id].clone();
+
+        assert_eq!(old_reader.meta_ref(), &meta);
+        assert_eq!(new_reader.meta_ref(), &updated);
+        assert_eq!(new_reader.is_deleted(), retire_before_update);
+        version.remove_files([updated].into_iter());
+        assert!(new_reader.is_deleted());
+        assert!(old_reader.is_deleted());
+        assert!(!independent.is_deleted());
+        drop(version);
+        assert!(old_snapshot.levels()[0].files[&meta.file_id].is_deleted());
     }
 
     #[test]

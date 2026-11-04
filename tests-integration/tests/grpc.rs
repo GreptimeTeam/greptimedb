@@ -15,6 +15,7 @@
 // Retain coverage of the legacy constructors, including TLS configuration.
 #![allow(deprecated)]
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use api::v1::alter_table_expr::Kind;
@@ -32,18 +33,23 @@ use api::v1::{
 };
 use auth::user_provider_from_option;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
+use catalog::process_manager::{ProcessManager, ProcessManagerRef};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
-use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, MITO_ENGINE};
+use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, METRICS_EXEMPLARS_TABLE, MITO_ENGINE};
 use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc::channel_manager::ClientTlsOption;
 use common_memory_manager::OnExhaustedPolicy;
+use common_meta::cluster::{FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus, Role};
 use common_meta::datanode::REGION_STATS_HISTORY_TABLE_NAME;
+use common_meta::peer::Peer;
+use common_meta::rpc::store::PutRequest;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_runtime::Runtime;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use common_test_util::find_workspace_path;
+use common_time::util;
 use datatypes::arrow::array::{
     Array, ArrayRef, Float64Array, Float64Builder, Int32Array, ListBuilder, StringArray,
     StructArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
@@ -52,6 +58,8 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::arrow::ipc::writer::StreamWriter;
 use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
+use meta_client::client::MetaClientBuilder;
+use meta_srv::mocks::{self, MockInfo};
 use otel_arrow_rust::otlp::metrics::MetricType as ArrowMetricType;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_client::ArrowMetricsServiceClient;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
@@ -60,8 +68,9 @@ use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::AggregationTemporality;
 use otel_arrow_rust::schema::consts as arrow_consts;
 use rstest_reuse::apply;
-use servers::grpc::GrpcServerConfig;
 use servers::grpc::builder::GrpcServerBuilder;
+use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
+use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::prometheus::{
     PromData, PromQueryResult, PromSampleValue, PromSeriesMatrix, PromSeriesVector,
     PrometheusJsonResponse, PrometheusResponse,
@@ -124,6 +133,7 @@ macro_rules! grpc_tests {
                 test_otel_arrow_auth,
                 test_otel_arrow_delta_histogram,
                 test_otel_arrow_exponential_histogram,
+                test_otel_arrow_exemplars_without_metric_engine,
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
@@ -536,6 +546,158 @@ pub async fn test_grpc_auth(store_type: StorageType) {
     assert!(re.is_ok());
 
     let _ = fe_grpc_server.shutdown().await;
+}
+
+async fn start_process_rpc_server(process_manager: Option<ProcessManagerRef>) -> GrpcServer {
+    let runtime: Runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("process-rpc-test")
+        .build()
+        .unwrap();
+    let mut builder = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime);
+    if let Some(process_manager) = process_manager {
+        builder = builder.frontend_grpc_handler(FrontendGrpcHandler::new(process_manager));
+    }
+    let mut server = builder.build();
+    server
+        .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+    server
+}
+
+async fn register_process_rpc_peer(mock: &MockInfo, addr: String) {
+    let node_info = NodeInfo {
+        peer: Peer { id: 1, addr },
+        last_activity_ts: util::current_time_millis(),
+        status: NodeStatus::Frontend(FrontendStatus::default()),
+        version: String::new(),
+        git_commit: String::new(),
+        start_time_ms: 0,
+        total_cpu_millicores: 0,
+        total_memory_bytes: 0,
+        cpu_usage_millicores: 0,
+        memory_usage_bytes: 0,
+        hostname: String::new(),
+        env_vars: Default::default(),
+        schedulable: None,
+    };
+    mock.in_memory
+        .as_ref()
+        .unwrap()
+        .put(PutRequest {
+            key: Vec::from(&NodeInfoKey {
+                role: Role::Frontend,
+                node_id: 1,
+            }),
+            value: node_info.try_into().unwrap(),
+            prev_kv: false,
+        })
+        .await
+        .unwrap();
+}
+
+async fn build_process_manager_with_remote_peer(
+    mock: &MockInfo,
+    remote_addr: String,
+) -> ProcessManagerRef {
+    register_process_rpc_peer(mock, remote_addr).await;
+    let mut meta_client = MetaClientBuilder::frontend_default_options()
+        .channel_manager(mock.channel_manager.clone())
+        .build();
+    meta_client.start(&[&mock.server_addr]).await.unwrap();
+    Arc::new(ProcessManager::new(
+        "local".to_string(),
+        Some(Arc::new(meta_client)),
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_all_processes_reports_unimplemented_remote_service() {
+    let mock = mocks::mock_with_memstore().await;
+    let server = start_process_rpc_server(None).await;
+    let remote_addr = server.bind_addr().unwrap().to_string();
+    let process_manager = build_process_manager_with_remote_peer(&mock, remote_addr).await;
+    let _local = process_manager.register_query(
+        "greptime".to_string(),
+        vec!["public".to_string()],
+        "local query".to_string(),
+        String::new(),
+        None,
+        None,
+    );
+
+    let result = process_manager.list_all_processes(Some("greptime")).await;
+    server.shutdown().await.unwrap();
+
+    assert!(
+        matches!(
+            &result,
+            Err(catalog::error::Error::InvokeFrontend {
+                source: common_frontend::error::Error::InvokeFrontend { error, .. },
+                ..
+            }) if error.code() == tonic::Code::Unimplemented
+        ),
+        "a missing remote management service must not return an incomplete list: {result:?}"
+    );
+    assert_eq!(
+        process_manager
+            .local_processes(Some("greptime"))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_all_processes_collects_remote_and_local_catalog() {
+    let mock = mocks::mock_with_memstore().await;
+    let remote_manager = Arc::new(ProcessManager::new("remote".to_string(), None));
+    let _selected = remote_manager.register_query(
+        "greptime".to_string(),
+        vec!["public".to_string()],
+        "selected remote query".to_string(),
+        String::new(),
+        None,
+        None,
+    );
+    let _other = remote_manager.register_query(
+        "other".to_string(),
+        vec!["public".to_string()],
+        "other remote query".to_string(),
+        String::new(),
+        None,
+        None,
+    );
+    let server = start_process_rpc_server(Some(remote_manager)).await;
+    let remote_addr = server.bind_addr().unwrap().to_string();
+    let process_manager = build_process_manager_with_remote_peer(&mock, remote_addr).await;
+    let _local = process_manager.register_query(
+        "greptime".to_string(),
+        vec!["public".to_string()],
+        "selected local query".to_string(),
+        String::new(),
+        None,
+        None,
+    );
+
+    let processes = process_manager
+        .list_all_processes(Some("greptime"))
+        .await
+        .unwrap();
+    server.shutdown().await.unwrap();
+
+    assert_eq!(processes.len(), 2);
+    assert!(
+        processes
+            .iter()
+            .any(|process| process.query == "selected local query")
+    );
+    assert!(
+        processes
+            .iter()
+            .any(|process| process.query == "selected remote query")
+    );
 }
 
 pub async fn test_otel_arrow_auth(store_type: StorageType) {
@@ -1078,6 +1240,103 @@ pub async fn test_otel_arrow_delta_histogram(store_type: StorageType) {
     assert_eq!(ArrowStatusCode::Ok as i32, after_collision.status_code);
     assert!(after_collision.status_message.is_empty());
     let _ = server.shutdown().await;
+}
+
+pub async fn test_otel_arrow_exemplars_without_metric_engine(store_type: StorageType) {
+    use datatypes::arrow::array::BinaryArray;
+    use otel_arrow_rust::Consumer;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::metric;
+
+    let (_instance, server) = setup_grpc_server(
+        store_type,
+        "test_otel_arrow_exemplars_without_metric_engine",
+    )
+    .await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let db = Database::new_with_dbname(
+        format!("{DEFAULT_CATALOG_NAME}-{DEFAULT_SCHEMA_NAME}"),
+        Client::with_urls(vec![addr.clone()]),
+    );
+    let mut client = ArrowMetricsServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let mut batch = gauge_arrow_batch(20, false);
+    let exemplars = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt32Array::from(vec![0_u32])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![2_000_000_000])) as ArrayRef,
+        ),
+        (
+            arrow_consts::DOUBLE_VALUE,
+            Arc::new(Float64Array::from(vec![0.5])) as ArrayRef,
+        ),
+        (
+            arrow_consts::SPAN_ID,
+            Arc::new(BinaryArray::from_vec(vec![&[1_u8; 8]])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TRACE_ID,
+            Arc::new(BinaryArray::from_vec(vec![&[2_u8; 16]])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    batch.arrow_payloads.push(ArrowPayload {
+        schema_id: "exemplars-20".into(),
+        r#type: ArrowPayloadType::NumberDpExemplars as i32,
+        record: serialize_arrow_record_batch(&exemplars),
+    });
+    let decoded = Consumer::default()
+        .consume_metrics_batches(&mut batch.clone())
+        .unwrap();
+    let Some(metric::Data::Gauge(gauge)) =
+        &decoded.resource_metrics[0].scope_metrics[0].metrics[0].data
+    else {
+        panic!("expected a gauge")
+    };
+    assert_eq!(gauge.data_points[0].exemplars.len(), 1);
+
+    let request = Request::new(futures::stream::iter([
+        batch,
+        delta_histogram_arrow_batch(21, &[(3, &[1, 2], &[1.0])]),
+    ]));
+    let mut response = client.arrow_metrics(request).await.unwrap().into_inner();
+    for batch_id in [20, 21] {
+        let status = response.message().await.unwrap().unwrap();
+        assert_eq!(status.batch_id, batch_id);
+        assert_eq!(status.status_code, ArrowStatusCode::Ok as i32);
+        assert!(status.status_message.is_empty());
+    }
+    assert!(response.message().await.unwrap().is_none());
+    for (sql, count) in [
+        ("SELECT COUNT(*) AS c FROM otel_arrow_gauge", 1),
+        (
+            "SELECT COUNT(*) AS c FROM otel_arrow_delta_histogram_bucket",
+            2,
+        ),
+        (
+            &format!(
+                "SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"
+            ),
+            0,
+        ),
+    ] {
+        let OutputData::Stream(stream) = db.sql(sql).await.unwrap().data else {
+            panic!("expected a stream")
+        };
+        assert_eq!(
+            RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .pretty_print()
+                .unwrap(),
+            format!("+---+\n| c |\n+---+\n| {count} |\n+---+"),
+        );
+    }
+    server.shutdown().await.unwrap();
 }
 
 pub async fn test_otel_arrow_exponential_histogram(store_type: StorageType) {

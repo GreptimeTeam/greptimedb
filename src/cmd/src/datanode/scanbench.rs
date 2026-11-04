@@ -836,7 +836,7 @@ impl ScanbenchCommand {
             }
             ScanbenchLogStore::Kafka(kafka_config) => {
                 let log_store = Arc::new(
-                    KafkaLogStore::try_new(kafka_config, None)
+                    KafkaLogStore::try_new(kafka_config)
                         .await
                         .map_err(BoxedError::new)
                         .context(error::BuildCliSnafu)?,
@@ -1017,6 +1017,7 @@ impl ScanbenchCommand {
             let num_partitions = scanner.properties().partitions.len();
             let ctx = QueryScanContext {
                 explain_verbose: collect_scanner_explain,
+                ..Default::default()
             };
             let metrics_set = ExecutionPlanMetricsSet::new();
 

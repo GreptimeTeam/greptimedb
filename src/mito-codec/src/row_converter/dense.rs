@@ -730,9 +730,13 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
     }
 
     fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>> {
-        // TODO(weny, yinwen): avoid decoding the whole primary key.
-        let mut values = self.decode_dense(bytes)?;
-        Ok(values.pop().map(|(_, v)| v))
+        // Dense keys store fields in primary key order, so only the first
+        // field needs to be decoded.
+        let Some((_, field)) = self.ordered_primary_key_columns.first() else {
+            return Ok(None);
+        };
+        let mut deserializer = Deserializer::new(bytes);
+        field.deserialize(&mut deserializer).map(Some)
     }
 }
 
@@ -1001,6 +1005,42 @@ mod tests {
             ],
             vec![Value::String(StringBytes::from("abcd")), Value::Null],
         )
+    }
+
+    #[test]
+    fn test_decode_leftmost_returns_first_field() {
+        let encoder = DensePrimaryKeyCodec::with_fields(vec![
+            (0, SortField::new(ConcreteDataType::string_datatype())),
+            (1, SortField::new(ConcreteDataType::int32_datatype())),
+            (2, SortField::new(ConcreteDataType::string_datatype())),
+        ]);
+        let row = [
+            Value::String("first".into()),
+            Value::Int32(42),
+            Value::String("last".into()),
+        ];
+        let encoded = encoder
+            .encode(row.iter().map(|v| v.as_value_ref()))
+            .unwrap();
+        assert_eq!(
+            encoder.decode_leftmost(&encoded).unwrap(),
+            Some(Value::String("first".into()))
+        );
+
+        let single = DensePrimaryKeyCodec::with_fields(vec![(
+            0,
+            SortField::new(ConcreteDataType::int32_datatype()),
+        )]);
+        let encoded = single
+            .encode([Value::Int32(7).as_value_ref()].into_iter())
+            .unwrap();
+        assert_eq!(
+            single.decode_leftmost(&encoded).unwrap(),
+            Some(Value::Int32(7))
+        );
+
+        let empty = DensePrimaryKeyCodec::with_fields(vec![]);
+        assert_eq!(empty.decode_leftmost(&[]).unwrap(), None);
     }
 
     #[test]

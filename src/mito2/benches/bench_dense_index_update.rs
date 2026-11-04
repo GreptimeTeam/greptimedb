@@ -38,10 +38,11 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
+use index::target::IndexTarget;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 use mito2::read::{Batch, BatchBuilder};
-use mito2::sst::index::Indexer;
 use mito2::sst::index::intermediate::IntermediateManager;
+use mito2::sst::index::{IndexBuildType, Indexer};
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::bench_util::{BloomFilterIndexer, InvertedIndexer};
 use store_api::codec::PrimaryKeyEncoding;
@@ -358,12 +359,22 @@ fn bench_dense_index_update(c: &mut Criterion) {
                                 intermediate.clone(),
                                 None,
                                 NonZeroUsize::new(SEGMENT_ROWS).unwrap(),
-                                inverted_columns.clone(),
+                                inverted_columns
+                                    .iter()
+                                    .copied()
+                                    .map(IndexTarget::ColumnId)
+                                    .collect(),
                             )
                         });
                         let bloom = if shape.bloom {
-                            BloomFilterIndexer::new(file_id, &metadata, intermediate.clone(), None)
-                                .unwrap()
+                            BloomFilterIndexer::new(
+                                file_id,
+                                &metadata,
+                                intermediate.clone(),
+                                None,
+                                IndexBuildType::Flush,
+                            )
+                            .unwrap()
                         } else {
                             None
                         };

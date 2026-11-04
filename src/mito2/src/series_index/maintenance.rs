@@ -19,13 +19,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_telemetry::{debug, info};
+use common_time::TimeToLive;
 use object_store::ObjectStore;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId};
 
 use crate::error::Result;
 use crate::metrics::{SERIES_INDEX_RECONCILE_ELAPSED, SERIES_INDEX_RECONCILE_TOTAL};
 use crate::read::series_candidate::is_sparse_metric_metadata;
-use crate::region::version::VersionRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::series_index::bucket::{
     group_files_into_series_buckets, plan_series_indexes, rounded_bucket_width,
@@ -37,6 +38,15 @@ use crate::series_index::catalog::{
 };
 use crate::series_index::purger::IndexFilePurger;
 use crate::series_index::version::{SeriesIndexFileHandle, SeriesIndexVersion};
+use crate::sst::file::FileHandle;
+
+/// Captured index-build inputs that retain SSTs without retaining memtables.
+struct ReconcileSnapshot {
+    metadata: RegionMetadataRef,
+    files: Vec<FileHandle>,
+    compaction_time_window: Option<Duration>,
+    ttl: Option<TimeToLive>,
+}
 
 /// Retires newly completed series files unless their snapshot is published.
 #[derive(Default)]
@@ -86,21 +96,36 @@ pub(crate) async fn reconcile_series_indexes(
     allow_builds: bool,
 ) -> Result<ReconcileStats> {
     let total_start = Instant::now();
-    // Use this snapshot throughout reconciliation, even if the region version advances.
-    let version = region.version_control.current().version;
-    if !is_sparse_metric_metadata(&version.metadata) {
-        SERIES_INDEX_RECONCILE_TOTAL
-            .with_label_values(&["noop"])
-            .inc();
-        return Ok(ReconcileStats::default());
-    }
+    // Retaining the full version during I/O would pin flushed memtables and delay
+    // write-buffer reclamation. Capture consistent build inputs without the memtables.
+    let snapshot = {
+        let version = region.version_control.current().version;
+        if !is_sparse_metric_metadata(&version.metadata) {
+            SERIES_INDEX_RECONCILE_TOTAL
+                .with_label_values(&["noop"])
+                .inc();
+            return Ok(ReconcileStats::default());
+        }
+        ReconcileSnapshot {
+            metadata: version.metadata.clone(),
+            files: version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files())
+                .cloned()
+                .collect(),
+            compaction_time_window: version.compaction_time_window,
+            ttl: version.options.ttl,
+        }
+    };
     let build_start = Instant::now();
     let mut unpublished = UnpublishedSeriesFiles::default();
     let (next, mut stats) = build_index_version(
         worker_id,
         &store,
         &region,
-        &version,
+        &snapshot,
         requested_bucket_width,
         now_ms,
         &purger,
@@ -161,7 +186,7 @@ async fn build_index_version(
     worker_id: u32,
     store: &ObjectStore,
     region: &MitoRegionRef,
-    version: &VersionRef,
+    snapshot: &ReconcileSnapshot,
     requested_bucket_width: Duration,
     now_ms: i64,
     purger: &IndexFilePurger,
@@ -170,13 +195,12 @@ async fn build_index_version(
     allow_builds: bool,
 ) -> Result<(Option<SeriesIndexVersion>, ReconcileStats)> {
     let mut stats = ReconcileStats::default();
-    let files = version
-        .ssts
-        .levels()
-        .iter()
-        .flat_map(|level| level.files())
-        .cloned()
-        .collect::<Vec<_>>();
+    let ReconcileSnapshot {
+        metadata,
+        files,
+        compaction_time_window,
+        ttl,
+    } = snapshot;
     stats.source_files = files.len();
     let visible = files
         .iter()
@@ -184,12 +208,12 @@ async fn build_index_version(
         .collect::<HashSet<_>>();
     let current = region.series_index_version();
     // Empty build inputs still let the planner expire established bucket coverage.
-    let buckets = match (allow_builds, version.compaction_time_window) {
+    let buckets = match (allow_builds, *compaction_time_window) {
         (true, Some(window)) => rounded_bucket_width(requested_bucket_width, window)
             // Successful rounding guarantees the window fits in i64; subsecond windows
             // use the same one-second minimum as rounded_bucket_width.
             .map(|width| {
-                group_files_into_series_buckets(&files, width, (window.as_secs() as i64).max(1))
+                group_files_into_series_buckets(files, width, (window.as_secs() as i64).max(1))
             })
             .unwrap_or_default(),
         (true, None) => {
@@ -201,12 +225,7 @@ async fn build_index_version(
         }
         (false, _) => Vec::new(),
     };
-    let plan = plan_series_indexes(
-        buckets,
-        current.index_buckets.clone(),
-        version.options.ttl,
-        now_ms,
-    );
+    let plan = plan_series_indexes(buckets, current.index_buckets.clone(), *ttl, now_ms);
     stats.computed_buckets = plan.computed_buckets;
     stats.skipped_buckets = plan.skipped_buckets;
     let mut next = prune_index_version(&current, &visible, &plan.expired_index_ids, &mut stats);
@@ -240,14 +259,15 @@ async fn build_index_version(
         for file in &bucket.files {
             if enable_range_index
                 && !range_indexes.contains_key(&file.file_id().file_id())
-                && let Some(entry) = build_range_index(store, region, version, file.clone()).await?
+                && let Some(entry) =
+                    build_range_index(store, region, metadata, file.clone()).await?
             {
                 stats.built_range += 1;
                 range_indexes.insert(entry.file_id, entry);
             }
         }
         let series_handle =
-            build_series_index(store, region, version, &bucket, &expected, purger).await?;
+            build_series_index(store, region, metadata, &bucket, &expected, purger).await?;
         unpublished.0.push(series_handle.clone());
         stats.built_series += 1;
         series_indexes.insert(expected.index_uuid, series_handle);
@@ -259,7 +279,7 @@ async fn build_index_version(
             if range_indexes.contains_key(&file_id) {
                 continue;
             }
-            if let Some(entry) = build_range_index(store, region, version, file).await? {
+            if let Some(entry) = build_range_index(store, region, metadata, file.clone()).await? {
                 stats.built_range += 1;
                 range_indexes.insert(entry.file_id, entry);
             }

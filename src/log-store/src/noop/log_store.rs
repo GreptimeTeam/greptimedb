@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use futures::stream;
 use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::Provider;
-use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream, WalIndex};
+use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
 
 use crate::error::{Error, Result};
@@ -45,7 +45,6 @@ impl LogStore for NoopLogStore {
         &self,
         _provider: &Provider,
         _entry_id: EntryId,
-        _index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         Ok(Box::pin(stream::empty()))
     }

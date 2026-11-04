@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::Plugins;
-use common_base::cancellation::{CancellableFuture, CancellationHandle};
+use common_base::cancellation::CancellationHandle;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{info, warn};
 use common_time::TimeToLive;
 use either::Either;
 use itertools::Itertools;
@@ -37,7 +37,8 @@ use crate::access_layer::{
 };
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
-use crate::compaction::reader::CompactionSstReaderBuilder;
+use crate::compaction::reader::{CompactionSstReaderBuilder, spawn_merge};
+use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
@@ -58,6 +59,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::metadata::extract_primary_key_range;
+use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::version::{SstVersion, SstVersionRef};
 
@@ -123,6 +125,70 @@ pub struct CompactionRegion {
     pub(crate) plugins: Plugins,
 }
 
+/// Execution resources for compaction, without a region-wide SST snapshot.
+///
+/// Inputs are owned by each output or unit so a slow sibling cannot retain
+/// files that another unit has already replaced.
+#[derive(Clone)]
+pub struct CompactionContext {
+    /// Region whose files are being compacted.
+    pub region_id: RegionId,
+    /// Region options including resolved dynamic compaction options.
+    pub region_options: RegionOptions,
+    /// Options from the version used to plan the merge.
+    version_options: RegionOptions,
+    pub(crate) engine_config: Arc<MitoConfig>,
+    region_metadata: RegionMetadataRef,
+    pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) access_layer: AccessLayerRef,
+    manifest_ctx: Arc<ManifestContext>,
+    plugins: Plugins,
+}
+
+impl From<&CompactionRegion> for CompactionContext {
+    fn from(region: &CompactionRegion) -> Self {
+        Self {
+            region_id: region.region_id,
+            region_options: region.region_options.clone(),
+            version_options: region.current_version.options.clone(),
+            engine_config: region.engine_config.clone(),
+            region_metadata: region.region_metadata.clone(),
+            cache_manager: region.cache_manager.clone(),
+            access_layer: region.access_layer.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
+            plugins: region.plugins.clone(),
+        }
+    }
+}
+
+/// Builds a minimal [`CompactionRegion`] for tests that do not touch the access layer.
+#[cfg(test)]
+pub(crate) async fn new_test_compaction_region() -> CompactionRegion {
+    let env = crate::test_util::scheduler_util::SchedulerEnv::new().await;
+    let metadata = crate::test_util::memtable_util::metadata_for_test();
+    let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+    CompactionRegion {
+        region_id: RegionId::new(1, 1),
+        region_options: RegionOptions::default(),
+        engine_config: Arc::new(MitoConfig::default()),
+        region_metadata: metadata.clone(),
+        cache_manager: Arc::new(CacheManager::default()),
+        access_layer: env.access_layer.clone(),
+        manifest_ctx,
+        current_version: CompactionVersion {
+            metadata: metadata.clone(),
+            options: RegionOptions::default(),
+            ssts: Arc::new(SstVersion::new(metadata)),
+            memtable_min_sequence: None,
+            compaction_time_window: None,
+        },
+        file_purger: None,
+        ttl: None,
+        max_parallelism: 1,
+        plugins: Plugins::new(),
+    }
+}
+
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
 #[derive(Clone)]
 pub struct OpenCompactionRegionRequest {
@@ -135,28 +201,26 @@ pub struct OpenCompactionRegionRequest {
     pub plugins: Plugins,
 }
 
-/// Open a compaction region from a compaction request.
-/// It's simple version of RegionOpener::open().
-pub async fn open_compaction_region(
-    req: &OpenCompactionRegionRequest,
-    mito_config: &MitoConfig,
+/// Opens manifest-backed compaction regions using executor-owned index resources.
+///
+/// Create one opener per auxiliary directory before accepting jobs and reuse it
+/// for the executor's lifetime. Initialization recovers staging files and removes
+/// stale intermediate files, so repeating it can delete another job's live files.
+#[derive(Clone)]
+pub struct CompactionRegionOpener {
+    mito_config: Arc<MitoConfig>,
     object_store_manager: ObjectStoreManagerRef,
-    ttl_provider: Either<TimeToLive, SchemaMetadataManagerRef>,
-) -> Result<CompactionRegion> {
-    let object_store = {
-        let name = &req.region_options.storage;
-        if let Some(name) = name {
-            object_store_manager
-                .find(name)
-                .with_context(|| ObjectStoreNotFoundSnafu {
-                    object_store: name.clone(),
-                })?
-        } else {
-            object_store_manager.default_object_store()
-        }
-    };
+    puffin_manager_factory: PuffinManagerFactory,
+    intermediate_manager: IntermediateManager,
+}
 
-    let access_layer = {
+impl CompactionRegionOpener {
+    /// Initializes the executor's index resources. The config must be sanitized
+    /// and its auxiliary directory must not be owned by another engine or opener.
+    pub async fn new(
+        mito_config: MitoConfig,
+        object_store_manager: ObjectStoreManagerRef,
+    ) -> Result<Self> {
         let puffin_manager_factory = PuffinManagerFactory::new(
             &mito_config.index.aux_path,
             mito_config.index.staging_size.as_bytes(),
@@ -165,95 +229,138 @@ pub async fn open_compaction_region(
         )
         .await?;
         let intermediate_manager =
-            IntermediateManager::init_fs(mito_config.index.aux_path.clone()).await?;
+            IntermediateManager::init_fs(&mito_config.index.aux_path).await?;
 
-        Arc::new(AccessLayer::new(
+        Ok(Self {
+            mito_config: Arc::new(mito_config),
+            object_store_manager,
+            puffin_manager_factory,
+            intermediate_manager,
+        })
+    }
+
+    /// Opens a region without reinitializing or cleaning shared index resources.
+    pub async fn open(
+        &self,
+        req: &OpenCompactionRegionRequest,
+        ttl_provider: Either<TimeToLive, SchemaMetadataManagerRef>,
+    ) -> Result<CompactionRegion> {
+        let mito_config = &self.mito_config;
+        let object_store = {
+            let name = &req.region_options.storage;
+            if let Some(name) = name {
+                self.object_store_manager
+                    .find(name)
+                    .with_context(|| ObjectStoreNotFoundSnafu {
+                        object_store: name.clone(),
+                    })?
+            } else {
+                self.object_store_manager.default_object_store()
+            }
+        };
+
+        let access_layer = Arc::new(AccessLayer::new(
             &req.table_dir,
             req.path_type,
             object_store.clone(),
-            puffin_manager_factory,
-            intermediate_manager,
-        ))
-    };
+            self.puffin_manager_factory.clone(),
+            self.intermediate_manager.clone(),
+        ));
 
-    let manifest_manager = {
-        let region_dir = region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
-        let region_manifest_options =
-            RegionManifestOptions::new(mito_config, &region_dir, object_store);
+        let manifest_manager = {
+            let region_dir =
+                region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
+            let region_manifest_options =
+                RegionManifestOptions::new(mito_config, &region_dir, object_store);
 
-        RegionManifestManager::open(region_manifest_options, &Default::default())
-            .await?
-            .with_context(|| EmptyRegionDirSnafu {
-                region_id: req.region_id,
-                region_dir: region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
-            })?
-    };
+            RegionManifestManager::open(region_manifest_options, &Default::default())
+                .await?
+                .with_context(|| EmptyRegionDirSnafu {
+                    region_id: req.region_id,
+                    region_dir: region_dir_from_table_dir(
+                        &req.table_dir,
+                        req.region_id,
+                        req.path_type,
+                    ),
+                })?
+        };
 
-    let manifest = manifest_manager.manifest();
-    let region_metadata = manifest.metadata.clone();
-    let hook: Option<RegionHookRef> = req.plugins.get();
-    let manifest_ctx = Arc::new(ManifestContext::new(
-        manifest_manager,
-        RegionRoleState::Leader(RegionLeaderState::Writable),
-        hook,
-    ));
+        let manifest = manifest_manager.manifest();
+        let region_metadata = manifest.metadata.clone();
+        let hook: Option<RegionHookRef> = req.plugins.get();
+        let manifest_ctx = Arc::new(ManifestContext::new(
+            manifest_manager,
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+            hook,
+        ));
 
-    let file_purger = {
-        let purge_scheduler = Arc::new(LocalScheduler::new(mito_config.max_background_purges));
-        Arc::new(LocalFilePurger::new(
-            purge_scheduler.clone(),
-            access_layer.clone(),
-            None,
-        ))
-    };
+        let file_purger = {
+            let purge_scheduler = Arc::new(LocalScheduler::new(mito_config.max_background_purges));
+            Arc::new(LocalFilePurger::new(
+                purge_scheduler.clone(),
+                access_layer.clone(),
+                None,
+            ))
+        };
 
-    let current_version = {
-        let mut ssts = SstVersion::new(region_metadata.clone());
-        ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
-        CompactionVersion {
-            metadata: region_metadata.clone(),
-            options: req.region_options.clone(),
-            ssts: Arc::new(ssts),
-            // Remote execution uses an already picked output. A manifest-only
-            // opener cannot prove that a new LastNonNull pick is memtable-safe.
-            memtable_min_sequence: Some(0),
-            compaction_time_window: manifest.compaction_time_window,
-        }
-    };
+        let current_version = {
+            let mut ssts = SstVersion::new(region_metadata.clone());
+            ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
+            CompactionVersion {
+                metadata: region_metadata.clone(),
+                options: req.region_options.clone(),
+                ssts: Arc::new(ssts),
+                // Remote execution uses an already picked output. A manifest-only
+                // opener cannot prove that a new LastNonNull pick is memtable-safe.
+                memtable_min_sequence: Some(0),
+                compaction_time_window: manifest.compaction_time_window,
+            }
+        };
 
-    let ttl = match ttl_provider {
-        // Use the specified ttl.
-        Either::Left(ttl) => ttl,
-        // Get the ttl from the schema metadata manager.
-        Either::Right(schema_metadata_manager) => {
-            let (_, ttl) =
-                find_dynamic_options(req.region_id, &req.region_options, &schema_metadata_manager)
-                    .await
-                    .unwrap_or_else(|e| {
-                        warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-                        (
-                            crate::region::options::CompactionOptions::default(),
-                            TimeToLive::default(),
-                        )
-                    });
-            ttl
-        }
-    };
+        let ttl = match ttl_provider {
+            // Use the specified ttl.
+            Either::Left(ttl) => ttl,
+            // Get the ttl from the schema metadata manager.
+            Either::Right(schema_metadata_manager) => {
+                let (_, ttl) = find_dynamic_options(
+                    req.region_id,
+                    &req.region_options,
+                    &schema_metadata_manager,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+                    (
+                        crate::region::options::CompactionOptions::default(),
+                        TimeToLive::default(),
+                    )
+                });
+                ttl
+            }
+        };
 
-    Ok(CompactionRegion {
-        region_id: req.region_id,
-        region_options: req.region_options.clone(),
-        engine_config: Arc::new(mito_config.clone()),
-        region_metadata: region_metadata.clone(),
-        cache_manager: Arc::new(CacheManager::default()),
-        access_layer,
-        manifest_ctx,
-        current_version,
-        file_purger: Some(file_purger),
-        ttl: Some(ttl),
-        max_parallelism: req.max_parallelism,
-        plugins: req.plugins.clone(),
-    })
+        Ok(CompactionRegion {
+            region_id: req.region_id,
+            region_options: req.region_options.clone(),
+            engine_config: self.mito_config.clone(),
+            region_metadata: region_metadata.clone(),
+            // Lets the scan reuse the input footers read while planning the merge.
+            cache_manager: Arc::new(
+                CacheManager::builder()
+                    .sst_meta_cache_size(mito_config.sst_meta_cache_size.as_bytes())
+                    // This per-job cache has no readers for the newly written outputs.
+                    .disable_sst_meta_cache_on_write()
+                    .build(),
+            ),
+            access_layer,
+            manifest_ctx,
+            current_version,
+            file_purger: Some(file_purger),
+            ttl: Some(ttl),
+            max_parallelism: req.max_parallelism,
+            plugins: req.plugins.clone(),
+        })
+    }
 }
 
 impl CompactionRegion {
@@ -273,9 +380,18 @@ impl CompactionRegion {
 
     /// Fires [`RegionHook::on_sst_files_written`] for the freshly-merged SST
     /// files in `merge_output`. Shared by both compaction paths, it must run
-    /// before [`Compactor::update_manifest`], whose `on_manifest_updated`
-    /// drains the per-region state this hook populates.
+    /// before this unit's [`Compactor::update_manifest`] so its committed edit
+    /// can be associated with the SST metadata reported here.
     pub async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
+        CompactionContext::from(self)
+            .invoke_sst_hook(merge_output)
+            .await;
+    }
+}
+
+impl CompactionContext {
+    /// Reports this unit's output metadata before publishing its manifest edit.
+    pub(crate) async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
         let Some(hook) = self.plugins.get::<RegionHookRef>() else {
             return;
         };
@@ -318,6 +434,32 @@ impl CompactionRegion {
             .collect();
         hook.on_sst_files_written(self.region_id, &self.region_metadata, &files)
             .await;
+    }
+
+    /// Publishes outputs through the existing manifest validation and hook path.
+    pub(crate) async fn update_manifest(
+        &self,
+        merge_output: MergeOutput,
+    ) -> Result<(RegionEdit, ManifestVersion)> {
+        let edit = RegionEdit {
+            files_to_add: merge_output.files_to_add,
+            files_to_remove: merge_output.files_to_remove,
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+            compaction_time_window: merge_output
+                .compaction_time_window
+                .map(|seconds| Duration::from_secs(seconds as u64)),
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+        };
+
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+        let manifest_version = self
+            .manifest_ctx
+            .update_manifest_for_compaction(action_list)
+            .await?;
+
+        Ok((edit, manifest_version))
     }
 }
 
@@ -406,7 +548,7 @@ pub trait Compactor: Send + Sync + 'static {
 pub trait SstMerger: Send + Sync + 'static {
     async fn merge_single_output(
         &self,
-        compaction_region: CompactionRegion,
+        context: CompactionContext,
         output: CompactionOutput,
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)>;
@@ -426,13 +568,13 @@ struct OutputSequenceMetadata {
 /// without allocating a new admission marker. Retaining physical row sequences
 /// does not by itself restore exact-read capability for untrusted inputs.
 fn output_sequence_metadata(
-    region: &CompactionRegion,
+    context: &CompactionContext,
     inputs: &[FileHandle],
 ) -> OutputSequenceMetadata {
-    let exact_sequence_trusted = region.region_options.preserve_row_sequence
+    let exact_sequence_trusted = context.region_options.preserve_row_sequence
         && inputs
             .iter()
-            .all(|f| f.is_effective_target_sequence_trusted(region.region_id));
+            .all(|f| f.is_effective_target_sequence_trusted(context.region_id));
     OutputSequenceMetadata {
         file_sequence: known_max_input_sequence(inputs),
         exact_sequence_trusted,
@@ -456,57 +598,54 @@ fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
 impl SstMerger for DefaultSstMerger {
     async fn merge_single_output(
         &self,
-        compaction_region: CompactionRegion,
+        context: CompactionContext,
         output: CompactionOutput,
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
-        let region_id = compaction_region.region_id;
-        let index_options = compaction_region
-            .current_version
-            .options
-            .index_options
-            .clone();
-        let append_mode = compaction_region.current_version.options.append_mode;
-        let merge_mode = compaction_region.current_version.options.merge_mode();
-        let flat_format = compaction_region
+        let region_id = context.region_id;
+        let index_options = context.version_options.index_options.clone();
+        let append_mode = context.version_options.append_mode;
+        let merge_mode = context.version_options.merge_mode();
+        let flat_format = context
             .region_options
             .sst_format
             .map(|format| format == FormatType::Flat)
-            .unwrap_or(compaction_region.engine_config.default_flat_format);
+            .unwrap_or(context.engine_config.default_flat_format);
 
-        let index_config = compaction_region.engine_config.index.clone();
-        let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
-        let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
-        let bloom_filter_index_config = compaction_region.engine_config.bloom_filter_index.clone();
+        let index_config = context.engine_config.index.clone();
+        let inverted_index_config = context.engine_config.inverted_index.clone();
+        let fulltext_index_config = context.engine_config.fulltext_index.clone();
+        let bloom_filter_index_config = context.engine_config.bloom_filter_index.clone();
 
         let input_file_names = output
             .inputs
             .iter()
             .map(|f| f.file_id().to_string())
             .join(",");
-        let sequence_metadata = output_sequence_metadata(&compaction_region, &output.inputs);
+        let sequence_metadata = output_sequence_metadata(&context, &output.inputs);
         let builder = CompactionSstReaderBuilder {
-            metadata: compaction_region.region_metadata.clone(),
-            sst_layer: compaction_region.access_layer.clone(),
-            cache: compaction_region.cache_manager.clone(),
+            metadata: context.region_metadata.clone(),
+            sst_layer: context.access_layer.clone(),
+            cache: context.cache_manager.clone(),
             inputs: &output.inputs,
             append_mode,
             filter_deleted: output.filter_deleted,
             time_range: output.output_time_range,
             merge_mode,
+            read_parallelism: write_opts.encode_parallelism,
         };
-        let source = builder.build_flat_sst_reader().await?;
+        let source = spawn_merge(builder.build_flat_sst_reader().await?);
 
         let mut metrics = Metrics::new(WriteType::Compaction);
-        let region_metadata = compaction_region.region_metadata.clone();
-        let sst_infos = compaction_region
+        let region_metadata = context.region_metadata.clone();
+        let sst_infos = context
             .access_layer
             .write_sst(
                 SstWriteRequest {
                     op_type: OperationType::Compact,
                     metadata: region_metadata.clone(),
                     source,
-                    cache_manager: compaction_region.cache_manager.clone(),
+                    cache_manager: context.cache_manager.clone(),
                     // Readers resolve file overrides before merge/dedup. Replacing
                     // their effective sequences here could promote old rows above
                     // versions in SSTs that were not part of this merge.
@@ -609,6 +748,10 @@ impl DefaultCompactor {
     ///
     /// This is the public entry point for external crates that want a
     /// cancellable compactor without opting into uncommitted-SST tracking.
+    ///
+    /// Cancellation stops new output batches. Already spawned outputs finish,
+    /// and their successful SSTs remain in the returned [`MergeOutput`]. This
+    /// can delay cancellation until the current batch completes.
     pub fn new_with_cancel_handle(cancel_handle: Arc<CancellationHandle>) -> Self {
         Self {
             merger: DefaultSstMerger,
@@ -629,6 +772,58 @@ impl DefaultCompactor {
     }
 }
 
+impl<M: SstMerger> DefaultCompactor<M> {
+    /// Merges a complete atomic unit. No partial input replacement is returned.
+    pub(crate) async fn merge_unit(
+        &self,
+        context: &CompactionContext,
+        unit: &CompactionUnit,
+    ) -> Result<MergeOutput> {
+        let mut result = MergeOutput {
+            files_to_remove: unit.inputs.iter().map(|f| f.meta_ref().clone()).collect(),
+            compaction_time_window: Some(unit.time_window_size),
+            ..Default::default()
+        };
+        for output in &unit.outputs {
+            if self.cancel_handle.is_cancelled() {
+                return error::CompactionCancelledSnafu.fail();
+            }
+            // Let the writer finish and register its files before observing cancellation.
+            // Dropping it mid-write can lose ownership of already finalized SSTs.
+            let (files, infos) = self
+                .merger
+                .merge_single_output(
+                    context.clone(),
+                    output.clone(),
+                    WriteOptions {
+                        write_buffer_size: context.engine_config.sst_write_buffer_size,
+                        max_file_size: unit.max_file_size,
+                        row_group_size: context.region_options.row_group_size(),
+                        float_field_encoding: context.region_options.float_field_encoding,
+                        encode_parallelism: context
+                            .region_options
+                            .compaction_output_parallelism_or(
+                                context
+                                    .engine_config
+                                    .experimental_compaction_output_parallelism,
+                            ),
+                        encode_runtime: EncodeRuntime::Compact,
+                    },
+                )
+                .await?;
+            if let Some(uncommitted) = &self.uncommitted {
+                uncommitted.track(&infos);
+            }
+            result.files_to_add.extend(files);
+            result.sst_infos.extend(infos);
+        }
+        if self.cancel_handle.is_cancelled() {
+            return error::CompactionCancelledSnafu.fail();
+        }
+        Ok(result)
+    }
+}
+
 #[async_trait::async_trait]
 impl<M: SstMerger> Compactor for DefaultCompactor<M>
 where
@@ -642,6 +837,7 @@ where
         let internal_parallelism = compaction_region.max_parallelism.max(1);
         let compaction_time_window = picker_output.time_window_size;
         let region_id = compaction_region.region_id;
+        let context = CompactionContext::from(compaction_region);
 
         // Build tasks along with their input file metas so we can track which
         // inputs correspond to each task.
@@ -655,13 +851,21 @@ where
                 max_file_size: picker_output.max_file_size,
                 row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
+                encode_parallelism: compaction_region
+                    .region_options
+                    .compaction_output_parallelism_or(
+                        compaction_region
+                            .engine_config
+                            .experimental_compaction_output_parallelism,
+                    ),
+                encode_runtime: EncodeRuntime::Compact,
             };
             let merger = self.merger.clone();
-            let compaction_region = compaction_region.clone();
+            let context = context.clone();
             let uncommitted = self.uncommitted.clone();
             let fut = async move {
                 let result = merger
-                    .merge_single_output(compaction_region, output, write_opts)
+                    .merge_single_output(context, output, write_opts)
                     .await;
                 if let (Some(uncommitted), Ok((_, infos))) = (&uncommitted, &result) {
                     uncommitted.track(infos);
@@ -679,7 +883,7 @@ where
                 + picker_output.expired_ssts.len(),
         );
 
-        while !tasks.is_empty() {
+        while !tasks.is_empty() && !self.cancel_handle.is_cancelled() {
             let mut chunk: Vec<(Vec<FileMeta>, _)> = Vec::with_capacity(internal_parallelism);
             for _ in 0..internal_parallelism {
                 if let Some(task) = tasks.pop() {
@@ -694,60 +898,40 @@ where
                 })
                 .collect();
 
-            while let Some((inputs, mut handle)) = spawned.pop() {
-                let abort_handle = handle.abort_handle();
-                match CancellableFuture::new(&mut handle, self.cancel_handle.clone()).await {
-                    Ok(Ok(Ok((files, infos)))) => {
+            // Like merge_unit, cancellation must not drop a writer mid-output:
+            // its blocking encoders would detach and finalized SSTs could lose
+            // their owner. Join the whole batch and retain every successful output.
+            let mut join_error = None;
+            while let Some((inputs, handle)) = spawned.pop() {
+                match handle.await {
+                    Ok(Ok((files, infos))) => {
                         output_files.extend(files);
                         if hook.is_some() {
                             all_sst_infos.extend(infos);
                         }
                         compacted_inputs.extend(inputs);
                     }
-                    Ok(Ok(Err(e))) => {
+                    Ok(Err(e)) => {
                         warn!(
                             e; "Failed to merge compaction output for region: {}, inputs: [{}]",
                             region_id,
                             inputs.iter().map(|f| f.file_id.to_string()).join(",")
                         );
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         warn!(
-                            "Region {} compaction task join error for inputs: [{}], skipping: {}",
+                            "Region {} compaction task join error for inputs: [{}]: {}",
                             region_id,
                             inputs.iter().map(|f| f.file_id.to_string()).join(","),
                             e
                         );
-                        // If the cancel handle is cancelled,
-                        // cancel the remaining tasks before returns the error.
-                        if self.cancel_handle.is_cancelled() {
-                            abort_handle.abort();
-                            for (_, handle) in &spawned {
-                                handle.abort();
-                            }
-                            for (_, handle) in spawned {
-                                let _ = handle.await;
-                            }
-                        }
-                        return Err(e).context(error::JoinSnafu);
-                    }
-                    Err(_) => {
-                        debug!(
-                            "Compaction merge cancelled for region: {}, aborting remaining {} spawned tasks",
-                            region_id,
-                            spawned.len(),
-                        );
-                        abort_handle.abort();
-                        for (_, handle) in &spawned {
-                            handle.abort();
-                        }
-                        let _ = handle.await;
-                        for (_, handle) in spawned {
-                            let _ = handle.await;
-                        }
-                        break;
+                        // Drain siblings before propagating the first join error.
+                        join_error.get_or_insert(e);
                     }
                 }
+            }
+            if let Some(e) = join_error {
+                return Err(e).context(error::JoinSnafu);
             }
 
             if self.cancel_handle.is_cancelled() {
@@ -777,49 +961,31 @@ where
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
     ) -> Result<(RegionEdit, ManifestVersion)> {
-        // Write region edit to manifest.
-        let edit = RegionEdit {
-            files_to_add: merge_output.files_to_add,
-            files_to_remove: merge_output.files_to_remove,
-            // Use current timestamp as the edit timestamp.
-            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
-            compaction_time_window: merge_output
-                .compaction_time_window
-                .map(|seconds| Duration::from_secs(seconds as u64)),
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
-        };
-
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
-        let manifest_version = compaction_region
-            .manifest_ctx
-            .update_manifest_for_compaction(action_list)
-            .await?;
-
-        Ok((edit, manifest_version))
+        CompactionContext::from(compaction_region)
+            .update_manifest(merge_output)
+            .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Weak};
     use std::time::Duration;
 
+    use datatypes::arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
     use store_api::storage::{FileId, RegionId};
-    use tokio::time::sleep;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio::time::timeout;
 
     use super::{DefaultCompactor, *};
-    use crate::cache::CacheManager;
+    use crate::compaction::memory_manager::new_compaction_memory_manager;
     use crate::compaction::picker::PickerOutput;
     use crate::error::Result;
     use crate::sst::file::FileHandle;
     use crate::sst::file_purger::NoopFilePurger;
-    use crate::sst::version::SstVersion;
-    use crate::test_util::memtable_util::metadata_for_test;
-    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::sst_util::new_record_batch_by_range;
 
     fn dummy_file_meta() -> FileMeta {
         FileMeta {
@@ -963,7 +1129,8 @@ mod tests {
             for preserve in [false, true] {
                 region.region_options.preserve_row_sequence = preserve;
                 for (inputs, known_bound, inputs_trusted) in &cases {
-                    let metadata = output_sequence_metadata(&region, inputs);
+                    let metadata =
+                        output_sequence_metadata(&CompactionContext::from(&region), inputs);
                     let trusted = preserve && *inputs_trusted;
                     assert_eq!(trusted, metadata.exact_sequence_trusted);
                     assert_eq!(
@@ -1125,6 +1292,7 @@ mod tests {
                 filter_deleted: true,
                 time_range: None,
                 merge_mode: MergeMode::LastRow,
+                read_parallelism: 1,
             }
             .build_flat_sst_reader()
             .await
@@ -1149,32 +1317,110 @@ mod tests {
         }
     }
 
-    /// Build a minimal [`CompactionRegion`] suitable for tests where the
-    /// [`SstMerger`] is mocked and never touches the access layer.
-    async fn new_test_compaction_region() -> CompactionRegion {
-        let env = SchedulerEnv::new().await;
-        let metadata = metadata_for_test();
-        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        CompactionRegion {
-            region_id: RegionId::new(1, 1),
-            region_options: RegionOptions::default(),
-            engine_config: Arc::new(MitoConfig::default()),
-            region_metadata: metadata.clone(),
-            cache_manager: Arc::new(CacheManager::default()),
-            access_layer: env.access_layer.clone(),
-            manifest_ctx,
-            current_version: CompactionVersion {
-                metadata: metadata.clone(),
-                options: RegionOptions::default(),
-                ssts: Arc::new(SstVersion::new(metadata)),
-                memtable_min_sequence: None,
-                compaction_time_window: None,
-            },
-            file_purger: None,
-            ttl: None,
-            max_parallelism: 1,
-            plugins: Plugins::new(),
+    #[rstest::rstest]
+    #[case::primary_key(false)]
+    #[case::flat(true)]
+    #[tokio::test]
+    async fn test_compaction_skips_missing_input(#[case] flat_format: bool) {
+        use datatypes::arrow::array::AsArray;
+        use datatypes::arrow::datatypes::TimestampMillisecondType;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::engine::compaction_test::put_and_flush;
+        use crate::test_util::{CreateRequestBuilder, TestEnv, rows_schema};
+
+        let mut env = TestEnv::new().await;
+        let config = MitoConfig {
+            default_flat_format: flat_format,
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let engine = env.create_engine(config.clone()).await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new().build();
+        let columns = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        // Nine files cross the eight-footer concurrency limit.
+        for file in 0..9 {
+            put_and_flush(&engine, region_id, &columns, file * 2..file * 2 + 2).await;
         }
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version();
+        let mut inputs: Vec<_> = version.ssts.levels()[0].files().cloned().collect();
+        assert_eq!(9, inputs.len());
+        inputs.sort_unstable_by_key(|file| file.meta_ref().sequence);
+        let missing = inputs[4].clone();
+        let output = CompactionOutput {
+            output_level: 1,
+            inputs,
+            filter_deleted: true,
+            output_time_range: None,
+        };
+        // Delete after selecting the inputs; a fresh cache avoids hiding the missing
+        // footer behind the metadata populated by flush.
+        let context = CompactionContext {
+            region_id,
+            region_options: version.options.clone(),
+            version_options: version.options.clone(),
+            engine_config: Arc::new(config),
+            region_metadata: version.metadata.clone(),
+            cache_manager: Arc::new(
+                CacheManager::builder()
+                    .sst_meta_cache_size(1024 * 1024)
+                    .build(),
+            ),
+            access_layer: region.access_layer.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
+            plugins: Plugins::new(),
+        };
+        region
+            .access_layer
+            .object_store()
+            .delete(&missing.file_path(
+                region.access_layer.table_dir(),
+                region.access_layer.path_type(),
+            ))
+            .await
+            .unwrap();
+        let (files, _) = DefaultSstMerger
+            .merge_single_output(context, output, WriteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(1, files.len());
+        let outputs: Vec<_> = files.into_iter().map(new_file_handle).collect();
+        let mut reader = CompactionSstReaderBuilder {
+            metadata: version.metadata.clone(),
+            sst_layer: region.access_layer.clone(),
+            cache: Arc::new(CacheManager::default()),
+            inputs: &outputs,
+            append_mode: false,
+            filter_deleted: true,
+            time_range: None,
+            merge_mode: MergeMode::LastRow,
+            read_parallelism: 1,
+        }
+        .build_flat_sst_reader()
+        .await
+        .unwrap();
+        let mut timestamps = Vec::new();
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            timestamps.extend_from_slice(
+                batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_primitive::<TimestampMillisecondType>()
+                    .values(),
+            );
+        }
+        let expected: Vec<i64> = (0..18)
+            .filter(|ts| !(8..10).contains(ts))
+            .map(|ts| ts * 1000)
+            .collect();
+        assert_eq!(expected, timestamps);
     }
 
     /// An [`SstMerger`] that returns pre-configured results per call index.
@@ -1199,7 +1445,7 @@ mod tests {
     impl SstMerger for MockMerger {
         async fn merge_single_output(
             &self,
-            _compaction_region: CompactionRegion,
+            _context: CompactionContext,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
         ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
@@ -1211,6 +1457,56 @@ mod tests {
                 }
                 .fail(),
                 None => panic!("MockMerger: no result configured for call index {idx}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compaction_unit_group_failure_is_atomic() {
+        let context = CompactionContext::from(&new_test_compaction_region().await);
+        let input = new_file_handle(dummy_file_meta());
+        let unit = CompactionUnit::from_picker(PickerOutput {
+            outputs: (0..2)
+                .map(|_| CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![input.clone()],
+                    filter_deleted: false,
+                    output_time_range: None,
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .unwrap()
+        .pop()
+        .unwrap();
+        for fail_second in [false, true] {
+            let second = if fail_second {
+                error::InvalidMetaSnafu {
+                    reason: "second output failed",
+                }
+                .fail()
+            } else {
+                Ok(vec![dummy_file_meta(), dummy_file_meta()])
+            };
+            let compactor =
+                DefaultCompactor::with_merger(MockMerger::new(vec![Ok(Vec::new()), second]));
+            let result = compactor.merge_unit(&context, &unit).await;
+            if fail_second {
+                assert!(
+                    result.is_err(),
+                    "cannot publish a successful subset of a dependency group"
+                );
+            } else {
+                let result = result.unwrap();
+                assert_eq!(2, result.files_to_add.len());
+                assert_eq!(
+                    vec![input.meta_ref().file_id],
+                    result
+                        .files_to_remove
+                        .iter()
+                        .map(|f| f.file_id)
+                        .collect::<Vec<_>>()
+                );
             }
         }
     }
@@ -1362,85 +1658,182 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct PendingEncoding {
+        input_id: FileId,
+        output_id: FileId,
+        batch: Weak<RecordBatch>,
+        release: oneshot::Sender<()>,
+    }
+
+    /// A merger with real blocking Parquet encoding and deterministic lifetime gates.
     #[derive(Clone)]
-    struct BlockingMerger {
-        call_idx: Arc<AtomicUsize>,
+    struct GatedEncodingMerger {
+        started: mpsc::UnboundedSender<PendingEncoding>,
+        panic_input: Option<FileId>,
     }
 
     #[async_trait::async_trait]
-    impl SstMerger for BlockingMerger {
+    impl SstMerger for GatedEncodingMerger {
         async fn merge_single_output(
             &self,
-            _compaction_region: CompactionRegion,
-            _output: CompactionOutput,
+            _context: CompactionContext,
+            output: CompactionOutput,
             _write_opts: WriteOptions,
         ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
-            self.call_idx.fetch_add(1, Ordering::SeqCst);
-            std::future::pending().await
+            let input_id = output.inputs[0].meta_ref().file_id;
+            let mut file = dummy_file_meta();
+            let batch = Arc::new(new_record_batch_by_range(&["a", "b"], 0, 4));
+            let (release, wait) = oneshot::channel();
+            let pending = PendingEncoding {
+                input_id,
+                output_id: file.file_id,
+                batch: Arc::downgrade(&batch),
+                release,
+            };
+            let started = self.started.clone();
+            file.file_size = common_runtime::spawn_blocking_compact(move || {
+                started.send(pending).unwrap();
+                wait.blocking_recv().unwrap();
+                let mut bytes = Vec::new();
+                let mut writer = ArrowWriter::try_new(&mut bytes, batch.schema(), None)?;
+                writer.write(&batch)?;
+                writer.close()?;
+                Ok::<_, parquet::errors::ParquetError>(bytes.len() as u64)
+            })
+            .await
+            .context(error::JoinSnafu)?
+            .context(error::WriteParquetSnafu)?;
+            if self.panic_input == Some(input_id) {
+                panic!("merge task panicked");
+            }
+            Ok((vec![file], Vec::new()))
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_merge_ssts_cancels_spawned_tasks() {
-        common_telemetry::init_default_ut_logging();
-
-        let mut compaction_region = new_test_compaction_region().await;
-        compaction_region.max_parallelism = 2;
-
+    #[rstest::rstest]
+    #[case::successful_outputs(false)]
+    #[case::join_error(true)]
+    #[tokio::test]
+    async fn test_merge_ssts_cancellation_waits_for_encoders(#[case] panic_merge: bool) {
+        let mut region = new_test_compaction_region().await;
+        region.max_parallelism = 2;
+        region.region_options.compaction_output_parallelism = Some(2);
+        let inputs: Vec<_> = (0..3).map(|_| dummy_file_meta()).collect();
+        let picker_output = PickerOutput {
+            outputs: inputs
+                .iter()
+                .map(|input| CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![new_file_handle(input.clone())],
+                    filter_deleted: false,
+                    output_time_range: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
         let cancel_handle = Arc::new(CancellationHandle::default());
-        let call_idx = Arc::new(AtomicUsize::new(0));
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
         let compactor = DefaultCompactor {
-            merger: BlockingMerger {
-                call_idx: call_idx.clone(),
+            merger: GatedEncodingMerger {
+                started: started_tx,
+                // Outputs are popped from the back, then joined in reverse order.
+                panic_input: panic_merge.then_some(inputs[1].file_id),
             },
             cancel_handle: cancel_handle.clone(),
             uncommitted: None,
         };
-
-        let picker_output = PickerOutput {
-            outputs: vec![
-                CompactionOutput {
-                    output_level: 1,
-                    inputs: vec![new_file_handle(dummy_file_meta())],
-                    filter_deleted: false,
-                    output_time_range: None,
-                },
-                CompactionOutput {
-                    output_level: 1,
-                    inputs: vec![new_file_handle(dummy_file_meta())],
-                    filter_deleted: false,
-                    output_time_range: None,
-                },
-                CompactionOutput {
-                    output_level: 1,
-                    inputs: vec![new_file_handle(dummy_file_meta())],
-                    filter_deleted: false,
-                    output_time_range: None,
-                },
-            ],
-            expired_ssts: vec![],
-            time_window_size: 3600,
-            max_file_size: None,
-        };
-
-        let task = tokio::spawn(async move {
-            compactor
-                .merge_ssts(&compaction_region, picker_output)
-                .await
+        let memory = new_compaction_memory_manager(1024 * 1024);
+        let budget = memory.try_acquire(memory.limit_bytes()).unwrap();
+        let mut merge = Box::pin(async {
+            let _budget = budget;
+            compactor.merge_ssts(&region, picker_output).await
         });
-
-        sleep(Duration::from_millis(100)).await;
+        assert!(futures::poll!(merge.as_mut()).is_pending());
+        let mut encoders = Vec::new();
+        for _ in 0..2 {
+            encoders.push(
+                timeout(Duration::from_secs(10), started_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
         cancel_handle.cancel();
+        assert!(futures::poll!(merge.as_mut()).is_pending());
+        assert!(memory.try_acquire(memory.limit_bytes()).is_none());
+        assert!(
+            encoders
+                .iter()
+                .all(|encoder| encoder.batch.upgrade().is_some())
+        );
+        let retained_batches: Vec<_> = encoders
+            .iter()
+            .map(|encoder| encoder.batch.clone())
+            .collect();
+        let mut expected_inputs: Vec<_> = encoders.iter().map(|encoder| encoder.input_id).collect();
+        let mut expected_outputs: Vec<_> =
+            encoders.iter().map(|encoder| encoder.output_id).collect();
+        for encoder in encoders {
+            encoder.release.send(()).unwrap();
+        }
+        let result = timeout(Duration::from_secs(10), merge).await.unwrap();
+        assert!(
+            retained_batches
+                .iter()
+                .all(|batch| batch.upgrade().is_none())
+        );
+        assert!(memory.try_acquire(memory.limit_bytes()).is_some());
+        assert!(
+            started_rx.try_recv().is_err(),
+            "cancelled work must not start another output"
+        );
+        if panic_merge {
+            assert!(matches!(result, Err(error::Error::Join { error, .. }) if error.is_panic()));
+        } else {
+            let merged = result.unwrap();
+            let mut removed: Vec<_> = merged
+                .files_to_remove
+                .iter()
+                .map(|file| file.file_id)
+                .collect();
+            let mut added: Vec<_> = merged
+                .files_to_add
+                .iter()
+                .map(|file| file.file_id)
+                .collect();
+            for ids in [
+                &mut removed,
+                &mut added,
+                &mut expected_inputs,
+                &mut expected_outputs,
+            ] {
+                ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+            }
+            assert_eq!(expected_inputs, removed);
+            assert_eq!(expected_outputs, added);
+            assert!(merged.files_to_add.iter().all(|file| file.file_size > 0));
+        }
+    }
 
-        let merge_output = task
-            .await
-            .expect("merge_ssts should stop after cancellation")
-            .unwrap();
-
-        let started = call_idx.load(Ordering::SeqCst);
-
-        assert!(merge_output.files_to_add.is_empty());
-        assert!(merge_output.files_to_remove.is_empty());
-        assert_eq!(started, 2);
+    #[tokio::test]
+    async fn test_merge_ssts_cancelled_before_start_skips_outputs() {
+        let region = new_test_compaction_region().await;
+        let merger = MockMerger::new(vec![Ok(vec![dummy_file_meta()])]);
+        let calls = merger.call_idx.clone();
+        let compactor = DefaultCompactor::with_merger(merger);
+        compactor.cancel_handle.cancel();
+        let picker_output = PickerOutput {
+            outputs: vec![CompactionOutput {
+                output_level: 1,
+                inputs: vec![new_file_handle(dummy_file_meta())],
+                filter_deleted: false,
+                output_time_range: None,
+            }],
+            ..Default::default()
+        };
+        let merged = compactor.merge_ssts(&region, picker_output).await.unwrap();
+        assert!(merged.is_empty());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
     }
 }

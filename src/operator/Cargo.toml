@@ -22,6 +22,7 @@ workspace = true
 ahash.workspace = true
 api.workspace = true
 arrow.workspace = true
+arrow-schema.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 backon.workspace = true
@@ -62,6 +63,7 @@ lazy_static.workspace = true
 meta-client.workspace = true
 meter-core.workspace = true
 meter-macros.workspace = true
+mito-codec.workspace = true
 moka = { workspace = true, features = ["future"] }
 object-store.workspace = true
 partition.workspace = true

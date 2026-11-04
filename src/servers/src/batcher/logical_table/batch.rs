@@ -13,50 +13,47 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Instant;
 
 use catalog::CatalogManagerRef;
 use common_batcher::flush_limiter::FlushLimiter;
-use common_meta::node_manager::NodeManagerRef;
-use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_error::ext::BoxedError;
+use common_query::{WriteProgress, prelude};
 use common_telemetry::{debug, warn};
+use operator::write_dispatcher::TrackedWrite;
+use operator::write_dispatcher::WriteDispatcherRef;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
-use snafu::OptionExt;
+use snafu::{IntoError, OptionExt, ensure};
 
 use crate::batcher::flow_notifier::FlowNotifier;
-use crate::batcher::logical_table::PHYSICAL_TABLE_KEY;
-use crate::batcher::logical_table::batch_convert::{
-    TableBatch, concat_modified_batches, transform_logical_batches_to_physical,
-};
-use crate::batcher::logical_table::flow_notifier::enqueue_flow_notifications;
+use crate::batcher::logical_table;
+use crate::batcher::logical_table::batch_convert::{self, TableBatch};
+use crate::batcher::logical_table::flow_notifier;
 use crate::batcher::logical_table::pending_worker::FlushWaiter;
 use crate::batcher::logical_table::region_write::{
-    CatalogManagerPhysicalFlushAdapter, NodeManagerPhysicalFlushAdapter,
-    PartitionManagerPhysicalFlushAdapter, PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester,
-    PhysicalFlushPartitionProvider, encode_region_write_requests, flush_region_writes_concurrently,
-    plan_region_batches, resolve_region_targets,
+    self, CatalogManagerPhysicalFlushAdapter, PartitionManagerPhysicalFlushAdapter,
+    PhysicalFlushCatalogProvider, PhysicalFlushPartitionProvider, PhysicalFlushWriteDispatcher,
+    WriteDispatcherPhysicalFlushAdapter,
 };
 use crate::error;
 use crate::error::Result;
-use crate::metrics::{
-    FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL,
-    PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED,
-};
+use crate::metrics;
 
-pub(in crate::batcher::logical_table) struct Batch {
-    pub(in crate::batcher::logical_table) table_batches: Vec<TableBatch>,
-    pub(in crate::batcher::logical_table) total_row_count: usize,
-    pub(in crate::batcher::logical_table) db_string: String,
-    pub(in crate::batcher::logical_table) ctx: QueryContextRef,
-    pub(in crate::batcher::logical_table) waiters: Vec<FlushWaiter>,
+/// Rows and completion waiters owned by one physical flush.
+pub(crate) struct Batch {
+    pub(crate) table_batches: Vec<TableBatch>,
+    pub(crate) total_row_count: usize,
+    pub(crate) db_string: String,
+    pub(crate) ctx: QueryContextRef,
+    pub(crate) waiters: Vec<FlushWaiter>,
 }
 
-pub(in crate::batcher::logical_table) async fn spawn_flush(
+/// Spawns a physical flush with the configured concurrency limit.
+pub(crate) async fn spawn_flush(
     flush: Batch,
     partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    write_dispatcher: WriteDispatcherRef,
     catalog_manager: CatalogManagerRef,
     flow_notification_tx: FlowNotifier,
     flush_limiter: FlushLimiter,
@@ -68,7 +65,7 @@ pub(in crate::batcher::logical_table) async fn spawn_flush(
                 flush_batch_with_managers(
                     flush,
                     partition_manager,
-                    node_manager,
+                    write_dispatcher,
                     catalog_manager,
                     flow_notification_tx,
                 )
@@ -80,7 +77,7 @@ pub(in crate::batcher::logical_table) async fn spawn_flush(
             flush_batch_with_managers(
                 flush,
                 partition_manager,
-                node_manager,
+                write_dispatcher,
                 catalog_manager,
                 flow_notification_tx,
             )
@@ -89,32 +86,32 @@ pub(in crate::batcher::logical_table) async fn spawn_flush(
     }
 }
 
-pub(in crate::batcher::logical_table) async fn flush_batch_with_managers(
+/// Connects shared routing and dispatch dependencies to a physical flush.
+pub(crate) async fn flush_batch_with_managers(
     flush: Batch,
     partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    write_dispatcher: WriteDispatcherRef,
     catalog_manager: CatalogManagerRef,
     flow_notification_tx: FlowNotifier,
 ) {
     let partition_provider = PartitionManagerPhysicalFlushAdapter { partition_manager };
-    let node_requester = NodeManagerPhysicalFlushAdapter {
-        node_manager: node_manager.clone(),
-    };
+    let write_dispatcher = WriteDispatcherPhysicalFlushAdapter { write_dispatcher };
     let catalog_provider = CatalogManagerPhysicalFlushAdapter { catalog_manager };
     flush_batch(
         flush,
         &partition_provider,
-        &node_requester,
+        &write_dispatcher,
         &catalog_provider,
         flow_notification_tx,
     )
     .await;
 }
 
-pub(in crate::batcher::logical_table) async fn flush_batch(
+/// Flushes a batch and reports completion to its waiters.
+pub(crate) async fn flush_batch(
     flush: Batch,
     partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
-    node_manager: &(impl PhysicalFlushNodeRequester + ?Sized),
+    write_dispatcher: &(impl PhysicalFlushWriteDispatcher + ?Sized),
     catalog_manager: &(impl PhysicalFlushCatalogProvider + ?Sized),
     flow_notification_tx: FlowNotifier,
 ) {
@@ -130,21 +127,29 @@ pub(in crate::batcher::logical_table) async fn flush_batch(
     // Physical-table-level flush: transform all logical table batches
     // into physical format and write them together.
     let physical_table_name = ctx
-        .extension(PHYSICAL_TABLE_KEY)
-        .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+        .extension(logical_table::PHYSICAL_TABLE_KEY)
+        .unwrap_or(prelude::GREPTIME_PHYSICAL_TABLE)
         .to_string();
-    let result = flush_batch_physical(
+    let result = flush_batch_physical_tracked(
         &table_batches,
         &physical_table_name,
         &ctx,
         partition_manager,
-        node_manager,
+        write_dispatcher,
         catalog_manager,
+        waiters.len().max(
+            table_batches
+                .iter()
+                .flat_map(|table| &table.batches)
+                .map(|batch| batch.owner + 1)
+                .max()
+                .unwrap_or(0),
+        ),
     )
     .await;
 
     let elapsed = start.elapsed().as_secs_f64();
-    FLUSH_ELAPSED.observe(elapsed);
+    metrics::FLUSH_ELAPSED.observe(elapsed);
 
     debug!(
         "Pending rows batch flushed, total rows: {}, elapsed time: {}s",
@@ -152,19 +157,46 @@ pub(in crate::batcher::logical_table) async fn flush_batch(
     );
 
     match result {
-        Ok(affected_rows) => {
-            FLUSH_TOTAL.inc();
-            FLUSH_ROWS.observe(total_row_count as f64);
-            operator::metrics::DIST_INGEST_ROW_COUNT
-                .with_label_values(&[db_string.as_str()])
-                .inc_by(affected_rows as u64);
-
-            notify_waiters(waiters, Ok(()));
-            enqueue_flow_notifications(table_batches, &flow_notification_tx);
+        Ok(progress) => {
+            if progress.iter().any(|result| result.error.is_some()) {
+                metrics::FLUSH_FAILURES.inc();
+            } else {
+                metrics::FLUSH_TOTAL.inc();
+                metrics::FLUSH_ROWS.observe(total_row_count as f64);
+            }
+            let affected_rows = progress.iter().map(|result| result.affected_rows).sum();
+            metrics::FLUSH_DROPPED_ROWS
+                .inc_by(total_row_count.saturating_sub(affected_rows) as u64);
+            let successful = progress
+                .iter()
+                .enumerate()
+                .filter_map(|(owner, result)| result.error.is_none().then_some(owner))
+                .collect::<HashSet<_>>();
+            for (waiter, result) in waiters.into_iter().zip(progress) {
+                operator::metrics::DIST_INGEST_ROW_COUNT
+                    .with_label_values(&[db_string.as_str()])
+                    .inc_by(result.affected_rows as u64);
+                let _ = waiter.response_tx.send(result);
+            }
+            let accepted = table_batches
+                .into_iter()
+                .filter_map(|mut table| {
+                    table
+                        .batches
+                        .retain(|batch| successful.contains(&batch.owner));
+                    table.row_count = table
+                        .batches
+                        .iter()
+                        .map(|batch| batch.batch.num_rows())
+                        .sum();
+                    (!table.batches.is_empty()).then_some(table)
+                })
+                .collect();
+            flow_notifier::enqueue_flow_notifications(accepted, &flow_notification_tx);
         }
         Err(err) => {
-            FLUSH_FAILURES.inc();
-            FLUSH_DROPPED_ROWS.inc_by(total_row_count as u64);
+            metrics::FLUSH_FAILURES.inc();
+            metrics::FLUSH_DROPPED_ROWS.inc_by(total_row_count as u64);
             notify_waiters(waiters, Err(err));
         }
     }
@@ -185,12 +217,46 @@ pub async fn flush_batch_physical(
     physical_table_name: &str,
     ctx: &QueryContextRef,
     partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
-    node_manager: &(impl PhysicalFlushNodeRequester + ?Sized),
+    write_dispatcher: &(impl PhysicalFlushWriteDispatcher + ?Sized),
     catalog_manager: &(impl PhysicalFlushCatalogProvider + ?Sized),
 ) -> Result<usize> {
+    let inputs = table_batches
+        .iter()
+        .flat_map(|table| &table.batches)
+        .map(|batch| batch.owner + 1)
+        .max()
+        .unwrap_or(1);
+    let progress = flush_batch_physical_tracked(
+        table_batches,
+        physical_table_name,
+        ctx,
+        partition_manager,
+        write_dispatcher,
+        catalog_manager,
+        inputs,
+    )
+    .await?;
+    let mut result = WriteProgress::default();
+    for part in progress {
+        result.merge(part);
+    }
+    result
+        .into_result()
+        .map_err(|source| error::ExecuteGrpcQuerySnafu.into_error(source))
+}
+
+async fn flush_batch_physical_tracked(
+    table_batches: &[TableBatch],
+    physical_table_name: &str,
+    ctx: &QueryContextRef,
+    partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
+    write_dispatcher: &(impl PhysicalFlushWriteDispatcher + ?Sized),
+    catalog_manager: &(impl PhysicalFlushCatalogProvider + ?Sized),
+    inputs: usize,
+) -> Result<Vec<WriteProgress>> {
     // 1. Resolve the physical table and get column ID mapping
     let physical_table = {
-        let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+        let _timer = metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
             .with_label_values(&["flush_physical_resolve_table"])
             .start_timer();
         catalog_manager
@@ -220,8 +286,8 @@ pub async fn flush_batch_physical(
         })?;
 
     // 2. Get the physical table's partition rule (one lookup instead of N)
-    let partition_rule = {
-        let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+    let (partition_rule, partition_versions) = {
+        let _timer = metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
             .with_label_values(&["flush_physical_fetch_partition_rule"])
             .start_timer();
         partition_manager
@@ -233,37 +299,90 @@ pub async fn flush_batch_physical(
         partition_columns.iter().map(String::as_str).collect();
 
     // 3. Transform each logical table batch into physical format
-    let modified_batches =
-        transform_logical_batches_to_physical(table_batches, &name_to_ids, &partition_columns_set)?;
-
-    // 4. Concatenate all modified batches (all share the same physical schema)
-    let combined_batch = concat_modified_batches(&modified_batches)?;
-
-    // 5. Split by physical partition rule and send to regions
-    let physical_table_id = physical_table_info.table_id();
-    let planned_batches = plan_region_batches(
-        combined_batch,
-        physical_table_id,
-        partition_rule.as_ref(),
-        partition_columns,
+    let modified_batches = batch_convert::transform_logical_batches_to_physical(
+        table_batches,
+        &name_to_ids,
+        &partition_columns_set,
     )?;
 
-    let resolved_batches = resolve_region_targets(planned_batches, partition_manager).await?;
-    let region_writes = encode_region_write_requests(resolved_batches, ctx.skip_wal())?;
-    flush_region_writes_concurrently(node_manager, region_writes).await
+    // 4. Concatenate all modified batches (all share the same physical schema)
+    let combined_batch = batch_convert::concat_modified_batches(&modified_batches)?;
+    // 5. Split by physical partition rule and send to regions
+    let physical_table_id = physical_table_info.table_id();
+    let row_count = table_batches
+        .iter()
+        .flat_map(|table| &table.batches)
+        .map(|batch| batch.batch.num_rows())
+        .sum::<usize>();
+    ensure!(
+        row_count == combined_batch.num_rows(),
+        error::InternalSnafu {
+            err_msg: "Physical transformation changed row ownership"
+        }
+    );
+    let masks =
+        region_write::split_combined_batch_by_region(&combined_batch, partition_rule.as_ref())?;
+    let mut writes = Vec::new();
+    for (region, mask) in masks {
+        let mut selected = Vec::with_capacity(mask.selected_rows());
+        let bits = mask.array().values();
+        let mut offset = 0;
+        // Filtering preserves batch order, and each original batch has one owner.
+        for batch in table_batches.iter().flat_map(|table| &table.batches) {
+            let num_rows = batch.batch.num_rows();
+            let selected_rows = if num_rows == 1 {
+                // Avoid bitmap range setup for single-row submissions.
+                usize::from(bits.value(offset))
+            } else {
+                // `offset` is mask-relative; the raw buffer also needs the mask's slice offset.
+                bits.inner()
+                    .count_set_bits_offset(bits.offset() + offset, num_rows)
+            };
+            selected.extend(std::iter::repeat_n(batch.owner, selected_rows));
+            offset += num_rows;
+        }
+        if let Some(batch) =
+            region_write::plan_region_batch(&combined_batch, physical_table_id, region, &mask)?
+        {
+            let request = region_write::encode_region_write_request(
+                batch,
+                ctx.skip_wal(),
+                &partition_versions,
+            )?;
+            writes.push(TrackedWrite {
+                request,
+                owners: selected,
+            });
+        }
+    }
+    let progress = write_dispatcher.dispatch_tracked(writes, inputs).await;
+    // A submission can contribute several logical batches; credit its counter once.
+    let counters = table_batches
+        .iter()
+        .flat_map(|table| &table.batches)
+        .filter_map(|batch| {
+            batch
+                .progress
+                .as_ref()
+                .map(|counter| (batch.owner, counter))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    for (owner, counter) in counters {
+        counter.add_written(progress[owner].affected_rows);
+    }
+    Ok(progress)
 }
 
 pub(in crate::batcher::logical_table) fn notify_waiters(
     waiters: Vec<FlushWaiter>,
     result: Result<()>,
 ) {
-    let shared_result = result.map_err(Arc::new);
+    let progress = match result {
+        Ok(()) => WriteProgress::default(),
+        Err(error) => WriteProgress::failed(BoxedError::new(error)),
+    };
     for waiter in waiters {
-        let _ = waiter.response_tx.send(match &shared_result {
-            Ok(()) => Ok(()),
-            Err(error) => Err(Arc::clone(error)),
-        });
-        // waiter._permit is dropped here, releasing the inflight semaphore slot
+        let _ = waiter.response_tx.send(progress.clone());
     }
 }
 
@@ -276,7 +395,6 @@ mod tests {
     use std::task::Poll;
     use std::time::Duration;
 
-    use api::region::RegionResponse;
     use api::v1::meta::Peer;
     use api::v1::region::RegionRequest;
     use arrow::record_batch::RecordBatch;
@@ -288,7 +406,6 @@ mod tests {
     use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
     use partition::error::Result as PartitionResult;
     use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
-    use store_api::storage::RegionId;
     use table::metadata::TableId;
     use table::test_util::table_info::test_table_info;
     use tokio::sync::{mpsc, oneshot};
@@ -300,7 +417,7 @@ mod tests {
     use crate::batcher::logical_table::batch_convert::TableBatch;
     use crate::batcher::logical_table::pending_worker::FlushWaiter;
     use crate::batcher::logical_table::region_write::{
-        PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
+        PhysicalFlushCatalogProvider, PhysicalFlushPartitionProvider, PhysicalFlushWriteDispatcher,
         PhysicalTableMetadata,
     };
     use crate::batcher::logical_table::test_util::{
@@ -309,7 +426,7 @@ mod tests {
     use crate::batcher::test_util::mock_table_flownode_cache;
     use crate::error;
     use crate::error::Error;
-    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
+    use crate::metrics::{self, FLOW_NOTIFICATION_DROPPED};
 
     #[tokio::test]
     async fn test_flush_batch_notifies_flownode_after_successful_physical_write() {
@@ -344,9 +461,8 @@ mod tests {
             },
             &MockFlushPartitionProvider {
                 partition_rule_calls: Arc::new(AtomicUsize::new(0)),
-                region_leader_calls: Arc::new(AtomicUsize::new(0)),
             },
-            &MockFlushNodeRequester {
+            &MockFlushWriteDispatcher {
                 writes: writes.clone(),
                 fail: false,
             },
@@ -405,9 +521,8 @@ mod tests {
             },
             &MockFlushPartitionProvider {
                 partition_rule_calls: Arc::new(AtomicUsize::new(0)),
-                region_leader_calls: Arc::new(AtomicUsize::new(0)),
             },
-            &MockFlushNodeRequester {
+            &MockFlushWriteDispatcher {
                 writes: writes.clone(),
                 fail: true,
             },
@@ -431,6 +546,7 @@ mod tests {
         let limiter = RequestLimiter::try_new(1).unwrap();
         let (response_tx, response_rx) = oneshot::channel();
         let waiter = FlushWaiter {
+            _completion: None,
             response_tx,
             _permit: limiter.acquire().await.unwrap(),
         };
@@ -451,8 +567,7 @@ mod tests {
             row_count: 1,
         }];
         let partition_calls = Arc::new(AtomicUsize::new(0));
-        let leader_calls = Arc::new(AtomicUsize::new(0));
-        let node = MockFlushNodeRequester::default();
+        let dispatcher = MockFlushWriteDispatcher::default();
         let ctx = session::context::QueryContext::arc();
 
         flush_batch_physical(
@@ -461,9 +576,8 @@ mod tests {
             &ctx,
             &MockFlushPartitionProvider {
                 partition_rule_calls: partition_calls.clone(),
-                region_leader_calls: leader_calls.clone(),
             },
-            &node,
+            &dispatcher,
             &MockFlushCatalogProvider {
                 table: Some(mock_physical_table_metadata(1024)),
             },
@@ -472,12 +586,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(1, partition_calls.load(Ordering::SeqCst));
-        assert_eq!(1, leader_calls.load(Ordering::SeqCst));
-        assert_eq!(1, node.writes.load(Ordering::SeqCst));
+        assert_eq!(1, dispatcher.writes.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
-    async fn test_flush_batch_physical_returns_actual_affected_rows() {
+    async fn test_flush_batch_physical_rejects_unattributable_affected_rows() {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
             table_id: 11,
@@ -486,27 +599,351 @@ mod tests {
         }];
         let ctx = session::context::QueryContext::arc();
 
-        let affected_rows = flush_batch_physical(
+        let error = flush_batch_physical(
             &table_batches,
             "phy",
             &ctx,
             &MockFlushPartitionProvider {
                 partition_rule_calls: Arc::new(AtomicUsize::new(0)),
-                region_leader_calls: Arc::new(AtomicUsize::new(0)),
             },
-            &AffectedRowsFlushNodeRequester { affected_rows: 7 },
+            &AffectedRowsFlushWriteDispatcher { affected_rows: 7 },
             &MockFlushCatalogProvider {
                 table: Some(mock_physical_table_metadata(1024)),
             },
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(7, affected_rows);
+        assert!(format!("{error:?}").contains("Unattributable"));
     }
 
     #[tokio::test]
-    async fn test_flush_batch_physical_stops_before_partition_and_node_when_table_missing() {
+    async fn test_exemplar_coalesced_logical_flush_retains_each_requests_progress() {
+        use common_error::ext::BoxedError;
+        use common_query::WriteProgress;
+        use operator::write_dispatcher::TrackedWrite;
+
+        struct ProgressDispatcher([(usize, bool); 2]);
+        #[async_trait]
+        impl PhysicalFlushWriteDispatcher for ProgressDispatcher {
+            async fn dispatch(&self, _: Vec<RegionRequest>) -> error::Result<usize> {
+                unreachable!()
+            }
+            async fn dispatch_tracked(
+                &self,
+                requests: Vec<TrackedWrite>,
+                inputs: usize,
+            ) -> Vec<WriteProgress> {
+                assert_eq!(inputs, 2);
+                assert_eq!(
+                    requests
+                        .iter()
+                        .flat_map(|r| &r.owners)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    vec![0, 1, 1]
+                );
+                self.0
+                    .iter()
+                    .map(|&(affected_rows, failed)| WriteProgress {
+                        affected_rows,
+                        error: failed.then(|| {
+                            Arc::new(BoxedError::new(
+                                error::InternalSnafu {
+                                    err_msg: "lost acknowledgement",
+                                }
+                                .build(),
+                            ))
+                        }),
+                    })
+                    .collect()
+            }
+        }
+        let ctx = session::context::QueryContext::arc();
+        let ingested = operator::metrics::DIST_INGEST_ROW_COUNT
+            .with_label_values(&[ctx.get_db_string().as_str()]);
+        for (expected_progress, successful_flush, expected_timestamps) in [
+            ([(1, false), (2, false)], true, vec![1000; 3]),
+            ([(1, false), (1, true)], false, vec![1000]),
+            ([(0, true), (0, true)], false, vec![]),
+        ] {
+            let limiter = RequestLimiter::try_new(2).unwrap();
+            let mut waiters = Vec::new();
+            let mut receivers = Vec::new();
+            let counters =
+                [0, 1].map(|_| Arc::new(session::write_progress::WriteProgress::default()));
+            for counter in &counters {
+                let (response_tx, response_rx) = oneshot::channel();
+                waiters.push(FlushWaiter {
+                    _completion: Some(counter.start()),
+                    response_tx,
+                    _permit: limiter.acquire().await.unwrap(),
+                });
+                receivers.push(response_rx);
+            }
+            let batches = [0, 1, 1]
+                .into_iter()
+                .map(|owner| {
+                    let mut batch = mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0);
+                    batch.owner = owner;
+                    batch.progress = Some(counters[owner].clone());
+                    batch
+                })
+                .collect();
+            let (notifier, mut notifications) =
+                FlowNotifier::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
+            let successes = metrics::FLUSH_TOTAL.get();
+            let failures = metrics::FLUSH_FAILURES.get();
+            let samples = metrics::FLUSH_ROWS.get_sample_count();
+            let sum = metrics::FLUSH_ROWS.get_sample_sum();
+            let dropped = metrics::FLUSH_DROPPED_ROWS.get();
+            let written = ingested.get();
+            flush_batch(
+                Batch {
+                    table_batches: vec![TableBatch {
+                        table_name: "cpu".into(),
+                        table_id: 42,
+                        batches,
+                        row_count: 3,
+                    }],
+                    total_row_count: 3,
+                    db_string: ctx.get_db_string(),
+                    ctx: ctx.clone(),
+                    waiters,
+                },
+                &MockFlushPartitionProvider {
+                    partition_rule_calls: Arc::new(AtomicUsize::new(0)),
+                },
+                &ProgressDispatcher(expected_progress),
+                &MockFlushCatalogProvider {
+                    table: Some(mock_physical_table_metadata(1024)),
+                },
+                notifier,
+            )
+            .await;
+            let expected_written: usize = expected_progress.iter().map(|(rows, _)| rows).sum();
+            assert_eq!(
+                metrics::FLUSH_TOTAL.get(),
+                successes + u64::from(successful_flush)
+            );
+            assert_eq!(
+                metrics::FLUSH_FAILURES.get(),
+                failures + u64::from(!successful_flush)
+            );
+            assert_eq!(
+                metrics::FLUSH_ROWS.get_sample_count(),
+                samples + u64::from(successful_flush)
+            );
+            assert_eq!(
+                metrics::FLUSH_ROWS.get_sample_sum(),
+                sum + if successful_flush { 3.0 } else { 0.0 }
+            );
+            assert_eq!(
+                metrics::FLUSH_DROPPED_ROWS.get(),
+                dropped + (3 - expected_written) as u64
+            );
+            assert_eq!(ingested.get(), written + expected_written as u64);
+            for (counter, (affected_rows, _)) in counters.iter().zip(expected_progress) {
+                counter.wait().await;
+                assert_eq!(counter.written(), affected_rows as u64);
+            }
+            for (receiver, (affected_rows, failed)) in receivers.into_iter().zip(expected_progress)
+            {
+                let result = receiver.await.unwrap();
+                assert_eq!(result.affected_rows, affected_rows);
+                assert_eq!(result.error.is_some(), failed);
+            }
+            if !expected_timestamps.is_empty() {
+                let notification = notifications.try_recv().unwrap();
+                assert_eq!(notification.table_id, 42);
+                assert_eq!(notification.timestamps, expected_timestamps);
+            }
+            assert!(notifications.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_physical_preserves_owners_with_sliced_masks() {
+        use std::sync::Mutex;
+
+        use api::v1::region::{bulk_insert_request, region_request};
+        use arrow::array::{BooleanArray, Float64Array, StringArray, TimestampMillisecondArray};
+        use common_grpc::flight::FlightDecoder;
+        use common_query::WriteProgress;
+        use operator::write_dispatcher::TrackedWrite;
+
+        #[derive(Clone)]
+        struct MaskPartitions {
+            offset: usize,
+            pattern: usize,
+        }
+
+        impl PartitionRule for MaskPartitions {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn partition_columns(&self) -> &[String] {
+                &[]
+            }
+
+            fn find_region(&self, _: &[datatypes::prelude::Value]) -> PartitionResult<u32> {
+                unreachable!()
+            }
+
+            fn split_record_batch(
+                &self,
+                batch: &RecordBatch,
+            ) -> PartitionResult<HashMap<u32, RegionMask>> {
+                Ok([false, true]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(region, selected)| {
+                        let values = std::iter::repeat_n(true, self.offset)
+                            .chain((0..batch.num_rows()).map(|row| {
+                                let matches = match self.pattern {
+                                    0 => false,
+                                    1 => true,
+                                    _ => row % 3 != 0,
+                                };
+                                matches == selected
+                            }))
+                            .chain([true; 8])
+                            .collect::<Vec<_>>();
+                        let mask = BooleanArray::from(values).slice(self.offset, batch.num_rows());
+                        (region as u32, RegionMask::from(mask))
+                    })
+                    .collect())
+            }
+        }
+
+        #[async_trait]
+        impl PhysicalFlushPartitionProvider for MaskPartitions {
+            async fn find_table_partition_rule(
+                &self,
+                _: &table::metadata::TableInfo,
+            ) -> PartitionResult<(PartitionRuleRef, HashMap<u32, Option<u64>>)> {
+                Ok((Arc::new(self.clone()), HashMap::new()))
+            }
+        }
+
+        #[derive(Default)]
+        struct RecordingDispatcher(Mutex<Vec<TrackedWrite>>);
+
+        #[async_trait]
+        impl PhysicalFlushWriteDispatcher for RecordingDispatcher {
+            async fn dispatch(&self, _: Vec<RegionRequest>) -> error::Result<usize> {
+                unreachable!()
+            }
+
+            async fn dispatch_tracked(
+                &self,
+                requests: Vec<TrackedWrite>,
+                inputs: usize,
+            ) -> Vec<WriteProgress> {
+                let mut progress = vec![WriteProgress::default(); inputs];
+                for owner in requests.iter().flat_map(|request| &request.owners) {
+                    progress[*owner].affected_rows += 1;
+                }
+                *self.0.lock().unwrap() = requests;
+                progress
+            }
+        }
+
+        let ctx = session::context::QueryContext::arc();
+        let catalog = MockFlushCatalogProvider {
+            table: Some(mock_physical_table_metadata(1024)),
+        };
+        for lengths in [[0; 7], [1; 7], [0, 3, 65, 1, 127, 0, 64]] {
+            let mut expected = Vec::new();
+            let tables = lengths
+                .chunks(4)
+                .enumerate()
+                .map(|(table, lengths)| {
+                    let batches = lengths
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &rows)| {
+                            let owner = [2, 0, 1, 0, 2, 1, 0][table * 4 + index];
+                            let start = expected.len();
+                            expected.extend(std::iter::repeat_n(owner, rows));
+                            let mut batch = mock_aligned_tag_batch("tag1", "host-1", 0, 1.0);
+                            batch.batch = RecordBatch::try_new(
+                                batch.batch.schema(),
+                                vec![
+                                    Arc::new(TimestampMillisecondArray::from_iter_values(
+                                        (start..start + rows).map(|row| row as i64),
+                                    )),
+                                    Arc::new(Float64Array::from(vec![1.0; rows])),
+                                    Arc::new(StringArray::from(vec!["host-1"; rows])),
+                                ],
+                            )
+                            .unwrap();
+                            batch.owner = owner;
+                            batch
+                        })
+                        .collect();
+                    TableBatch {
+                        table_name: format!("logical_{table}"),
+                        table_id: 100 + table as u32,
+                        batches,
+                        row_count: lengths.iter().sum(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            for offset in [0, 1, 7, 65] {
+                for pattern in 0..3 {
+                    let dispatcher = RecordingDispatcher::default();
+                    let affected = flush_batch_physical(
+                        &tables,
+                        "phy",
+                        &ctx,
+                        &MaskPartitions { offset, pattern },
+                        &dispatcher,
+                        &catalog,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(affected, expected.len());
+                    let mut actual = Vec::new();
+                    for write in dispatcher.0.into_inner().unwrap() {
+                        let Some(region_request::Body::BulkInsert(request)) = write.request.body
+                        else {
+                            panic!("expected bulk request")
+                        };
+                        let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
+                            panic!("expected Arrow IPC")
+                        };
+                        let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                            .unwrap()
+                            .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                            .unwrap();
+                        assert_eq!(batch.num_rows(), write.owners.len());
+                        let timestamps = batch
+                            .column_by_name("greptime_timestamp")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<TimestampMillisecondArray>()
+                            .unwrap();
+                        assert!(timestamps.values().windows(2).all(|pair| pair[0] < pair[1]));
+                        actual.extend(timestamps.values().iter().copied().zip(write.owners));
+                    }
+                    actual.sort_unstable();
+                    assert_eq!(
+                        actual,
+                        expected
+                            .iter()
+                            .enumerate()
+                            .map(|(row, owner)| (row as i64, *owner))
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_physical_stops_before_partition_and_dispatch_when_table_missing() {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
             table_id: 11,
@@ -514,8 +951,7 @@ mod tests {
             row_count: 1,
         }];
         let partition_calls = Arc::new(AtomicUsize::new(0));
-        let leader_calls = Arc::new(AtomicUsize::new(0));
-        let node = MockFlushNodeRequester::default();
+        let dispatcher = MockFlushWriteDispatcher::default();
         let ctx = session::context::QueryContext::arc();
 
         let err = flush_batch_physical(
@@ -524,9 +960,8 @@ mod tests {
             &ctx,
             &MockFlushPartitionProvider {
                 partition_rule_calls: partition_calls.clone(),
-                region_leader_calls: leader_calls.clone(),
             },
-            &node,
+            &dispatcher,
             &MockFlushCatalogProvider { table: None },
         )
         .await
@@ -537,8 +972,7 @@ mod tests {
                 .contains("Physical table 'missing_phy' not found")
         );
         assert_eq!(0, partition_calls.load(Ordering::SeqCst));
-        assert_eq!(0, leader_calls.load(Ordering::SeqCst));
-        assert_eq!(0, node.writes.load(Ordering::SeqCst));
+        assert_eq!(0, dispatcher.writes.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -558,8 +992,7 @@ mod tests {
             },
         ];
         let partition_calls = Arc::new(AtomicUsize::new(0));
-        let leader_calls = Arc::new(AtomicUsize::new(0));
-        let node = MockFlushNodeRequester::default();
+        let dispatcher = MockFlushWriteDispatcher::default();
         let ctx = session::context::QueryContext::arc();
 
         let err = flush_batch_physical(
@@ -568,9 +1001,8 @@ mod tests {
             &ctx,
             &MockFlushPartitionProvider {
                 partition_rule_calls: partition_calls.clone(),
-                region_leader_calls: leader_calls.clone(),
             },
-            &node,
+            &dispatcher,
             &MockFlushCatalogProvider {
                 table: Some(mock_physical_table_metadata(1024)),
             },
@@ -580,8 +1012,7 @@ mod tests {
 
         assert!(err.to_string().contains("unknown_tag"));
         assert_eq!(1, partition_calls.load(Ordering::SeqCst));
-        assert_eq!(0, leader_calls.load(Ordering::SeqCst));
-        assert_eq!(0, node.writes.load(Ordering::SeqCst));
+        assert_eq!(0, dispatcher.writes.load(Ordering::SeqCst));
     }
 
     fn mock_physical_table_metadata(table_id: TableId) -> PhysicalTableMetadata {
@@ -671,7 +1102,6 @@ mod tests {
 
     struct MockFlushPartitionProvider {
         partition_rule_calls: Arc<AtomicUsize>,
-        region_leader_calls: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -679,40 +1109,28 @@ mod tests {
         async fn find_table_partition_rule(
             &self,
             _table_info: &table::metadata::TableInfo,
-        ) -> PartitionResult<PartitionRuleRef> {
+        ) -> PartitionResult<(PartitionRuleRef, HashMap<u32, Option<u64>>)> {
             self.partition_rule_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(SingleRegionPartitionRule))
-        }
-
-        async fn find_region_leader(&self, _region_id: RegionId) -> error::Result<Peer> {
-            self.region_leader_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Peer {
-                id: 1,
-                addr: "node-1".to_string(),
-            })
+            Ok((Arc::new(SingleRegionPartitionRule), HashMap::new()))
         }
     }
 
     #[derive(Default)]
-    struct MockFlushNodeRequester {
+    struct MockFlushWriteDispatcher {
         writes: Arc<AtomicUsize>,
         fail: bool,
     }
 
     #[async_trait]
-    impl PhysicalFlushNodeRequester for MockFlushNodeRequester {
-        async fn handle(
-            &self,
-            _peer: &Peer,
-            _request: RegionRequest,
-        ) -> error::Result<RegionResponse> {
+    impl PhysicalFlushWriteDispatcher for MockFlushWriteDispatcher {
+        async fn dispatch(&self, _requests: Vec<RegionRequest>) -> error::Result<usize> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             if self.fail {
                 return Err(Error::Internal {
                     err_msg: "physical write failed".to_string(),
                 });
             }
-            Ok(RegionResponse::new(0))
+            Ok(1)
         }
     }
 
@@ -726,18 +1144,14 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct AffectedRowsFlushNodeRequester {
+    struct AffectedRowsFlushWriteDispatcher {
         affected_rows: usize,
     }
 
     #[async_trait]
-    impl PhysicalFlushNodeRequester for AffectedRowsFlushNodeRequester {
-        async fn handle(
-            &self,
-            _peer: &Peer,
-            _request: RegionRequest,
-        ) -> error::Result<RegionResponse> {
-            Ok(RegionResponse::new(self.affected_rows))
+    impl PhysicalFlushWriteDispatcher for AffectedRowsFlushWriteDispatcher {
+        async fn dispatch(&self, _requests: Vec<RegionRequest>) -> error::Result<usize> {
+            Ok(self.affected_rows)
         }
     }
 }

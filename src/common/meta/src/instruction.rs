@@ -381,7 +381,7 @@ pub struct UpgradeRegion {
     /// it's helpful to verify whether the leader region is ready.
     #[serde(with = "humantime_serde")]
     pub replay_timeout: Duration,
-    /// The hint for replaying memtable.
+    /// Legacy WAL index location hint, retained for older datanodes.
     #[serde(default)]
     pub location_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

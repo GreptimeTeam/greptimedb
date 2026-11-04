@@ -14,7 +14,6 @@
 
 pub(crate) mod client_manager;
 pub(crate) mod consumer;
-pub(crate) mod index;
 pub mod log_store;
 mod periodic_offset_fetcher;
 pub(crate) mod producer;
@@ -24,7 +23,6 @@ pub(crate) mod util;
 pub(crate) mod worker;
 
 pub use client_manager::DEFAULT_PARTITION;
-pub use index::{GlobalIndexCollector, default_index_file};
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::Id as EntryId;
 

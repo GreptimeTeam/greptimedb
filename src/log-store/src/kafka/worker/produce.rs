@@ -30,16 +30,10 @@ impl BackgroundProducerWorker {
         max_batch_bytes: usize,
     ) -> Vec<PendingRequest> {
         let mut records_buffer = vec![];
-        let mut region_ids = vec![];
         let mut batch_size = 0;
         let mut pending_requests = Vec::with_capacity(requests.len());
 
-        for ProduceRequest {
-            batch,
-            sender,
-            region_id,
-        } in std::mem::take(requests)
-        {
+        for ProduceRequest { batch, sender } in std::mem::take(requests) {
             let mut receiver = ProduceResultReceiver::default();
             for record in batch {
                 assert!(record.approximate_size() <= max_batch_bytes);
@@ -48,7 +42,6 @@ impl BackgroundProducerWorker {
                     let (tx, rx) = oneshot::channel();
                     pending_requests.push(PendingRequest {
                         batch: std::mem::take(&mut records_buffer),
-                        region_ids: std::mem::take(&mut region_ids),
                         size: batch_size,
                         sender: tx,
                     });
@@ -58,7 +51,6 @@ impl BackgroundProducerWorker {
 
                 batch_size += record.approximate_size();
                 records_buffer.push(record);
-                region_ids.push(region_id);
             }
             // The remaining records.
             if batch_size > 0 {
@@ -66,7 +58,6 @@ impl BackgroundProducerWorker {
                 let (tx, rx) = oneshot::channel();
                 pending_requests.push(PendingRequest {
                     batch: std::mem::take(&mut records_buffer),
-                    region_ids: std::mem::take(&mut region_ids),
                     size: batch_size,
                     sender: tx,
                 });

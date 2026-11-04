@@ -44,9 +44,9 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
+use futures::future::join_all;
 use log_store::ObjectStoreLogStore;
 use log_store::kafka::log_store::KafkaLogStore;
-use log_store::kafka::{GlobalIndexCollector, default_index_file};
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
@@ -61,6 +61,7 @@ use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use query::dummy_catalog::TableProviderFactoryRef;
 use query::region_query::RegionQueryHandlerFactoryRef;
+use relational_engine::engine::RelationalEngine;
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -88,7 +89,7 @@ use crate::heartbeat::HeartbeatTask;
 use crate::partition_expr_fetcher::MetaPartitionExprFetcher;
 use crate::region_query::DatanodeRegionQueryHandler;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
-use crate::store::{self, new_object_store_without_cache};
+use crate::store;
 use crate::utils::{RegionOpenRequests, build_region_open_requests};
 
 /// Datanode service.
@@ -168,7 +169,10 @@ impl Datanode {
                     .context(ShutdownInstanceSnafu),
             );
         }
-        record_shutdown_error(&mut first_error, self.region_server.stop().await);
+        // The object store WAL stops before the regions close: its stop
+        // uploads the backlog or drops it, and answers every wait for its
+        // entries, so a flush that waits for the WAL, queued or run by the
+        // close of a region, cannot hold up the shutdown.
         if let Some(log_store) = &self.object_store_log_store {
             record_shutdown_error(
                 &mut first_error,
@@ -179,6 +183,7 @@ impl Datanode {
                     .context(ShutdownInstanceSnafu),
             );
         }
+        record_shutdown_error(&mut first_error, self.region_server.stop().await);
         first_error.map_or(Ok(()), Err)
     }
 
@@ -367,6 +372,11 @@ impl DatanodeBuilder {
                 cache_registry.clone(),
             )
             .await?;
+        // A region acknowledges only writes whose WAL append completed within its lease from
+        // the metasrv.
+        if controlled_by_metasrv && let Some(mito) = region_server.mito_engine() {
+            mito.require_write_lease();
+        }
 
         // TODO(weny): Considering introducing a readonly kv_backend trait.
         let runtime_switch_manager = RuntimeSwitchManager::new(self.kv_backend.clone());
@@ -458,18 +468,81 @@ impl DatanodeBuilder {
         .await
     }
 
-    /// Builds [ObjectStoreManager] from [StorageConfig].
-    pub async fn build_object_store_manager(cfg: &StorageConfig) -> Result<ObjectStoreManagerRef> {
+    /// Builds [ObjectStoreManager] from [StorageConfig] and probes every remote
+    /// object store it contains, unless `probe_on_startup` is disabled.
+    ///
+    /// The probe fails the build when a store rejects any of the operations the
+    /// engines rely on, so a misconfigured storage surfaces here instead of failing
+    /// on the first write.
+    pub async fn build_object_store_manager(
+        cfg: &StorageConfig,
+        node_id: u64,
+    ) -> Result<ObjectStoreManagerRef> {
         let object_store = store::new_object_store(cfg.store.clone(), &cfg.data_home).await?;
         let default_name = cfg.store.config_name();
-        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
-        for store in &cfg.providers {
-            object_store_manager.add(
-                store.config_name(),
-                store::new_object_store(store.clone(), &cfg.data_home).await?,
-            );
+        let mut checks = Vec::with_capacity(1 + cfg.providers.len());
+        if cfg.store.is_object_storage() {
+            checks.push((default_name.to_string(), object_store.clone()));
         }
+        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
+        for provider in &cfg.providers {
+            let name = provider.config_name();
+            let object_store = store::new_object_store(provider.clone(), &cfg.data_home).await?;
+            if provider.is_object_storage() {
+                checks.push((name.to_string(), object_store.clone()));
+            }
+            object_store_manager.add(name, object_store);
+        }
+
+        if cfg.probe_on_startup && !checks.is_empty() {
+            let prefix = store::probe_key_prefix(node_id);
+            Self::run_probes(&checks, &prefix).await?;
+        }
+
         Ok(Arc::new(object_store_manager))
+    }
+
+    /// Probes every store in `checks` under its own key prefix.
+    ///
+    /// Providers often share one object storage, so when there is more than one
+    /// store each probe starts after a random delay rather than all at once.
+    ///
+    /// Each check is bounded by [`store::PROBE_TIMEOUT`], so a store that accepts
+    /// connections but never answers fails startup instead of blocking it, after a
+    /// best-effort removal of its probe.
+    async fn run_probes(checks: &[(String, ObjectStore)], prefix: &str) -> Result<()> {
+        let stagger = checks.len() > 1;
+        let checks = checks
+            .iter()
+            .enumerate()
+            .map(|(index, (name, object_store))| {
+                let prefix = format!("{prefix}/{index}");
+                async move {
+                    if stagger {
+                        tokio::time::sleep(store::probe_start_delay()).await;
+                    }
+                    match tokio::time::timeout(
+                        store::PROBE_TIMEOUT,
+                        store::probe_object_store(object_store, name, &prefix),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            store::remove_probe_object(object_store, &prefix).await;
+                            error::ObjectStoreProbeTimeoutSnafu {
+                                name,
+                                timeout: store::PROBE_TIMEOUT,
+                            }
+                            .fail()
+                        }
+                    }
+                }
+            });
+        for result in join_all(checks).await {
+            result?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -565,7 +638,11 @@ impl DatanodeBuilder {
         );
         region_server.install_remote_dyn_filter_receiver_injector(&self.plugins);
 
-        let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
+        let object_store_manager = Self::build_object_store_manager(
+            &opts.storage,
+            opts.node_id.context(MissingNodeIdSnafu)?,
+        )
+        .await?;
         let engines = self
             .build_store_engines(
                 object_store_manager,
@@ -634,10 +711,14 @@ impl DatanodeBuilder {
             self.local_file_access.clone(),
         );
 
+        let relational_engine =
+            RelationalEngine::new(object_store_manager.default_object_store().clone());
+
         Ok(vec![
             Arc::new(mito_engine) as _,
             Arc::new(metric_engine) as _,
             Arc::new(file_engine) as _,
+            Arc::new(relational_engine) as _,
         ])
     }
 
@@ -683,29 +764,7 @@ impl DatanodeBuilder {
                 builder.try_build().await.context(BuildMitoEngineSnafu)?
             }
             DatanodeWalConfig::Kafka(kafka_config) => {
-                if kafka_config.create_index && opts.node_id.is_none() {
-                    warn!("The WAL index creation only available in distributed mode.")
-                }
-                let global_index_collector = if kafka_config.create_index
-                    && let Some(node_id) = opts.node_id
-                {
-                    let operator = new_object_store_without_cache(
-                        &opts.storage.store,
-                        &opts.storage.data_home,
-                    )
-                    .await?;
-                    let path = default_index_file(node_id);
-                    Some(Self::build_global_index_collector(
-                        kafka_config.dump_index_interval,
-                        operator,
-                        path,
-                    ))
-                } else {
-                    None
-                };
-
-                let log_store =
-                    Self::build_kafka_log_store(kafka_config, global_index_collector).await?;
+                let log_store = Self::build_kafka_log_store(kafka_config).await?;
                 self.topic_stats_reporter = Some(log_store.topic_stats_reporter());
                 let builder = MitoEngineBuilder::new(
                     &opts.storage.data_home,
@@ -825,24 +884,12 @@ impl DatanodeBuilder {
     }
 
     /// Builds [`KafkaLogStore`].
-    async fn build_kafka_log_store(
-        config: &DatanodeKafkaConfig,
-        global_index_collector: Option<GlobalIndexCollector>,
-    ) -> Result<Arc<KafkaLogStore>> {
-        KafkaLogStore::try_new(config, global_index_collector)
+    async fn build_kafka_log_store(config: &DatanodeKafkaConfig) -> Result<Arc<KafkaLogStore>> {
+        KafkaLogStore::try_new(config)
             .await
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)
             .map(Arc::new)
-    }
-
-    /// Builds [`GlobalIndexCollector`]
-    fn build_global_index_collector(
-        dump_index_interval: Duration,
-        operator: object_store::ObjectStore,
-        path: String,
-    ) -> GlobalIndexCollector {
-        GlobalIndexCollector::new(dump_index_interval, operator, path)
     }
 }
 
@@ -1090,45 +1137,58 @@ mod tests {
     use std::assert_matches;
     use std::collections::{BTreeMap, HashMap};
     use std::io::Write;
+    use std::ops::Range;
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use api::v1::{ColumnSchema, Rows};
     use cache::build_datanode_layered_cache_registry;
     use common_base::Plugins;
     use common_base::readable_size::ReadableSize;
+    use common_base::secrets::SecretString;
     use common_config::Configurable;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
+    use common_meta::cache::{SchemaCacheRef, TableSchemaCacheRef};
     use common_meta::key::RegionRoleSet;
+    use common_meta::key::SchemaMetadataManager;
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::node_manager::NodeManagerRef;
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
-    use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use common_wal::config::object_store::{AckMode, ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
     use log_store::ObjectStoreLogStore;
     use log_store::error::Error as LogStoreError;
     use meta_client::client::MetaClientBuilder;
     use mito2::engine::MITO_ENGINE_NAME;
+    use mito2::sst::file_ref::FileReferenceManager;
+    use mito2::test_util::{CreateRequestBuilder, build_rows, rows_schema};
     use object_store::ObjectStore;
+    use object_store::config::{S3Config, S3Connection};
     use object_store::manager::ObjectStoreManager;
     use partition::manager::PartitionRuleManagerRef;
     use query::region_query::{RegionQueryHandlerFactory, RegionQueryHandlerFactoryRef};
     use store_api::logstore::LogStore;
-    use store_api::region_request::RegionRequest;
+    use store_api::logstore::provider::Provider;
+    use store_api::region_request::{PathType, RegionOpenRequest, RegionPutRequest, RegionRequest};
     use store_api::storage::RegionId;
 
-    use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
+    use crate::config::{DatanodeOptions, ObjectStoreConfig, RegionEngineConfig, StorageConfig};
     use crate::datanode::{
-        DatanodeBuilder, validate_object_store_wal_config, validate_region_engine_config,
+        Datanode, DatanodeBuilder, validate_object_store_wal_config, validate_region_engine_config,
         wal_object_store,
     };
     use crate::error::{self, Error};
     use crate::region_query::DatanodeRegionQueryHandler;
+    use crate::region_server::RegionServer;
     use crate::tests::{MockRegionEngine, mock_region_server};
+
+    const WAIT: Duration = Duration::from_secs(30);
 
     async fn setup_table_datanode(kv: &KvBackendRef) {
         let mgr = DatanodeTableManager::new(kv.clone());
@@ -1478,6 +1538,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_object_store_probe_can_be_disabled() {
+        // The endpoint does not accept connections, so this only succeeds when the
+        // probe does not run.
+        let storage = StorageConfig {
+            store: ObjectStoreConfig::S3(S3Config {
+                connection: S3Connection {
+                    bucket: "test".to_string(),
+                    endpoint: Some("http://127.0.0.1:1".to_string()),
+                    region: Some("us-east-1".to_string()),
+                    access_key_id: SecretString::from("test".to_string()),
+                    secret_access_key: SecretString::from("test".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            probe_on_startup: false,
+            ..Default::default()
+        };
+
+        DatanodeBuilder::build_object_store_manager(&storage, 1)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_file_store_is_not_probed() {
+        // The probe is enabled by default, but a File store must skip it.
+        let data_home = create_temp_dir("object-store-probe-file");
+        let storage = StorageConfig {
+            data_home: data_home.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+
+        DatanodeBuilder::build_object_store_manager(&storage, 1)
+            .await
+            .unwrap();
+
+        // The probe would leave this directory behind if it ran.
+        assert!(!data_home.path().join(".greptime_probe").exists());
+    }
+
+    #[tokio::test]
+    async fn test_object_store_probe_failure_aborts_build() {
+        // The endpoint does not accept connections, so the probe write fails and the
+        // build must fail with it.
+        let storage = StorageConfig {
+            store: ObjectStoreConfig::S3(S3Config {
+                connection: S3Connection {
+                    bucket: "test".to_string(),
+                    endpoint: Some("http://127.0.0.1:1".to_string()),
+                    region: Some("us-east-1".to_string()),
+                    access_key_id: SecretString::from("test".to_string()),
+                    secret_access_key: SecretString::from("test".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let err = DatanodeBuilder::build_object_store_manager(&storage, 1)
+            .await
+            .unwrap_err();
+        assert_matches!(
+            err,
+            Error::ObjectStoreProbe {
+                name,
+                step: "write",
+                ..
+            } if name == storage.store.config_name()
+        );
+    }
+
     struct CountingRegionQueryHandlerFactory(Arc<AtomicUsize>);
 
     impl RegionQueryHandlerFactory for CountingRegionQueryHandlerFactory {
@@ -1614,6 +1748,263 @@ mod tests {
         assert!(is_stopped(log_store).await);
     }
 
+    const REGION: RegionId = RegionId::new(1024, 1);
+
+    fn enqueued_wal_config(flush_interval: Duration) -> ObjectStoreWalConfig {
+        ObjectStoreWalConfig {
+            ack_mode: AckMode::Enqueued,
+            flush_interval,
+            ..Default::default()
+        }
+    }
+
+    /// The options that put a region on the WAL of a datanode with `config`.
+    fn region_wal_options(config: &ObjectStoreWalConfig) -> HashMap<String, String> {
+        let prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        let wal_options =
+            serde_json::to_string(&WalOptions::ObjectStore(ObjectStoreWalOptions::new(prefix)))
+                .unwrap();
+        HashMap::from([(WAL_OPTIONS_KEY.to_string(), wal_options)])
+    }
+
+    async fn put_rows(
+        region_server: &RegionServer,
+        schema: &[ColumnSchema],
+        rows: Range<usize>,
+        skip_wal: bool,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        region_server
+            .handle_request(
+                REGION,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: schema.to_vec(),
+                        rows: build_rows(rows.start, rows.end),
+                    },
+                    skip_wal,
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Builds a datanode on an `enqueued` object store WAL with
+    /// `flush_interval` and creates [`REGION`] on it with `durable_rows`
+    /// written through the WAL and uploaded. Then makes every later create
+    /// of the WAL fail with a transient error if `uploads_fail`, and writes
+    /// `rows` through the WAL and `skipped_rows` past it. Returns the datanode
+    /// and its log store.
+    async fn datanode_with_object_store_wal(
+        data_home: &str,
+        flush_interval: Duration,
+        durable_rows: usize,
+        uploads_fail: bool,
+        rows: usize,
+        skipped_rows: usize,
+    ) -> (Datanode, Arc<ObjectStoreLogStore>) {
+        let config = enqueued_wal_config(flush_interval);
+        let prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        let mut request = CreateRequestBuilder::new().build();
+        request.options.extend(region_wal_options(&config));
+        let datanode = object_store_wal_builder(data_home, config)
+            .build()
+            .await
+            .unwrap();
+        let log_store = datanode.object_store_log_store.clone().unwrap();
+        let region_server = datanode.region_server();
+        let schema = rows_schema(&request);
+        region_server
+            .handle_request(REGION, RegionRequest::Create(request))
+            .await
+            .unwrap();
+
+        put_rows(&region_server, &schema, 0..durable_rows, false).await;
+        if durable_rows > 0 {
+            let provider = Provider::object_store_provider(REGION, prefix);
+            tokio::time::timeout(WAIT, async {
+                while log_store.latest_entry_id(&provider).unwrap() == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the rows must become durable");
+        }
+        if uploads_fail {
+            log_store.fail_creates();
+        }
+        let skipped = durable_rows + rows;
+        put_rows(&region_server, &schema, durable_rows..skipped, false).await;
+        put_rows(
+            &region_server,
+            &schema,
+            skipped..skipped + skipped_rows,
+            true,
+        )
+        .await;
+        (datanode, log_store)
+    }
+
+    /// Restarts a datanode on the files of `data_home`, opens [`REGION`] and
+    /// returns the number of rows it holds after replaying the WAL.
+    async fn rows_after_restart(data_home: &str) -> u64 {
+        let config = enqueued_wal_config(ObjectStoreWalConfig::default().flush_interval);
+        let options = region_wal_options(&config);
+        let mut datanode = object_store_wal_builder(data_home, config)
+            .build()
+            .await
+            .unwrap();
+        let region_server = datanode.region_server();
+        region_server
+            .handle_request(
+                REGION,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: MITO_ENGINE_NAME.to_string(),
+                    table_dir: CreateRequestBuilder::new().build().table_dir,
+                    path_type: PathType::Bare,
+                    options,
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let rows = region_server.region_statistic(REGION).unwrap().num_rows;
+        datanode.shutdown().await.unwrap();
+        rows
+    }
+
+    /// Returns the Parquet files under `dir` and its subdirectories.
+    fn sst_files(dir: &Path) -> Vec<String> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(sst_files(&path));
+            } else if path.extension().is_some_and(|ext| ext == "parquet") {
+                files.push(path.display().to_string());
+            }
+        }
+        files
+    }
+
+    /// A flush that waits for WAL uploads that keep failing does not hold up
+    /// the shutdown: the WAL stops first and drops its backlog, which fails
+    /// the flush with the stopped error before it writes its manifest edit,
+    /// and the shutdown reports the dropped backlog. After a restart the rows
+    /// that were durable before the outage replay once.
+    #[tokio::test]
+    async fn test_shutdown_while_a_flush_waits_for_failing_wal_uploads() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("object-store-wal-shutdown-flush");
+        let data_home = data_home.path().to_str().unwrap();
+        let (mut datanode, log_store) = datanode_with_object_store_wal(
+            data_home,
+            ObjectStoreWalConfig::default().flush_interval,
+            3,
+            true,
+            2,
+            0,
+        )
+        .await;
+        let flush = {
+            let region_server = datanode.region_server();
+            tokio::spawn(async move {
+                region_server
+                    .handle_request(REGION, RegionRequest::Flush(Default::default()))
+                    .await
+            })
+        };
+        tokio::time::timeout(WAIT, log_store.wait_for_durability_waits(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = tokio::time::timeout(WAIT, datanode.shutdown())
+            .await
+            .expect("the shutdown must finish")
+            .unwrap_err();
+
+        assert_matches!(err, Error::ShutdownInstance { .. });
+        assert!(
+            format!("{err:?}").contains("injected create failure"),
+            "{err:?}"
+        );
+        let flush_err = flush.await.unwrap().unwrap_err();
+        assert!(
+            format!("{flush_err:?}").contains("Object store WAL log store is stopped"),
+            "{flush_err:?}"
+        );
+        assert_eq!(Vec::<String>::new(), sst_files(Path::new(data_home)));
+        assert!(is_stopped(&log_store).await);
+        drop(datanode);
+
+        assert_eq!(3, rows_after_restart(data_home).await);
+    }
+
+    /// A region that holds writes that skipped the WAL is flushed when it
+    /// closes. When the WAL's uploads keep failing, the WAL stops first and
+    /// drops its backlog, so that flush fails at once instead of waiting: the
+    /// close fails, the writes that skipped the WAL are lost, and the shutdown
+    /// returns the dropped backlog.
+    #[tokio::test]
+    async fn test_shutdown_closes_a_region_after_the_wal_dropped_its_backlog() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("object-store-wal-shutdown-closing-flush");
+        let (mut datanode, log_store) = datanode_with_object_store_wal(
+            data_home.path().to_str().unwrap(),
+            ObjectStoreWalConfig::default().flush_interval,
+            0,
+            true,
+            3,
+            2,
+        )
+        .await;
+
+        let err = tokio::time::timeout(WAIT, datanode.shutdown())
+            .await
+            .expect("the shutdown must finish")
+            .unwrap_err();
+
+        assert_matches!(err, Error::ShutdownInstance { .. });
+        assert!(
+            format!("{err:?}").contains("injected create failure"),
+            "{err:?}"
+        );
+        assert_eq!(Vec::<String>::new(), sst_files(data_home.path()));
+        assert!(is_stopped(&log_store).await);
+    }
+
+    /// With a healthy WAL whose seal interval is longer than any test, the
+    /// close-time flush of a region that holds writes that skipped the WAL
+    /// commits: the WAL's stop seals and uploads its open batch before the
+    /// region closes, so the flush finds its entries durable, and every row
+    /// survives a restart.
+    #[tokio::test]
+    async fn test_shutdown_flushes_a_region_while_the_wal_is_healthy() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("object-store-wal-shutdown-healthy-flush");
+        let data_home = data_home.path().to_str().unwrap();
+        let (mut datanode, log_store) =
+            datanode_with_object_store_wal(data_home, Duration::from_secs(3600), 0, false, 3, 2)
+                .await;
+
+        tokio::time::timeout(WAIT, datanode.shutdown())
+            .await
+            .expect("the shutdown must finish")
+            .unwrap();
+        assert_eq!(1, sst_files(Path::new(data_home)).len());
+        assert!(is_stopped(&log_store).await);
+        drop(datanode);
+
+        assert_eq!(5, rows_after_restart(data_home).await);
+    }
+
     #[test]
     fn test_node_prefix_passes_validation() {
         let config = ObjectStoreWalConfig::default();
@@ -1622,5 +2013,53 @@ mod tests {
             ..config
         };
         validate_object_store_wal_config(&derived).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_build_store_engines_registers_relational_engine() {
+        common_telemetry::init_default_ut_logging();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let cache_registry = Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
+        let schema_cache: SchemaCacheRef = cache_registry.get().unwrap();
+        let table_id_schema_cache: TableSchemaCacheRef = cache_registry.get().unwrap();
+        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(
+            table_id_schema_cache,
+            schema_cache,
+        ));
+        let file_ref_manager = Arc::new(FileReferenceManager::with_gc_enabled(Some(0), false));
+
+        let data_home = create_temp_dir("build-store-engines");
+        let mut opts = DatanodeOptions {
+            node_id: Some(0),
+            wal: DatanodeWalConfig::Noop,
+            enable_telemetry: false,
+            ..Default::default()
+        };
+        opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
+
+        let object_store_manager =
+            DatanodeBuilder::build_object_store_manager(&opts.storage, opts.node_id.unwrap())
+                .await
+                .unwrap();
+
+        let mut builder = DatanodeBuilder::new(opts, Plugins::default(), kv_backend);
+        let engines = builder
+            .build_store_engines(
+                object_store_manager,
+                schema_metadata_manager,
+                file_ref_manager,
+                Plugins::default(),
+            )
+            .await
+            .unwrap();
+
+        let names: Vec<&str> = engines.iter().map(|engine| engine.name()).collect();
+        assert_eq!(engines.len(), 4, "expected 4 engines, got: {names:?}");
+        for expected in [MITO_ENGINE_NAME, "metric", "file", "relational"] {
+            assert!(
+                names.contains(&expected),
+                "engine {expected:?} not registered, got: {names:?}"
+            );
+        }
     }
 }

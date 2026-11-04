@@ -283,6 +283,7 @@ fn select_dynamic_hints(
             path: path.iter().map(|x| (*x).to_owned()).collect(),
             data_type: ConcreteDataType::from_arrow_type(&stat.data_type.as_arrow_type()),
             inverted_index: false,
+            skipping_index: None,
         })
         .collect()
 }
@@ -378,6 +379,7 @@ mod tests {
                 path: vec!["hint".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             Some(2),
         )?;
@@ -434,6 +436,7 @@ mod tests {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             Some(0),
         )?;
@@ -488,6 +491,7 @@ mod tests {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             Some(0),
         )?;
@@ -508,11 +512,13 @@ mod tests {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
                 JsonTypeHint {
                     path: vec!["source_only".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
             ],
             None,
@@ -579,6 +585,7 @@ mod tests {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             Some(0),
         )?;
@@ -588,11 +595,13 @@ mod tests {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
                 JsonTypeHint {
                     path: vec!["promoted".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
             ],
             Some(0),

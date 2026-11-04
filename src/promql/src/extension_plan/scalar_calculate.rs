@@ -413,7 +413,7 @@ impl ExecutionPlan for ScalarCalculateExec {
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
-        vec![true; self.children().len()]
+        vec![false]
     }
 
     fn input_distribution_requirements(&self) -> InputDistributionRequirements {

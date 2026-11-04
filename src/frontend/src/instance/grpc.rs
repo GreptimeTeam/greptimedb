@@ -27,7 +27,8 @@ use api::v1::{
 use async_stream::try_stream;
 use async_trait::async_trait;
 use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTargets,
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTarget,
+    PermissionTableTargets,
 };
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
@@ -85,6 +86,20 @@ impl GrpcQueryHandler for Instance {
                         Some(&ctx.current_schema()),
                     )
                     .context(PermissionSnafu)?;
+
+                if let Some(checker) = self.plugins.get::<PermissionCheckerRef>()
+                    && checker.uses_table_targets()
+                {
+                    let targets = checker.grpc_table_targets(
+                        &request,
+                        ctx.current_catalog(),
+                        &ctx.current_schema(),
+                    );
+                    let targets = self.resolve_query_permission_targets(targets, &ctx)
+                        .await.map_err(BoxedError::new).context(ExternalSnafu)?;
+                    self.check_table_permission(&ctx, PermissionReq::GrpcRequest(&request), targets)
+                        .context(PermissionSnafu)?;
+                }
             }
 
             let output = match request {
@@ -127,9 +142,12 @@ impl GrpcQueryHandler for Instance {
                             let timer = GRPC_HANDLE_PLAN_ELAPSED.start_timer();
 
                             // use dummy catalog to provide table
-                            let plan_decoder = self
+                            let engine_ctx = self
                                 .query_engine()
                                 .engine_context(ctx.clone())
+                                .context(PlanStatementSnafu)?;
+                            let ctx = engine_ctx.query_ctx();
+                            let plan_decoder = engine_ctx
                                 .new_plan_decoder()
                                 .context(PlanStatementSnafu)?;
 
@@ -436,6 +454,23 @@ impl Instance {
                             table_name: table_name.to_string(),
                         })?;
 
+                    let target = PermissionTableTarget::new(
+                        &table_name.catalog_name,
+                        &table_name.schema_name,
+                        &table_name.table_name,
+                    )
+                    .with_physical_metric_table(table.table_info().is_physical_table());
+                    plugins.get::<PermissionCheckerRef>().as_ref()
+                        .check_permission_with_table_targets(
+                            ctx.current_user(),
+                            PermissionReq::BulkInsert {
+                                catalog: &table_name.catalog_name,
+                                schema: &table_name.schema_name,
+                                table: &table_name.table_name,
+                            },
+                            PermissionTableTargets::resolved(vec![target]),
+                        ).context(PermissionSnafu)?;
+
                     // Check permissions for the table
                     let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
                     let interceptor = interceptor_ref.as_ref();
@@ -488,11 +523,12 @@ impl Instance {
         })?;
 
         // use dummy catalog to provide table
-        let plan_decoder = self
+        let engine_ctx = self
             .query_engine()
             .engine_context(ctx.clone())
-            .new_plan_decoder()
             .context(PlanStatementSnafu)?;
+        let ctx = engine_ctx.query_ctx();
+        let plan_decoder = engine_ctx.new_plan_decoder().context(PlanStatementSnafu)?;
 
         let dummy_catalog_list = Arc::new(
             catalog::table_source::dummy_catalog::DummyCatalogList::new_with_query_ctx(
@@ -535,7 +571,11 @@ impl Instance {
         let insert_into = add_insert_to_logical_plan(table_name, table_source, logical_plan)
             .context(SubstraitDecodeLogicalPlanSnafu)?;
 
-        let engine_ctx = self.query_engine().engine_context(ctx.clone());
+        let engine_ctx = self
+            .query_engine()
+            .engine_context(ctx.clone())
+            .context(PlanStatementSnafu)?;
+        let ctx = engine_ctx.query_ctx();
         let state = engine_ctx.state();
         // Analyze the plan
         let analyzed_plan = state

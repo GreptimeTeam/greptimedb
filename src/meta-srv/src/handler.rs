@@ -51,7 +51,7 @@ use response_header_handler::ResponseHeaderHandler;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{Notify, RwLock, oneshot, watch};
+use tokio::sync::{Notify, OwnedMutexGuard, RwLock, oneshot, watch};
 
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::handler::collect_topic_stats_handler::CollectTopicStatsHandler;
@@ -198,6 +198,8 @@ pub struct Pusher {
     deregister_signal_receiver: DeregisterSignalReceiver,
 
     res_header: ResponseHeader,
+    /// The `node_epoch` of the datanode process that registered the pusher, or 0.
+    node_epoch: u64,
 }
 
 impl Drop for Pusher {
@@ -220,7 +222,13 @@ impl Pusher {
             deregister_signal_sender,
             deregister_signal_receiver,
             res_header,
+            node_epoch: 0,
         }
+    }
+
+    pub(crate) fn with_node_epoch(mut self, node_epoch: u64) -> Self {
+        self.node_epoch = node_epoch;
+        self
     }
 
     #[inline]
@@ -327,12 +335,38 @@ impl Pushers {
         Ok(())
     }
 
-    pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> Option<Pusher> {
-        self.0.write().await.insert(pusher_id, pusher)
+    /// Inserts the pusher unless the slot holds one with a higher node epoch, so an older
+    /// datanode process cannot take over a newer one's pusher. A pusher of the same stream
+    /// only takes the new epoch, keeping the messages waiting on it. Returns `None` if refused,
+    /// otherwise whether the slot was empty.
+    pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> Option<bool> {
+        let mut pushers = self.0.write().await;
+        match pushers.get_mut(&pusher_id) {
+            None => {
+                pushers.insert(pusher_id, pusher);
+                return Some(true);
+            }
+            Some(current) if current.node_epoch > pusher.node_epoch => return None,
+            Some(current) if current.sender.same_channel(&pusher.sender) => {
+                current.node_epoch = pusher.node_epoch;
+            }
+            Some(current) => *current = pusher,
+        }
+        Some(false)
     }
 
-    async fn remove(&self, pusher_id: PusherId) -> Option<Pusher> {
-        self.0.write().await.remove(&pusher_id)
+    /// Removes the pusher if it pushes to `sender`'s channel, keeping one that another stream
+    /// has registered since.
+    async fn remove(
+        &self,
+        pusher_id: PusherId,
+        sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    ) -> bool {
+        let mut pushers = self.0.write().await;
+        let own = pushers
+            .get(&pusher_id)
+            .is_some_and(|pusher| pusher.sender.same_channel(sender));
+        own && pushers.remove(&pusher_id).is_some()
     }
 }
 
@@ -357,22 +391,41 @@ pub type HeartbeatHandlerGroupRef = Arc<HeartbeatHandlerGroup>;
 pub struct HeartbeatHandlerGroup {
     handlers: Vec<NameCachedHandler>,
     pushers: Pushers,
+    /// One lock per datanode id seen, kept for the life of the process.
+    datanode_locks: DashMap<u64, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl HeartbeatHandlerGroup {
-    /// Registers the heartbeat response [`Pusher`] with the given key to the group.
+    /// Registers the heartbeat response [`Pusher`] with the given key to the group, unless the
+    /// group holds one with a higher node epoch.
     pub async fn register_pusher(&self, pusher_id: PusherId, pusher: Pusher) {
-        METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
+        let Some(vacant) = self.pushers.insert(pusher_id, pusher).await else {
+            return;
+        };
         info!("Pusher register: {}", pusher_id);
-        let _ = self.pushers.insert(pusher_id, pusher).await;
+        if vacant {
+            METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
+        }
     }
 
-    /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
-    pub async fn deregister_push(&self, pusher_id: PusherId) {
-        if self.pushers.remove(pusher_id).await.is_some() {
+    /// Deregisters the heartbeat response [`Pusher`] with the given key from the group if
+    /// `sender` registered it.
+    pub async fn deregister_push(
+        &self,
+        pusher_id: PusherId,
+        sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    ) {
+        if self.pushers.remove(pusher_id, sender).await {
             info!("Pusher unregister: {}", pusher_id);
             METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         }
+    }
+
+    /// Locks the datanode with the given id until the guard is dropped, so its requests are
+    /// checked and handled one at a time.
+    pub(crate) async fn lock_datanode(&self, node_id: u64) -> OwnedMutexGuard<()> {
+        let lock = self.datanode_locks.entry(node_id).or_default().clone();
+        lock.lock_owned().await
     }
 
     #[cfg(test)]
@@ -783,6 +836,7 @@ impl HeartbeatHandlerGroupBuilder {
         Ok(HeartbeatHandlerGroup {
             handlers: self.handlers,
             pushers: self.pushers,
+            datanode_locks: DashMap::new(),
         })
     }
 
@@ -1475,6 +1529,25 @@ mod tests {
         let mut healthy = Box::pin(pushers.push(healthy_id, msg));
         assert!(poll_immediate(healthy.as_mut()).await.is_some());
         assert!(healthy_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pusher_insert_reports_an_empty_slot() {
+        let pushers = Pushers::default();
+        let id = PusherId::new(Role::Datanode, 1);
+        let (tx1, _rx1) = mpsc::channel(1);
+        let (tx2, _rx2) = mpsc::channel(1);
+        assert_eq!(
+            pushers.insert(id, Pusher::new(tx1.clone())).await,
+            Some(true)
+        );
+        // Taking an epoch and replacing another stream's pusher fill no slot.
+        let in_place = Pusher::new(tx1).with_node_epoch(2);
+        assert_eq!(pushers.insert(id, in_place).await, Some(false));
+        let lower = Pusher::new(tx2.clone()).with_node_epoch(1);
+        assert_eq!(pushers.insert(id, lower).await, None);
+        let other = Pusher::new(tx2).with_node_epoch(2);
+        assert_eq!(pushers.insert(id, other).await, Some(false));
     }
 
     #[tokio::test]

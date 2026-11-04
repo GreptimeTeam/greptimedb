@@ -41,6 +41,18 @@ pub use retry_hint::{retry_hint_from_postgres_error, retry_hint_from_postgres_po
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to execute batch request"))]
+    BatchRequest { source: Arc<Error> },
+
+    #[snafu(display(
+        "Region request has {} failed entries; {}",
+        response.failures.len(),
+        response.first_failure().map(|(index, error)| format!("entry {index}: {}", error.output_msg())).unwrap_or_default()
+    ))]
+    PartialRegion {
+        response: Box<api::region::BatchRegionResponse<Error>>,
+    },
+
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey {
         #[snafu(implicit)]
@@ -198,6 +210,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: common_procedure::Error,
+    },
+
+    #[snafu(display(
+        "DDL request timed out after {timeout:?}; a submitted procedure may still be running"
+    ))]
+    DdlTaskTimeout {
+        timeout: std::time::Duration,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to start procedure manager"))]
@@ -1149,6 +1170,20 @@ pub enum Error {
         actual_column_id: u32,
     },
 
+    #[snafu(display(
+        "Partition expression of region {} is incompatible with the altered column '{}': the persisted bound can no longer be compared with the new column type {}",
+        region_id,
+        column,
+        target_type
+    ))]
+    PartitionExprIncompatible {
+        region_id: RegionId,
+        column: String,
+        target_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "enterprise")]
     #[snafu(display("Too large duration"))]
     TooLargeDuration {
@@ -1181,6 +1216,10 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            Error::PartialRegion { response } => response
+                .first_failure()
+                .map_or(StatusCode::Internal, |(_, error)| error.status_code()),
+            Error::BatchRequest { source } => source.status_code(),
             IllegalServerState { .. }
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
@@ -1268,7 +1307,8 @@ impl ErrorExt for Error {
             | InvalidFileName { .. }
             | InvalidFlowRequestBody { .. }
             | InvalidFilePath { .. }
-            | ConflictingSchemaOptions { .. } => StatusCode::InvalidArguments,
+            | ConflictingSchemaOptions { .. }
+            | PartitionExprIncompatible { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             MissingInterval { .. } | NegativeDuration { .. } | TooLargeDuration { .. } => {
@@ -1316,6 +1356,9 @@ impl ErrorExt for Error {
             | InvalidRole { .. }
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
 
+            // DeadlineExceeded is treated as unreachable by MetaClient and
+            // retried. A wait timeout must not resubmit a running procedure.
+            DdlTaskTimeout { .. } => StatusCode::Cancelled,
             LoadTlsCertificate { .. } => StatusCode::Internal,
 
             #[cfg(feature = "pg_kvbackend")]
@@ -1346,6 +1389,8 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            Error::PartialRegion { .. } => RetryHint::Retryable,
+            Error::BatchRequest { source } => source.retry_hint(),
             RetryLater { source, .. } => match source.retry_hint() {
                 RetryHint::RetryAfterRouteRefresh => RetryHint::RetryAfterRouteRefresh,
                 RetryHint::Retryable | RetryHint::NonRetryable => RetryHint::Retryable,
@@ -1373,15 +1418,15 @@ impl ErrorExt for Error {
             | StartProcedureManager { source, .. }
             | StopProcedureManager { source, .. }
             | RegisterProcedureLoader { source, .. }
-            | PutPoison { source, .. }
-            | ProcedureStateReceiver { source, .. } => source.retry_hint(),
+            | PutPoison { source, .. } => source.retry_hint(),
             External { source, .. }
             | ResponseExceededSizeLimit { source, .. }
             | OperateDatanode { source, .. }
-            | AbortProcedure { source, .. }
             | RegisterRepartitionProcedureLoader { source, .. }
             | CreateRepartitionProcedure { source, .. }
             | PersistRepartitionGcRequirement { source, .. } => source.retry_hint(),
+            // These errors end an operation; their sources cannot make it retryable.
+            AbortProcedure { .. } | ProcedureStateReceiver { .. } => RetryHint::NonRetryable,
             Table { source, .. } => source.retry_hint(),
             ConvertAlterTableRequest { source, .. } => source.retry_hint(),
             ConvertColumnDef { source, .. } => source.retry_hint(),
@@ -1466,6 +1511,7 @@ mod retry_hint_tests {
     use std::sync::Arc;
 
     use common_error::mock::MockError;
+    use snafu::ResultExt;
 
     use super::*;
 
@@ -1481,6 +1527,42 @@ mod retry_hint_tests {
         let err = GetLatestCacheRetryExceededSnafu { attempts: 3_usize }.build();
 
         assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_leader_retry_hints() {
+        for (error, expected) in [
+            (
+                NoLeaderSnafu { table_id: 1_u32 }.build(),
+                RetryHint::Retryable,
+            ),
+            (ElectionNoLeaderSnafu.build(), RetryHint::Retryable),
+            (
+                ElectionLeaderLeaseExpiredSnafu.build(),
+                RetryHint::Retryable,
+            ),
+            (
+                ElectionLeaderLeaseChangedSnafu.build(),
+                RetryHint::Retryable,
+            ),
+        ] {
+            assert_eq!(error.retry_hint(), expected, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn test_procedure_error_retry_hints() {
+        let source = common_procedure::Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Err::<(), _>(source).context(PutPoisonSnafu).unwrap_err();
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+
+        let source = common_procedure::Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Err::<(), _>(source)
+            .context(ProcedureStateReceiverSnafu {
+                procedure_id: ProcedureId::random(),
+            })
+            .unwrap_err();
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 
     #[test]

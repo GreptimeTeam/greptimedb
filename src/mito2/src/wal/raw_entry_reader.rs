@@ -18,9 +18,9 @@ use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use futures::stream::BoxStream;
 use snafu::ResultExt;
+use store_api::logstore::LogStore;
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
-use store_api::logstore::{LogStore, WalIndex};
 use store_api::storage::RegionId;
 use tokio_stream::StreamExt;
 
@@ -38,20 +38,11 @@ pub(crate) trait RawEntryReader: Send + Sync {
 /// Implement the [RawEntryReader] for the [LogStore].
 pub struct LogStoreRawEntryReader<S> {
     store: Arc<S>,
-    wal_index: Option<WalIndex>,
 }
 
 impl<S> LogStoreRawEntryReader<S> {
     pub fn new(store: Arc<S>) -> Self {
-        Self {
-            store,
-            wal_index: None,
-        }
-    }
-
-    pub fn with_wal_index(mut self, wal_index: WalIndex) -> Self {
-        self.wal_index = Some(wal_index);
-        self
+        Self { store }
     }
 }
 
@@ -59,10 +50,9 @@ impl<S: LogStore> RawEntryReader for LogStoreRawEntryReader<S> {
     fn read(&self, provider: &Provider, start_id: EntryId) -> Result<EntryStream<'static>> {
         let store = self.store.clone();
         let provider = provider.clone();
-        let wal_index = self.wal_index;
         let stream = try_stream!({
             let mut stream = store
-                .read(&provider, start_id, wal_index)
+                .read(&provider, start_id)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| error::ReadWalSnafu {
@@ -129,9 +119,7 @@ mod tests {
 
     use futures::{TryStreamExt, stream};
     use store_api::logstore::entry::{Entry, NaiveEntry};
-    use store_api::logstore::{
-        AppendBatchResponse, EntryId, LogStore, SendableEntryStream, WalIndex,
-    };
+    use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream};
     use store_api::storage::RegionId;
 
     use super::*;
@@ -161,7 +149,6 @@ mod tests {
             &self,
             _provider: &Provider,
             _id: EntryId,
-            _index: Option<WalIndex>,
         ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error> {
             Ok(Box::pin(stream::iter(vec![Ok(self.entries.clone())])))
         }

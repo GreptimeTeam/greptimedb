@@ -17,7 +17,7 @@ use std::sync::Arc;
 use api::region::RegionResponse;
 use api::v1::region::{RegionRequest, RegionResponse as RegionResponseV1};
 use async_trait::async_trait;
-use client::region::check_response_header;
+use client::region;
 use common_error::ext::BoxedError;
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::node_manager::{
@@ -30,7 +30,7 @@ use common_telemetry::tracing;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 
@@ -64,12 +64,8 @@ impl RegionInvoker {
     }
 
     async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponseV1> {
-        let body = request.body.with_context(|| InvalidRegionRequestSnafu {
-            reason: "body not found",
-        })?;
-
         self.region_server
-            .handle(body)
+            .handle_region_request(request)
             .await
             .context(InvokeRegionServerSnafu)
     }
@@ -77,7 +73,17 @@ impl RegionInvoker {
 
 #[async_trait]
 impl Datanode for RegionInvoker {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
+    async fn handle_request(&self, request: Arc<RegionRequest>) -> MetaResult<RegionResponse> {
+        // Local execution consumes the request; standalone does not retain it for retries.
+        let request = Arc::try_unwrap(request)
+            .map_err(|_| {
+                InvalidRegionRequestSnafu {
+                    reason: "local region request has multiple owners",
+                }
+                .build()
+            })
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
         let span = request
             .header
             .as_ref()
@@ -90,10 +96,7 @@ impl Datanode for RegionInvoker {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        check_response_header(&response.header)
-            .map_err(BoxedError::new)
-            .context(meta_error::ExternalSnafu)?;
-        Ok(RegionResponse::from_region_response(response))
+        region::decode_region_response(response).map_err(Into::into)
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
@@ -113,5 +116,67 @@ impl Datanode for RegionInvoker {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::Rows;
+    use api::v1::region::{InsertRequest, InsertRequests, region_request};
+    use common_error::ext::ErrorExt;
+    use common_error::mock::MockError;
+    use common_error::status_code::StatusCode;
+    use datanode::tests::{MockRegionEngine, mock_region_server};
+    use mito2::engine::MITO_ENGINE_NAME;
+    use mito2::test_util::CreateRequestBuilder;
+    use store_api::region_request::RegionRequest as StoreRegionRequest;
+    use store_api::storage::RegionId;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_write_preserves_original_error() {
+        for code in [StatusCode::StorageUnavailable, StatusCode::InvalidArguments] {
+            let mut server = mock_region_server();
+            let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+                MITO_ENGINE_NAME,
+                Box::new(move |region_id, request| {
+                    if matches!(request, StoreRegionRequest::Put(_)) {
+                        Err(BoxedError::new(MockError::new(code)))
+                            .context(datanode::error::HandleRegionRequestSnafu { region_id })
+                    } else {
+                        Ok(0)
+                    }
+                }),
+            );
+            server.register_engine(engine);
+            let mut requests = Vec::new();
+            for number in 0..2 {
+                let region_id = RegionId::new(1, number);
+                server
+                    .handle_request(
+                        region_id,
+                        StoreRegionRequest::Create(CreateRequestBuilder::new().build()),
+                    )
+                    .await
+                    .unwrap();
+                requests.push(InsertRequest {
+                    region_id: region_id.as_u64(),
+                    rows: Some(Rows::default()),
+                    ..Default::default()
+                });
+            }
+            let datanode: DatanodeRef = RegionInvoker::arc(server);
+            let error = datanode
+                .handle(RegionRequest {
+                    header: Some(Default::default()),
+                    body: Some(region_request::Body::Inserts(InsertRequests { requests })),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(code, error.status_code());
+            assert_eq!(MockError::new(code).retry_hint(), error.retry_hint());
+            assert!(!matches!(error, meta_error::Error::PartialRegion { .. }));
+        }
     }
 }

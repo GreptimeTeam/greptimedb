@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::iter;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use api::v1::OpType;
@@ -474,7 +474,13 @@ impl Drop for SeriesMap {
         let num_field_builders = self
             .0
             .values()
-            .map(|v| v.read().unwrap().active.num_field_builders())
+            // The map may be dropped while unwinding from a panic that poisoned a lock.
+            .map(|v| {
+                v.read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .active
+                    .num_field_builders()
+            })
             .sum::<usize>();
         MEMTABLE_ACTIVE_SERIES_COUNT.sub(num_series as i64);
         MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.sub(num_field_builders as i64);
@@ -1491,6 +1497,20 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(expect, &read);
+    }
+
+    #[test]
+    fn test_series_map_drop_with_poisoned_lock() {
+        let region_metadata = schema_for_test();
+        let series = Arc::new(RwLock::new(Series::new(&region_metadata)));
+        let map = SeriesMap(BTreeMap::from([(vec![1], series.clone())]));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = series.write().unwrap();
+            panic!("poison the series lock");
+        }))
+        .unwrap_err();
+        assert!(series.is_poisoned());
+        drop(map);
     }
 
     #[test]

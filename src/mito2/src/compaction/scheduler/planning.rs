@@ -14,7 +14,7 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::region::compact_request;
@@ -30,30 +30,35 @@ use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
-use crate::compaction::picker::{CompactionTask, PickerOutput, new_picker};
-use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
+use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
+use crate::compaction::last_non_null;
+use crate::compaction::picker::{PickerOutput, new_picker, new_twcs_picker};
+use crate::compaction::scheduler::history::{PickHistory, PickKey};
+use crate::compaction::scheduler::state::{
+    CompactingFiles, CompactionExecution, CompactionPhase, CompactionTrigger,
+};
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
-use crate::compaction::task::CompactionTaskImpl;
-use crate::compaction::{CompactionOutput, find_dynamic_options};
+use crate::compaction::unit::CompactionUnit;
+use crate::compaction::{CompactionOutput, find_dynamic_options, format_panic_reason};
 use crate::config::MitoConfig;
 use crate::error::{CompactRegionSnafu, Error, RemoteCompactionSnafu, Result, UnexpectedSnafu};
 use crate::metrics::{
     COMPACTION_MEMORY_REJECTED, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT,
 };
 use crate::region::ManifestContextRef;
-use crate::region::options::RegionOptions;
+use crate::region::options::{MergeMode, RegionOptions};
 use crate::request::{BackgroundNotify, OutputTx, WorkerRequest, WorkerRequestWithTime};
-use crate::schedule::CancellableTaskState;
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
-use crate::sst::file::{FileHandle, UncommittedSsts};
+use crate::sst::file::FileHandle;
 use crate::sst::version::SstVersion;
 use crate::worker::WorkerListener;
 
 /// Region compaction request.
 pub struct CompactionRequest {
+    /// Private snapshot for automatic regular planning; manual requests carry none.
+    pub(crate) pick_history: Option<PickHistory>,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) current_version: CompactionVersion,
     pub(crate) access_layer: AccessLayerRef,
@@ -77,7 +82,8 @@ impl CompactionRequest {
 /// Result returned to the worker after background compaction planning.
 pub(crate) enum CompactionPlanningResult {
     Prepared(PreparedCompaction),
-    NoPlan,
+    /// Returns automatic history even for an empty plan, to prune stale eligibility.
+    NoPlan(Option<PickHistory>),
     Error(Arc<Error>),
 }
 
@@ -88,7 +94,7 @@ impl fmt::Debug for CompactionPlanningResult {
                 .debug_tuple("Prepared")
                 .field(&prepared.compaction_region.region_id)
                 .finish(),
-            Self::NoPlan => f.write_str("NoPlan"),
+            Self::NoPlan(_) => f.write_str("NoPlan"),
             Self::Error(err) => f.debug_tuple("Error").field(err).finish(),
         }
     }
@@ -103,10 +109,62 @@ pub(crate) struct CompactionPickFinished {
 }
 
 pub(crate) struct PreparedCompaction {
+    /// Updated automatic snapshot, installed only after the worker accepts the plan.
+    /// Manual planning returns `None` and leaves resident waiting ages unchanged.
+    pick_history: Option<PickHistory>,
     pub(super) compaction_region: CompactionRegion,
     pub(super) picker_output: PickerOutput,
     start_time: Instant,
     ttl: TimeToLive,
+}
+
+/// Scheduler policy applied between stateless discovery and semantic closure.
+/// Runs on the planning runtime with a private history snapshot, never on the
+/// worker or through a shared mutex. Stale results cannot mutate resident state.
+async fn pick_automatic(
+    region: &CompactionRegion,
+    history: &mut PickHistory,
+    max_outputs: Option<usize>,
+    time_range: Option<TimestampRange>,
+) -> Result<Option<PickerOutput>> {
+    let picker = new_twcs_picker(&region.region_options, max_outputs, time_range, false);
+    let mut candidates = picker.discover(region).await?;
+    let last_non_null = region.region_options.merge_mode() == MergeMode::LastNonNull;
+    let now = Instant::now();
+    candidates.candidates = history.rank_candidates(candidates.candidates, now);
+    if !last_non_null {
+        candidates
+            .candidates
+            .truncate(max_outputs.unwrap_or(usize::MAX));
+    }
+    // finish() reverses candidates for the compactor's pop order. Keep seed
+    // identities in that same order without retaining them in execution state.
+    let keys: Vec<_> = candidates
+        .candidates
+        .iter()
+        .rev()
+        .map(PickKey::from)
+        .collect();
+    let output = candidates.finish().await?;
+    if last_non_null {
+        let (output, attempted_seeds) =
+            last_non_null::close_outputs(region, output, max_outputs).await?;
+        history.acknowledge(attempted_seeds.into_iter().map(|index| keys[index]), now);
+        Ok(output)
+    } else {
+        history.acknowledge(keys.into_iter(), now);
+        Ok((!output.outputs.is_empty() || !output.expired_ssts.is_empty()).then_some(output))
+    }
+}
+
+/// Exercises automatic selection and closure from cross-module regression tests.
+#[cfg(test)]
+pub(crate) async fn pick_automatic_for_test(
+    region: &CompactionRegion,
+    history: &mut PickHistory,
+    max_outputs: Option<usize>,
+) -> Result<Option<PickerOutput>> {
+    pick_automatic(region, history, max_outputs, None).await
 }
 
 impl CompactionScheduler {
@@ -116,6 +174,7 @@ impl CompactionScheduler {
         request: CompactionRequest,
         options: compact_request::Options,
         time_range: Option<TimestampRange>,
+        trigger: CompactionTrigger,
     ) {
         let plugins = self.plugins.clone();
         let max_background_compactions = self.engine_config.max_background_compactions;
@@ -128,6 +187,7 @@ impl CompactionScheduler {
                 plugins,
                 max_background_compactions,
                 time_range,
+                trigger,
             );
             Self::notify_planning_result(region_id, plan_id, request_sender, planning).await;
         });
@@ -149,13 +209,7 @@ impl CompactionScheduler {
     ) {
         // The idiomatic way to handle a panic result.
         let result = std::panic::AssertUnwindSafe(planning).catch_unwind().await.unwrap_or_else(|payload| {
-            let reason = if let Some(message) = payload.as_ref().downcast_ref::<&str>() {
-                message.to_string()
-            } else if let Some(message) = payload.as_ref().downcast_ref::<String>() {
-                message.clone()
-            } else {
-                "unknown panic".to_string()
-            };
+            let reason = format_panic_reason(payload.as_ref());
             CompactionPlanningResult::Error(Arc::new(
                 UnexpectedSnafu {
                     reason: format!(
@@ -187,6 +241,7 @@ impl CompactionScheduler {
         plugins: Plugins,
         max_background_compactions: usize,
         time_range: Option<TimestampRange>,
+        trigger: CompactionTrigger,
     ) -> CompactionPlanningResult {
         let region_id = request.region_id();
         let (dynamic_compaction_opts, ttl) = find_dynamic_options(
@@ -203,21 +258,16 @@ impl CompactionScheduler {
             )
         });
 
-        // Avoid queuing serial outputs from a stale snapshot. Repicking after each
-        // batch lets newly flushed L0 files outrank L1 work that has not started.
+        // Bound accepted work independently of discovery. Waiting compensation
+        // persists across batches, including when automatic execution is serial.
         let max_picker_outputs = max_background_compactions.min(request.max_parallelism.max(1));
         let region_options = RegionOptions {
             compaction: dynamic_compaction_opts,
             ..request.current_version.options.clone()
         };
-        let picker = new_picker(
-            &options,
-            &region_options,
-            Some(max_picker_outputs),
-            time_range,
-        );
         let region_id = request.region_id();
         let CompactionRequest {
+            pick_history,
             engine_config,
             current_version,
             access_layer,
@@ -229,11 +279,6 @@ impl CompactionScheduler {
             schema_metadata_manager: _,
             max_parallelism,
         } = request;
-
-        debug!(
-            "Pick compaction strategy {:?} for region: {}, ttl: {:?}",
-            picker, region_id, ttl
-        );
 
         let compaction_region = CompactionRegion {
             region_id,
@@ -254,16 +299,34 @@ impl CompactionScheduler {
         let _pick_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["pick"])
             .start_timer();
-        let picker_output = match picker.pick(&compaction_region).await {
-            Ok(output) => output,
+        let mut history = pick_history;
+        let picked = if let Some(history) = &mut history {
+            pick_automatic(
+                &compaction_region,
+                history,
+                Some(max_picker_outputs),
+                time_range,
+            )
+            .await
+        } else {
+            new_picker(
+                &options,
+                &compaction_region.region_options,
+                Some(max_picker_outputs),
+                time_range,
+                trigger == CompactionTrigger::Manual,
+            )
+            .pick(&compaction_region)
+            .await
+        };
+        let picker_output = match picked {
+            Ok(Some(output)) => output,
+            Ok(None) => return CompactionPlanningResult::NoPlan(history),
             Err(err) => return CompactionPlanningResult::Error(Arc::new(err)),
         };
 
-        let Some(picker_output) = picker_output else {
-            return CompactionPlanningResult::NoPlan;
-        };
-
         CompactionPlanningResult::Prepared(PreparedCompaction {
+            pick_history: history,
             compaction_region,
             picker_output,
             start_time,
@@ -287,7 +350,7 @@ impl CompactionScheduler {
     ) -> CompactionTransition {
         let region_id = finished.region_id;
         let plan_id = finished.plan_id;
-        let Some(status) = self.region_status.get(&region_id) else {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
             return CompactionTransition::NoAction;
         };
 
@@ -302,8 +365,13 @@ impl CompactionScheduler {
             );
         }
 
+        // Manual/error results retain the resident history. Automatic snapshots
+        // replace it below only after passing the same lifecycle fence.
         match finished.result {
             CompactionPlanningResult::Prepared(mut prepared) => {
+                if let Some(history) = prepared.pick_history.take() {
+                    status.pick_history = history;
+                }
                 let current = status.version_control.current().version;
                 let Some(picker_output) =
                     refresh_picker_output(prepared.picker_output, &current.ssts)
@@ -333,16 +401,18 @@ impl CompactionScheduler {
                 };
                 let waiters = status.take_waiters();
                 match self
-                    .submit_prepared_compaction(prepared, files, waiters, plan_id)
+                    .prepare_or_submit_compaction(prepared, files, waiters, plan_id)
                     .await
                 {
                     Ok(Some(phase)) => {
                         if let Some(status) = self.region_status.get_mut(&region_id) {
                             status.set_phase(phase);
                         }
+                        self.dispatch_local_units(region_id);
                         // The execution now owns the terminal transition. Any
                         // fenced DDLs remain queued until its callback arrives.
-                        CompactionTransition::NoAction
+                        self.finish_local_units(region_id, manifest_ctx, schema_metadata_manager)
+                            .await
                     }
                     Ok(None) => {
                         self.finish_compaction_planning(
@@ -361,7 +431,10 @@ impl CompactionScheduler {
             }
             // These paths never create an execution. Finish the Picking
             // lifecycle here and release DDLs if no follow-up was scheduled.
-            CompactionPlanningResult::NoPlan => {
+            CompactionPlanningResult::NoPlan(history) => {
+                if let Some(history) = history {
+                    status.pick_history = history;
+                }
                 self.finish_compaction_planning(
                     region_id,
                     None,
@@ -427,14 +500,17 @@ impl CompactionScheduler {
         CompactionTransition::NoAction
     }
 
-    async fn submit_prepared_compaction(
+    /// Submits a remote job, or prepares local unit tasks without submitting them.
+    /// The caller dispatches local units after installing the returned phase.
+    async fn prepare_or_submit_compaction(
         &mut self,
         prepared: PreparedCompaction,
         files: CompactingFiles,
         waiters: Vec<OutputTx>,
-        mut plan_id: u64,
+        plan_id: u64,
     ) -> Result<Option<CompactionPhase>> {
         let PreparedCompaction {
+            pick_history: _,
             compaction_region,
             picker_output,
             start_time,
@@ -492,7 +568,6 @@ impl CompactionScheduler {
                         error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
                         // An error may be ambiguous after the remote scheduler consumed
                         // the notifier. Fence a delayed remote callback from the local fallback.
-                        plan_id = Self::next_plan_id(&mut self.next_plan_id);
                         e.waiters
                     }
                 }
@@ -507,9 +582,19 @@ impl CompactionScheduler {
             waiters
         };
 
-        // Check whether this local compaction can ever fit before submitting it.
-        let estimated_bytes = estimate_compaction_bytes(&picker_output);
-        if let Some(limit_bytes) = self.exceeds_compaction_memory_limit(estimated_bytes) {
+        let units = CompactionUnit::from_picker(picker_output);
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.extend_waiters(waiters);
+        }
+        let Some(mut units) = units else {
+            return UnexpectedSnafu {
+                reason: "Compaction plan expires a merge input",
+            }
+            .fail();
+        };
+        units.retain(|unit| {
+            let estimated_bytes = unit.estimated_memory_bytes();
+            let Some(limit_bytes) = self.exceeds_compaction_memory_limit(estimated_bytes) else { return true };
             COMPACTION_MEMORY_REJECTED
                 .with_label_values(&["oversized"])
                 .inc();
@@ -517,82 +602,16 @@ impl CompactionScheduler {
                 "Skip compaction for region {} because estimated memory {} bytes exceeds compaction memory limit {} bytes",
                 region_id, estimated_bytes, limit_bytes,
             );
-            for waiter in waiters {
-                waiter.send(Ok(0));
-            }
+            false
+        });
+        if units.is_empty() {
             return Ok(None);
         }
-
-        let state = CancellableTaskState::new();
-        let cancel_handle = state.cancel_handle();
-        let execution = CompactionExecution::new(plan_id, files);
-        let uncommitted = UncommittedSsts::new(
-            region_id,
-            compaction_region.access_layer.clone(),
-            Some(compaction_region.cache_manager.clone()),
-        );
-        let local_compaction_task = Box::new(CompactionTaskImpl {
-            state: state.clone(),
-            execution: execution.clone(),
-            request_sender: self.request_sender.clone(),
-            waiters,
-            start_time,
-            listener: self.listener.clone(),
-            picker_output,
+        Ok(Some(self.prepare_local_units(
             compaction_region,
-            compactor: Arc::new(DefaultCompactor::with_cancel_handle(
-                cancel_handle.clone(),
-                uncommitted.clone(),
-            )),
-            memory_manager: self.memory_manager.clone(),
-            memory_policy: self.memory_policy,
-            estimated_memory_bytes: estimated_bytes,
-            uncommitted,
-        });
-
-        match self.submit_compaction_task(local_compaction_task, region_id) {
-            Ok(()) => Ok(Some(CompactionPhase::Local { state, execution })),
-            Err((err, task)) => {
-                if let (Some(status), Some(mut task)) =
-                    (self.region_status.get_mut(&region_id), task)
-                {
-                    status.append_waiters(&mut task.waiters);
-                }
-                Err(err)
-            }
-        }
-    }
-
-    fn submit_compaction_task(
-        &mut self,
-        task: Box<CompactionTaskImpl>,
-        region_id: RegionId,
-    ) -> std::result::Result<(), (Error, Option<Box<CompactionTaskImpl>>)> {
-        let task = Arc::new(Mutex::new(Some(task)));
-        let task_to_run = task.clone();
-        match self.scheduler.schedule(Box::pin(async move {
-            let task = task_to_run
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
-            if let Some(mut task) = task {
-                INFLIGHT_COMPACTION_COUNT.inc();
-                task.run().await;
-                INFLIGHT_COMPACTION_COUNT.dec();
-            } else {
-                error!("Compaction task was missing when the scheduled job started");
-            }
-        })) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                error!(err; "Failed to submit compaction request for region {}", region_id);
-                let task = task
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
-                Err((err, task))
-            }
-        }
+            units,
+            files,
+        )))
     }
 
     fn exceeds_compaction_memory_limit(&self, estimated_bytes: u64) -> Option<u64> {
@@ -603,20 +622,6 @@ impl CompactionScheduler {
             None
         }
     }
-}
-
-/// Estimates compaction memory as the sum of all input files' maximum row-group
-/// uncompressed sizes.
-fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
-    picker_output
-        .outputs
-        .iter()
-        .flat_map(|output| output.inputs.iter())
-        .map(|file: &FileHandle| {
-            let meta = file.meta_ref();
-            meta.max_row_group_uncompressed_size
-        })
-        .sum()
 }
 
 /// Rebuilds picker output with current SST handles while preserving the picker's grouping.

@@ -20,7 +20,7 @@ use hyper::Request;
 use influxdb_line_protocol::{FieldValue, parse_lines};
 use snafu::ResultExt;
 
-use crate::error::{Error, InfluxdbLineProtocolSnafu};
+use crate::error::{Error, InfluxdbLineProtocolSnafu, TimePrecisionSnafu};
 use crate::row_writer::{self, MultiTableData};
 
 const INFLUXDB_API_PATH_NAME: &str = "influxdb";
@@ -110,6 +110,27 @@ fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
         val
     } else {
         DEFAULT_TIME_PRECISION
+    }
+}
+
+/// Parses an InfluxDB time-precision name shared by the HTTP write
+/// endpoints (v1/v2) and the `precision` option of COPY FROM STDIN.
+pub(crate) fn parse_time_precision(value: &str) -> crate::error::Result<Precision> {
+    // Precision conversion needs to be compatible with influxdb v1 v2 api.
+    // For details, see the Influxdb documents.
+    // https://docs.influxdata.com/influxdb/v1.8/tools/api/#apiv2write-http-endpoint
+    // https://docs.influxdata.com/influxdb/v1.8/tools/api/#write-http-endpoint
+    match value {
+        "n" | "ns" => Ok(Precision::Nanosecond),
+        "u" | "us" => Ok(Precision::Microsecond),
+        "ms" => Ok(Precision::Millisecond),
+        "s" => Ok(Precision::Second),
+        "m" => Ok(Precision::Minute),
+        "h" => Ok(Precision::Hour),
+        unknown => TimePrecisionSnafu {
+            name: unknown.to_string(),
+        }
+        .fail(),
     }
 }
 

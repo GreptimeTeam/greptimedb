@@ -52,7 +52,9 @@ mod test {
     };
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{Int32Vector, StringVector, TimestampMillisecondVector};
+    use datatypes::vectors::{
+        Int32Vector, StringVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    };
     use futures_util::{Stream, StreamExt};
     use hyper_util::rt::TokioIo;
     use itertools::Itertools;
@@ -838,6 +840,82 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_bulk_widen_partitioned_time_index() {
+        // https://github.com/GreptimeTeam/greptimedb/issues/9747
+        // Bulk writes route through `MultiDimPartitionRule::split_record_batch`,
+        // which evaluates the persisted partition bounds against the batch. The
+        // bounds keep the unit they were created with, so widening the time
+        // index unit must not mix timestamp units during that evaluation.
+        common_telemetry::init_default_ut_logging();
+
+        let (db, server) = setup_grpc_server(
+            StorageType::File,
+            "test_flight_bulk_widen_partitioned_time_index",
+        )
+        .await;
+        let addr = server.bind_addr().unwrap().to_string();
+
+        let client = Client::with_urls(vec![addr]);
+        let client = Database::new_with_dbname("greptime-public", client);
+
+        client
+            .sql(
+                "CREATE TABLE widen_ts (host STRING, ts TIMESTAMP TIME INDEX) \
+                 PARTITION ON COLUMNS (ts) (\
+                   ts < '2024-01-02 00:00:00', \
+                   ts >= '2024-01-02 00:00:00'\
+                 )",
+            )
+            .await
+            .unwrap();
+        client
+            .sql("ALTER TABLE widen_ts MODIFY COLUMN ts TIMESTAMP_NS")
+            .await
+            .unwrap();
+
+        // 2024-01-02 00:00:00 UTC == 1704153600000 ms; rows below and above the
+        // bound, expressed in the widened nanosecond unit ("c" only exists in ns).
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let batch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(StringVector::from_vec(vec![
+                    "a".to_string(),
+                    "b".to_string(),
+                    "c".to_string(),
+                ])) as VectorRef,
+                Arc::new(TimestampNanosecondVector::from_vec(vec![
+                    1_704_153_599_500_000_000,
+                    1_704_153_600_000_000_000,
+                    1_704_153_600_000_000_001,
+                ])) as VectorRef,
+            ],
+        )
+        .unwrap();
+
+        test_put_record_batches_to_table(&client, "widen_ts", vec![batch]).await;
+
+        let sql = "select host, ts from widen_ts order by ts";
+        let expected = "\
++------+-------------------------------+
+| host | ts                            |
++------+-------------------------------+
+| a    | 2024-01-01T23:59:59.500       |
+| b    | 2024-01-02T00:00:00           |
+| c    | 2024-01-02T00:00:00.000000001 |
++------+-------------------------------+";
+        query_and_expect(db.frontend().as_ref(), sql, expected).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_flight_do_put_missing_nullable_columns() {
         common_telemetry::init_default_ut_logging();
 
@@ -1124,15 +1202,36 @@ mod test {
         test_put_record_batches_with_hints(client, record_batches, &[]).await;
     }
 
+    async fn test_put_record_batches_to_table(
+        client: &Database,
+        table: &str,
+        record_batches: Vec<RecordBatch>,
+    ) {
+        test_put_record_batches_with_hints_and_table(client, table, record_batches, &[]).await;
+    }
+
     async fn test_put_record_batches_with_hints(
         client: &Database,
         record_batches: Vec<RecordBatch>,
         hints: &[(&str, &str)],
     ) {
+        test_put_record_batches_with_hints_and_table(client, "foo", record_batches, hints).await
+    }
+
+    async fn test_put_record_batches_with_hints_and_table(
+        client: &Database,
+        table: &str,
+        record_batches: Vec<RecordBatch>,
+        hints: &[(&str, &str)],
+    ) {
+        let table = table.to_string();
         let requests_count = record_batches.len();
         let schema = record_batches[0].schema.arrow_schema().clone();
 
-        let stream = futures::stream::once(async move { encode_put_schema(schema.as_ref()) })
+        let stream =
+            futures::stream::once(
+                async move { encode_put_schema_for_table(schema.as_ref(), &table) },
+            )
             .chain(
                 tokio_stream::iter(record_batches)
                     .enumerate()
@@ -1169,11 +1268,18 @@ mod test {
     }
 
     fn encode_put_schema(schema: &datatypes::arrow::datatypes::Schema) -> FlightData {
+        encode_put_schema_for_table(schema, "foo")
+    }
+
+    fn encode_put_schema_for_table(
+        schema: &datatypes::arrow::datatypes::Schema,
+        table: &str,
+    ) -> FlightData {
         let mut schema_data = FlightEncoder::default().encode_schema(schema);
         schema_data.app_metadata = serde_json::to_vec(&DoPutMetadata::new(0)).unwrap().into();
         schema_data.flight_descriptor = Some(FlightDescriptor {
             r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
-            path: vec!["foo".to_string()],
+            path: vec![table.to_string()],
             ..Default::default()
         });
         schema_data

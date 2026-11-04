@@ -578,6 +578,7 @@ pub(crate) fn create_datanode_opts(
         storage: StorageConfig {
             data_home: home_dir,
             copy_root: None,
+            probe_on_startup: false,
             providers,
             store: default_store,
         },
@@ -892,6 +893,7 @@ pub fn build_test_prom_server(
         LogicalTablePendingRowsBatcher::try_new(
             frontend_ref.partition_manager().clone(),
             frontend_ref.node_manager().clone(),
+            frontend_ref.inserter().write_dispatcher().clone(),
             frontend_ref.catalog_manager().clone(),
             frontend_ref.table_flownode_set_cache().clone(),
             true,
@@ -1203,15 +1205,20 @@ pub async fn setup_pg_server_with_slow_query_threshold(
             .expect("Failed to load certificates and keys"),
     );
 
-    let mut pg_server = Box::new(PostgresServer::new(
-        fe_instance_ref,
-        opts.tls.should_force_tls(),
-        tls_server_config,
-        0,
-        runtime,
-        None,
-        None,
-    ));
+    let mut pg_server = Box::new(
+        PostgresServer::new(
+            fe_instance_ref.clone(),
+            fe_instance_ref.clone(),
+            opts.tls.should_force_tls(),
+            tls_server_config,
+            0,
+            runtime,
+            None,
+            None,
+        )
+        .with_influxdb_handler(fe_instance_ref.clone())
+        .with_otlp_handler(fe_instance_ref.clone(), true),
+    );
 
     pg_server
         .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
@@ -1246,15 +1253,20 @@ pub async fn setup_pg_server_with_user_provider(
             .expect("Failed to load certificates and keys"),
     );
 
-    let mut pg_server = Box::new(PostgresServer::new(
-        fe_instance_ref,
-        opts.tls.should_force_tls(),
-        tls_server_config,
-        0,
-        runtime,
-        user_provider,
-        None,
-    ));
+    let mut pg_server = Box::new(
+        PostgresServer::new(
+            fe_instance_ref.clone(),
+            fe_instance_ref.clone(),
+            opts.tls.should_force_tls(),
+            tls_server_config,
+            0,
+            runtime,
+            user_provider,
+            None,
+        )
+        .with_influxdb_handler(fe_instance_ref.clone())
+        .with_otlp_handler(fe_instance_ref.clone(), true),
+    );
 
     pg_server
         .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
@@ -1301,15 +1313,20 @@ pub async fn setup_pg_server_with_prom_native_histogram(
             .expect("Failed to load certificates and keys"),
     );
 
-    let mut pg_server = Box::new(PostgresServer::new(
-        instance.fe_instance().clone(),
-        opts.tls.should_force_tls(),
-        tls_server_config,
-        0,
-        runtime,
-        None,
-        None,
-    ));
+    let mut pg_server = Box::new(
+        PostgresServer::new(
+            instance.fe_instance().clone(),
+            instance.fe_instance().clone(),
+            opts.tls.should_force_tls(),
+            tls_server_config,
+            0,
+            runtime,
+            None,
+            None,
+        )
+        .with_influxdb_handler(instance.fe_instance().clone())
+        .with_otlp_handler(instance.fe_instance().clone(), true),
+    );
 
     pg_server
         .start(fe_pg_addr.parse::<SocketAddr>().unwrap())

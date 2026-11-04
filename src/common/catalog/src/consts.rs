@@ -152,6 +152,7 @@ pub fn default_engine() -> &'static str {
 }
 
 pub const FILE_ENGINE: &str = "file";
+pub const RELATIONAL_ENGINE: &str = "relational";
 
 pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "TAG";
 pub const SEMANTIC_TYPE_FIELD: &str = "FIELD";
@@ -217,11 +218,14 @@ pub const TRACE_TIMESTAMP_COLUMN: &str = "timestamp";
 pub const SPAN_KIND_COLUMN: &str = "span_kind";
 pub const SPAN_STATUS_CODE_COLUMN: &str = "span_status_code";
 pub const DURATION_NANO_COLUMN: &str = "duration_nano";
+pub const TIMESTAMP_END_COLUMN: &str = "timestamp_end";
 pub const SPAN_KIND_CLIENT: &str = "SPAN_KIND_CLIENT";
 pub const SPAN_KIND_SERVER: &str = "SPAN_KIND_SERVER";
 pub const SPAN_STATUS_ERROR: &str = "STATUS_CODE_ERROR";
 pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
 pub const TRACE_TABLE_NAME_SESSION_KEY: &str = "trace_table_name";
+/// Shared exemplar destination within each source metric's schema.
+pub const METRICS_EXEMPLARS_TABLE: &str = concatcp!(DEFAULT_CATALOG_NAME, "_metrics_exemplars");
 // ---- End of special table and fields ----
 
 /// Generate the trace services table name from the trace table name by adding `_services` suffix.

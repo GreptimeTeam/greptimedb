@@ -82,7 +82,6 @@ mod tests {
     use common_wal::maybe_skip_kafka_integration_test;
     use common_wal::test_util::get_kafka_endpoints;
     use store_api::logstore::provider::KafkaProvider;
-    use store_api::storage::RegionId;
 
     use super::*;
     use crate::kafka::test_util::{prepare, record};
@@ -113,8 +112,7 @@ mod tests {
         assert_eq!(current_latest_offset, 0);
 
         let record = vec![record(), record()];
-        let region = RegionId::new(1, 1);
-        producer.produce(region, record.clone()).await.unwrap();
+        producer.produce(record.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
         let current_latest_offset = topic_stats.get(&provider).unwrap().latest_offset;
         assert_eq!(current_latest_offset, record.len() as u64 - 1);

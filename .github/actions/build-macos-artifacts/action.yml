@@ -64,6 +64,7 @@ runs:
       shell: bash
       env:
         CARGO_BUILD_RUSTFLAGS: "-Clink-arg=-Wl,-ld_classic"
+        RUST_MIN_STACK: 8388608 # 8 MiB, aligned with Rust CI and release tests.
         SQLNESS_OPTS: "--preserve-state"
       run: |
         make test sqlness-test

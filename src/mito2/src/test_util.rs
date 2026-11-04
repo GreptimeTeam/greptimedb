@@ -495,7 +495,7 @@ impl TestEnv {
     }
 
     /// Creates a new engine with specific config on `log_store` under this env.
-    pub(crate) async fn create_engine_with_log_store<S: LogStore>(
+    pub async fn create_engine_with_log_store<S: LogStore>(
         &mut self,
         config: MitoConfig,
         log_store: Arc<S>,
@@ -841,6 +841,7 @@ impl TestEnv {
                 0,
                 manifest_opts,
                 FormatType::PrimaryKey,
+                false,
                 &Default::default(),
             )
             .await

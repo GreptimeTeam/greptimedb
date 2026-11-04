@@ -70,7 +70,7 @@ pub(crate) async fn prepare(
         ..Default::default()
     };
     let high_watermark = Arc::new(DashMap::new());
-    let manager = ClientManager::try_new(&config, None, high_watermark)
+    let manager = ClientManager::try_new(&config, high_watermark)
         .await
         .unwrap();
 

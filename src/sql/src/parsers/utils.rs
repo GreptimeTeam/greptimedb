@@ -28,18 +28,20 @@ use datafusion_expr::{AggregateUDF, Expr, HigherOrderUDF, ScalarUDF, TableSource
 use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::schema::{
-    COLUMN_COMPRESSION_OPT_KEY_LEVEL, COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE,
-    COLUMN_COMPRESSION_OPT_KEY_TYPE, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
-    COLUMN_FULLTEXT_OPT_KEY_BACKEND, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
-    COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE, COLUMN_FULLTEXT_OPT_KEY_GRANULARITY,
-    COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE, COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
-    COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
+    COLUMN_COMPRESSION_OPT_KEY_ENCODING, COLUMN_COMPRESSION_OPT_KEY_LEVEL,
+    COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE, COLUMN_COMPRESSION_OPT_KEY_TYPE,
+    COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
+    COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
 };
 use snafu::{ResultExt, ensure};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
-use table::requests::{SEMANTIC_PREFIX, validate_semantic_option, validate_table_option};
+use table::requests::{
+    SEMANTIC_PREFIX, VALID_DDL_OPTION_KEYS, validate_semantic_option, validate_table_option,
+};
 
 use crate::error::{
     ConvertToLogicalExpressionSnafu, InvalidSqlSnafu, InvalidTableOptionSnafu, ParseSqlValueSnafu,
@@ -382,6 +384,7 @@ pub fn validate_column_compression_create_option(key: &str) -> bool {
         COLUMN_COMPRESSION_OPT_KEY_TYPE,
         COLUMN_COMPRESSION_OPT_KEY_LEVEL,
         COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE,
+        COLUMN_COMPRESSION_OPT_KEY_ENCODING,
     ]
     .contains(&key)
 }
@@ -422,15 +425,32 @@ pub fn convert_month_day_nano_to_duration(
     Ok(std::time::Duration::new(adjusted_seconds, nanos_remainder))
 }
 
+/// Parses submission options, accepting only scalar `wait` and `timeout` values.
+pub(crate) fn parse_ddl_options(parser: &mut Parser) -> Result<OptionMap> {
+    parse_with_options_inner(parser, true)
+}
+
 pub fn parse_with_options(parser: &mut Parser) -> Result<OptionMap> {
+    parse_with_options_inner(parser, false)
+}
+
+fn parse_with_options_inner(parser: &mut Parser, ddl_only: bool) -> Result<OptionMap> {
     let options = parser
         .parse_options(Keyword::WITH)
         .context(SyntaxSnafu)?
         .into_iter()
         .map(parse_option_string)
         .collect::<Result<HashMap<String, OptionValue>>>()?;
+    // Validate before OptionMap can discard non-scalar secret options.
     for (key, value) in &options {
-        if key.starts_with(SEMANTIC_PREFIX) {
+        if ddl_only {
+            ensure!(
+                VALID_DDL_OPTION_KEYS.contains(&key.as_str()) && value.as_string().is_some(),
+                InvalidSqlSnafu {
+                    msg: format!("invalid DDL option '{key}': '{value}'")
+                }
+            );
+        } else if key.starts_with(SEMANTIC_PREFIX) {
             // Semantic keys are whitelisted and value-checked against their domain,
             // so a user cannot set an unknown key or an out-of-range value.
             let value = value.as_string().unwrap_or_default();

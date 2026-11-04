@@ -191,7 +191,7 @@ mod tests {
     use common_meta::rpc::procedure::{
         GcResponse, ManageRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
     };
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextRef};
 
     use super::*;
     use crate::handlers::ProcedureServiceHandler;
@@ -298,6 +298,7 @@ mod tests {
 
         async fn manage_region_follower(
             &self,
+            _query_ctx: QueryContextRef,
             _request: ManageRegionFollowerRequest,
         ) -> Result<()> {
             unreachable!()

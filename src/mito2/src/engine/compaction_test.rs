@@ -18,9 +18,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use api::region::RegionResponse;
 use api::v1::{ColumnSchema, Rows};
 use async_trait::async_trait;
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use common_time::Timestamp;
@@ -40,6 +41,7 @@ use tokio::sync::{Notify, Semaphore};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::listener::{CompactionListener, EventListener};
+use crate::sst::file::RegionFileId;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
@@ -210,6 +212,7 @@ async fn test_strict_window_output_file_size(
     assert!(version.ssts.levels()[0].files.is_empty());
     let primary_key_mapper = version.ssts.primary_key_mapper();
     let files = version.ssts.levels()[1].files().collect::<Vec<_>>();
+    let max_output_size = files.iter().map(|file| file.size()).max().unwrap();
     assert_eq!(
         6000,
         files
@@ -227,6 +230,14 @@ async fn test_strict_window_output_file_size(
             .collect::<Vec<_>>();
         if expect_split {
             assert!(window_files.len() > 1, "each window must split by size");
+            assert_eq!(
+                window_files.len() as u64,
+                window_files
+                    .iter()
+                    .map(|file| file.size())
+                    .sum::<u64>()
+                    .div_ceil(max_output_size)
+            );
         } else {
             assert_eq!(1, window_files.len(), "zero must disable size splitting");
         }
@@ -250,6 +261,35 @@ async fn test_strict_window_output_file_size(
     assert_eq!(
         sort_batches_and_print(&before, &["tag_0", "ts"]),
         sort_batches_and_print(&after, &["tag_0", "ts"])
+    );
+
+    // Fresh size-split outputs have disjoint series and must not look like
+    // independently written files sharing a boundary key to the TWCS picker.
+    // Raise the tiny split threshold so an overlap merge would be eligible by
+    // size; otherwise the output-count guard alone would reject these files.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: SetRegionOptions {
+                    options: vec![SetRegionOption::Twsc(
+                        "compaction.twcs.max_output_file_size".into(),
+                        format!("{max_output_size}B"),
+                    )],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let output_ids: HashSet<_> = files.iter().map(|file| file.file_id()).collect();
+    compact(&engine, region_id).await;
+    let version = engine.get_region(region_id).unwrap().version();
+    assert_eq!(
+        output_ids,
+        version.ssts.levels()[1]
+            .files()
+            .map(|file| file.file_id())
+            .collect()
     );
 }
 
@@ -542,6 +582,1142 @@ async fn assert_partial_compaction_preserves_delete_order(flat_format: bool) {
     );
 }
 
+/// Exercise the small-L1 fallback with real SST sizes, preserved tombstones,
+/// and both layouts. No fabricated file metadata or hand-picked merge inputs.
+#[rstest::rstest]
+#[tokio::test]
+async fn test_inactive_small_l1_compaction_preserves_large_peer(
+    #[values(false, true)] flat_format: bool,
+    #[values(3600, 7200)] active_ts: usize,
+) {
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, columns) = env_for_manual_compaction(&mut env, region_id, flat_format).await;
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(41);
+    let mut old_rows = build_rows_for_key("m", 10, 16, 0);
+    for _ in 0..30_000 {
+        old_rows.extend(build_rows_for_key(
+            &format!("a{:032x}", rand::Rng::random::<u128>(&mut rng)),
+            1,
+            2,
+            0,
+        ));
+    }
+    for _ in 0..2 {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: columns.clone(),
+                rows: old_rows.clone(),
+            },
+        )
+        .await;
+        flush(&engine, region_id).await;
+    }
+    compact(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let table_dir = region.table_dir().to_string();
+    let large = region.version().ssts.levels()[1]
+        .files()
+        .next()
+        .unwrap()
+        .clone();
+    const OUTPUT_SIZE: u64 = 64 * 1024;
+    assert!(large.size() > 8 * OUTPUT_SIZE);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: SetRegionOptions {
+                    options: vec![
+                        SetRegionOption::Twsc(
+                            "compaction.twcs.max_output_file_size".into(),
+                            "64KiB".into(),
+                        ),
+                        SetRegionOption::Twsc(
+                            "compaction.twcs.inactive_window.l1_merge_trigger".into(),
+                            "2".into(),
+                        ),
+                    ],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Each pair of L0 files becomes one small L1. The first contains a Delete
+    // masking the large SST; later pairs update other rows in its key/time box.
+    for ts in 10..14 {
+        for _ in 0..2 {
+            let rows = Rows {
+                schema: columns.clone(),
+                rows: build_rows_for_key("m", ts, ts + 2, ts),
+            };
+            if ts == 10 {
+                engine
+                    .handle_request(
+                        region_id,
+                        RegionRequest::Delete(RegionDeleteRequest {
+                            rows,
+                            hint: None,
+                            partition_expr_version: None,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                put_rows(&engine, region_id, rows).await;
+            }
+            flush(&engine, region_id).await;
+        }
+        compact(&engine, region_id).await;
+    }
+    put_and_flush(&engine, region_id, &columns, active_ts..active_ts + 1).await;
+    let version = region.version();
+    let small = version.ssts.levels()[1]
+        .files()
+        .filter(|file| file.file_id() != large.file_id())
+        .collect::<Vec<_>>();
+    assert_eq!(4, small.len());
+    assert!(small.iter().all(|file| file.size() <= OUTPUT_SIZE / 4));
+    let small_ids = small
+        .iter()
+        .map(|file| file.file_id())
+        .collect::<HashSet<_>>();
+    let pick = preview_regular_compaction(&engine, region_id).await;
+    assert_eq!(1, pick.outputs.len());
+    assert_eq!(
+        small_ids,
+        pick.outputs[0]
+            .inputs
+            .iter()
+            .map(|file| file.file_id())
+            .collect()
+    );
+    assert!(!pick.outputs[0].filter_deleted);
+    let before = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+
+    // Even manual cleanup cannot rewrite the dominant peer within the closed
+    // merge's output bound, so it executes the same small-only fallback.
+    compact(&engine, region_id).await;
+    let version = region.version();
+    let l1 = version.ssts.levels()[1].files().collect::<Vec<_>>();
+    assert_eq!(2, l1.len());
+    assert!(l1.iter().any(|file| file.file_id() == large.file_id()));
+    let output = l1
+        .iter()
+        .find(|file| file.file_id() != large.file_id())
+        .unwrap();
+    assert!(!small_ids.contains(&output.file_id()));
+    assert_eq!(1, count_sst_deletes(&engine, region_id, output).await);
+    let after = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+    assert_eq!(before, after);
+    crate::test_util::reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let reopened = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+    assert_eq!(before, reopened);
+}
+
+/// Region fixture containing only identifiers, so it cannot pin an old SST snapshot.
+struct CompactionTestRegion {
+    region_id: RegionId,
+    table_dir: String,
+    path_type: PathType,
+}
+
+/// Scan observations from one version, without retaining the scanner or its SST handles.
+struct CompactionScanResult {
+    file_ids: HashSet<RegionFileId>,
+    timestamps: Vec<i64>,
+}
+
+impl CompactionTestRegion {
+    async fn create(engine: &MitoEngine, region_id: RegionId, ranges: &[Range<usize>]) -> Self {
+        let create = CreateRequestBuilder::new().build();
+        let fixture = Self {
+            region_id,
+            table_dir: create.table_dir.clone(),
+            path_type: create.path_type,
+        };
+        let columns = crate::test_util::rows_schema(&create);
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        for rows in ranges {
+            put_and_flush(engine, region_id, &columns, rows.clone()).await;
+        }
+        fixture
+    }
+
+    fn start_compaction(
+        &self,
+        engine: &MitoEngine,
+    ) -> tokio::task::JoinHandle<Result<RegionResponse, BoxedError>> {
+        let engine = engine.clone();
+        let region_id = self.region_id;
+        tokio::spawn(async move {
+            engine
+                .handle_request(region_id, strict_window_request(60, Some(2)))
+                .await
+        })
+    }
+
+    async fn scanner(&self, engine: &MitoEngine) -> crate::read::scan_region::Scanner {
+        engine
+            .scanner(self.region_id, ScanRequest::default())
+            .await
+            .unwrap()
+    }
+
+    async fn file_ids(&self, engine: &MitoEngine) -> HashSet<RegionFileId> {
+        self.scanner(engine).await.file_ids().into_iter().collect()
+    }
+
+    async fn scan(&self, engine: &MitoEngine) -> CompactionScanResult {
+        let scanner = self.scanner(engine).await;
+        let file_ids = scanner.file_ids().into_iter().collect();
+        let timestamps = collect_stream_ts(scanner.scan().await.unwrap()).await;
+        CompactionScanResult {
+            file_ids,
+            timestamps,
+        }
+    }
+
+    async fn open(&self, engine: &MitoEngine) {
+        engine
+            .handle_request(
+                self.region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    table_dir: self.table_dir.clone(),
+                    path_type: self.path_type,
+                    options: Default::default(),
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn reopen(&self, engine: &MitoEngine) {
+        engine
+            .handle_request(
+                self.region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
+            .await
+            .unwrap();
+        self.open(engine).await;
+    }
+}
+
+fn strict_window_request(window_seconds: i64, parallelism: Option<u32>) -> RegionRequest {
+    RegionRequest::Compact(RegionCompactRequest {
+        options: api::v1::region::compact_request::Options::StrictWindow(
+            api::v1::region::StrictWindow { window_seconds },
+        ),
+        parallelism,
+        ..Default::default()
+    })
+}
+
+/// Pauses the first unit at merge or commit while observing sibling progress.
+struct UnitVisibilityGate {
+    first: std::sync::atomic::AtomicU64,
+    at_commit: bool,
+    entered: Notify,
+    resume: Semaphore,
+    applied: Notify,
+    cancel_requested: Notify,
+}
+
+/// Occupies one pool slot and holds the target's first commit to expose dispatch order.
+struct WindowPriorityGate {
+    blocker: RegionId,
+    target: RegionId,
+    blocker_started: Notify,
+    release_blocker: Semaphore,
+    target_committed: Notify,
+    release_target: Semaphore,
+    target_started: std::sync::atomic::AtomicUsize,
+    first_target_commit: AtomicBool,
+}
+
+/// Releases both background tasks if an assertion aborts the test.
+struct WindowPriorityGuard(Arc<WindowPriorityGate>);
+
+impl Drop for WindowPriorityGuard {
+    fn drop(&mut self) {
+        self.0.release_blocker.add_permits(1);
+        self.0.release_target.add_permits(1);
+    }
+}
+
+#[async_trait]
+impl EventListener for WindowPriorityGate {
+    async fn on_compaction_unit_merge_begin(&self, region_id: RegionId, _plan_id: u64) {
+        if region_id == self.blocker {
+            self.blocker_started.notify_one();
+            self.release_blocker.acquire().await.unwrap().forget();
+        } else if region_id == self.target {
+            self.target_started.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn on_compaction_unit_committed(&self, region_id: RegionId, _plan_id: u64) {
+        if region_id == self.target && self.first_target_commit.swap(false, Ordering::SeqCst) {
+            self.target_committed.notify_one();
+            self.release_target.acquire().await.unwrap().forget();
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_compaction_unit_newest_window_starts_first_with_one_available_slot() {
+    let blocker = RegionId::new(46, 1);
+    let target = RegionId::new(47, 1);
+    let gate = Arc::new(WindowPriorityGate {
+        blocker,
+        target,
+        blocker_started: Notify::new(),
+        release_blocker: Semaphore::new(0),
+        target_committed: Notify::new(),
+        release_target: Semaphore::new(0),
+        target_started: std::sync::atomic::AtomicUsize::new(0),
+        first_target_commit: AtomicBool::new(true),
+    });
+    let guard = WindowPriorityGuard(gate.clone());
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine_with_time(
+            MitoConfig {
+                max_background_compactions: 2,
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            Arc::new(MockTimeProvider::new(1000)),
+        )
+        .await;
+    for region_id in [blocker, target] {
+        let create = CreateRequestBuilder::new()
+            .insert_option("compaction.type", "twcs")
+            .insert_option("compaction.twcs.time_window", "1h")
+            .insert_option("compaction.twcs.trigger_file_num", "4")
+            .insert_option("compaction.twcs.inactive_window_trigger_file_num", "4")
+            .build();
+        let columns = crate::test_util::rows_schema(&create);
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        if region_id == blocker {
+            put_and_flush(&engine, region_id, &columns, 0..2).await;
+        } else {
+            for window_start in [0, 3600] {
+                for _ in 0..4 {
+                    put_and_flush(&engine, region_id, &columns, window_start..window_start + 2)
+                        .await;
+                }
+            }
+        }
+    }
+    let region = engine.get_region(target).unwrap();
+    let version = region.version();
+    let (newest, older): (HashSet<_>, HashSet<_>) = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| (file.meta_ref().file_id, file.time_range().0))
+        .partition(|(_, start)| *start >= Timestamp::new_second(3600));
+    assert_eq!(4, newest.len());
+    assert_eq!(4, older.len());
+    let blocker_engine = engine.clone();
+    let blocked = tokio::spawn(async move {
+        blocker_engine
+            .handle_request(blocker, strict_window_request(3600, None))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), gate.blocker_started.notified())
+        .await
+        .unwrap();
+    let target_engine = engine.clone();
+    let compact = tokio::spawn(async move {
+        target_engine
+            .handle_request(
+                target,
+                RegionRequest::Compact(RegionCompactRequest {
+                    parallelism: Some(2),
+                    ..Default::default()
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), gate.target_committed.notified())
+        .await
+        .unwrap();
+    assert_eq!(1, gate.target_started.load(Ordering::SeqCst));
+    let manifest = region.manifest_ctx.manifest_manager.read().await.manifest();
+    assert!(
+        newest
+            .iter()
+            .all(|(id, _)| !manifest.files.contains_key(id)),
+        "the newest window must consume the only available execution slot"
+    );
+    assert!(older.iter().all(|(id, _)| manifest.files.contains_key(id)));
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        compact.await.unwrap().unwrap();
+        blocked.await.unwrap().unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Fails a selected SST close and records earlier outputs for cleanup assertions.
+struct FailingUnitSstWriter {
+    inner: object_store::layers::mock::Writer,
+    path: String,
+    remaining: Arc<std::sync::atomic::AtomicUsize>,
+    finalized: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl object_store::layers::mock::Write for FailingUnitSstWriter {
+    async fn write(
+        &mut self,
+        bytes: object_store::layers::mock::Buffer,
+    ) -> object_store::layers::mock::Result<()> {
+        self.inner.write(bytes).await
+    }
+    /// Injects failure at the configured close without publishing that SST.
+    async fn close(
+        &mut self,
+    ) -> object_store::layers::mock::Result<object_store::layers::mock::Metadata> {
+        let previous = self
+            .remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        if previous == Ok(1) {
+            return Err(object_store::layers::mock::Error::new(
+                object_store::layers::mock::ErrorKind::Unexpected,
+                "second unit SST failed",
+            ));
+        }
+        let metadata = self.inner.close().await?;
+        if previous.is_ok() {
+            self.finalized.lock().unwrap().push(self.path.clone());
+        }
+        Ok(metadata)
+    }
+    async fn abort(&mut self) -> object_store::layers::mock::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+fn failing_unit_sst_layer(
+    remaining: Arc<std::sync::atomic::AtomicUsize>,
+    finalized: Arc<std::sync::Mutex<Vec<String>>>,
+) -> object_store::layers::mock::MockLayer {
+    object_store::layers::mock::MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".parquet") {
+                Box::new(FailingUnitSstWriter {
+                    inner,
+                    path: path.to_string(),
+                    remaining: remaining.clone(),
+                    finalized: finalized.clone(),
+                })
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_compaction_unit_failed_dependency_group_keeps_input_and_cleans_output() {
+    let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let finalized = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let layer = failing_unit_sst_layer(remaining.clone(), finalized.clone());
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let config = MitoConfig {
+        min_compaction_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let region_id = RegionId::new(43, 1);
+    let test_region =
+        CompactionTestRegion::create(&engine, region_id, std::slice::from_ref(&(0..122))).await;
+    let original = test_region.file_ids(&engine).await;
+    remaining.store(2, Ordering::SeqCst);
+    let error = test_region
+        .start_compaction(&engine)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    let current = test_region.scan(&engine).await;
+    assert_eq!(original, current.file_ids);
+    let expected = (0..122).map(|n| n * 1000).collect::<Vec<_>>();
+    assert_eq!(expected, current.timestamps);
+    let paths = finalized.lock().unwrap().clone();
+    assert_eq!(
+        1,
+        paths.len(),
+        "one output must have finished before the failing output"
+    );
+    let store = env.get_object_store().unwrap();
+    for path in paths {
+        assert!(
+            !store.exists(&path).await.unwrap(),
+            "abandoned output {path}"
+        );
+    }
+    let engine = env.reopen_engine(engine, config).await;
+    test_region.open(&engine).await;
+    assert_eq!(expected, test_region.scan(&engine).await.timestamps);
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn test_compaction_unit_applied_sibling_survives_failure_and_reopen(
+    #[values(false, true)] flat_format: bool,
+) {
+    let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let finalized = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let layer = failing_unit_sst_layer(remaining.clone(), finalized.clone());
+    let gate = Arc::new(UnitVisibilityGate::before_merge());
+    let guard = UnitVisibilityGuard(gate.clone());
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let config = MitoConfig {
+        default_flat_format: flat_format,
+        max_background_compactions: 2,
+        min_compaction_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let engine = env
+        .create_engine_with(config.clone(), None, Some(gate.clone()), None)
+        .await;
+    let region_id = RegionId::new(48, 1);
+    // Disjoint input SSTs produce two independent units, not one dependency group.
+    let test_region = CompactionTestRegion::create(&engine, region_id, &[0..2, 120..122]).await;
+    let original = test_region.file_ids(&engine).await;
+    assert_eq!(2, original.len());
+    remaining.store(2, Ordering::SeqCst);
+    let compact = test_region.start_compaction(&engine);
+    // B is held before merge until A's manifest edit has been committed and applied.
+    tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("unit B did not reach the merge gate");
+    tokio::time::timeout(Duration::from_secs(10), gate.applied.notified())
+        .await
+        .expect("unit A did not apply independently of B");
+    assert!(!compact.is_finished(), "request must still wait for B");
+    assert_eq!(1, remaining.load(Ordering::SeqCst));
+    let applied = test_region.scan(&engine).await;
+    let applied_ids = applied.file_ids;
+    assert_eq!(2, applied_ids.len());
+    assert_eq!(1, applied_ids.intersection(&original).count());
+    assert_eq!(1, applied_ids.difference(&original).count());
+    let expected = vec![0, 1000, 120_000, 121_000];
+    assert_eq!(expected, applied.timestamps);
+
+    drop(guard);
+    let error = tokio::time::timeout(Duration::from_secs(10), compact)
+        .await
+        .expect("compaction did not finish after B failed")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    assert_eq!(0, remaining.load(Ordering::SeqCst));
+    let failed = test_region.scan(&engine).await;
+    assert_eq!(
+        applied_ids, failed.file_ids,
+        "B's failure must retain A's output and B's original input"
+    );
+    assert_eq!(expected, failed.timestamps);
+    assert!(
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .all(|file| !file.compacting())
+    );
+    let paths = finalized.lock().unwrap().clone();
+    assert_eq!(1, paths.len());
+    assert!(
+        env.get_object_store()
+            .unwrap()
+            .exists(&paths[0])
+            .await
+            .unwrap()
+    );
+
+    let engine = tokio::time::timeout(Duration::from_secs(10), env.reopen_engine(engine, config))
+        .await
+        .expect("engine shutdown must not wait for a failed unit");
+    test_region.reopen(&engine).await;
+    let reopened = test_region.scan(&engine).await;
+    assert_eq!(
+        applied_ids, reopened.file_ids,
+        "recovery must preserve the partial-success file set"
+    );
+    assert_eq!(expected, reopened.timestamps);
+}
+
+/// Holds one unit before merge and observes its sibling's task exit.
+struct UnitReleaseListener {
+    merge: Arc<UnitVisibilityGate>,
+    released: Semaphore,
+}
+
+#[async_trait]
+impl EventListener for UnitReleaseListener {
+    async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, plan_id: u64) {
+        self.merge.block_first(plan_id).await;
+    }
+
+    async fn on_compaction_result_notified(&self, _region_id: RegionId) {
+        self.released.add_permits(1);
+    }
+}
+
+/// Regression for #9067: a slow sibling must not pin a completed unit's old SSTs.
+#[tokio::test]
+async fn test_compaction_unit_releases_inputs_before_sibling_finishes() {
+    let gate = Arc::new(UnitVisibilityGate::before_merge());
+    let guard = UnitVisibilityGuard(gate.clone());
+    let listener = Arc::new(UnitReleaseListener {
+        merge: gate.clone(),
+        released: Semaphore::new(0),
+    });
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                max_background_compactions: 2,
+                // A queued barrier can drain every preceding purge job.
+                max_background_purges: 1,
+                // TestEnv constructs its purge scheduler with flush concurrency.
+                max_background_flushes: 1,
+                min_compaction_interval: Duration::from_secs(3600),
+                gc: crate::gc::GcConfig {
+                    enable: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(49, 1);
+    // The third unit starts only after a submitted unit exits; one sibling stays blocked.
+    let test_region =
+        CompactionTestRegion::create(&engine, region_id, &[0..2, 120..122, 240..242]).await;
+
+    // Keep only IDs and paths, never a scanner, Version, or input FileHandle.
+    let original = test_region.file_ids(&engine).await;
+    assert_eq!(3, original.len());
+    let paths: HashMap<_, _> = original
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                crate::sst::location::sst_file_path(
+                    &test_region.table_dir,
+                    *id,
+                    test_region.path_type,
+                ),
+            )
+        })
+        .collect();
+    let store = env.get_object_store().unwrap();
+    for path in paths.values() {
+        assert!(store.exists(path).await.unwrap());
+    }
+
+    let compact = test_region.start_compaction(&engine);
+    tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("unit B did not reach the merge gate");
+    tokio::time::timeout(Duration::from_secs(10), listener.released.acquire_many(2))
+        .await
+        .expect("submitted and pending units did not exit while their sibling was blocked")
+        .unwrap()
+        .forget();
+    assert!(!compact.is_finished());
+    let current = test_region.file_ids(&engine).await;
+    assert_eq!(3, current.len());
+    assert_eq!(1, original.intersection(&current).count());
+    assert_eq!(2, original.difference(&current).count());
+    let blocked_input = *original.intersection(&current).next().unwrap();
+
+    let drain_purges = || async {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        engine
+            .purge_scheduler()
+            .schedule(Box::pin(async move {
+                let _ = sender.send(());
+            }))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), receiver)
+            .await
+            .expect("purge queue did not drain")
+            .unwrap();
+    };
+    drain_purges().await;
+    let mut retained_before_sibling_exit = Vec::new();
+    for input in original.difference(&current) {
+        if store.exists(&paths[input]).await.unwrap() {
+            retained_before_sibling_exit.push(*input);
+        }
+    }
+    assert!(store.exists(&paths[&blocked_input]).await.unwrap());
+
+    // Finish B before asserting the regression, also checking that purging works at all.
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(10), compact)
+        .await
+        .expect("compaction did not finish after releasing B")
+        .unwrap()
+        .unwrap();
+    drain_purges().await;
+    for path in paths.values() {
+        assert!(
+            !store.exists(path).await.unwrap(),
+            "input not purged: {path}"
+        );
+    }
+    engine.stop().await.unwrap();
+    assert!(
+        retained_before_sibling_exit.is_empty(),
+        "completed units exited and the purge queue drained, but their old inputs remained until the blocked sibling exited: {retained_before_sibling_exit:?}",
+    );
+}
+
+impl UnitVisibilityGate {
+    fn before_merge() -> Self {
+        Self {
+            first: std::sync::atomic::AtomicU64::new(u64::MAX),
+            at_commit: false,
+            entered: Notify::new(),
+            resume: Semaphore::new(0),
+            applied: Notify::new(),
+            cancel_requested: Notify::new(),
+        }
+    }
+
+    fn after_commit() -> Self {
+        Self {
+            at_commit: true,
+            ..Self::before_merge()
+        }
+    }
+
+    /// Blocks only the first arriving unit, leaving its siblings free to progress.
+    async fn block_first(&self, id: u64) {
+        if self
+            .first
+            .compare_exchange(u64::MAX, id, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            self.entered.notify_one();
+            self.resume.acquire().await.unwrap().forget();
+        }
+    }
+}
+
+/// Releases the visibility gate even when a test exits through a panic.
+struct UnitVisibilityGuard(Arc<UnitVisibilityGate>);
+
+/// Holds one unit before merge and its sibling at commit for deterministic failure ordering.
+struct UnitFailureGate {
+    merge: Arc<UnitVisibilityGate>,
+    commit: Arc<CompactionPlanningGate>,
+}
+
+#[async_trait]
+impl EventListener for UnitFailureGate {
+    async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, id: u64) {
+        self.merge.block_first(id).await;
+    }
+
+    async fn on_compaction_commit_begin(&self, region_id: RegionId) {
+        self.commit.on_compaction_commit_begin(region_id).await;
+    }
+
+    fn on_compaction_cancel_requested(&self, region_id: RegionId) {
+        self.commit.on_compaction_cancel_requested(region_id);
+    }
+
+    async fn on_compaction_result_notified(&self, region_id: RegionId) {
+        self.commit.on_compaction_result_notified(region_id).await;
+    }
+}
+
+/// Distinguishes a rejected write from a lost reply after persistence.
+#[derive(Clone, Copy)]
+enum ManifestWriteFailure {
+    BeforeWrite,
+    AfterWrite,
+}
+
+/// Injects manifest failures around a real storage write to verify output ownership.
+struct FailingManifestWriter {
+    inner: object_store::layers::mock::Writer,
+    failure: ManifestWriteFailure,
+}
+
+impl object_store::layers::mock::Write for FailingManifestWriter {
+    /// Rejects the pre-write case before any bytes reach the real writer.
+    async fn write(
+        &mut self,
+        bytes: object_store::layers::mock::Buffer,
+    ) -> object_store::layers::mock::Result<()> {
+        if matches!(self.failure, ManifestWriteFailure::BeforeWrite) {
+            return Err(object_store::layers::mock::Error::new(
+                object_store::layers::mock::ErrorKind::Unsupported,
+                "manifest write rejected before persistence",
+            ));
+        }
+        self.inner.write(bytes).await
+    }
+    /// Persists the manifest before simulating a lost success reply.
+    async fn close(
+        &mut self,
+    ) -> object_store::layers::mock::Result<object_store::layers::mock::Metadata> {
+        self.inner.close().await?;
+        Err(object_store::layers::mock::Error::new(
+            object_store::layers::mock::ErrorKind::Unexpected,
+            "lost manifest response after persistence",
+        ))
+    }
+    async fn abort(&mut self) -> object_store::layers::mock::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+#[rstest::rstest]
+#[case::before_write(ManifestWriteFailure::BeforeWrite)]
+#[case::after_write(ManifestWriteFailure::AfterWrite)]
+#[tokio::test]
+async fn test_compaction_unit_manifest_failure_preserves_outputs(
+    #[case] failure: ManifestWriteFailure,
+) {
+    let armed = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ssts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (inject, writes, paths) = (armed.clone(), attempts.clone(), ssts.clone());
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".parquet") {
+                paths.lock().unwrap().push(path.to_string());
+            }
+            if path.contains("/manifest/") && path.contains(".json") {
+                writes.fetch_add(1, Ordering::SeqCst);
+                if inject.swap(false, Ordering::SeqCst) {
+                    return Box::new(FailingManifestWriter { inner, failure });
+                }
+            }
+            inner
+        }))
+        .build()
+        .unwrap();
+    let region_id = RegionId::new(44, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_id));
+    let merge_gate = Arc::new(UnitVisibilityGate::before_merge());
+    let merge_guard = UnitVisibilityGuard(merge_gate.clone());
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                max_background_compactions: 2,
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            None,
+            Some(Arc::new(UnitFailureGate {
+                merge: merge_gate,
+                commit: gate.clone(),
+            })),
+            None,
+        )
+        .await;
+    let test_region = CompactionTestRegion::create(&engine, region_id, &[0..2, 120..122]).await;
+    let original = test_region.file_ids(&engine).await;
+    assert_eq!(2, original.len());
+    let region = engine.get_region(region_id).unwrap();
+    let version = region
+        .manifest_ctx
+        .manifest_manager
+        .read()
+        .await
+        .manifest()
+        .manifest_version;
+    ssts.lock().unwrap().clear();
+    attempts.store(0, Ordering::SeqCst);
+    armed.store(true, Ordering::SeqCst);
+    let guard = gate.arm_commit();
+    let compact = test_region.start_compaction(&engine);
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_until_commit_entered())
+        .await
+        .unwrap();
+    let sibling_guard = gate.arm_pending_ddl_dispatch();
+    let ddl_engine = engine.clone();
+    let truncate = tokio::spawn(async move {
+        ddl_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::All),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_until_cancel_requested())
+        .await
+        .unwrap();
+    drop(merge_guard);
+    // Observe the cancelled sibling's exit before releasing the failing commit.
+    // Its cancellation must neither finish the request nor mask the later I/O error.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        gate.wait_until_pending_ddl_dispatch(),
+    )
+    .await
+    .unwrap();
+    assert!(!compact.is_finished());
+    assert!(!truncate.is_finished());
+    sibling_guard.release();
+    guard.release();
+    let error = tokio::time::timeout(Duration::from_secs(10), compact)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    let error = tokio::time::timeout(Duration::from_secs(10), truncate)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    assert_eq!(
+        1,
+        attempts.load(Ordering::SeqCst),
+        "one failed publication, without automatic retry"
+    );
+    assert!(!armed.load(Ordering::SeqCst));
+    assert_eq!(
+        version,
+        region
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .manifest()
+            .manifest_version
+    );
+    let scan = test_region.scan(&engine).await;
+    assert_eq!(original, scan.file_ids, "failed edits must not be applied");
+    assert_eq!(vec![0, 1000, 120_000, 121_000], scan.timestamps);
+    assert!(
+        region
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|l| l.files())
+            .all(|f| !f.compacting())
+    );
+    let paths = ssts.lock().unwrap().clone();
+    assert!(!paths.is_empty());
+    let store = env.get_object_store().unwrap();
+    let mut retained = 0;
+    for path in paths {
+        retained += usize::from(store.exists(&path).await.unwrap());
+    }
+    assert_eq!(
+        usize::from(matches!(failure, ManifestWriteFailure::AfterWrite)),
+        retained
+    );
+}
+
+impl Drop for UnitVisibilityGuard {
+    fn drop(&mut self) {
+        self.0.resume.add_permits(1);
+    }
+}
+
+#[async_trait]
+impl EventListener for UnitVisibilityGate {
+    fn on_compaction_cancel_requested(&self, _region_id: RegionId) {
+        self.cancel_requested.notify_one();
+    }
+    async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, id: u64) {
+        if !self.at_commit {
+            self.block_first(id).await;
+        }
+    }
+    async fn on_compaction_unit_committed(&self, _region_id: RegionId, id: u64) {
+        if self.at_commit {
+            self.block_first(id).await;
+        }
+    }
+    fn on_compaction_unit_applied(&self, _region_id: RegionId, _id: u64) {
+        self.applied.notify_one();
+    }
+}
+
+enum UnitInterleaving {
+    SlowMerge,
+    PendingApply,
+    Truncate,
+    Reopen,
+}
+
+#[rstest::rstest]
+#[case::slow_merge(UnitInterleaving::SlowMerge)]
+#[case::pending_apply(UnitInterleaving::PendingApply)]
+#[case::truncate(UnitInterleaving::Truncate)]
+#[case::reopen(UnitInterleaving::Reopen)]
+#[tokio::test]
+async fn test_compaction_unit_commit_and_apply_can_interleave(#[case] scenario: UnitInterleaving) {
+    let gate = Arc::new(match scenario {
+        UnitInterleaving::PendingApply | UnitInterleaving::Reopen => {
+            UnitVisibilityGate::after_commit()
+        }
+        UnitInterleaving::SlowMerge | UnitInterleaving::Truncate => {
+            UnitVisibilityGate::before_merge()
+        }
+    });
+    let guard = UnitVisibilityGuard(gate.clone());
+    let mut env = TestEnv::new().await;
+    let config = MitoConfig {
+        max_background_compactions: 2,
+        min_compaction_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let engine = env
+        .create_engine_with(config.clone(), None, Some(gate.clone()), None)
+        .await;
+    let region_id = RegionId::new(42, 1);
+    let test_region = CompactionTestRegion::create(&engine, region_id, &[0..2, 120..122]).await;
+    // Keep this scanner explicitly: this scenario also verifies old query snapshots.
+    let old = test_region.scanner(&engine).await;
+    let old_ids = old.file_ids();
+    assert_eq!(2, old.num_files());
+    let task = test_region.start_compaction(&engine);
+    tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), gate.applied.notified())
+        .await
+        .expect("sibling unit waited for another unit's merge or apply");
+    let current = test_region.scan(&engine).await;
+    let unchanged = current
+        .file_ids
+        .iter()
+        .filter(|id| old_ids.contains(id))
+        .count();
+    assert_eq!(1, unchanged, "the ungated unit must already be visible");
+    assert!(
+        !task.is_finished(),
+        "manual request finished before all units"
+    );
+    let mut expected = vec![0, 1000, 120_000, 121_000];
+    assert_eq!(expected, current.timestamps);
+    assert_eq!(expected, collect_stream_ts(old.scan().await.unwrap()).await);
+    let truncate_task = if matches!(scenario, UnitInterleaving::Truncate) {
+        let engine = engine.clone();
+        let ddl = tokio::spawn(async move {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Truncate(RegionTruncateRequest::All),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), gate.cancel_requested.notified())
+            .await
+            .unwrap();
+        assert!(!ddl.is_finished());
+        assert!(!task.is_finished());
+        Some(ddl)
+    } else {
+        None
+    };
+    if matches!(scenario, UnitInterleaving::Reopen) {
+        test_region.reopen(&engine).await;
+        assert_eq!(expected, test_region.scan(&engine).await.timestamps);
+    }
+    drop(guard);
+    let result = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    if let Some(ddl) = truncate_task {
+        assert_eq!(StatusCode::Cancelled, result.unwrap_err().status_code());
+        tokio::time::timeout(Duration::from_secs(10), ddl)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        expected.clear();
+    } else if matches!(scenario, UnitInterleaving::Reopen) {
+        assert_eq!(StatusCode::Cancelled, result.unwrap_err().status_code());
+    } else {
+        result.unwrap();
+    }
+    let completed = test_region.scan(&engine).await;
+    assert!(completed.file_ids.iter().all(|id| !old_ids.contains(id)));
+    assert_eq!(
+        expected, completed.timestamps,
+        "applying the delayed edit must preserve its sibling's result"
+    );
+    let engine = tokio::time::timeout(Duration::from_secs(10), env.reopen_engine(engine, config))
+        .await
+        .unwrap();
+    test_region.open(&engine).await;
+    assert_eq!(expected, test_region.scan(&engine).await.timestamps);
+}
+
 /// Real-engine regression for the tombstone resurrection chain described in
 /// https://greptime.feishu.cn/wiki/L2WYwIM40iG9tckowrnctyw8nQc.
 /// No synthetic file sizes, PK ranges, or manually selected compaction inputs.
@@ -831,6 +2007,7 @@ async fn preview_regular_compaction(
         &version.options,
         None,
         None,
+        false,
     );
     let compaction_region = CompactionRegion {
         region_id,
@@ -885,6 +2062,7 @@ struct CompactionPlanningGate {
     pending_ddl_armed: AtomicBool,
     pending_ddl_entered: Notify,
     pending_ddl_permits: Semaphore,
+    flush_completed: Notify,
 }
 
 /// Releases an armed [`CompactionPlanningGate`] when a test exits unexpectedly.
@@ -980,6 +2158,7 @@ impl CompactionPlanningGate {
             pending_ddl_armed: AtomicBool::new(false),
             pending_ddl_entered: Notify::new(),
             pending_ddl_permits: Semaphore::new(0),
+            flush_completed: Notify::new(),
         }
     }
 
@@ -1050,6 +2229,12 @@ impl CompactionPlanningGate {
 
 #[async_trait]
 impl EventListener for CompactionPlanningGate {
+    fn on_flush_success(&self, region_id: RegionId) {
+        if region_id == self.region_id {
+            self.flush_completed.notify_one();
+        }
+    }
+
     async fn on_compaction_pick_begin(&self, region_id: RegionId) {
         if region_id != self.region_id {
             return;
@@ -1211,6 +2396,9 @@ async fn assert_automatic_followup_updates_schedule_time(preexisting_flushes: us
             offset * 10..offset * 10 + 10,
         )
         .await;
+        tokio::time::timeout(Duration::from_secs(5), gate.flush_completed.notified())
+            .await
+            .unwrap();
     }
 
     let first_schedule_time = initial_time + interval.as_millis() as i64;
@@ -1227,6 +2415,9 @@ async fn assert_automatic_followup_updates_schedule_time(preexisting_flushes: us
     tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
         .await
         .expect("initial automatic planning did not reach the gate");
+    tokio::time::timeout(Duration::from_secs(5), gate.flush_completed.notified())
+        .await
+        .unwrap();
 
     let trigger_time = first_schedule_time + interval.as_millis() as i64;
     time_provider.set_now(trigger_time);
@@ -1237,6 +2428,11 @@ async fn assert_automatic_followup_updates_schedule_time(preexisting_flushes: us
         first_start + 10..first_start + 20,
     )
     .await;
+    // The flush reply precedes the worker's compaction trigger; wait for that trigger
+    // before advancing the mock clock and releasing the picker.
+    tokio::time::timeout(Duration::from_secs(5), gate.flush_completed.notified())
+        .await
+        .unwrap();
     let followup_schedule_time = trigger_time + 1;
     time_provider.set_now(followup_schedule_time);
     gate_guard.release();
@@ -1694,16 +2890,29 @@ async fn test_worker_shutdown_fails_picking_waiter() {
 
 #[tokio::test]
 async fn test_compaction_region() {
-    test_compaction_region_with_format(false).await;
-    test_compaction_region_with_format(true).await;
+    for (engine_parallelism, table_parallelism) in [
+        (1, None),
+        (4, None),
+        (1, Some(4)),
+        (4, Some(1)),
+        (1, Some(usize::MAX)),
+    ] {
+        test_compaction_region_with_format(false, engine_parallelism, table_parallelism).await;
+        test_compaction_region_with_format(true, engine_parallelism, table_parallelism).await;
+    }
 }
 
-async fn test_compaction_region_with_format(flat_format: bool) {
+async fn test_compaction_region_with_format(
+    flat_format: bool,
+    output_parallelism: usize,
+    table_parallelism: Option<usize>,
+) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
             default_flat_format: flat_format,
+            experimental_compaction_output_parallelism: output_parallelism,
             ..Default::default()
         })
         .await;
@@ -1720,10 +2929,16 @@ async fn test_compaction_region_with_format(flat_format: bool) {
         )
         .await;
 
-    let request = CreateRequestBuilder::new()
+    let mut builder = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("experimental_sst_float_field_encoding", "byte_stream_split")
-        .build();
+        .insert_option("experimental_sst_float_field_encoding", "byte_stream_split");
+    if let Some(parallelism) = table_parallelism {
+        builder = builder.insert_option(
+            "compaction.experimental_output_parallelism",
+            &parallelism.to_string(),
+        );
+    }
+    let request = builder.build();
 
     let column_schemas = request
         .column_metadatas
@@ -1783,9 +2998,9 @@ async fn test_compaction_region_with_format(flat_format: bool) {
     //          -[15.........29]- (delete)
     //           [15.....24]
     // Count-first compaction consumes the first 4 SSTs as soon as the trigger is reached.
-    // The compacted output and final flush leave 2 SSTs.
+    // The manual compaction then merges the compacted output with the final flush.
     assert_eq!(
-        2,
+        1,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()

@@ -124,10 +124,12 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
 
     async fn manage_region_follower(
         &self,
+        query_ctx: QueryContextRef,
         request: ManageRegionFollowerRequest,
     ) -> QueryResult<()> {
+        let executor_context = to_executor_context(query_ctx, TriggerReason::Manual);
         self.procedure_executor
-            .manage_region_follower(&ExecutorContext::default(), request)
+            .manage_region_follower(&executor_context, request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)
@@ -178,8 +180,11 @@ mod tests {
         ExecutorContext, ProcedureExecutor, ProcedureExecutorRef,
     };
     use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
-    use common_meta::rpc::procedure::{MigrateRegionResponse, ProcedureStateResponse};
-    use session::context::QueryContextBuilder;
+    use common_meta::rpc::procedure::{
+        AddRegionFollowerRequest, ManageRegionFollowerRequest, MigrateRegionResponse,
+        ProcedureStateResponse,
+    };
+    use session::context::{QueryContextBuilder, QueryContextRef};
     use table::table_name::TableName;
 
     use super::*;
@@ -228,6 +233,14 @@ mod tests {
             _: &str,
         ) -> common_meta::error::Result<ProcedureStateResponse> {
             unimplemented!()
+        }
+        async fn manage_region_follower(
+            &self,
+            context: &ExecutorContext,
+            _: ManageRegionFollowerRequest,
+        ) -> common_meta::error::Result<()> {
+            self.contexts.lock().unwrap().push(context.clone());
+            Ok(())
         }
         async fn list_procedures(
             &self,
@@ -297,6 +310,40 @@ mod tests {
         let query_context = contexts[0].query_context.as_ref().unwrap();
         assert_eq!(query_context.current_catalog, "catalog");
         assert_eq!(query_context.current_schema, "schema");
+        assert_eq!(
+            contexts[0].event_input.as_ref().map(|input| input.reason),
+            Some(TriggerReason::Manual)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manage_region_follower_forwards_query_context() {
+        let manager = Arc::new(TableMetadataManager::new(Arc::new(
+            MemoryKvBackend::default(),
+        )));
+        let executor = Arc::new(RecordingProcedureExecutor::default());
+        let operator = ProcedureServiceOperator::new(
+            executor.clone(),
+            catalog::memory::MemoryCatalogManager::new(),
+            manager,
+        );
+        let query_ctx: QueryContextRef = QueryContextBuilder::default().build().into();
+
+        operator
+            .manage_region_follower(
+                query_ctx,
+                ManageRegionFollowerRequest::AddRegionFollower(AddRegionFollowerRequest {
+                    region_id: 1,
+                    peer_id: 2,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let contexts = executor.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), 1);
+        // The default query context runs as the default user.
+        assert_eq!(contexts[0].actor.as_deref(), Some("greptime"));
         assert_eq!(
             contexts[0].event_input.as_ref().map(|input| input.reason),
             Some(TriggerReason::Manual)

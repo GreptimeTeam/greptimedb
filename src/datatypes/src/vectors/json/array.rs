@@ -643,6 +643,7 @@ mod test {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             Some(0),
         )?;

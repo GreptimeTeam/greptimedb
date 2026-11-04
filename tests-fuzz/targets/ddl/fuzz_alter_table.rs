@@ -229,14 +229,14 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let expr = generate_create_table_expr(&mut rng).unwrap();
     let translator = CreateTableExprTranslator;
     let sql = translator.translate(&expr)?;
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create table: {sql}, result: {result:?}");
 
     let insert = generate_insert_table_sql(&mut rng, &expr)?;
-    let result = sqlx::query(&insert)
+    let result = sqlx::query(sqlx::AssertSqlSafe(insert.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql: &insert })?;
@@ -248,7 +248,7 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         let expr = generate_alter_table_expr(table_ctx.clone(), &mut rng).unwrap();
         let translator = AlterTableExprTranslator;
         let sql = translator.translate(&expr)?;
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
@@ -303,7 +303,7 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
         // select from table to make sure the table is still ok
         let sql = format!("SELECT * FROM {}", table_ctx.name);
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .persistent(false)
             .execute(&ctx.greptime)
             .await
@@ -314,7 +314,7 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     // Cleans up
     let table_name = table_ctx.name.clone();
     let sql = format!("DROP TABLE {}", table_name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;

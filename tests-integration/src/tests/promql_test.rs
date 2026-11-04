@@ -22,7 +22,9 @@ use api::v1::{
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
-use datatypes::arrow::array::{Float64Array, Int64Array, StringArray, TimestampMillisecondArray};
+use datatypes::arrow::array::{
+    Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+};
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
@@ -1308,5 +1310,445 @@ async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn Mo
         );
         assert_nan_series(extract_samples(query_at(2_000).await), 2_000);
         assert_nan_series(extract_samples(query_at(2_500).await), 2_500);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F06: `ScalarCalculate` (`scalar()` in TQL) order contract
+// ---------------------------------------------------------------------------
+//
+// `scalar()` inside a TQL CTE is planned as `ScalarCalculate`
+// (`src/promql/src/extension_plan/scalar_calculate.rs`). Before this fix, its execution plan
+// claimed `maintains_input_order() == true` even though the node projects its
+// input down to `(time_index, scalar(field))`, so its output column `ts@0` is
+// not the input column `0`. DataFusion's sort push-down mapped the sort key by
+// column index, so the SQL-level sort over `scalar()` read the wrong column:
+//
+// * `ORDER BY ts DESC` really sorted by `host` (ordinary Mito table) or by `val`
+//   (metric logical table) and silently returned the wrong row order.
+// * `ORDER BY "scalar(val)" ASC` did not order by the scalar value at all.
+// * `LAG(...) OVER (ORDER BY ts DESC)` could not be planned before this fix:
+//   the window needed `ts@0 DESC` while the pushed-down sort provided
+//   `host@0 DESC` / `val@0 DESC`, so planning failed with code 3000.
+//
+// The controls below must keep passing: a bare selector keeps the `ts` order of
+// its input, and `ORDER BY ts DESC LIMIT 3` keeps the correct `TopK` above
+// `ScalarCalculate` (the fetch blocks the wrong push-down).
+//
+// Every comparison below is row-by-row in result order: sorting the rows before
+// comparing them would hide exactly this bug.
+
+/// `(ts_millis, val)` fixture shared by both engines.
+///
+/// The values are deliberately neither ascending nor descending, so a wrong row
+/// order is visible in the value column too: `ORDER BY ts DESC` must pair
+/// `ts = 3000` with `2.0`, not with `4.0`.
+const F06_FIXTURE_ROWS: &[(i64, f64)] = &[(0, 4.0), (1000, 1.0), (2000, 3.0), (3000, 2.0)];
+
+/// Truth of `ORDER BY ts DESC` over the F06 fixture.
+const F06_ROWS_BY_TS_DESC: &[(i64, f64)] = &[(3000, 2.0), (2000, 3.0), (1000, 1.0), (0, 4.0)];
+
+/// Truth of `ORDER BY ts DESC LIMIT 3` over the F06 fixture.
+const F06_ROWS_BY_TS_DESC_LIMIT_3: &[(i64, f64)] = &[(3000, 2.0), (2000, 3.0), (1000, 1.0)];
+
+/// Truth of `ORDER BY "scalar(val)" ASC` over the F06 fixture.
+const F06_ROWS_BY_VALUE_ASC: &[(i64, f64)] = &[(1000, 1.0), (3000, 2.0), (2000, 3.0), (0, 4.0)];
+
+/// Truth of `LAG("scalar(val)") OVER (ORDER BY ts DESC)` over the F06 fixture:
+/// the row order, the scalar values and the lagged values `(ts_millis, val,
+/// prev)`. The window's first row has no predecessor, so its `prev` is `NULL`.
+const F06_ROWS_LAG_BY_TS_DESC: &[(i64, f64, Option<f64>)] = &[
+    (3000, 2.0, None),
+    (2000, 3.0, Some(2.0)),
+    (1000, 1.0, Some(3.0)),
+    (0, 4.0, Some(1.0)),
+];
+
+/// Output column of a `scalar()` TQL query; it has to be quoted in SQL.
+const F06_SCALAR_VALUE_COLUMN: &str = "scalar(val)";
+
+/// Ordinary Mito fixture. `host` stays the first column on purpose: the wrong
+/// push-down reuses output index `0` (`ts`) as input column `0` (`host`).
+const F06_ORDINARY_TABLE: &str = "f06_scalar_plain";
+
+const F06_ORDINARY_CREATE: &str = r#"
+CREATE TABLE f06_scalar_plain (
+    host STRING PRIMARY KEY,
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+);
+"#;
+
+/// Metric fixture; the physical table only carries the logical table, all
+/// `INSERT`s, reads and TQL queries go to the logical `f06_scalar_metric`.
+/// `ScalarCalculate` sees its input columns as `(val, host, ts)`, so the wrong
+/// push-down turns `ts@0` into `val@0`.
+const F06_METRIC_TABLE: &str = "f06_scalar_metric";
+
+const F06_METRIC_CREATE: &str = r#"
+CREATE TABLE f06_scalar_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+) ENGINE=metric WITH ("physical_metric_table" = "");
+
+CREATE TABLE f06_scalar_metric (
+    host STRING,
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    PRIMARY KEY (host)
+) ENGINE=metric WITH (on_physical_table = 'f06_scalar_phy');
+"#;
+
+fn f06_insert_sql(table: &str) -> String {
+    format!(
+        "INSERT INTO {table} (host, ts, val) VALUES \
+         ('h', 0, 4), ('h', 1000, 1), ('h', 2000, 3), ('h', 3000, 2)"
+    )
+}
+
+fn f06_fixture_sql(table: &str) -> String {
+    format!("SELECT ts, val FROM {table} ORDER BY ts")
+}
+
+/// `ORDER BY ts DESC` over `scalar()`; this is the repro of the wrong sort
+/// push-down.
+fn f06_scalar_order_by_ts_desc_sql(table: &str) -> String {
+    format!("WITH q AS (TQL EVAL (0, 3, '1s') scalar({table})) SELECT * FROM q ORDER BY ts DESC")
+}
+
+/// Same as [`f06_scalar_order_by_ts_desc_sql`] but with a fetch, which keeps the
+/// correct `TopK` above `ScalarCalculate`.
+fn f06_scalar_order_by_ts_desc_limit_3_sql(table: &str) -> String {
+    format!(
+        "WITH q AS (TQL EVAL (0, 3, '1s') scalar({table})) SELECT * FROM q \
+         ORDER BY ts DESC LIMIT 3"
+    )
+}
+
+/// `ORDER BY` on the scalar value instead of on the time index.
+fn f06_scalar_order_by_value_asc_sql(table: &str) -> String {
+    format!(
+        r#"WITH q AS (TQL EVAL (0, 3, '1s') scalar({table})) SELECT * FROM q ORDER BY "scalar(val)" ASC"#
+    )
+}
+
+/// A SQL window over `scalar()`; the window requires the `ts` order that the
+/// wrong push-down removes.
+fn f06_scalar_lag_order_by_ts_desc_sql(table: &str) -> String {
+    format!(
+        r#"WITH q AS (TQL EVAL (0, 3, '1s') scalar({table})) SELECT ts, "scalar(val)" AS val, LAG("scalar(val)") OVER (ORDER BY ts DESC) AS prev FROM q ORDER BY ts DESC"#
+    )
+}
+
+/// Selector control: the `ts` order of a bare selector must stay correct.
+fn f06_selector_order_by_ts_desc_sql(table: &str) -> String {
+    format!("WITH q AS (TQL EVAL (0, 3, '1s') {table}) SELECT ts, val FROM q ORDER BY ts DESC")
+}
+
+/// Creates and fills one F06 fixture and also guards the fixture itself: an
+/// ordering regression is only meaningful if the stored rows read back in `ts`
+/// order.
+async fn f06_setup(instance: &Arc<Instance>, create: &str, table: &str) {
+    let insert = f06_insert_sql(table);
+    for sql in [create, insert.as_str()] {
+        for result in instance.do_query(sql, QueryContext::arc()).await {
+            if let Err(err) = result {
+                panic!("F06: setup statement failed: {err}\n{sql}");
+            }
+        }
+    }
+
+    let sql = f06_fixture_sql(table);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_rows(instance, &sql, parallelism, "val").await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_FIXTURE_ROWS,
+            "F06: fixture `{table}` must read back in `ts` order (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Runs one F06 query with a query parallelism hint and returns its rows in
+/// result order as `(ts_millis, value_column)`; the rows are never sorted here.
+async fn f06_ordered_rows(
+    instance: &Arc<Instance>,
+    sql: &str,
+    parallelism: usize,
+    value_column: &str,
+) -> Vec<(i64, f64)> {
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
+    let output = instance
+        .do_query(sql, Arc::new(query_ctx))
+        .await
+        .remove(0)
+        .unwrap_or_else(|err| panic!("F06: query failed: {err}\n{sql}"));
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("F06: expected a query result"),
+    };
+
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let ts = cast(
+            batch.column_by_name("ts").unwrap().as_ref(),
+            &DataType::Int64,
+        )
+        .unwrap();
+        let ts = ts.as_any().downcast_ref::<Int64Array>().unwrap();
+        let values = batch.column_by_name(value_column).unwrap();
+        let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((ts.value(row), values.value(row)));
+        }
+    }
+    rows
+}
+
+/// Runs the F06 `LAG` query and returns its rows in result order as
+/// `(ts_millis, val, prev)`; `prev` is `None` for the first row of the window.
+/// The rows are never sorted here.
+async fn f06_ordered_lag_rows(
+    instance: &Arc<Instance>,
+    sql: &str,
+    parallelism: usize,
+) -> Vec<(i64, f64, Option<f64>)> {
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
+    let output = instance
+        .do_query(sql, Arc::new(query_ctx))
+        .await
+        .remove(0)
+        .unwrap_or_else(|err| panic!("F06: query failed: {err}\n{sql}"));
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("F06: expected a query result"),
+    };
+
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let ts = cast(
+            batch.column_by_name("ts").unwrap().as_ref(),
+            &DataType::Int64,
+        )
+        .unwrap();
+        let ts = ts.as_any().downcast_ref::<Int64Array>().unwrap();
+        let values = batch.column_by_name("val").unwrap();
+        let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+        let prevs = batch.column_by_name("prev").unwrap();
+        let prevs = prevs.as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            let prev = if prevs.is_null(row) {
+                None
+            } else {
+                Some(prevs.value(row))
+            };
+            rows.push((ts.value(row), values.value(row), prev));
+        }
+    }
+    rows
+}
+
+/// Repro of the wrong sort push-down: `ORDER BY ts DESC` over `scalar()` is
+/// pushed into the TQL input as `host@0 DESC` and silently returns the wrong row
+/// order (the fixture order, not `ts`-descending).
+#[apply(both_instances_cases)]
+async fn f06_scalar_ordinary_table_order_by_ts_desc(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_ORDINARY_CREATE, F06_ORDINARY_TABLE).await;
+
+    let sql = f06_scalar_order_by_ts_desc_sql(F06_ORDINARY_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_rows(&instance, &sql, parallelism, F06_SCALAR_VALUE_COLUMN).await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_BY_TS_DESC,
+            "F06: `ORDER BY ts DESC` over scalar() must return `ts`-descending rows \
+             (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Same repro as [`f06_scalar_ordinary_table_order_by_ts_desc`] for a metric
+/// logical table, where the wrong push-down uses `val@0 DESC`.
+#[apply(both_instances_cases)]
+async fn f06_scalar_metric_table_order_by_ts_desc(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_METRIC_CREATE, F06_METRIC_TABLE).await;
+
+    let sql = f06_scalar_order_by_ts_desc_sql(F06_METRIC_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_rows(&instance, &sql, parallelism, F06_SCALAR_VALUE_COLUMN).await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_BY_TS_DESC,
+            "F06: `ORDER BY ts DESC` over scalar() must return `ts`-descending rows \
+             (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Repro: ordering by the scalar value is broken as well, the rows come back in
+/// the fixture order instead of `1.0, 2.0, 3.0, 4.0`.
+#[apply(both_instances_cases)]
+async fn f06_scalar_ordinary_table_order_by_value_asc(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_ORDINARY_CREATE, F06_ORDINARY_TABLE).await;
+
+    let sql = f06_scalar_order_by_value_asc_sql(F06_ORDINARY_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_rows(&instance, &sql, parallelism, F06_SCALAR_VALUE_COLUMN).await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_BY_VALUE_ASC,
+            "F06: `ORDER BY \"scalar(val)\" ASC` must order by the scalar value \
+             (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Same as [`f06_scalar_ordinary_table_order_by_value_asc`] for a metric logical
+/// table.
+#[apply(both_instances_cases)]
+async fn f06_scalar_metric_table_order_by_value_asc(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_METRIC_CREATE, F06_METRIC_TABLE).await;
+
+    let sql = f06_scalar_order_by_value_asc_sql(F06_METRIC_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_rows(&instance, &sql, parallelism, F06_SCALAR_VALUE_COLUMN).await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_BY_VALUE_ASC,
+            "F06: `ORDER BY \"scalar(val)\" ASC` must order by the scalar value \
+             (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Control that must stay correct: the fetch keeps the `TopK` above
+/// `ScalarCalculate`, so the `ts` order is right although the plain
+/// `ORDER BY ts DESC` repro is wrong.
+#[apply(both_instances_cases)]
+async fn f06_scalar_ordinary_table_order_by_ts_desc_limit_3_control(
+    instance: Arc<dyn MockInstance>,
+) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_ORDINARY_CREATE, F06_ORDINARY_TABLE).await;
+
+    let sql = f06_scalar_order_by_ts_desc_limit_3_sql(F06_ORDINARY_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_rows(&instance, &sql, parallelism, F06_SCALAR_VALUE_COLUMN).await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_BY_TS_DESC_LIMIT_3,
+            "F06: `ORDER BY ts DESC LIMIT 3` over scalar() must keep returning the newest rows \
+             (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Metric logical table variant of
+/// [`f06_scalar_ordinary_table_order_by_ts_desc_limit_3_control`].
+#[apply(both_instances_cases)]
+async fn f06_scalar_metric_table_order_by_ts_desc_limit_3_control(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_METRIC_CREATE, F06_METRIC_TABLE).await;
+
+    let sql = f06_scalar_order_by_ts_desc_limit_3_sql(F06_METRIC_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_rows(&instance, &sql, parallelism, F06_SCALAR_VALUE_COLUMN).await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_BY_TS_DESC_LIMIT_3,
+            "F06: `ORDER BY ts DESC LIMIT 3` over scalar() must keep returning the newest rows \
+             (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Selector control that must stay correct: a bare selector does not go through
+/// `ScalarCalculate`, so `ORDER BY ts DESC` over it is right.
+#[apply(both_instances_cases)]
+async fn f06_selector_ordinary_table_order_by_ts_desc_control(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_ORDINARY_CREATE, F06_ORDINARY_TABLE).await;
+
+    let sql = f06_selector_order_by_ts_desc_sql(F06_ORDINARY_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_rows(&instance, &sql, parallelism, "val").await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_BY_TS_DESC,
+            "F06: a bare selector must keep its `ts` order under `ORDER BY ts DESC` \
+             (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Metric logical table variant of
+/// [`f06_selector_ordinary_table_order_by_ts_desc_control`].
+#[apply(both_instances_cases)]
+async fn f06_selector_metric_table_order_by_ts_desc_control(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_METRIC_CREATE, F06_METRIC_TABLE).await;
+
+    let sql = f06_selector_order_by_ts_desc_sql(F06_METRIC_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_rows(&instance, &sql, parallelism, "val").await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_BY_TS_DESC,
+            "F06: a bare selector must keep its `ts` order under `ORDER BY ts DESC` \
+             (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Repro of the planning failure that the wrong sort push-down used to cause:
+/// the window needs `ts@0 DESC`, the pushed-down sort only provided
+/// `host@0 DESC`, so this query failed with code 3000 while `ScalarCalculate`
+/// claimed `maintains_input_order`.
+///
+/// Now that the node stops claiming the input order, the window is planned
+/// above the correct sort and the query must return exactly
+/// `(3000, 2.0, NULL)`, `(2000, 3.0, 2.0)`, `(1000, 1.0, 3.0)`,
+/// `(0, 4.0, 1.0)`.
+#[apply(both_instances_cases)]
+async fn f06_scalar_ordinary_table_lag_order_by_ts_desc(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_ORDINARY_CREATE, F06_ORDINARY_TABLE).await;
+
+    let sql = f06_scalar_lag_order_by_ts_desc_sql(F06_ORDINARY_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_lag_rows(&instance, &sql, parallelism).await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_LAG_BY_TS_DESC,
+            "F06: `LAG(...) OVER (ORDER BY ts DESC)` over scalar() must return `ts`-descending \
+             rows with the lagged scalar values (parallelism={parallelism})\n{sql}"
+        );
+    }
+}
+
+/// Metric logical table variant of
+/// [`f06_scalar_ordinary_table_lag_order_by_ts_desc`].
+#[apply(both_instances_cases)]
+async fn f06_scalar_metric_table_lag_order_by_ts_desc(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    f06_setup(&instance, F06_METRIC_CREATE, F06_METRIC_TABLE).await;
+
+    let sql = f06_scalar_lag_order_by_ts_desc_sql(F06_METRIC_TABLE);
+    for parallelism in [1, 4] {
+        let rows = f06_ordered_lag_rows(&instance, &sql, parallelism).await;
+        assert_eq!(
+            rows.as_slice(),
+            F06_ROWS_LAG_BY_TS_DESC,
+            "F06: `LAG(...) OVER (ORDER BY ts DESC)` over scalar() must return `ts`-descending \
+             rows with the lagged scalar values (parallelism={parallelism})\n{sql}"
+        );
     }
 }

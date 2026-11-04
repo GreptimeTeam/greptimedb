@@ -19,6 +19,8 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+#[cfg(feature = "enterprise")]
+use common_error::ext::ErrorExt;
 use common_event_recorder::Event;
 use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
@@ -53,7 +55,7 @@ use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
 #[cfg(feature = "enterprise")]
 fn ensure_retry_later(err: error::Error) -> error::Error {
-    if err.is_retry_later() {
+    if err.retry_hint().is_retryable() {
         err
     } else {
         error::Error::retry_later(err)

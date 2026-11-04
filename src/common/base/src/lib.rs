@@ -25,6 +25,7 @@ pub mod readable_size;
 pub mod regex_pattern;
 pub mod secrets;
 pub mod serde;
+pub mod term_token;
 
 pub type AffectedRows = usize;
 

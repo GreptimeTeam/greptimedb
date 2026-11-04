@@ -17,8 +17,8 @@ use api::v1::region::{
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
-    Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::warn;
@@ -156,6 +156,7 @@ impl UndropTableProcedure {
         }
         .await;
         if let Err(err) = restore_result {
+            // Keep this classification aligned with map_restore_error().
             let should_cleanup_opened_regions = !err.is_retry_later();
             let err = self.map_restore_metadata_error(err);
             if should_cleanup_opened_regions
@@ -272,6 +273,19 @@ impl UndropTableProcedure {
             }
         );
         Ok(())
+    }
+
+    fn map_restore_error(err: error::Error) -> ProcedureError {
+        // Restore retries keep opened regions, while other failures close them. Preserve
+        // this policy even when the underlying metadata error carries a retry hint:
+        // retrying after cleanup would restore metadata without reopening the regions.
+        if err.is_retry_later() {
+            map_to_procedure_error(err)
+        } else if err.need_clean_poisons() {
+            ProcedureError::external_and_clean_poisons(err)
+        } else {
+            ProcedureError::external(err)
+        }
     }
 
     fn map_restore_metadata_error(&self, err: error::Error) -> error::Error {
@@ -413,7 +427,12 @@ impl Procedure for UndropTableProcedure {
     async fn execute(&mut self, _: &ProcedureContext) -> ProcedureResult<Status> {
         match self.data.state {
             UndropTableState::Prepare => self.on_prepare().await,
-            UndropTableState::RestoreMetadata => self.on_restore_metadata().await,
+            UndropTableState::RestoreMetadata => {
+                return self
+                    .on_restore_metadata()
+                    .await
+                    .map_err(Self::map_restore_error);
+            }
             UndropTableState::OpenRegions => self.on_open_regions().await,
             UndropTableState::InvalidateTableCache => self.on_broadcast().await,
         }
@@ -606,7 +625,8 @@ mod tests {
     use api::v1::region::region_request;
     use async_trait::async_trait;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_error::ext::ErrorExt;
+    use common_error::ext::{BoxedError, ErrorExt};
+    use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use store_api::storage::RegionId;
     use table::table_name::TableName;
@@ -632,6 +652,38 @@ mod tests {
 
         async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
             self.deregistered.lock().await.extend(detecting_regions);
+        }
+    }
+
+    #[test]
+    fn test_restore_metadata_retry_policy() {
+        let source = error::Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Err::<(), _>(BoxedError::new(source))
+            .context(error::ExternalSnafu)
+            .unwrap_err();
+        assert!(err.retry_hint().is_retryable());
+        assert!(!err.is_retry_later());
+        let err = UndropTableProcedure::map_restore_error(err);
+        assert!(!err.is_retry_later());
+        assert!(!err.need_clean_poisons());
+
+        for retryable in [false, true] {
+            for clean_poisons in [false, true] {
+                let source = BoxedError::new(MockError::new(StatusCode::Internal));
+                let err = if retryable {
+                    error::Error::RetryLater {
+                        source,
+                        clean_poisons,
+                    }
+                } else {
+                    Err::<(), _>(source)
+                        .context(error::AbortProcedureSnafu { clean_poisons })
+                        .unwrap_err()
+                };
+                let err = UndropTableProcedure::map_restore_error(err);
+                assert_eq!(err.is_retry_later(), retryable);
+                assert_eq!(err.need_clean_poisons(), clean_poisons);
+            }
         }
     }
 

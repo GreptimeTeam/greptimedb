@@ -1170,7 +1170,7 @@ mod tests {
             response.unwrap_err().status_code()
         );
 
-        for value in ["", "unknown", "follower"] {
+        for value in ["", "unknown"] {
             let mut query_context =
                 api::v1::QueryContext::from(session::context::QueryContext::arc().as_ref());
             query_context.extensions.insert(

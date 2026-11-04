@@ -152,7 +152,7 @@ async fn create_metric_tables<R: Rng + 'static>(
     let create_physical_expr = generate_create_physical_table_expr(partitions, rng)?;
     let translator = CreateTableExprTranslator;
     let create_physical_sql = translator.translate(&create_physical_expr)?;
-    let result = sqlx::query(&create_physical_sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(create_physical_sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu {
@@ -180,7 +180,7 @@ async fn create_metric_tables<R: Rng + 'static>(
         }
 
         let create_logical_sql = translator.translate(&create_logical_expr)?;
-        let result = sqlx::query(&create_logical_sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(create_logical_sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu {
@@ -212,7 +212,7 @@ async fn execute_insert_with_retry(ctx: &FuzzContext, sql: &str) -> Result<()> {
     let mut attempt = 0;
     let max_attempts = 10;
     loop {
-        match sqlx::query(sql)
+        match sqlx::query(sqlx::AssertSqlSafe(sql))
             .persistent(false)
             .execute(&ctx.greptime)
             .await
@@ -408,7 +408,7 @@ async fn cleanup_tables(
 ) -> Result<()> {
     for table_ctx in logical_tables.values() {
         let drop_logical_sql = format!("DROP TABLE {}", table_ctx.name);
-        let result = sqlx::query(&drop_logical_sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(drop_logical_sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu {
@@ -418,7 +418,7 @@ async fn cleanup_tables(
     }
 
     let drop_physical_sql = format!("DROP TABLE {}", physical_table_ctx.name);
-    let result = sqlx::query(&drop_physical_sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(drop_physical_sql.as_str()))
         .execute(&ctx.greptime)
         .await
         .context(error::ExecuteQuerySnafu {
@@ -572,7 +572,7 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
         info!("Repartition sql: {sql}");
         let started_at_ms = current_time_millis();
         let now = Instant::now();
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;

@@ -43,6 +43,16 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   `handler/utils.rs` for per-node address persistence. Datanode address
   updates retain the statistics handler's per-node ordering. Address epochs are
   confirmed only after a successful save; cache invalidation remains best effort.
+  A changed datanode address invalidates every table on that node (`__dn_table`),
+  not only the tables in the current heartbeat.
+- **Datanode process fence**: before the handler chain, the leader's heartbeat
+  session checks a datanode request's non-zero `node_epoch` against the highest
+  one recorded under `__datanode_epoch`, read and raised through the leader
+  cache. A lower epoch gets a reply without running the chain; requests that
+  carry an epoch take a per-node lock through the check and the chain; epoch 0
+  (handshakes, older datanodes) is not checked. A datanode stream registers
+  its pusher on its first request that passes, not on the handshake; pushers
+  carry the epoch, and a lower one cannot replace a higher one.
 - **DDL**: `service/procedure.rs` (`ddl`) is leader-only and hands off to
   `common-meta`'s `DdlManager`, executed via `common-procedure`.
 - **Region migration**: `procedure/region_migration/manager.rs` plus per-step
@@ -64,6 +74,16 @@ API under `src/meta-srv/src/service/admin/`.
   must be idempotent for crash recovery.
 - **Cache invalidation**: new metadata types need matching invalidation in
   `cache_invalidator.rs` and the heartbeat publish handler.
+- **Affinity**: `common-meta/affinity.rs` defines requirements, matching, batch
+  resolution, and the query allocation-context provider. The selector factory
+  optionally supplies a resolver shared by DDL allocation and the region
+  supervisor; without one, allocation skips source lookup. DDL configurators can
+  install a query provider before procedure loaders are registered. Repartition
+  and failover resolve source requirements before selection. Each selector allows
+  one unconstrained retry on candidate shortage when its context permits it.
+  Failover always permits this retry and continues without affinity when source
+  resolution fails or returns no requirements; DDL/repartition retain their own
+  policy. Candidate discovery errors still propagate. Procedure state is unchanged.
 - **Selector stats fields**: keep `selector/` implementations in sync with the
   stats they consume.
 

@@ -15,6 +15,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
@@ -129,6 +130,17 @@ impl RegionEngine for FileRegionEngine {
         self.inner
             .set_region_role(region_id, role)
             .map_err(BoxedError::new)
+    }
+
+    /// Regions of this engine take no writes, so the lease is not needed.
+    fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        _sent_at: Instant,
+        _deadline: Instant,
+    ) -> Result<bool, BoxedError> {
+        self.set_region_role(region_id, role).map(|_| true)
     }
 
     async fn set_region_role_state_gracefully(

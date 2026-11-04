@@ -16,8 +16,10 @@
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
+use datatypes::arrow::array::AsArray;
 use datatypes::value::Value;
-use partition::expr::col;
+use partition::expr::{Operand, col};
+use partition::function::IcebergHash;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     EnterStagingRequest, RegionFlushRequest, RegionRequest, StagingPartitionDirective,
@@ -167,4 +169,116 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
         "Should see 6 rows after exiting staging (rows 5-10 from staging SST), flat_format: {}",
         flat_format
     );
+}
+
+#[tokio::test]
+async fn test_partition_filter_iceberg_hash() {
+    test_partition_filter_iceberg_hash_with_format(false).await;
+    test_partition_filter_iceberg_hash_with_format(true).await;
+}
+
+/// Narrows a region to `iceberg_hash(tag_0) < 0` and checks rows flushed under
+/// the old partition expr are filtered by the hash.
+async fn test_partition_filter_iceberg_hash_with_format(flat_format: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(range_expr_string("field_0", 0., 99.)))
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let flush = || async {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+            .unwrap();
+    };
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 20),
+        },
+    )
+    .await;
+    flush().await;
+
+    let in_partition = |i: &usize| {
+        IcebergHash::evaluate_value(&Value::String(i.to_string().as_str().into())).unwrap()
+            < Value::Int32(0)
+    };
+    let hash_expr = Operand::IcebergHash(IcebergHash::new("tag_0")).lt(Value::Int32(0));
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    hash_expr.as_json_str().unwrap(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: (20..40)
+                .filter(in_partition)
+                .flat_map(|i| build_rows(i, i + 1))
+                .collect(),
+        },
+    )
+    .await;
+    flush().await;
+    use store_api::region_engine::SettableRegionRoleState;
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+
+    let request = ScanRequest {
+        projection: Some(vec![0]),
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap();
+    let mut actual = vec![];
+    for batch in batches.iter() {
+        let tags = datatypes::arrow::compute::cast(
+            batch.column(0),
+            &datatypes::arrow::datatypes::DataType::Utf8,
+        )
+        .unwrap();
+        actual.extend(
+            tags.as_string::<i32>()
+                .iter()
+                .map(|v| v.unwrap().to_string()),
+        );
+    }
+    actual.sort();
+    let mut expected = (0..40)
+        .filter(in_partition)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    // Rows flushed before staging fall on both sides of the hash bound.
+    assert!((0..20).any(|i| in_partition(&i)) && !(0..20).all(|i| in_partition(&i)));
+    assert_eq!(actual, expected, "flat_format: {flat_format}");
 }

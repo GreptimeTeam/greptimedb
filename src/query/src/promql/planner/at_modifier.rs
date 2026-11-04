@@ -21,7 +21,8 @@ use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder};
 use datafusion::prelude::{Column, Expr as DfExpr};
 use promql::extension_plan::{InstantManipulate, Millisecond, SeriesDivide};
 use promql_parser::parser::{
-    AtModifier, Call, Expr as PromExpr, MatrixSelector, Offset, ParenExpr,
+    AtModifier, Call, Expr as PromExpr, MatrixSelector, Offset, ParenExpr, SubqueryExpr,
+    VectorSelector,
 };
 use snafu::{OptionExt, ResultExt, ensure};
 
@@ -138,8 +139,14 @@ impl PromPlanner {
                 arg = expr;
             }
             match arg {
-                // The window is pinned by `@`, so every step folds the same samples.
-                PromExpr::MatrixSelector(MatrixSelector { vs, .. }) if vs.at.is_some() => {
+                // The window is pinned by `@`, so every step folds the same samples. That holds
+                // for a subquery with `@` too, which Prometheus treats as step-invariant whatever
+                // its inner expression is.
+                PromExpr::MatrixSelector(MatrixSelector {
+                    vs: VectorSelector { at: Some(_), .. },
+                    ..
+                })
+                | PromExpr::Subquery(SubqueryExpr { at: Some(_), .. }) => {
                     if anchored_range {
                         return false;
                     }

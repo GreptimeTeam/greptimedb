@@ -26,6 +26,7 @@ use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
+use common_meta::affinity::{AffinityFallback, AffinityRef, AffinityResolverRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::allocator::resource_id::ResourceIdAllocatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
@@ -66,6 +67,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::discovery;
+use crate::discovery::node_info::NodeInfoAccessor;
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
@@ -73,7 +75,9 @@ use crate::error::{
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
+use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
+use crate::procedure::drain_datanode::manager::DrainDatanodeManagerRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
@@ -486,6 +490,10 @@ impl Display for SelectTarget {
 #[derive(Clone)]
 pub struct SelectorContext {
     pub peer_discovery: PeerDiscoveryRef,
+    /// Evaluator shared by datanode and flownode selection.
+    pub affinity: AffinityRef,
+    /// Whether selection may retry without affinity when candidates are insufficient.
+    pub affinity_fallback: AffinityFallback,
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
@@ -507,6 +515,18 @@ pub struct SelectorFactoryContext {
 /// Builds the final datanode selector metasrv should use.
 pub trait SelectorFactory: Send + Sync {
     fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef;
+
+    /// Builds the resolver shared by allocation and failover callers.
+    ///
+    /// The accessor includes last-known records of inactive source nodes; discovery
+    /// is the shared scheduling-aware view of active nodes.
+    fn build_affinity_resolver(
+        &self,
+        _node_info_accessor: Arc<dyn NodeInfoAccessor>,
+        _peer_discovery: PeerDiscoveryRef,
+    ) -> Option<AffinityResolverRef> {
+        None
+    }
 }
 
 /// Shared selector factory plugin registered through [`common_base::Plugins`].
@@ -587,6 +607,7 @@ pub struct Metasrv {
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
+    drain_datanode_manager: DrainDatanodeManagerRef,
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
@@ -598,6 +619,7 @@ pub struct Metasrv {
     resource_stat: ResourceStatRef,
     gc_ticker: Option<GcTickerRef>,
     database_operator: DatabaseOperatorRef,
+    node_scheduling_manager: NodeSchedulingManagerRef,
 
     plugins: Plugins,
 }
@@ -839,6 +861,10 @@ impl Metasrv {
         &self.kv_backend
     }
 
+    /// Returns the undecorated peer client.
+    ///
+    /// Its `active_datanodes` does not know about node scheduling states. Use
+    /// [`Metasrv::selector_ctx`] for any consumer that places regions or picks datanodes.
     pub fn meta_peer_client(&self) -> &MetaPeerClientRef {
         &self.meta_peer_client
     }
@@ -847,6 +873,7 @@ impl Metasrv {
         &self.selector
     }
 
+    /// Returns the selector context, whose `peer_discovery` stamps node scheduling states.
     pub fn selector_ctx(&self) -> &SelectorContext {
         &self.selector_ctx
     }
@@ -891,6 +918,11 @@ impl Metasrv {
         &self.region_migration_manager
     }
 
+    /// Returns the [`DrainDatanodeManagerRef`].
+    pub fn drain_datanode_manager(&self) -> &DrainDatanodeManagerRef {
+        &self.drain_datanode_manager
+    }
+
     pub fn publish(&self) -> Option<PublisherRef> {
         self.plugins.get::<PublisherRef>()
     }
@@ -909,6 +941,10 @@ impl Metasrv {
 
     pub fn database_operator(&self) -> &DatabaseOperatorRef {
         &self.database_operator
+    }
+
+    pub fn node_scheduling_manager(&self) -> &NodeSchedulingManagerRef {
+        &self.node_scheduling_manager
     }
 
     pub fn plugins(&self) -> &Plugins {

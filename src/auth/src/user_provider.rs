@@ -24,6 +24,7 @@ use std::{fmt, io};
 use common_base::secrets::ExposeSecret;
 use common_telemetry::warn;
 use pbkdf2::pbkdf2_hmac;
+use serde::Serialize;
 use sha2::Sha256;
 use snafu::{OptionExt, ResultExt, ensure};
 use subtle::ConstantTimeEq;
@@ -48,6 +49,27 @@ use crate::{UserInfoRef, auth_mysql};
 /// selector does not itself require TLS, so transport policy remains a server
 /// deployment choice.
 pub const BEARER_TOKEN_USER: &str = "*";
+
+/// A login method advertised by the HTTP authentication configuration endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AuthMethod {
+    /// Username and password authentication.
+    Password,
+    /// OpenID Connect authentication for browser clients.
+    Oidc {
+        /// Stable identifier for this identity provider.
+        id: String,
+        /// Human-readable identity provider name.
+        display_name: String,
+        /// OpenID Connect issuer URL.
+        issuer: String,
+        /// Public client identifier.
+        client_id: String,
+        /// OAuth scopes requested during login.
+        scopes: Vec<String>,
+    },
+}
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
@@ -105,6 +127,11 @@ pub trait UserProvider: Send + Sync {
         let user_info = self.authenticate_bearer_token(token, catalog).await?;
         self.authorize(catalog, schema, &user_info).await?;
         Ok(user_info)
+    }
+
+    /// Returns the login methods that browser clients can use.
+    fn auth_methods(&self) -> Vec<AuthMethod> {
+        vec![AuthMethod::Password]
     }
 
     fn mysql_auth_method(&self) -> MysqlAuthMethod {

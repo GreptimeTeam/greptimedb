@@ -31,7 +31,7 @@ One engine, on your infrastructure.</h2>
 
 ## Introduction
 
-**GreptimeDB** is an open-source observability database. Metrics, logs, and traces run on one columnar engine over object storage and share one [table model](https://docs.greptime.com/user-guide/concepts/data-model/): tags, timestamp, and fields. When signals carry common identifiers such as service, host, or trace ID, you can correlate them in SQL without moving data between databases.
+**GreptimeDB** is an open-source [observability database](https://docs.greptime.com/user-guide/concepts/why-greptimedb/#what-an-observability-database-is). Metrics, logs, and traces run on one columnar engine over object storage and share one [table model](https://docs.greptime.com/user-guide/concepts/data-model/): tags, timestamp, and fields. When signals carry common identifiers such as service, host, or trace ID, you can correlate them in SQL without moving data between databases.
 
 Ingest through OpenTelemetry, Prometheus Remote Write, Loki Push, or Elasticsearch Bulk. Use SQL across observability data and PromQL for metrics. Migrate ingestion one signal at a time without rebuilding your collectors.
 
@@ -202,7 +202,7 @@ See the [Contribution Guidelines](CONTRIBUTING.md) for the full developer workfl
 
 GreptimeDB is generally available, with stable APIs and regular releases. It runs in production at scale — [OceanBase Cloud](https://greptime.com/blogs/2025-07-22-user-case-obcloud-log-management-greptimedb) operates 80+ GreptimeDB clusters managing 300 TB of logs, cutting log storage cost by 60%+ after migrating from Grafana Loki. See more in [case studies](https://greptime.com/blogs/?category=Use%20Case).
 
-Release lines and support windows are in the [version reference](https://docs.greptime.com/nightly/reference/about-greptimedb-version). For where the project is going, read the [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) and the [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026).
+Release lines and support windows are in the [version reference](https://docs.greptime.com/nightly/reference/about-greptimedb-version). For where the project is going, read the [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights), the [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026), and [what we mean by an observability database](https://greptime.com/blogs/2026-08-26-what-is-an-observability-database).
 
 ## Community
 

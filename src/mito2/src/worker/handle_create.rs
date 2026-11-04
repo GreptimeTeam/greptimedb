@@ -22,6 +22,8 @@ use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::region::opener::{RegionOpener, check_recovered_region};
+#[cfg(feature = "hdfs-object-store")]
+use crate::temp_file_sweeper;
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -79,6 +81,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let region = opener.create_or_open(&self.config, &self.wal).await?;
 
+        // A Create retried after a crash opens an existing region as a leader
+        // without a role-state change, so sweep here as well.
+        #[cfg(feature = "hdfs-object-store")]
+        temp_file_sweeper::spawn_region_sweep(
+            region.access_layer(),
+            region_id,
+            self.config.gc.unknown_file_lingering_time,
+            self.sweep_limiter.clone(),
+        );
+
         info!(
             "A new region created with requirement {:?}, worker: {}, region: {:?}",
             requirements,
@@ -94,6 +106,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             hook.on_region_opened(region_id, &region.metadata()).await;
         }
 
+        // The region takes writes under the node lease until its first Leader grant.
+        self.node_lease.seed(&region.manifest_ctx.leader_deadline);
         // Insert the MitoRegion into the RegionMap.
         self.register_region(region);
         if let Some(state) = &self.series_index_task_state {

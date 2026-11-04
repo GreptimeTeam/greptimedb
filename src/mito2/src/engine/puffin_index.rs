@@ -39,7 +39,8 @@ use crate::cache::index::inverted_index::{CachedInvertedIndexBlobReader, Inverte
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE as BLOOM_BLOB_TYPE;
 use crate::sst::index::fulltext_index::{
-    INDEX_BLOB_TYPE_BLOOM as FULLTEXT_BLOOM_BLOB_TYPE,
+    FULLTEXT_BLOOM_VERSION, INDEX_BLOB_TYPE_BLOOM as FULLTEXT_BLOOM_BLOB_TYPE,
+    INDEX_BLOB_TYPE_BLOOM_V1 as FULLTEXT_BLOOM_V1_BLOB_TYPE,
     INDEX_BLOB_TYPE_TANTIVY as FULLTEXT_TANTIVY_BLOB_TYPE,
 };
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE as INVERTED_BLOB_TYPE;
@@ -48,6 +49,8 @@ use crate::sst::index::puffin_manager::{SstPuffinManager, SstPuffinReader};
 const TARGET_TYPE_UNKNOWN: &str = "unknown";
 
 const TARGET_TYPE_COLUMN: &str = "column";
+
+const TARGET_TYPE_JSON_PATH: &str = "json_path";
 
 pub(crate) struct IndexEntryContext<'a> {
     pub(crate) table_dir: &'a str,
@@ -126,7 +129,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
                 );
                 entries.push(entry);
             }
-            Some(BlobIndexTypeTargetKey::FulltextBloom(target_key)) => {
+            Some(BlobIndexTypeTargetKey::FulltextBloom(target_key, bloom_version)) => {
                 let bloom_meta = try_read_bloom_meta(
                     &reader,
                     region_index_id,
@@ -139,7 +142,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
                 .await;
 
                 let bloom_value = bloom_meta.as_deref().map(bloom_meta_value);
-                let fulltext_value = Some(fulltext_meta_value(blob));
+                let fulltext_value = Some(fulltext_meta_value(blob, Some(bloom_version)));
                 let (target_type, target_json) = decode_target_info(target_key);
                 let meta_json = build_meta_json(bloom_value, fulltext_value, None);
                 let entry = build_index_entry(
@@ -154,7 +157,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
                 entries.push(entry);
             }
             Some(BlobIndexTypeTargetKey::FulltextTantivy(target_key)) => {
-                let fulltext_value = Some(fulltext_meta_value(blob));
+                let fulltext_value = Some(fulltext_meta_value(blob, None));
                 let (target_type, target_json) = decode_target_info(target_key);
                 let meta_json = build_meta_json(None, fulltext_value, None);
                 let entry = build_index_entry(
@@ -313,7 +316,7 @@ async fn try_read_bloom_meta(
                         CachedBloomFilterIndexBlobReader::new(
                             region_index_id.file_id(),
                             region_index_id.version,
-                            column_id,
+                            IndexTarget::ColumnId(column_id),
                             tag,
                             blob_size,
                             bloom_reader,
@@ -369,6 +372,11 @@ fn decode_target_info(target_key: &str) -> (String, String) {
             TARGET_TYPE_COLUMN.to_string(),
             json!({ "column": id }).to_string(),
         ),
+        Ok(IndexTarget::JsonPath(target)) => (
+            TARGET_TYPE_JSON_PATH.to_string(),
+            json!({ "json_path": { "column": target.column_id(), "path": target.path() } })
+                .to_string(),
+        ),
         _ => (
             TARGET_TYPE_UNKNOWN.to_string(),
             json!({ "error": "failed_to_decode" }).to_string(),
@@ -392,12 +400,16 @@ fn bloom_meta_value(meta: &BloomFilterMeta) -> Value {
     })
 }
 
-fn fulltext_meta_value(blob: &BlobMetadata) -> Value {
+fn fulltext_meta_value(blob: &BlobMetadata, bloom_version: Option<u8>) -> Value {
     let config = FulltextConfig::from_blob_metadata(blob).unwrap_or_default();
-    json!({
+    let mut value = json!({
         "analyzer": config.analyzer.to_str(),
         "case_sensitive": config.case_sensitive,
-    })
+    });
+    if let Some(version) = bloom_version {
+        value["bloom_version"] = json!(version);
+    }
+    value
 }
 
 fn inverted_meta_value(meta: &InvertedIndexMeta, metas: &InvertedIndexMetas) -> Value {
@@ -441,7 +453,8 @@ fn build_meta_json(
 
 enum BlobIndexTypeTargetKey<'a> {
     BloomFilter(&'a str),
-    FulltextBloom(&'a str),
+    /// Target key and version of a fulltext bloom blob.
+    FulltextBloom(&'a str, u8),
     FulltextTantivy(&'a str),
     Inverted,
 }
@@ -451,9 +464,17 @@ impl<'a> BlobIndexTypeTargetKey<'a> {
         if let Some(target_key) = Self::target_key_from_blob(blob_type, BLOOM_BLOB_TYPE) {
             Some(BlobIndexTypeTargetKey::BloomFilter(target_key))
         } else if let Some(target_key) =
+            // v2 goes first: the v1 type is a prefix of it.
             Self::target_key_from_blob(blob_type, FULLTEXT_BLOOM_BLOB_TYPE)
         {
-            Some(BlobIndexTypeTargetKey::FulltextBloom(target_key))
+            Some(BlobIndexTypeTargetKey::FulltextBloom(
+                target_key,
+                FULLTEXT_BLOOM_VERSION,
+            ))
+        } else if let Some(target_key) =
+            Self::target_key_from_blob(blob_type, FULLTEXT_BLOOM_V1_BLOB_TYPE)
+        {
+            Some(BlobIndexTypeTargetKey::FulltextBloom(target_key, 1))
         } else if let Some(target_key) =
             Self::target_key_from_blob(blob_type, FULLTEXT_TANTIVY_BLOB_TYPE)
         {

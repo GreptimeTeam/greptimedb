@@ -39,10 +39,12 @@ use headers::HeaderValue;
 use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use operator::insert::PreparedMetricInserts;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
+use table::metadata::TableInfoRef;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DashboardDefinition {
@@ -54,6 +56,7 @@ use crate::error::Result;
 use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
@@ -108,6 +111,64 @@ pub struct PromStoreResponse {
 
 #[async_trait]
 pub trait PromStoreProtocolHandler {
+    /// Resolves metric destinations before source identities are attached to exemplars.
+    /// Requires pre-write checks and admission to have succeeded for the entire request.
+    async fn prepare_metric_write(
+        &self,
+        _request: RowInsertRequests,
+        _ctx: QueryContextRef,
+    ) -> Result<PreparedMetricInserts> {
+        crate::error::NotSupportedSnafu {
+            feat: "metric write preparation",
+        }
+        .fail()
+    }
+
+    /// Executes the same routed metric writes used to resolve exemplar source identities.
+    async fn write_prepared_metric(
+        &self,
+        _request: PreparedMetricInserts,
+        _ctx: QueryContextRef,
+    ) -> Result<Output> {
+        crate::error::NotSupportedSnafu {
+            feat: "prepared metric ingestion",
+        }
+        .fail()
+    }
+
+    /// Writes exemplars using table identities captured while preparing the source metrics.
+    async fn write_exemplars_with_sources(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        _sources: &[TableInfoRef],
+    ) -> Result<Output> {
+        self.write_exemplars_prepared(request, ctx).await
+    }
+
+    /// Authorizes source series, including inputs with no metric samples.
+    async fn check_exemplar_sources(
+        &self,
+        _sources: &std::collections::BTreeSet<String>,
+        _ctx: QueryContextRef,
+    ) -> Result<()> {
+        crate::error::NotSupportedSnafu {
+            feat: "exemplar source authorization",
+        }
+        .fail()
+    }
+
+    async fn write_exemplars_prepared(
+        &self,
+        _request: RowInsertRequests,
+        _ctx: QueryContextRef,
+    ) -> Result<Output> {
+        crate::error::NotSupportedSnafu {
+            feat: "exemplar ingestion",
+        }
+        .fail()
+    }
+
     /// Runs pre-write checks/hooks for prometheus remote write requests.
     async fn pre_write(&self, request: &RowInsertRequests, ctx: QueryContextRef) -> Result<()>;
 
@@ -140,11 +201,13 @@ pub trait PromStoreProtocolHandler {
 
 #[async_trait]
 pub trait OpenTelemetryProtocolHandler: PipelineHandler {
-    /// Handling opentelemetry metrics request
+    /// Handles metrics, reserving row expansion against the transport's limiter.
+    /// The accompanying byte count includes permits already held by this request.
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
+        memory_limiter: Option<(ServerMemoryLimiter, u64)>,
     ) -> Result<MetricsIngestOutcome>;
 
     /// Handling opentelemetry traces request
@@ -290,3 +353,33 @@ pub trait JaegerQueryHandler {
         query_params: QueryTraceParams,
     ) -> Result<Output>;
 }
+
+/// Handler for the PostgreSQL `COPY ... FROM STDIN` (copy-in) sub-protocol.
+///
+/// The servers layer owns the wire protocol and data parsing; this trait is
+/// the boundary to catalog lookup and ingestion, implemented by the
+/// frontend instance.
+#[async_trait]
+pub trait CopyInHandler: Send + Sync {
+    /// Resolves the target table of a COPY and returns its metadata, or
+    /// `None` when the table does not exist. Implementations should also
+    /// enforce the write permission for the table here so unauthorized
+    /// copies fail before any data is transferred.
+    async fn copy_in_table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<TableInfoRef>>;
+
+    /// Inserts a parsed batch produced by a COPY stream. Returns the
+    /// number of affected rows.
+    async fn copy_in_insert(
+        &self,
+        requests: RowInsertRequests,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output>;
+}
+
+pub type CopyInHandlerRef = Arc<dyn CopyInHandler + Send + Sync>;

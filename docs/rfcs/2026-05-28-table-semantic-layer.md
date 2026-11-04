@@ -100,24 +100,19 @@ Two design decisions worth pinning down up front, because they constrain everyth
 - **Conflict.** Some table-level keys (`trace.conventions` lifted from `schema_url`, `metric.temporality`, ...) cannot represent the truth when a long-lived table sees rows from multiple sources. v1 records `mixed` or `unknown` rather than a fictitious single value. Downstream consumers must treat any single-valued semantic key as best-effort, not strong evidence.
 - **Update.** Semantic options are stamped at table creation. v1 does not specify an update path; promoting `metadata_quality` from `inferred` to `declared`, refreshing `resource.attributes_preserved`, or revising `trace.conventions` on later writes is deferred. If real usage shows update is needed, it lands as a separate RFC.
 
-OTLP delta sums and explicit histograms store raw interval values without
-accumulating across timestamps. Delta-to-cumulative conversion and its
-per-series ingestion state are intentionally out of scope. Explicit histogram
-bucket counts are prefix-summed only within each point to produce the classic
-histogram representation. Delta exponential histograms are currently rejected;
-[planned raw-delta support](2026-08-04-native-histograms.md#planned-raw-delta-exponential-histograms)
-will store their interval values in the canonical native-histogram Struct using
-the same temporality tag and a gauge reset hint. The tag will select histogram
-summation for `increase()` and summation divided by range duration for `rate()`,
-without cumulative reset correction or extrapolation.
+OTLP delta sums, explicit histograms and exponential histograms store raw interval
+values without accumulation across timestamps or requests. Explicit histogram
+buckets are prefix-summed within each point. Exponential histograms retain their
+canonical native-histogram Struct and use a gauge reset hint for delta samples.
+All use the fixed String tag `otlp_aggregation_temporality="delta"`, independent
+of `default_column_prefix`, as part of series identity.
 
-OTLP delta sums and explicit histograms additionally store the query-visible
-String tag `otlp_aggregation_temporality="delta"` on each generated row. Its
-name is fixed and does not follow `default_column_prefix`. The tag is part of
-series identity and is authoritative for per-series float `rate()` and
-`increase()` behavior; the table option is never used as a row-level
-discriminator. Native histograms currently retain their native algorithms;
-the planned delta extension will change only tagged delta histogram series.
+For tagged float series, the marker selects existing delta `rate()`/`increase()`
+behavior. Native histogram counter functions are unchanged: query raw delta
+histograms with `sum_over_time(metric[3m])`, or divide that histogram by `180`
+for a per-second result. See [raw-delta exponential histograms](2026-08-04-native-histograms.md#raw-delta-exponential-histograms).
+Table options never select per-row query behavior.
+
 Prometheus metadata reports `unknown` for counter, histogram, and up/down-counter tables
 whose catalog temporality is `delta` or `mixed`. A same-request conflict can
 create `mixed`; a later write does not update an existing table option, so the
@@ -143,7 +138,7 @@ schema lacks it; unrelated nullable labels retain their existing matching
 behavior. Ignoring the marker adds no marker-related matching work.
 
 Use `ignoring(otlp_aggregation_temporality)` when temporality should not
-participate in matching. Apply `rate()` or `increase()` before an aggregation
+participate in matching. For float series, apply `rate()` or `increase()` before an aggregation
 or subquery that drops the marker. `irate()` and `resets()` are not
 temporality-aware in v1; `delta()`, `idelta()`, and `changes()` retain their
 existing raw-sample semantics.

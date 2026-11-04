@@ -12,20 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod history;
+mod local;
 mod planning;
 mod state;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use api::v1::region::compact_request;
 use common_base::Plugins;
 use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
+#[cfg(test)]
+pub(crate) use planning::pick_automatic_for_test;
 pub(crate) use state::CompactionExecution;
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
 use store_api::storage::RegionId;
@@ -38,7 +42,7 @@ use crate::compaction::task::MAX_PARALLEL_COMPACTION;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactionCancelledSnafu, Error, ManualCompactionAlreadyRunningSnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    RegionDroppedSnafu, RegionTruncatedSnafu, Result, UnsupportedOperationSnafu,
 };
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
@@ -48,8 +52,42 @@ use crate::schedule::RequestCancelResult;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::worker::WorkerListener;
 
+/// Internal testing switch to prevent SST compaction from changing file layouts
+/// during query regression tests. This is not a public configuration option.
+const DISABLE_COMPACTION_ENV: &str = "GREPTIME_DISABLE_COMPACTION";
+
+/// Internal query-regression switch, read once when the first scheduler starts.
+/// Applies to SST compaction only; ingestion and flushing remain enabled.
+static DISABLE_COMPACTION: LazyLock<bool> = LazyLock::new(|| {
+    let value = std::env::var(DISABLE_COMPACTION_ENV).ok();
+    let disabled = parse_disable_compaction(value.as_deref());
+    if disabled {
+        warn!(
+            "SST compaction is disabled by {DISABLE_COMPACTION_ENV}; restart without it to resume"
+        );
+    }
+    disabled
+});
+
+fn parse_disable_compaction(value: Option<&str>) -> bool {
+    match value {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => {
+            warn!(
+                "Invalid {DISABLE_COMPACTION_ENV}: expected true or false; compaction remains enabled"
+            );
+            false
+        }
+    }
+}
+
 /// Compaction scheduler tracks and manages compaction tasks.
 pub(crate) struct CompactionScheduler {
+    /// Disables SST compaction for internal query regression tests.
+    /// Initialized from [`DISABLE_COMPACTION`] and fixed for the scheduler's lifetime
+    /// in production; unit tests can override it without changing the process environment.
+    disable_compaction: bool,
     scheduler: SchedulerRef,
     /// All loaded regions, including idle regions and regions executing DDLs.
     region_status: HashMap<RegionId, CompactionStatus>,
@@ -126,6 +164,7 @@ impl CompactionScheduler {
         memory_policy: OnExhaustedPolicy,
     ) -> Self {
         Self {
+            disable_compaction: *DISABLE_COMPACTION,
             scheduler,
             region_status: HashMap::new(),
             request_sender,
@@ -324,28 +363,6 @@ impl CompactionScheduler {
         .await
     }
 
-    /// Completes a cooperatively canceled execution.
-    ///
-    /// # Effects
-    ///
-    /// Resets the matching region to idle, notifies compaction waiters, and
-    /// returns DDLs that were waiting for cancellation.
-    ///
-    /// # Constraints
-    ///
-    /// The owning worker must execute every returned DDL request. A stale
-    /// cancellation is ignored.
-    pub(crate) async fn on_execution_cancelled(
-        &mut self,
-        region_id: RegionId,
-        execution: &CompactionExecution,
-    ) -> Vec<SenderDdlRequest> {
-        if !self.is_current_execution(region_id, execution) {
-            return Vec::new();
-        }
-        self.on_compaction_cancelled(region_id).await
-    }
-
     /// Records failure of the installed execution.
     ///
     /// # Effects
@@ -483,6 +500,17 @@ impl CompactionScheduler {
         max_parallelism: usize,
         time_range: Option<TimestampRange>,
     ) -> Result<bool> {
+        if self.disable_compaction {
+            if matches!(trigger, CompactionTrigger::Manual) {
+                waiter.send(
+                    UnsupportedOperationSnafu {
+                        err_msg: format!("SST compaction is disabled by {DISABLE_COMPACTION_ENV}"),
+                    }
+                    .fail(),
+                );
+            }
+            return Ok(false);
+        }
         let region_id = version_control.region_id();
         let status = self.region_status.entry(region_id).or_insert_with(|| {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone())
@@ -536,6 +564,9 @@ impl CompactionScheduler {
         // Publish the picking phase before dispatching background planning.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking_with_trigger(plan_id, trigger);
+        let pick_history = (trigger == CompactionTrigger::Automatic
+            && matches!(compact_options, compact_request::Options::Regular(_)))
+        .then(|| status.pick_history.clone());
         let request = status.new_compaction_request(
             self.request_sender.clone(),
             self.engine_config.clone(),
@@ -544,9 +575,10 @@ impl CompactionScheduler {
             self.listener.clone(),
             schema_metadata_manager,
             max_parallelism,
+            pick_history,
         );
         status.merge_waiter(waiter);
-        self.dispatch_compaction_planning(plan_id, request, compact_options, time_range);
+        self.dispatch_compaction_planning(plan_id, request, compact_options, time_range, trigger);
         self.listener.on_compaction_scheduled(region_id);
         Ok(true)
     }
@@ -585,6 +617,7 @@ impl CompactionScheduler {
             self.listener.clone(),
             schema_metadata_manager,
             max_parallelism,
+            None,
         );
         status.merge_waiter(waiter);
         // Bump the counter through a disjoint field borrow so the `status`
@@ -592,7 +625,13 @@ impl CompactionScheduler {
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking_with_trigger(plan_id, CompactionTrigger::Manual);
-        self.dispatch_compaction_planning(plan_id, request, options, time_range);
+        self.dispatch_compaction_planning(
+            plan_id,
+            request,
+            options,
+            time_range,
+            CompactionTrigger::Manual,
+        );
         debug!(
             "Successfully scheduled manual compaction planning for region id: {}",
             region_id
@@ -608,10 +647,6 @@ impl CompactionScheduler {
         schema_metadata_manager: SchemaMetadataManagerRef,
         made_progress: bool,
     ) -> CompactionTransition {
-        if !self.region_status.contains_key(&region_id) {
-            return CompactionTransition::NoAction;
-        }
-
         if let Some(ddls) = self.take_ready_ddls(region_id) {
             return CompactionTransition::DdlReady(ddls);
         }
@@ -652,6 +687,9 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> bool {
+        if self.disable_compaction {
+            return false;
+        }
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
         };
@@ -664,6 +702,7 @@ impl CompactionScheduler {
             self.listener.clone(),
             schema_metadata_manager,
             MAX_PARALLEL_COMPACTION,
+            Some(status.pick_history.clone()),
         );
         // Bump the counter through a disjoint field borrow so the `status`
         // borrow stays alive; nothing could have removed the status since it
@@ -675,6 +714,7 @@ impl CompactionScheduler {
             request,
             compact_request::Options::Regular(Default::default()),
             None,
+            CompactionTrigger::Automatic,
         );
         debug!(
             "Successfully scheduled next compaction planning for region id: {}",
@@ -684,6 +724,7 @@ impl CompactionScheduler {
     }
 
     /// Notifies the scheduler that the compaction job is cancelled cooperatively.
+    #[cfg(test)]
     async fn on_compaction_cancelled(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
         self.finish_compaction_on_cancel(region_id)
     }

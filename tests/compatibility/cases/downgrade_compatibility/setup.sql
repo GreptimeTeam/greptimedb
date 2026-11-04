@@ -47,3 +47,24 @@ INSERT INTO t_sst_float_field_encoding_downgrade VALUES
 ('2024-02-10 00:02:00+0000', 'host_c', NULL, NULL);
 
 ADMIN FLUSH_TABLE('t_sst_float_field_encoding_downgrade');
+
+CREATE TABLE t_fulltext_bloom_v2_downgrade (
+    ts TIMESTAMP TIME INDEX,
+    msg STRING FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false')
+);
+
+INSERT INTO t_fulltext_bloom_v2_downgrade VALUES
+    (1, 'hello_world'),
+    (2, '错误error日志');
+
+ADMIN FLUSH_TABLE('t_fulltext_bloom_v2_downgrade');
+
+CREATE TABLE t_column_encoding_downgrade (
+    ts TIMESTAMP TIME INDEX,
+    span_id STRING COMPRESSION WITH (encoding = 'plain', page_size = '64KiB'),
+    ts_end TIMESTAMP(9) COMPRESSION WITH (encoding = 'delta_binary_packed')
+);
+
+INSERT INTO t_column_encoding_downgrade VALUES (1, 'a1', 1000), (2, 'a2', 2000), (3, NULL, NULL);
+
+ADMIN FLUSH_TABLE('t_column_encoding_downgrade');

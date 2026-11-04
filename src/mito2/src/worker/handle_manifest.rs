@@ -197,6 +197,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_id: region.region_id,
                     build_type: IndexBuildType::SchemaChange,
                     file_metas: Vec::new(),
+                    result_senders: Vec::new(),
                 },
                 OptionOutputTx::new(None),
             )
@@ -273,6 +274,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         let version = version_builder.build();
         region.version_control.overwrite_current(Arc::new(version));
+        // Restore last sequence from the manifest.
+        if let Some(sequence) = manifest.committed_sequence {
+            region.version_control.update_last_sequence(sequence);
+        }
 
         let updated = manifest.manifest_version > original_manifest_version;
         let _ = sender.send(Ok((manifest.manifest_version, updated)));
@@ -310,7 +315,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters,
             preload_sst_cache,
         } = request;
-        let file_sequence = region.version_control.committed_sequence() + 1;
+        let file_sequence = region.version_control.current().last_sequence + 1;
         edit.committed_sequence = Some(file_sequence);
 
         // Generic region edits (direct/import/staging) assign a new destination
@@ -336,6 +341,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| Err(e.clone()).context(EditRegionSnafu { region_id }));
             return;
         }
+        region.version_control.update_last_sequence(file_sequence);
 
         let request_sender = self.sender.clone();
         let cache_manager = self.cache_manager.clone();

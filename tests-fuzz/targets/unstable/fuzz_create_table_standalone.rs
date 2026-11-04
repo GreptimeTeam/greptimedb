@@ -125,7 +125,10 @@ async fn execute_unstable_create_table(
     let mysql_public = connect_mysql(DEFAULT_MYSQL_URL, "public").await;
     loop {
         let sql = format!("CREATE DATABASE IF NOT EXISTS {FUZZ_TESTS_DATABASE}");
-        match sqlx::query(&sql).execute(&mysql_public).await {
+        match sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .execute(&mysql_public)
+            .await
+        {
             Ok(result) => {
                 info!("Create database: {}, result: {result:?}", sql);
                 break;
@@ -150,7 +153,9 @@ async fn execute_unstable_create_table(
 
         let translator = CreateTableExprTranslator;
         let sql = translator.translate(&expr).unwrap();
-        let result = sqlx::query(&sql).execute(&ctx.greptime).await;
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .execute(&ctx.greptime)
+            .await;
         match result {
             Ok(result) => {
                 let state = *rx.borrow();
@@ -179,7 +184,10 @@ async fn execute_unstable_create_table(
 
     loop {
         let sql = format!("DROP DATABASE IF EXISTS {FUZZ_TESTS_DATABASE}");
-        match sqlx::query(&sql).execute(&mysql_public).await {
+        match sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .execute(&mysql_public)
+            .await
+        {
             Ok(result) => {
                 info!("Drop database: {}, result: {result:?}", sql);
                 break;

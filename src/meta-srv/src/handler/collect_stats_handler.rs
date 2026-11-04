@@ -16,14 +16,17 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, Peer, Role};
+use common_meta::DatanodeId;
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, Stat};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::MetadataKey;
-use common_meta::key::node_address::NodeAddressKey;
+use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
 use common_meta::rpc::store::PutRequest;
 use common_telemetry::{error, warn};
 use dashmap::DashMap;
+use futures::TryStreamExt;
 use snafu::ResultExt;
+use store_api::storage::TableId;
 use tokio::sync::Mutex;
 
 use crate::error::{self, Result};
@@ -196,14 +199,43 @@ async fn update_datanode_address(updater: &NodeAddressUpdater, ctx: &Context, st
         .inspect_err(|e| {
             error!(e; "Failed to update datanode address, node: {}, address: {}", stat.id, stat.addr);
         });
-    if let Ok(true) = updated {
-        let cache_idents = stat
-            .table_ids()
-            .into_iter()
-            .map(CacheIdent::TableId)
-            .collect::<Vec<_>>();
-        utils::invalidate_address_caches(ctx, stat.id, &cache_idents).await;
+    let Ok(Some(saved)) = updated else {
+        return;
+    };
+
+    let mut table_ids = stat.table_ids();
+    // Cached table routes embed the address, and a restarted datanode's first
+    // heartbeat may report few regions, so invalidate every table on the node.
+    // A failed earlier attempt may already have stored the new address, which
+    // hides the change from this save.
+    if saved.retried || address_changed(saved.output.as_ref(), &stat.addr) {
+        match datanode_table_ids(ctx, stat.id).await {
+            Ok(ids) => table_ids.extend(ids),
+            Err(e) => {
+                error!(e; "Failed to list tables of datanode {} for address invalidation", stat.id)
+            }
+        }
     }
+    let cache_idents = table_ids
+        .into_iter()
+        .map(CacheIdent::TableId)
+        .collect::<Vec<_>>();
+    utils::invalidate_address_caches(ctx, stat.id, &cache_idents).await;
+}
+
+/// A missing or undecodable previous address counts as changed.
+fn address_changed(previous: Option<&NodeAddressValue>, addr: &str) -> bool {
+    previous.is_none_or(|previous| previous.peer.addr != addr)
+}
+
+async fn datanode_table_ids(ctx: &Context, datanode_id: DatanodeId) -> Result<Vec<TableId>> {
+    ctx.table_metadata_manager
+        .datanode_table_manager()
+        .tables(datanode_id)
+        .map_ok(|value| value.table_id)
+        .try_collect()
+        .await
+        .context(error::TableMetadataManagerSnafu)
 }
 
 #[cfg(test)]
@@ -214,8 +246,11 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use common_meta::cache_invalidator::{CacheInvalidator, Context as InvalidationContext};
     use common_meta::datanode::DatanodeStatKey;
     use common_meta::error::{Error as MetaError, Result as MetaResult};
+    use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue, RegionInfo};
+    use common_meta::key::{MetadataValue, RegionRoleSet};
     use common_meta::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend, TxnService};
     use common_meta::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
@@ -535,6 +570,168 @@ mod tests {
             };
             handler.handle(&req, &mut ctx, &mut acc).await.unwrap();
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingCacheInvalidator {
+        calls: StdMutex<Vec<Vec<CacheIdent>>>,
+    }
+
+    impl RecordingCacheInvalidator {
+        fn table_ids_per_call(&self) -> Vec<Vec<TableId>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|idents| {
+                    let mut ids = idents
+                        .iter()
+                        .map(|ident| match ident {
+                            CacheIdent::TableId(id) => *id,
+                            other => panic!("unexpected cache ident: {other:?}"),
+                        })
+                        .collect::<Vec<_>>();
+                    ids.sort_unstable();
+                    ids
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CacheInvalidator for RecordingCacheInvalidator {
+        async fn invalidate(
+            &self,
+            _: &InvalidationContext,
+            idents: &[CacheIdent],
+        ) -> MetaResult<()> {
+            self.calls.lock().unwrap().push(idents.to_vec());
+            Ok(())
+        }
+
+        fn invalidate_all(&self) -> MetaResult<()> {
+            Ok(())
+        }
+    }
+
+    async fn register_datanode_tables(ctx: &Context, datanode_id: u64, table_ids: &[TableId]) {
+        for table_id in table_ids {
+            let value = DatanodeTableValue::new(
+                *table_id,
+                RegionRoleSet::new(vec![0], vec![]),
+                RegionInfo::default(),
+            );
+            ctx.kv_backend
+                .put(PutRequest {
+                    key: DatanodeTableKey::new(datanode_id, *table_id).to_bytes(),
+                    value: value.try_as_raw_value().unwrap(),
+                    prev_kv: false,
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    fn use_recording_invalidator(ctx: &mut Context) -> Arc<RecordingCacheInvalidator> {
+        let invalidator = Arc::new(RecordingCacheInvalidator::default());
+        ctx.cache_invalidator = invalidator.clone();
+        invalidator
+    }
+
+    #[tokio::test]
+    async fn test_address_change_invalidates_all_tables_on_datanode() {
+        let mut ctx = TestEnv::new().ctx();
+        let invalidator = use_recording_invalidator(&mut ctx);
+        register_datanode_tables(&ctx, 101, &[1024, 1025]).await;
+        register_datanode_tables(&ctx, 102, &[2048]).await;
+        let handler = Arc::new(CollectStatsHandler::default());
+
+        handle_stat(handler.clone(), ctx.clone(), stat(101, 1, 0, "dn-101-v1"))
+            .await
+            .unwrap();
+        // Restarted on a new address, reporting no regions yet.
+        handle_stat(handler.clone(), ctx.clone(), stat(101, 2, 0, "dn-101-v2"))
+            .await
+            .unwrap();
+        handle_stat(handler, ctx, stat(101, 2, 0, "dn-101-v2"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vec![vec![1024, 1025], vec![1024, 1025]],
+            invalidator.table_ids_per_call()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unchanged_address_only_invalidates_reported_tables() {
+        let mut ctx = TestEnv::new().ctx();
+        register_datanode_tables(&ctx, 101, &[1024, 1025]).await;
+        let handler = Arc::new(CollectStatsHandler::default());
+        handle_stat(handler, ctx.clone(), stat(101, 1, 0, "dn-101"))
+            .await
+            .unwrap();
+
+        // A fresh handler sees the node as after a metasrv leader change.
+        let invalidator = use_recording_invalidator(&mut ctx);
+        let handler = Arc::new(CollectStatsHandler::default());
+        handle_stat(handler.clone(), ctx.clone(), stat(101, 1, 0, "dn-101"))
+            .await
+            .unwrap();
+        handle_stat(handler, ctx, stat(101, 2, 0, "dn-101"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vec![Vec::<TableId>::new(), vec![]],
+            invalidator.table_ids_per_call()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_after_landed_write_invalidates_all_tables_on_datanode() {
+        use common_meta::kv_backend::test_util::MockKvBackendBuilder;
+        use common_meta::rpc::KeyValue;
+
+        let mut ctx = TestEnv::new().ctx();
+        let invalidator = use_recording_invalidator(&mut ctx);
+        register_datanode_tables(&ctx, 101, &[1024, 1025]).await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let backend = MockKvBackendBuilder::default()
+            .put_fn(Arc::new({
+                let attempts = attempts.clone();
+                move |req: PutRequest| {
+                    // The first write lands but reports an error, so the retry
+                    // reads back its own address as the previous one.
+                    if attempts.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
+                        return common_meta::error::UnexpectedSnafu {
+                            err_msg: "injected lost response",
+                        }
+                        .fail();
+                    }
+                    Ok(PutResponse {
+                        prev_kv: Some(KeyValue {
+                            key: req.key,
+                            value: req.value,
+                        }),
+                    })
+                }
+            }) as _)
+            .build()
+            .unwrap();
+        ctx.leader_cached_kv_backend =
+            Arc::new(LeaderCachedKvBackend::with_always_leader(Arc::new(backend)));
+        let handler = Arc::new(CollectStatsHandler::default());
+
+        handle_stat(handler.clone(), ctx.clone(), stat(101, 2, 0, "dn-101-v2"))
+            .await
+            .unwrap();
+        handle_stat(handler, ctx, stat(101, 2, 0, "dn-101-v2"))
+            .await
+            .unwrap();
+
+        assert_eq!(2, attempts.load(AtomicOrdering::Relaxed));
+        assert_eq!(vec![vec![1024, 1025]], invalidator.table_ids_per_call());
     }
 
     #[tokio::test]

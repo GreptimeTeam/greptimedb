@@ -398,3 +398,143 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
             .contains(datanode_id, region_id)
     );
 }
+
+#[tokio::test]
+async fn test_on_prepare_uses_peer_alloc_context_provider() {
+    use std::sync::Mutex;
+
+    use crate::affinity::{AffinityRequirements, PeerAllocContextProvider};
+    use crate::ddl::table_meta::TableMetadataAllocator;
+    use crate::error;
+    use crate::peer::{PeerAllocContext, PeerAllocator};
+    use crate::rpc::ddl::QueryContext;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ProviderMode {
+        Absent,
+        Available,
+        Error,
+    }
+
+    struct Provider {
+        mode: ProviderMode,
+        calls: Mutex<Vec<QueryContext>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerAllocContextProvider for Provider {
+        async fn build(&self, query_context: &QueryContext) -> Result<PeerAllocContext> {
+            self.calls.lock().unwrap().push(query_context.clone());
+            if self.mode == ProviderMode::Error {
+                return error::UnexpectedSnafu {
+                    err_msg: "allocation context lookup failed",
+                }
+                .fail();
+            }
+            Ok(PeerAllocContext {
+                affinity: AffinityRequirements::new(HashMap::from([("pool".into(), "a".into())])),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct Allocator(Mutex<Vec<PeerAllocContext>>);
+
+    #[async_trait::async_trait]
+    impl PeerAllocator for Allocator {
+        async fn alloc(&self, num: usize, ctx: &PeerAllocContext) -> Result<Vec<Peer>> {
+            self.0.lock().unwrap().push(ctx.clone());
+            Ok(vec![Peer::empty(2); num])
+        }
+    }
+
+    for (mode, table_exists) in [
+        (ProviderMode::Available, false),
+        (ProviderMode::Absent, false),
+        (ProviderMode::Error, false),
+        (ProviderMode::Error, true),
+    ] {
+        let provider = Arc::new(Provider {
+            mode,
+            calls: Mutex::new(Vec::new()),
+        });
+        let allocator = Arc::new(Allocator::default());
+        let mut context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+        if mode != ProviderMode::Absent {
+            context.peer_alloc_context_provider = Some(provider.clone());
+        }
+        context.table_metadata_allocator = Arc::new(TableMetadataAllocator::with_peer_allocator(
+            context.table_metadata_allocator.table_id_allocator(),
+            context.table_metadata_allocator.wal_options_allocator(),
+            allocator.clone(),
+        ));
+        let mut task = test_create_table_task("provider_table");
+        task.create_table.create_if_not_exists = true;
+        if table_exists {
+            context
+                .table_metadata_manager
+                .create_table_metadata(
+                    task.table_info.clone(),
+                    TableRouteValue::physical(vec![]),
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+        }
+        let query_context = QueryContext {
+            current_catalog: "test_catalog".into(),
+            current_schema: "test_schema".into(),
+            timezone: "UTC".into(),
+            extensions: HashMap::from([("custom-key".into(), "custom-value".into())]),
+            channel: 1,
+            snapshot_seqs: HashMap::from([(1, 10)]),
+            sst_min_sequences: HashMap::from([(1, 2)]),
+        };
+        let mut procedure =
+            CreateTableProcedure::new_with_query_context(task, query_context.clone(), context)
+                .unwrap();
+        let result = procedure.on_prepare().await;
+        if table_exists {
+            assert_matches!(result.unwrap(), Status::Done { .. });
+            assert!(provider.calls.lock().unwrap().is_empty());
+            assert!(allocator.0.lock().unwrap().is_empty());
+            continue;
+        }
+        let expected_calls = if mode == ProviderMode::Absent {
+            vec![]
+        } else {
+            vec![query_context]
+        };
+        assert_eq!(*provider.calls.lock().unwrap(), expected_calls);
+        if mode == ProviderMode::Error {
+            let error = result.unwrap_err();
+            assert_matches!(error, Error::Unexpected { .. });
+            assert!(
+                error
+                    .to_string()
+                    .contains("allocation context lookup failed")
+            );
+            assert_matches!(procedure.data.state, CreateTableState::Prepare);
+            assert!(allocator.0.lock().unwrap().is_empty());
+        } else {
+            result.unwrap();
+            assert_matches!(
+                procedure.data.state,
+                CreateTableState::DatanodeCreateRegions
+            );
+            let calls = allocator.0.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            let expected = if mode == ProviderMode::Available {
+                PeerAllocContext {
+                    affinity: AffinityRequirements::new(HashMap::from([(
+                        "pool".into(),
+                        "a".into(),
+                    )])),
+                }
+            } else {
+                PeerAllocContext::default()
+            };
+            assert_eq!(calls[0].affinity, expected.affinity);
+        }
+    }
+}

@@ -49,7 +49,7 @@ use crate::error::Result;
 ///
 /// The caller can only supply reason/extensions. Protocol is derived here from
 /// the trusted, typed query channel held locally in the executor context.
-pub(crate) fn procedure_event_context(context: &ExecutorContext) -> Option<ProcedureEventContext> {
+pub fn procedure_event_context(context: &ExecutorContext) -> Option<ProcedureEventContext> {
     context.event_input.as_ref().map(|input| {
         let mut event_context = ProcedureEventContext::from(input);
         event_context.protocol = context
@@ -62,7 +62,7 @@ pub(crate) fn procedure_event_context(context: &ExecutorContext) -> Option<Proce
 }
 
 /// Builds the optional procedure actor transported by a procedure RPC.
-pub(crate) fn procedure_actor(context: &ExecutorContext) -> Option<ProcedureActor> {
+pub fn procedure_actor(context: &ExecutorContext) -> Option<ProcedureActor> {
     context.actor.as_ref().map(|username| ProcedureActor {
         username: username.clone(),
     })

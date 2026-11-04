@@ -15,10 +15,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_function::aggrs::aggr_wrapper::{StateMergeHelper, is_all_aggr_exprs_steppable};
+use common_function::aggrs::aggr_wrapper::{
+    StateMergeHelper, get_aggr_func, is_all_aggr_exprs_steppable,
+};
 use common_telemetry::debug;
 use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_expr::expr::NullTreatment;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -113,10 +116,17 @@ impl Categorizer {
                 }
                 Commutativity::Commutative
             }
-            // TODO(ruihang): Change this to Commutative once Like is supported in substrait
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
+                // The pinned Substrait codec drops IGNORE NULLS, so keep these aggregates on the frontend.
+                if aggr.aggr_expr.iter().any(|expr| {
+                    get_aggr_func(expr).is_some_and(|func| {
+                        func.params.null_treatment == Some(NullTreatment::IgnoreNulls)
+                    })
+                }) {
+                    return Ok(Commutativity::NonCommutative);
+                }
                 // The state/merge split maps each group expression to one output column,
                 // which doesn't hold for grouping sets.
                 let has_grouping_set = aggr
@@ -276,6 +286,7 @@ impl Categorizer {
             | Expr::Between(_)
             | Expr::Exists(_)
             | Expr::InList(_)
+            | Expr::Like(_)
             | Expr::Case(_) => Commutativity::Commutative,
             // Annotation collection must not affect distribution. Keep scalar UDFs pushdownable;
             // TODO: Preserve datanode PromQL annotations through plan decoding, return them in
@@ -283,8 +294,7 @@ impl Categorizer {
             Expr::ScalarFunction(_) => Commutativity::Commutative,
             Expr::AggregateFunction(_udaf) => Commutativity::Commutative,
 
-            Expr::Like(_)
-            | Expr::SimilarTo(_)
+            Expr::SimilarTo(_)
             | Expr::IsUnknown(_)
             | Expr::IsNotUnknown(_)
             | Expr::WindowFunction(_)

@@ -16,8 +16,8 @@ use std::collections::HashMap;
 
 use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
 use datatypes::schema::{
-    COMMENT_KEY, COMPRESSION_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY,
-    FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
+    COMMENT_KEY, COMPRESSION_KEY, ColumnDefaultConstraint, ColumnSchema, CompressionOptions,
+    FULLTEXT_KEY, FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
     SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType,
 };
 use greptime_proto::v1::{
@@ -240,6 +240,14 @@ pub fn options_from_skipping(skipping: &SkippingIndexOptions) -> Result<Option<C
     Ok((!options.options.is_empty()).then_some(options))
 }
 
+/// Tries to construct a `ColumnOptions` from the given `CompressionOptions`.
+pub fn options_from_compression(compression: &CompressionOptions) -> Result<ColumnOptions> {
+    let mut options = ColumnOptions::default();
+    let v = serde_json::to_string(compression).context(error::SerializeJsonSnafu)?;
+    options.options.insert(COMPRESSION_GRPC_KEY.to_string(), v);
+    Ok(options)
+}
+
 /// Tries to construct a `ColumnOptions` for inverted index.
 pub fn options_from_inverted() -> ColumnOptions {
     let mut options = ColumnOptions::default();
@@ -270,6 +278,23 @@ pub fn as_skipping_index_type(skipping_index_type: PbSkippingIndexType) -> Skipp
     match skipping_index_type {
         PbSkippingIndexType::BloomFilter => SkippingIndexType::BloomFilter,
     }
+}
+
+/// Validates skipping options received for a JSON2 type hint.
+pub fn json_skipping_options_from_proto(
+    options: crate::v1::JsonSkippingIndexOptions,
+) -> datatypes::error::Result<SkippingIndexOptions> {
+    let index_type = PbSkippingIndexType::try_from(options.index_type).map_err(|_| {
+        datatypes::error::InvalidSkippingIndexOptionSnafu {
+            msg: format!("Unknown skipping index type: {}", options.index_type),
+        }
+        .build()
+    })?;
+    SkippingIndexOptions::new(
+        options.granularity,
+        options.false_positive_rate,
+        as_skipping_index_type(index_type),
+    )
 }
 
 #[cfg(test)]

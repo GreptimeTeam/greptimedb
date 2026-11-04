@@ -110,7 +110,7 @@ pub const GT_FUZZ_CLUSTER_NAME: &str = "GT_FUZZ_CLUSTER_NAME";
 /// Flushes memtable to SST file.
 pub async fn flush_memtable(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
     let sql = format!("admin flush_table(\"{}\")", table_name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(e)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;
@@ -122,7 +122,7 @@ pub async fn flush_memtable(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
 /// Triggers a compaction for table
 pub async fn compact_table(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
     let sql = format!("admin compact_table(\"{}\")", table_name);
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .execute(e)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;

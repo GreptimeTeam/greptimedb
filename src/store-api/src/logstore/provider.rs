@@ -187,7 +187,7 @@ mod tests {
 
     use super::*;
     use crate::logstore::entry::Entry;
-    use crate::logstore::{AppendBatchResponse, EntryId, SendableEntryStream, WalIndex};
+    use crate::logstore::{AppendBatchResponse, EntryId, SendableEntryStream};
 
     /// A log store whose latest entry id is fixed.
     #[derive(Debug)]
@@ -212,7 +212,6 @@ mod tests {
             &self,
             _provider: &Provider,
             _id: EntryId,
-            _index: Option<WalIndex>,
         ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error> {
             unreachable!()
         }

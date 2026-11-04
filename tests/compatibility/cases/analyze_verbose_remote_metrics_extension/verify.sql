@@ -8,4 +8,5 @@
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE ("files":\s\[.*\],) "files": REDACTED,
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE "(time_range|file_summary|max_part_range)":.* "scan_details":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM t_analyze_verbose_remote_metrics_extension;

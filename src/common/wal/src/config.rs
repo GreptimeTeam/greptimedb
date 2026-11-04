@@ -298,6 +298,7 @@ mod tests {
         assert_eq!(config.max_unpersisted_bytes, ReadableSize::mb(64));
         assert_eq!(config.max_unpersisted_age, Duration::from_secs(8));
         assert_eq!(config.on_corrupted_segment, CorruptedSegmentAction::Skip);
+        assert!(!config.accept_missing_history);
         assert!(matches!(
             MetasrvWalConfig::try_from(datanode_wal_config).unwrap_err(),
             Error::UnsupportedWalProvider { .. }
@@ -313,6 +314,7 @@ mod tests {
             max_unpersisted_bytes = "32MB"
             max_unpersisted_age = "4s"
             on_corrupted_segment = "fail"
+            accept_missing_history = true
         "#;
         let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
         let expected = ObjectStoreWalConfig {
@@ -324,6 +326,7 @@ mod tests {
             max_unpersisted_bytes: ReadableSize::mb(32),
             max_unpersisted_age: Duration::from_secs(4),
             on_corrupted_segment: CorruptedSegmentAction::Fail,
+            accept_missing_history: true,
         };
         assert_eq!(
             datanode_wal_config,
@@ -334,6 +337,7 @@ mod tests {
         assert_eq!(table["ack_mode"].as_str(), Some("enqueued"));
         assert_eq!(table["max_unpersisted_bytes"].as_str(), Some("32MiB"));
         assert_eq!(table["max_unpersisted_age"].as_str(), Some("4s"));
+        assert_eq!(table["accept_missing_history"].as_bool(), Some(true));
         assert_eq!(
             datanode_wal_config,
             toml::from_str::<DatanodeWalConfig>(&serialized).unwrap()
@@ -344,6 +348,30 @@ mod tests {
             provider = "object_store"
         "#;
         assert!(toml::from_str::<DatanodeWalConfig>(toml_str).is_err());
+    }
+
+    #[test]
+    fn test_removed_datanode_wal_index_config() {
+        let expected = DatanodeWalConfig::Kafka(DatanodeKafkaConfig::default());
+        for create_index in [false, true] {
+            let config = format!(
+                r#"
+                provider = "kafka"
+                create_index = {create_index}
+                dump_index_interval = "10s"
+                "#
+            );
+            let parsed: DatanodeWalConfig = toml::from_str(&config).unwrap();
+            assert_eq!(parsed, expected);
+            let serialized = toml::to_string(&parsed).unwrap();
+            let table: toml::Table = toml::from_str(&serialized).unwrap();
+            assert!(!table.contains_key("create_index"));
+            assert!(!table.contains_key("dump_index_interval"));
+            assert_eq!(
+                toml::from_str::<DatanodeWalConfig>(&serialized).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

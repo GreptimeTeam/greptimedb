@@ -31,19 +31,17 @@ use store_api::logstore::entry::{
     Entry, Id as EntryId, MultiplePartEntry, MultiplePartHeader, NaiveEntry,
 };
 use store_api::logstore::provider::{KafkaProvider, Provider};
-use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream, WalIndex};
+use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
 
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
-use crate::kafka::index::{
-    GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE, build_region_wal_index_iterator,
-};
+use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer, RegionWalRange};
 use crate::kafka::periodic_offset_fetcher::PeriodicOffsetFetcher;
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
-    ESTIMATED_META_SIZE, Record, convert_to_kafka_records, maybe_emit_entry, remaining_entries,
+    ESTIMATED_META_SIZE, Record, convert_to_kafka_records, is_record_meta_key, maybe_emit_entry,
+    remaining_entries,
 };
 use crate::metrics;
 
@@ -142,14 +140,9 @@ impl TopicStatsReporter for PeriodicTopicStatsReporter {
 
 impl KafkaLogStore {
     /// Tries to create a Kafka log store.
-    pub async fn try_new(
-        config: &DatanodeKafkaConfig,
-        global_index_collector: Option<GlobalIndexCollector>,
-    ) -> Result<Self> {
+    pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
         let topic_stats = Arc::new(DashMap::new());
-        let client_manager = Arc::new(
-            ClientManager::try_new(config, global_index_collector, topic_stats.clone()).await?,
-        );
+        let client_manager = Arc::new(ClientManager::try_new(config, topic_stats.clone()).await?);
         let fetcher = PeriodicOffsetFetcher::new(
             config.topic_latest_offset_fetch_interval,
             client_manager.clone(),
@@ -291,8 +284,7 @@ impl LogStore for KafkaLogStore {
         for (region_id, (producer, records)) in region_grouped_records {
             // Safety: `KafkaLogStore::entry` will ensure that the
             // `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
-            region_grouped_result_receivers
-                .push((region_id, producer.produce(region_id, records).await?))
+            region_grouped_result_receivers.push((region_id, producer.produce(records).await?))
         }
 
         let region_grouped_max_offset =
@@ -318,7 +310,6 @@ impl LogStore for KafkaLogStore {
         &self,
         provider: &Provider,
         mut entry_id: EntryId,
-        index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         let provider = provider
             .as_kafka_provider()
@@ -378,28 +369,13 @@ impl LogStore for KafkaLogStore {
                 record_num: 0,
             });
 
-        let region_indexes = if let (Some(index), Some(collector)) =
-            (index, self.client_manager.global_index_collector())
-        {
-            collector
-                .read_remote_region_index(index.location_id, provider, index.region_id, entry_id)
-                .await?
-        } else {
-            None
-        };
-
-        let Some(iterator) = build_region_wal_index_iterator(
-            entry_id,
-            end_offset as u64,
-            region_indexes,
-            self.max_batch_bytes,
-            MIN_BATCH_WINDOW_SIZE,
-        ) else {
-            let range = entry_id..end_offset as u64;
+        let range = entry_id..end_offset as u64;
+        if range.is_empty() {
             warn!("No new entries in range {:?} of ns {}", range, provider);
             return Ok(futures_util::stream::empty().boxed());
-        };
+        }
 
+        let iterator = RegionWalRange::new(range, self.max_batch_bytes);
         debug!("Reading entries with {:?} of ns {}", iterator, provider);
 
         // Safety: Must be ok.
@@ -433,26 +409,41 @@ impl LogStore for KafkaLogStore {
                 );
 
                 // Ignores no-op records.
-                if kafka_record.value.is_none() {
-                    if check_termination(offset, end_offset) {
-                        if let Some(entries) = remaining_entries(&provider, &mut entry_records) {
-                            yield Ok(entries);
+                if kafka_record.value.is_some() {
+                    let key = kafka_record.key;
+                    match Record::try_from_parts(key.as_deref(), kafka_record.value) {
+                        Ok(record) => {
+                            // Tries to construct an entry from records consumed so far.
+                            if let Some(mut entry) =
+                                maybe_emit_entry(&provider, record, &mut entry_records)?
+                            {
+                                // We don't rely on the EntryId generated by mito2.
+                                // Instead, we use the offset return from Kafka as EntryId.
+                                // Therefore, we MUST overwrite the EntryId with RecordOffset.
+                                entry.set_entry_id(offset as u64);
+                                yield Ok(vec![entry]);
+                            }
                         }
-                        break;
+                        Err(err) => {
+                            // A key that cannot be decoded is skipped only when the log store
+                            // never wrote it. A key that is a JSON object with a `version`
+                            // field may be a `RecordMeta` written by an incompatible version,
+                            // for example one with a newer `RecordType` variant read after a
+                            // rollback or during a rolling upgrade; skipping it would lose the
+                            // entry once the WAL is pruned past its offset, so it stays fatal.
+                            if key.as_deref().is_some_and(is_record_meta_key) {
+                                yield Err(err);
+                                return;
+                            }
+                            warn!(
+                                "Skipping unparsable record at offset {} of topic {}, reason: {}",
+                                offset, provider.topic, err
+                            );
+                        }
                     }
-                    continue;
                 }
 
-                let record = Record::try_from(kafka_record)?;
-                // Tries to construct an entry from records consumed so far.
-                if let Some(mut entry) = maybe_emit_entry(&provider, record, &mut entry_records)? {
-                    // We don't rely on the EntryId generated by mito2.
-                    // Instead, we use the offset return from Kafka as EntryId.
-                    // Therefore, we MUST overwrite the EntryId with RecordOffset.
-                    entry.set_entry_id(offset as u64);
-                    yield Ok(vec![entry]);
-                }
-
+                // The termination check runs for every consumed record, including skipped ones.
                 if check_termination(offset, end_offset) {
                     if let Some(entries) = remaining_entries(&provider, &mut entry_records) {
                         yield Ok(entries);
@@ -495,19 +486,11 @@ impl LogStore for KafkaLogStore {
     /// that the obsolete entries are deleted immediately.
     async fn obsolete(
         &self,
-        provider: &Provider,
-        region_id: RegionId,
-        entry_id: EntryId,
+        _provider: &Provider,
+        _region_id: RegionId,
+        _entry_id: EntryId,
     ) -> Result<()> {
-        if let Some(collector) = self.client_manager.global_index_collector() {
-            let provider = provider
-                .as_kafka_provider()
-                .with_context(|| InvalidProviderSnafu {
-                    expected: KafkaProvider::type_name(),
-                    actual: provider.type_name(),
-                })?;
-            collector.truncate(provider, region_id, entry_id).await?;
-        }
+        // Kafka WAL pruning is coordinated by metasrv.
         Ok(())
     }
 
@@ -562,21 +545,25 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_meta::datanode::TopicStatsReporter;
     use common_telemetry::info;
-    use common_telemetry::tracing::warn;
     use common_wal::config::kafka::DatanodeKafkaConfig;
     use common_wal::config::kafka::common::KafkaConnectionConfig;
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::test_util::get_kafka_endpoints;
     use dashmap::DashMap;
     use futures::TryStreamExt;
     use rand::Rng;
     use rand::prelude::SliceRandom;
-    use rskafka::client::partition::OffsetAt;
+    use rskafka::client::partition::{Compression, OffsetAt};
+    use rskafka::record::Record as KafkaRecord;
     use store_api::logstore::LogStore;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
     use store_api::logstore::provider::Provider;
     use store_api::storage::RegionId;
 
     use super::build_entry;
+    use crate::error;
     use crate::kafka::log_store::{KafkaLogStore, PeriodicTopicStatsReporter, TopicStat};
+    use crate::kafka::util::record::{ESTIMATED_META_SIZE, convert_to_kafka_records};
 
     #[test]
     fn test_build_naive_entry() {
@@ -663,26 +650,76 @@ mod tests {
             .unwrap();
     }
 
+    async fn new_test_logstore(max_batch_bytes: ReadableSize) -> KafkaLogStore {
+        let config = DatanodeKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: get_kafka_endpoints(),
+                ..Default::default()
+            },
+            max_batch_bytes,
+            ..Default::default()
+        };
+        KafkaLogStore::try_new(&config).await.unwrap()
+    }
+
+    async fn produce_records(
+        logstore: &KafkaLogStore,
+        provider: &Provider,
+        records: Vec<KafkaRecord>,
+    ) {
+        // A freshly created topic can be missing from the broker's metadata for a short
+        // while; `try_create_client` already retries that case.
+        let client = logstore
+            .client_manager
+            .get_or_insert(provider.as_kafka_provider().unwrap())
+            .await
+            .unwrap()
+            .client()
+            .clone();
+        client
+            .produce(records, Compression::NoCompression)
+            .await
+            .unwrap();
+    }
+
+    /// Builds a record that was not written by this log store.
+    fn foreign_record(key: Option<&[u8]>) -> KafkaRecord {
+        KafkaRecord {
+            key: key.map(|key| key.to_vec()),
+            value: Some(b"foreign payload".to_vec()),
+            timestamp: chrono::Utc::now(),
+            headers: Default::default(),
+        }
+    }
+
+    /// Returns the log end offset of the topic, i.e. the exclusive end of the range that
+    /// `read` consumes.
+    async fn log_end_offset(logstore: &KafkaLogStore, provider: &Provider) -> i64 {
+        let client = logstore
+            .client_manager
+            .get_or_insert(provider.as_kafka_provider().unwrap())
+            .await
+            .unwrap();
+        client.client().get_offset(OffsetAt::Latest).await.unwrap()
+    }
+
+    /// Returns one record per kind of key that the log store never writes: a missing key, a
+    /// key that is not JSON, a JSON value that is not an object, and a JSON object without a
+    /// `version` field.
+    fn foreign_records() -> Vec<KafkaRecord> {
+        vec![
+            foreign_record(None),
+            foreign_record(Some(b"not-a-json-key")),
+            foreign_record(Some(b"[1, 2, 3]")),
+            foreign_record(Some(br#"{"hello": "world"}"#)),
+        ]
+    }
+
     #[tokio::test]
     async fn test_append_batch_basic() {
         common_telemetry::init_default_ut_logging();
-        let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
-            warn!("The endpoints is empty, skipping the test 'test_append_batch_basic'");
-            return;
-        };
-        let broker_endpoints = broker_endpoints
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect::<Vec<_>>();
-        let config = DatanodeKafkaConfig {
-            connection: KafkaConnectionConfig {
-                broker_endpoints,
-                ..Default::default()
-            },
-            max_batch_bytes: ReadableSize::kb(32),
-            ..Default::default()
-        };
-        let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(32)).await;
         let topic_name = uuid::Uuid::new_v4().to_string();
         prepare_topic(&logstore, &topic_name).await;
         let provider = Provider::kafka_provider(topic_name);
@@ -708,7 +745,7 @@ mod tests {
         // 5 region
         assert_eq!(response.last_entry_ids.len(), 5);
         let got_entries = logstore
-            .read(&provider, 0, None)
+            .read(&provider, 0)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -748,25 +785,10 @@ mod tests {
     #[tokio::test]
     async fn test_append_batch_basic_large() {
         common_telemetry::init_default_ut_logging();
-        let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
-            warn!("The endpoints is empty, skipping the test 'test_append_batch_basic_large'");
-            return;
-        };
+        maybe_skip_kafka_integration_test!();
         let data_size_kb = rand::rng().random_range(9..31usize);
         info!("Entry size: {}Ki", data_size_kb);
-        let broker_endpoints = broker_endpoints
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect::<Vec<_>>();
-        let config = DatanodeKafkaConfig {
-            connection: KafkaConnectionConfig {
-                broker_endpoints,
-                ..Default::default()
-            },
-            max_batch_bytes: ReadableSize::kb(8),
-            ..Default::default()
-        };
-        let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
+        let logstore = new_test_logstore(ReadableSize::kb(8)).await;
         let topic_name = uuid::Uuid::new_v4().to_string();
         prepare_topic(&logstore, &topic_name).await;
         let provider = Provider::kafka_provider(topic_name);
@@ -792,7 +814,7 @@ mod tests {
         // 5 region
         assert_eq!(response.last_entry_ids.len(), 5);
         let got_entries = logstore
-            .read(&provider, 0, None)
+            .read(&provider, 0)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -819,6 +841,356 @@ mod tests {
         }
         let high_wathermark = logstore.latest_entry_id(&provider).unwrap();
         assert_eq!(high_wathermark, (data_size_kb as u64 / 8 + 1) * 20 * 5 - 1);
+    }
+
+    #[tokio::test]
+    async fn test_read_skips_unparsable_record_inside_multipart_entry() {
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(8)).await;
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
+        let provider = Provider::kafka_provider(topic_name);
+
+        let region_id = RegionId::new(1, 1);
+        // Splits the entry into First, Middle(1) and Last.
+        let max_data_size = 8 * 1024 - ESTIMATED_META_SIZE;
+        let data = vec![7u8; max_data_size * 2 + 10];
+        let entry = logstore
+            .entry(data.clone(), 0, region_id, &provider)
+            .unwrap();
+        assert_matches!(entry, Entry::MultiplePart(_));
+        let mut records = convert_to_kafka_records(entry).unwrap();
+        assert_eq!(records.len(), 3);
+
+        let last = records.pop().unwrap();
+        // Places an unparsable record before the entry and between every pair of parts.
+        produce_records(
+            &logstore,
+            &provider,
+            vec![foreign_record(Some(b"not-a-json-key"))],
+        )
+        .await;
+        produce_records(&logstore, &provider, vec![records[0].clone()]).await;
+        produce_records(
+            &logstore,
+            &provider,
+            vec![foreign_record(Some(br#"{"hello": "world"}"#))],
+        )
+        .await;
+        produce_records(&logstore, &provider, vec![records[1].clone()]).await;
+        produce_records(
+            &logstore,
+            &provider,
+            vec![foreign_record(Some(b"not-a-json-key"))],
+        )
+        .await;
+        produce_records(&logstore, &provider, vec![last]).await;
+
+        let entries = logstore
+            .read(&provider, 0)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        let entry = entries
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_multiple_part_entry()
+            .unwrap();
+        assert_eq!(
+            entry.headers,
+            vec![
+                MultiplePartHeader::First,
+                MultiplePartHeader::Middle(1),
+                MultiplePartHeader::Last
+            ]
+        );
+        assert_eq!(entry.parts.concat(), data);
+    }
+
+    #[tokio::test]
+    async fn test_read_skips_unparsable_record_across_regions() {
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(8)).await;
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
+        let provider = Provider::kafka_provider(topic_name);
+
+        let region_a = RegionId::new(1, 1);
+        let region_b = RegionId::new(1, 2);
+        let max_data_size = 8 * 1024 - ESTIMATED_META_SIZE;
+        let data_a = vec![1u8; max_data_size * 2 + 10];
+        let data_b = vec![2u8; max_data_size * 2 + 10];
+        let records_a = convert_to_kafka_records(
+            logstore
+                .entry(data_a.clone(), 0, region_a, &provider)
+                .unwrap(),
+        )
+        .unwrap();
+        let records_b = convert_to_kafka_records(
+            logstore
+                .entry(data_b.clone(), 0, region_b, &provider)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(records_a.len(), 3);
+        assert_eq!(records_b.len(), 3);
+
+        // Interleaves the parts of both entries with unparsable records.
+        for i in 0..3 {
+            produce_records(&logstore, &provider, vec![records_a[i].clone()]).await;
+            produce_records(&logstore, &provider, vec![records_b[i].clone()]).await;
+            produce_records(
+                &logstore,
+                &provider,
+                vec![foreign_record(Some(b"not-a-json-key"))],
+            )
+            .await;
+        }
+
+        let entries = logstore
+            .read(&provider, 0)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2);
+
+        let mut entries = entries
+            .into_iter()
+            .map(|entry| (entry.region_id(), entry.into_multiple_part_entry().unwrap()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(entries.remove(&region_a).unwrap().parts.concat(), data_a);
+        assert_eq!(entries.remove(&region_b).unwrap().parts.concat(), data_b);
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_read_finishes_when_last_record_is_unparsable() {
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(32)).await;
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
+        let provider = Provider::kafka_provider(topic_name);
+
+        let region_id = RegionId::new(1, 1);
+        let mut expected = generate_entries(&logstore, &provider, 3, region_id, 128);
+        logstore.append_batch(expected.clone()).await.unwrap();
+        // Appends an unparsable record as the last record of the read range.
+        produce_records(
+            &logstore,
+            &provider,
+            vec![foreign_record(Some(b"not-a-json-key"))],
+        )
+        .await;
+
+        let entries = tokio::time::timeout(
+            Duration::from_secs(30),
+            logstore
+                .read(&provider, 0)
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>(),
+        )
+        .await
+        .expect("read should finish after skipping the unparsable record")
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+        expected.iter_mut().for_each(|entry| entry.set_entry_id(0));
+        let mut entries = entries;
+        entries.iter_mut().for_each(|entry| entry.set_entry_id(0));
+        assert_eq!(entries, expected);
+    }
+
+    #[tokio::test]
+    async fn test_read_skips_foreign_records_of_every_kind() {
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(32)).await;
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
+        let provider = Provider::kafka_provider(topic_name);
+
+        // Places every kind of unparsable record before the first entry.
+        for record in foreign_records() {
+            produce_records(&logstore, &provider, vec![record]).await;
+        }
+
+        let region_id = RegionId::new(1, 1);
+        let mut expected = generate_entries(&logstore, &provider, 1, region_id, 128);
+        logstore.append_batch(expected.clone()).await.unwrap();
+
+        let entries = logstore
+            .read(&provider, 0)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+        expected.iter_mut().for_each(|entry| entry.set_entry_id(0));
+        let mut entries = entries;
+        entries.iter_mut().for_each(|entry| entry.set_entry_id(0));
+        assert_eq!(entries, expected);
+    }
+
+    #[tokio::test]
+    async fn test_read_finishes_when_topic_only_has_foreign_records() {
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(32)).await;
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
+        let provider = Provider::kafka_provider(topic_name);
+
+        for record in foreign_records() {
+            produce_records(&logstore, &provider, vec![record]).await;
+        }
+
+        // Asserts the read range covers the produced records; an empty range would let `read`
+        // return without exercising the skip path.
+        assert_eq!(log_end_offset(&logstore, &provider).await, 4);
+
+        let entries = tokio::time::timeout(
+            Duration::from_secs(30),
+            logstore
+                .read(&provider, 0)
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>(),
+        )
+        .await
+        .expect("read should finish after skipping all unparsable records")
+        .unwrap();
+
+        assert!(entries.into_iter().flatten().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_read_fails_on_incompatible_record_meta() {
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(32)).await;
+
+        // Keys that look like a `RecordMeta` but cannot be decoded by this version. They may
+        // come from an incompatible version of the log store, so the read must not skip them.
+        let keys: [&[u8]; 2] = [
+            // A `RecordType` variant this version does not know.
+            br#"{"version": 0, "tp": "Compressed", "entry_id": 0, "ns": {"region_id": 1, "topic": ""}}"#,
+            // A field with the wrong type.
+            br#"{"version": "0", "tp": "Full", "entry_id": 0, "ns": {"region_id": 1, "topic": ""}}"#,
+        ];
+        for key in keys {
+            let topic_name = uuid::Uuid::new_v4().to_string();
+            prepare_topic(&logstore, &topic_name).await;
+            let provider = Provider::kafka_provider(topic_name);
+            produce_records(&logstore, &provider, vec![foreign_record(Some(key))]).await;
+
+            let err = logstore
+                .read(&provider, 0)
+                .await
+                .unwrap()
+                .try_collect::<Vec<Vec<Entry>>>()
+                .await
+                .unwrap_err();
+            assert_matches!(err, error::Error::DecodeJson { .. });
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_fails_on_missing_middle_part() {
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(8)).await;
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
+        let provider = Provider::kafka_provider(topic_name);
+
+        let region_id = RegionId::new(1, 1);
+        // Splits the entry into First, Middle(1), Middle(2) and Last.
+        let max_data_size = 8 * 1024 - ESTIMATED_META_SIZE;
+        let data = vec![7u8; max_data_size * 3 + 10];
+        let entry = logstore.entry(data, 0, region_id, &provider).unwrap();
+        let records = convert_to_kafka_records(entry).unwrap();
+        assert_eq!(records.len(), 4);
+
+        // Only a missing part of an entry we wrote is fatal; a foreign record is skipped
+        // because it cannot be one of our parts.
+        produce_records(
+            &logstore,
+            &provider,
+            vec![foreign_record(Some(b"not-a-json-key"))],
+        )
+        .await;
+        produce_records(&logstore, &provider, vec![records[0].clone()]).await;
+        produce_records(&logstore, &provider, vec![records[2].clone()]).await;
+
+        let err = logstore
+            .read(&provider, 0)
+            .await
+            .unwrap()
+            .try_collect::<Vec<Vec<Entry>>>()
+            .await
+            .unwrap_err();
+        assert_matches!(err, error::Error::IllegalSequence { .. });
+    }
+
+    #[tokio::test]
+    async fn test_read_succeeds_on_two_part_entry() {
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(8)).await;
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
+        let provider = Provider::kafka_provider(topic_name);
+
+        let region_id = RegionId::new(1, 1);
+        // Splits the entry into First and Last, without any middle part.
+        let max_data_size = 8 * 1024 - ESTIMATED_META_SIZE;
+        let data = vec![7u8; max_data_size + 10];
+        let entry = logstore
+            .entry(data.clone(), 0, region_id, &provider)
+            .unwrap();
+        let records = convert_to_kafka_records(entry).unwrap();
+        assert_eq!(records.len(), 2);
+
+        for record in records {
+            produce_records(&logstore, &provider, vec![record]).await;
+        }
+
+        let entries = logstore
+            .read(&provider, 0)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        let entry = entries
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_multiple_part_entry()
+            .unwrap();
+        assert_eq!(
+            entry.headers,
+            vec![MultiplePartHeader::First, MultiplePartHeader::Last]
+        );
+        assert_eq!(entry.parts.concat(), data);
     }
 
     #[tokio::test]

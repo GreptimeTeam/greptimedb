@@ -19,7 +19,7 @@ flowchart TD
     A["POST /v1/otlp/v1/traces<br/>OTLP protobuf"] --> B["HTTP handler<br/>decode, select table and pipeline"]
     B --> C["Instance::traces<br/>permission and interceptor"]
     C --> D["Derive trace conventions<br/>parse resource/scope groups"]
-    D --> E["Chunk spans within each group"]
+    D --> E["Chunk spans across groups"]
     E --> F{"Trace pipeline"}
 
     F -->|greptime_trace_v0| G["v0 conversion<br/>fixed columns and JSON attributes"]
@@ -72,8 +72,10 @@ After permission checks, admission counts all spans in the request once per
 database. Chunks, schema retries, and derived lookup-table writes retain that
 admission; their actual writes still contribute WCU accounting.
 
-`ingest_trace_spans` in [`trace_ingest.rs`](trace_ingest.rs) splits the spans in
-each group into owned chunks. `trace_ingest_chunk_size` defaults to 512; setting
+`ingest_trace_spans` in [`trace_ingest.rs`](trace_ingest.rs) splits the spans of
+all resource/scope groups in the request into owned chunks; a chunk can mix
+groups because every span carries its own resource and scope attributes.
+`trace_ingest_chunk_size` defaults to 512; setting
 it to 0 disables splitting. The option is defined in
 [`service_config/otlp.rs`](../../service_config/otlp.rs).
 
@@ -113,11 +115,11 @@ The v1 path performs these steps before the normal chunk writes:
    `TraceBatchSchema` that records observed scalar types, sparse row presence,
    and binary logical types. Drop the dense request after collecting its
    lightweight schema observations.
-2. Mark a chunk for span-only fallback if one column contains both raw OTLP
-   bytes and arrays or key-value lists encoded as JSONB. Both use protobuf
-   `BinaryValue`, but a Greptime column cannot represent both logical schemas.
-   The chunk bypasses request-wide schema planning and is reconciled span by
-   span.
+2. Split a chunk into single-span planning units if one column contains both
+   raw OTLP bytes and arrays or key-value lists encoded as JSONB. Both use
+   protobuf `BinaryValue`, but a Greptime column cannot represent both logical
+   schemas. Only the spans whose logical types conflict are removed from the
+   request-wide plan; the other spans keep contributing to it.
 3. Aggregate the compatible observations into `TraceRequestSchema` and
    compare them with the existing table schema and the fixed types in
    [`trace_semconv.rs`](trace_semconv.rs).
@@ -150,7 +152,7 @@ determines the next action when that preparation fails:
 
 | Reaction | Behavior |
 | --- | --- |
-| `RetryPerSpan` | Prepare and write each span independently. Successful spans are accepted; deterministic per-span preparation failures are rejected. A v1 chunk with incompatible raw-binary and JSONB values starts here without attempting a chunk write. |
+| `RetryPerSpan` | Prepare and write each span independently. Successful spans are accepted; deterministic per-span preparation failures are rejected. |
 | `DiscardChunk` | Do not retry the chunk at span granularity. Count every span in the chunk as rejected. |
 | `Propagate` | Return retryable or unclassified failures instead of reporting a partial success. Retry hints take precedence over status-code classification. |
 

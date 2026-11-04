@@ -152,6 +152,15 @@ impl PartitionPruner {
         pruned
     }
 
+    /// Returns the pre-filter mode for a file index in the scan input.
+    /// Defaults to [`PreFilterMode::SkipFields`] when no mode was recorded.
+    pub(crate) fn pre_filter_mode(&self, file_index: usize) -> PreFilterMode {
+        self.pre_filter_modes
+            .get(file_index)
+            .copied()
+            .unwrap_or(PreFilterMode::SkipFields)
+    }
+
     /// Pre-fetches upcoming files starting from the given position.
     fn prefetch_upcoming_files(&self, current_pos: usize, partition_metrics: &PartitionMetrics) {
         let start = current_pos + 1;
@@ -166,13 +175,6 @@ impl PartitionPruner {
                 Some(partition_metrics.clone()),
             );
         }
-    }
-
-    fn pre_filter_mode(&self, file_index: usize) -> PreFilterMode {
-        self.pre_filter_modes
-            .get(file_index)
-            .copied()
-            .unwrap_or(PreFilterMode::SkipFields)
     }
 
     fn file_index(&self, index: RowGroupIndex) -> Option<usize> {
@@ -810,7 +812,7 @@ mod tests {
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
-    use crate::read::range::RowGroupIndex;
+    use crate::read::range::{RangeMeta, RowGroupIndex};
     use crate::read::scan_region::{PredicateGroup, ScanInput};
     use crate::read::scan_util::PartitionMetrics;
     use crate::sst::file::{FileHandle, FileMeta};
@@ -853,7 +855,13 @@ mod tests {
             .with_files(files)
             .with_append_mode(true)
             .build();
-        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let ranges = RangeMeta::unordered_scan_ranges(&input).await;
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(
+            input,
+            ranges,
+            query_start,
+        ));
         let pruner = Arc::new(Pruner::new_with_options(
             stream_ctx,
             1,
@@ -912,7 +920,13 @@ mod tests {
             .with_predicate(predicate)
             .with_append_mode(true)
             .build();
-        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let ranges = RangeMeta::unordered_scan_ranges(&input).await;
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(
+            input,
+            ranges,
+            query_start,
+        ));
         let pruner = Arc::new(Pruner::new(stream_ctx, 1));
         (env, pruner)
     }

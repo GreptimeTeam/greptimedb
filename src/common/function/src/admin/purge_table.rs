@@ -157,7 +157,11 @@ mod tests {
         async fn query_procedure_state(&self, _: &str) -> Result<ProcedureStateResponse> {
             unreachable!()
         }
-        async fn manage_region_follower(&self, _: ManageRegionFollowerRequest) -> Result<()> {
+        async fn manage_region_follower(
+            &self,
+            _query_ctx: QueryContextRef,
+            _request: ManageRegionFollowerRequest,
+        ) -> Result<()> {
             unreachable!()
         }
         fn catalog_manager(&self) -> &CatalogManagerRef {

@@ -118,21 +118,34 @@ impl RegionScanExec {
         }
 
         let metadata = scanner.metadata();
-        let mut pk_names = metadata
+        // Keep the primary key columns in the order reported by the metadata (for a metric
+        // region that is the physical row key order). Reordering them would let a projected
+        // logical tag look like a prefix of the row key, which yields ordering and
+        // partitioning claims the scanner cannot honour.
+        let pk_names = metadata
             .primary_key_columns()
             .map(|col| col.column_schema.name.clone())
             .collect::<Vec<_>>();
-        // workaround for logical table
-        if scanner.properties().is_logical_region() {
-            pk_names.sort_unstable();
-        }
+        // A region emits rows ordered by its primary key columns and then by the time
+        // index column. A primary key column that is not projected is absent from the
+        // arrow schema, and it also breaks the ordering of every primary key column that
+        // follows it (e.g. the physical `__table_id`/`__tsid` prefix of a metric region
+        // when reading a logical table). Thus only the longest fully projected prefix of
+        // the primary key can describe the output ordering, and that prefix can be empty.
+        let projected_pk_prefix_len = pk_names
+            .iter()
+            .position(|name| Column::new_with_schema(name, &arrow_schema).is_err())
+            .unwrap_or(pk_names.len());
+        // Whether the projected prefix covers the whole row key.
+        let all_pk_projected = projected_pk_prefix_len == pk_names.len();
+        let projected_pk_names = &pk_names[..projected_pk_prefix_len];
         let pk_columns = pk_names
             .iter()
             .filter_map(
                 |col| Some(Arc::new(Column::new_with_schema(col, &arrow_schema).ok()?) as _),
             )
             .collect::<Vec<_>>();
-        let pk_sort_columns: Vec<PhysicalSortExpr> = pk_names
+        let pk_sort_columns: Vec<PhysicalSortExpr> = projected_pk_names
             .iter()
             .filter_map(|col| {
                 Some(PhysicalSortExpr::new(
@@ -165,21 +178,21 @@ impl RegionScanExec {
                 let mut orderings = Vec::with_capacity(2);
 
                 let mut pk_time_ordering = pk_sort_columns.clone();
-                if let Some(ts) = ts_col.clone() {
+                // The time index column extends the ordering only when the whole row key
+                // precedes it; otherwise rows of different series can interleave.
+                if all_pk_projected && let Some(ts) = ts_col.clone() {
                     pk_time_ordering.push(ts);
                 }
                 orderings.push(pk_time_ordering);
 
-                // Metric engine physical tables keep tag columns alongside `__tsid`. When `__tsid`
-                // is present, the scan output is also ordered by `(__tsid, time index)` which can
-                // help eliminate redundant sorts for promql plans (e.g. SeriesDivide).
-                //
-                // `pk_time_ordering` and the potential `(__tsid, time index)` ordering are actually
-                // the same thing, thus present in one `OrderingEquivalenceClass`.
-                if let (Ok(tsid_col), Some(ts)) = (
-                    Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
-                    ts_col.clone(),
-                ) {
+                // Only logical metric scans constrain the physical key to one source table.
+                // A shared table can have the same TSID under different table IDs.
+                if scanner_props.is_logical_region()
+                    && let (Ok(tsid_col), Some(ts)) = (
+                        Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
+                        ts_col.clone(),
+                    )
+                {
                     orderings.push(vec![
                         PhysicalSortExpr::new(
                             Arc::new(tsid_col) as _,
@@ -210,13 +223,13 @@ impl RegionScanExec {
         let partitioning = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
                 match Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema) {
-                    Ok(tsid_col) => {
+                    Ok(tsid_col) if scanner_props.is_logical_region() => {
                         Partitioning::Hash(vec![Arc::new(tsid_col) as _], num_output_partition)
                     }
-                    Err(_) if pk_columns.len() == pk_names.len() => {
+                    _ if pk_columns.len() == pk_names.len() => {
                         Partitioning::Hash(pk_columns.clone(), num_output_partition)
                     }
-                    Err(_) => Partitioning::UnknownPartitioning(num_output_partition),
+                    _ => Partitioning::UnknownPartitioning(num_output_partition),
                 }
             }
             Some(TimeSeriesDistribution::TimeWindowed) | None => {
@@ -441,6 +454,7 @@ impl ExecutionPlan for RegionScanExec {
 
         let ctx = QueryScanContext {
             explain_verbose: self.explain_verbose,
+            memory_pool: context.memory_pool().clone(),
         };
         let stream = self
             .scanner
@@ -507,13 +521,21 @@ impl ExecutionPlan for RegionScanExec {
         let statistics = if scanner.properties().total_rows_is_exact()
             && !scanner.has_predicate_without_region()
         {
+            // Only the row count is known. DataFusion answers `count(col)` as
+            // `num_rows - null_count` and `count(DISTINCT col)` as `distinct_count`
+            // without scanning, so these must stay absent unless the schema
+            // guarantees them. Non-nullable columns (including the time index that
+            // `count(*)` is rewritten to) keep an exact zero null count.
             let column_statistics = self
                 .arrow_schema
                 .fields
                 .iter()
-                .map(|_| ColumnStatistics {
-                    distinct_count: Precision::Exact(self.total_rows),
-                    null_count: Precision::Exact(0), // all null rows are counted for append-only table
+                .map(|field| ColumnStatistics {
+                    null_count: if field.is_nullable() {
+                        Precision::Absent
+                    } else {
+                        Precision::Exact(0)
+                    },
                     ..Default::default()
                 })
                 .collect();
@@ -693,10 +715,13 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
     use futures::TryStreamExt;
+    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
     use store_api::region_engine::{
         PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties, SinglePartitionScanner,
     };
+    use store_api::storage::consts::ReservedColumnId;
     use store_api::storage::{RegionId, TimeSeriesDistribution};
 
     use super::*;
@@ -707,6 +732,7 @@ mod test {
         properties: ScannerProperties,
         metadata: store_api::metadata::RegionMetadataRef,
         dynamic_filters: Arc<Mutex<Vec<Arc<DynamicFilterPhysicalExpr>>>>,
+        observed_pool: Arc<Mutex<Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>>>,
     }
 
     impl fmt::Display for RepeatableScanner {
@@ -745,10 +771,11 @@ mod test {
 
         fn scan_partition(
             &self,
-            _ctx: &QueryScanContext,
+            ctx: &QueryScanContext,
             _metrics_set: &ExecutionPlanMetricsSet,
             _partition: usize,
         ) -> Result<SendableRecordBatchStream, BoxedError> {
+            *self.observed_pool.lock().unwrap() = Some(ctx.memory_pool.clone());
             Ok(self.batches.as_stream())
         }
 
@@ -935,6 +962,7 @@ mod test {
                 batches,
                 properties: ScannerProperties::new(vec![vec![], vec![]], false, 0),
                 metadata: metadata.clone(),
+                observed_pool: Default::default(),
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
             });
             let request = ScanRequest {
@@ -953,6 +981,301 @@ mod test {
         }
     }
 
+    /// Returns whether the scan claims the given output ordering.
+    fn claims_ordering(plan: &RegionScanExec, names: &[&str]) -> bool {
+        plan.properties()
+            .equivalence_properties()
+            .ordering_satisfy(names.iter().map(|name| {
+                PhysicalSortExpr::new(
+                    Arc::new(Column::new_with_schema(name, &plan.arrow_schema).unwrap()),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: true,
+                    },
+                )
+            }))
+            .unwrap()
+    }
+
+    /// Column schema used by the ordering fixtures below.
+    fn column_schema_of(name: &str) -> ColumnSchema {
+        let data_type = match name {
+            "ts" => ConcreteDataType::timestamp_millisecond_datatype(),
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME => ConcreteDataType::uint32_datatype(),
+            DATA_SCHEMA_TSID_COLUMN_NAME => ConcreteDataType::uint64_datatype(),
+            _ => ConcreteDataType::string_datatype(),
+        };
+        ColumnSchema::new(name, data_type, false)
+    }
+
+    /// The scan must describe its output ordering with the primary key order reported by
+    /// the metadata. Sorting the names (the removed logical-table workaround) would let a
+    /// projected column look like a row key prefix and claim an ordering the scanner does
+    /// not produce; the time index only extends a fully projected row key.
+    #[test]
+    fn test_per_series_ordering_follows_metadata_pk_order() {
+        // Deliberately not alphabetical: sorting these names would give `[a, b, z]`.
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5690));
+        for (index, name) in ["z", "a", "b", "ts"].into_iter().enumerate() {
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: column_schema_of(name),
+                semantic_type: if name == "ts" {
+                    SemanticType::Timestamp
+                } else {
+                    SemanticType::Tag
+                },
+                column_id: index as u32 + 1,
+            });
+        }
+        builder.primary_key(vec![1, 2, 3]);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        // The claims must not depend on the scanner reporting a logical region.
+        for logical_region in [false, true] {
+            for (projection, claimed, unclaimed) in [
+                // Missing the first key: neither the remaining keys nor the time index are
+                // ordered.
+                (
+                    vec!["a", "b", "ts"],
+                    vec![],
+                    vec![vec!["a"], vec!["b"], vec!["ts"], vec!["a", "b"]],
+                ),
+                // Missing a key in the middle: only the prefix before it is ordered.
+                (
+                    vec!["z", "b", "ts"],
+                    vec![vec!["z"]],
+                    vec![vec!["b"], vec!["z", "b"], vec!["z", "ts"]],
+                ),
+                // A valid but incomplete prefix: the time index is not ordered after it.
+                (
+                    vec!["z", "a", "ts"],
+                    vec![vec!["z"], vec!["z", "a"]],
+                    vec![vec!["a", "z"], vec!["z", "a", "ts"]],
+                ),
+                // The whole row key followed by the time index.
+                (
+                    vec!["z", "a", "b", "ts"],
+                    vec![vec!["z", "a", "b"], vec!["z", "a", "b", "ts"]],
+                    vec![vec!["a"], vec!["a", "b", "z"]],
+                ),
+            ] {
+                let schema = Arc::new(Schema::new(
+                    projection
+                        .iter()
+                        .map(|name| column_schema_of(name))
+                        .collect(),
+                ));
+                let mut properties = ScannerProperties::new(vec![vec![], vec![]], false, 0);
+                properties.set_logical_region(logical_region);
+                let scanner = Box::new(RepeatableScanner {
+                    batches: RecordBatches::try_new(schema, vec![]).unwrap(),
+                    properties,
+                    metadata: metadata.clone(),
+                    dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+                    observed_pool: Default::default(),
+                });
+                let plan = RegionScanExec::new(
+                    scanner,
+                    ScanRequest {
+                        distribution: Some(TimeSeriesDistribution::PerSeries),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+
+                for ordering in claimed {
+                    assert!(
+                        claims_ordering(&plan, &ordering),
+                        "logical_region={logical_region} projection {projection:?} must claim \
+                         ordering {ordering:?}"
+                    );
+                }
+                for ordering in unclaimed {
+                    assert!(
+                        !claims_ordering(&plan, &ordering),
+                        "logical_region={logical_region} projection {projection:?} must not \
+                         claim ordering {ordering:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Metric TSID properties require projecting `__tsid` and restricting the scan to one
+    /// `__table_id`; hiding the physical row-key prefix must not claim a visible tag or time as
+    /// order or hash partition columns.
+    #[test]
+    fn test_metric_projection_claims_only_projected_row_key_prefix() {
+        for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
+            check_metric_projection_ordering(encoding);
+        }
+    }
+
+    fn check_metric_projection_ordering(encoding: PrimaryKeyEncoding) {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5691));
+        builder.primary_key_encoding(encoding);
+        for (name, column_id) in [
+            (
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ReservedColumnId::table_id(),
+            ),
+            (DATA_SCHEMA_TSID_COLUMN_NAME, ReservedColumnId::tsid()),
+            ("A", 1),
+            ("marker", 2),
+            ("ts", 3),
+        ] {
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: column_schema_of(name),
+                semantic_type: if name == "ts" {
+                    SemanticType::Timestamp
+                } else {
+                    SemanticType::Tag
+                },
+                column_id,
+            });
+        }
+        // The physical row key order: `__table_id`, `__tsid`, then the tag columns.
+        builder.primary_key(vec![
+            ReservedColumnId::table_id(),
+            ReservedColumnId::tsid(),
+            1,
+            2,
+        ]);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        for (projection, logical_region, partitioned_by_tsid, claimed, unclaimed) in [
+            (
+                vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME, "A", "ts"],
+                false,
+                false,
+                vec![vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME]],
+                vec![vec!["A"], vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME, "ts"]],
+            ),
+            // The logical projection drops the row key prefix, so `A` is not a prefix of the
+            // row key and neither `A` nor `ts` is ordered.
+            (
+                vec!["A", "marker", "ts"],
+                true,
+                false,
+                vec![],
+                vec![vec!["A"], vec!["marker"], vec!["ts"], vec!["A", "ts"]],
+            ),
+            // Projecting internal `__tsid` plus the single-table filter preserves metric TSID properties.
+            (
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME, "A", "marker", "ts"],
+                true,
+                true,
+                vec![
+                    vec![DATA_SCHEMA_TSID_COLUMN_NAME],
+                    vec![DATA_SCHEMA_TSID_COLUMN_NAME, "ts"],
+                ],
+                vec![vec!["A"], vec!["ts"], vec!["A", "ts"]],
+            ),
+            // Shared exemplar tables project TSID too, but span multiple source tables.
+            (
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME, "A", "marker", "ts"],
+                false,
+                false,
+                vec![],
+                vec![
+                    vec![DATA_SCHEMA_TSID_COLUMN_NAME],
+                    vec![DATA_SCHEMA_TSID_COLUMN_NAME, "ts"],
+                ],
+            ),
+        ] {
+            let schema = Arc::new(Schema::new(
+                projection
+                    .iter()
+                    .map(|name| column_schema_of(name))
+                    .collect(),
+            ));
+            let mut properties = ScannerProperties::new(vec![vec![], vec![]], false, 0);
+            properties.set_logical_region(logical_region);
+            let scanner = Box::new(RepeatableScanner {
+                batches: RecordBatches::try_new(schema, vec![]).unwrap(),
+                properties,
+                metadata: metadata.clone(),
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+                observed_pool: Default::default(),
+            });
+            let plan = RegionScanExec::new(
+                scanner,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    filters: if partitioned_by_tsid {
+                        vec![
+                            datafusion_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                                .eq(datafusion_expr::lit(42u32)),
+                        ]
+                    } else {
+                        vec![]
+                    },
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+            let expected_partitioning = if partitioned_by_tsid {
+                Partitioning::Hash(
+                    vec![Arc::new(
+                        Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &plan.arrow_schema)
+                            .unwrap(),
+                    ) as _],
+                    2,
+                )
+            } else {
+                Partitioning::UnknownPartitioning(2)
+            };
+            match (&plan.properties.partitioning, &expected_partitioning) {
+                (
+                    Partitioning::UnknownPartitioning(actual_count),
+                    Partitioning::UnknownPartitioning(expected_count),
+                ) => assert_eq!(actual_count, expected_count, "projection {projection:?}"),
+                (actual, expected) => assert_eq!(actual, expected, "projection {projection:?}"),
+            }
+
+            for ordering in claimed {
+                assert!(
+                    claims_ordering(&plan, &ordering),
+                    "projection {projection:?} must claim ordering {ordering:?}"
+                );
+            }
+            for ordering in unclaimed {
+                assert!(
+                    !claims_ordering(&plan, &ordering),
+                    "projection {projection:?} must not claim ordering {ordering:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_execute_forwards_runtime_memory_pool() {
+        let (schema, batch, metadata) = dynamic_filter_test_data(5686, false);
+        let observed_pool = Arc::new(Mutex::new(None));
+        let scanner = RepeatableScanner {
+            batches: RecordBatches::try_new(schema, vec![batch]).unwrap(),
+            properties: ScannerProperties::default(),
+            metadata,
+            dynamic_filters: Default::default(),
+            observed_pool: observed_pool.clone(),
+        };
+        let plan =
+            Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap());
+        for _ in 0..2 {
+            let context = SessionContext::new().task_ctx();
+            let pool = context.memory_pool().clone();
+            drop(plan.execute(0, context).unwrap());
+            assert!(Arc::ptr_eq(
+                observed_pool.lock().unwrap().as_ref().unwrap(),
+                &pool
+            ));
+            plan.scanner.lock().unwrap().reset_state();
+        }
+    }
+
     #[test]
     fn test_count_statistics_require_exact_source_rows() {
         for (append_mode, exact, expected) in [
@@ -960,7 +1283,8 @@ mod test {
             (true, true, Precision::Exact(3)),
             (false, true, Precision::Absent),
         ] {
-            let (schema, batch, metadata) = dynamic_filter_test_data(5685, false);
+            // Column `a` is nullable and `ts` is not.
+            let (schema, batch, metadata) = dynamic_filter_test_data(5685, true);
             let scanner = Box::new(RepeatableScanner {
                 batches: RecordBatches::try_new(schema, vec![batch]).unwrap(),
                 properties: ScannerProperties::default()
@@ -969,15 +1293,22 @@ mod test {
                     .with_total_rows_is_exact(exact),
                 metadata,
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+                observed_pool: Default::default(),
             });
             let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
-            assert_eq!(
-                StatisticsContext::new()
-                    .compute(&plan, &StatisticsArgs::new())
-                    .unwrap()
-                    .num_rows,
-                expected,
-            );
+            let stats = StatisticsContext::new()
+                .compute(&plan, &StatisticsArgs::new())
+                .unwrap();
+            assert_eq!(stats.num_rows, expected);
+            if expected != Precision::Absent {
+                let [a, ts] = stats.column_statistics.as_slice() else {
+                    panic!("unexpected column statistics: {stats:?}");
+                };
+                assert_eq!(a.null_count, Precision::Absent);
+                assert_eq!(ts.null_count, Precision::Exact(0));
+                assert_eq!(a.distinct_count, Precision::Absent);
+                assert_eq!(ts.distinct_count, Precision::Absent);
+            }
             assert_eq!(
                 StatisticsContext::new()
                     .compute(&plan, &StatisticsArgs::new().with_partition(Some(0)))
@@ -998,6 +1329,7 @@ mod test {
             properties: ScannerProperties::default(),
             metadata,
             dynamic_filters: scanner_dynamic_filters.clone(),
+            observed_pool: Default::default(),
         };
         let plan =
             Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap());

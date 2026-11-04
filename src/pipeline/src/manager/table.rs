@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use api::v1::value::ValueData;
 use api::v1::{
@@ -46,10 +45,11 @@ use crate::error::{
     ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
     MultiPipelineWithDiffSchemaSnafu, PipelineNotFoundSnafu, RecordBatchLenNotMatchSnafu, Result,
 };
-use crate::etl::{Content, Pipeline, parse};
+use crate::etl::{Content, Pipeline, parse_with_options};
 use crate::manager::pipeline_cache::{PipelineCache, PipelineContent};
 use crate::manager::{PipelineInfo, PipelineVersion};
 use crate::metrics::METRIC_PIPELINE_TABLE_FIND_COUNT;
+use crate::options::PipelineOptions;
 use crate::util::prepare_dataframe_conditions;
 
 pub(crate) const PIPELINE_TABLE_NAME: &str = "pipelines";
@@ -68,6 +68,7 @@ pub struct PipelineTable {
     table: TableRef,
     query_engine: QueryEngineRef,
     cache: PipelineCache,
+    options: PipelineOptions,
 }
 
 impl PipelineTable {
@@ -77,14 +78,15 @@ impl PipelineTable {
         statement_executor: StatementExecutorRef,
         table: TableRef,
         query_engine: QueryEngineRef,
-        cache_ttl: Duration,
+        options: &PipelineOptions,
     ) -> Self {
         Self {
             inserter,
             statement_executor,
             table,
             query_engine,
-            cache: PipelineCache::new(cache_ttl),
+            cache: PipelineCache::new(options.cache_ttl),
+            options: options.clone(),
         }
     }
 
@@ -198,9 +200,9 @@ impl PipelineTable {
     }
 
     /// Compile a pipeline from a string.
-    pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline> {
+    pub fn compile_pipeline(&self, pipeline: &str) -> Result<Pipeline> {
         let yaml_content = Content::Yaml(pipeline);
-        parse(&yaml_content)
+        parse_with_options(&yaml_content, &self.options)
     }
 
     /// Insert a pipeline into the pipeline table.
@@ -267,7 +269,7 @@ impl PipelineTable {
         self.cache
             .get_pipeline_with(schema, name, input_version, async {
                 let pipeline_content = self.get_pipeline_str(schema, name, input_version).await?;
-                Ok(Arc::new(Self::compile_pipeline(&pipeline_content.content)?))
+                Ok(Arc::new(self.compile_pipeline(&pipeline_content.content)?))
             })
             .await
     }
@@ -373,7 +375,7 @@ impl PipelineTable {
         content_type: &str,
         pipeline: &str,
     ) -> Result<PipelineInfo> {
-        let compiled_pipeline = Arc::new(Self::compile_pipeline(pipeline)?);
+        let compiled_pipeline = Arc::new(self.compile_pipeline(pipeline)?);
         // we will use the version in the future
         let version = self
             .insert_pipeline_to_pipeline_table(name, content_type, pipeline)

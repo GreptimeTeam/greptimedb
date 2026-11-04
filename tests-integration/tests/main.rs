@@ -32,6 +32,7 @@ mod sql;
 #[macro_use]
 mod region_migration;
 mod table_ddl_event;
+mod truncate;
 #[macro_use]
 mod repartition;
 mod repartition_event;

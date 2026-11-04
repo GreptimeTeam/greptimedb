@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod range;
+
+pub(crate) use range::RegionWalRange;
+
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::pin::Pin;
@@ -26,7 +30,7 @@ use pin_project::pin_project;
 use rskafka::client::partition::PartitionClient;
 use rskafka::record::RecordAndOffset;
 
-use crate::kafka::index::{NextBatchHint, RegionWalIndexIterator};
+use crate::kafka::consumer::range::NextBatchHint;
 
 pub struct FetchResult {
     /// The offsets of the fetched records.
@@ -88,7 +92,7 @@ const MAX_BATCH_SIZE: usize = 52428800;
 const AVG_RECORD_SIZE: usize = 256 * 1024;
 
 /// The [`Consumer`] struct represents a Kafka consumer that fetches messages from
-/// a Kafka cluster. Yielding records respecting the [`RegionWalIndexIterator`].
+/// a Kafka cluster. Yielding records respecting the [`RegionWalRange`].
 #[pin_project]
 #[derive(Builder)]
 #[builder(pattern = "owned")]
@@ -142,12 +146,12 @@ impl Consumer {
 pub(crate) struct RecordsBuffer {
     buffer: VecDeque<RecordAndOffset>,
 
-    index: Box<dyn RegionWalIndexIterator>,
+    index: RegionWalRange,
 }
 
 impl RecordsBuffer {
     /// Creates an empty [`RecordsBuffer`]
-    pub fn new(index: Box<dyn RegionWalIndexIterator>) -> Self {
+    pub fn new(index: RegionWalRange) -> Self {
         RecordsBuffer {
             buffer: VecDeque::new(),
             index,
@@ -297,7 +301,6 @@ mod tests {
 
     use super::*;
     use crate::kafka::consumer::{Consumer, RecordsBuffer};
-    use crate::kafka::index::{MultipleRegionWalIndexIterator, RegionWalRange, RegionWalVecIndex};
 
     #[derive(Debug)]
     struct MockFetchClient {
@@ -346,40 +349,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_consumer_with_index() {
-        common_telemetry::init_default_ut_logging();
-        let record = test_record();
-        let record_size = record.approximate_size();
-        let mock_client = MockFetchClient {
-            record: record.clone(),
-        };
-        let index = RegionWalVecIndex::new([1, 3, 4, 8, 10, 12], record_size * 3);
-        let consumer = Consumer {
-            last_high_watermark: -1,
-            client: Arc::new(mock_client),
-            max_batch_size: usize::MAX,
-            max_wait_ms: 500,
-            avg_record_size: record_size,
-            terminated: false,
-            buffer: RecordsBuffer {
-                buffer: VecDeque::new(),
-                index: Box::new(index),
-            },
-            fetch_fut: Fuse::terminated(),
-            total_fetched_bytes: 0,
-        };
-
-        let records = consumer.try_collect::<Vec<_>>().await.unwrap();
-        assert_eq!(
-            records
-                .into_iter()
-                .map(|(x, _)| x.offset)
-                .collect::<Vec<_>>(),
-            vec![1, 3, 4, 8, 10, 12]
-        )
-    }
-
-    #[tokio::test]
     async fn test_consumer_without_index() {
         common_telemetry::init_default_ut_logging();
         let record = test_record();
@@ -396,7 +365,7 @@ mod tests {
             terminated: false,
             buffer: RecordsBuffer {
                 buffer: VecDeque::new(),
-                index: Box::new(index),
+                index,
             },
             fetch_fut: Fuse::terminated(),
             total_fetched_bytes: 0,
@@ -413,44 +382,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_consumer_with_multiple_index() {
-        common_telemetry::init_default_ut_logging();
-        let record = test_record();
-        let mock_client = MockFetchClient {
-            record: record.clone(),
-        };
-
-        let iter0 = Box::new(RegionWalRange::new(0..0, 1024)) as _;
-        let iter1 = Box::new(RegionWalVecIndex::new(
-            [0, 1, 2, 7, 8, 11],
-            record.approximate_size() * 4,
-        )) as _;
-        let iter2 = Box::new(RegionWalRange::new(12..12, 1024)) as _;
-        let iter3 = Box::new(RegionWalRange::new(1024..1028, 1024)) as _;
-        let iter = MultipleRegionWalIndexIterator::new([iter0, iter1, iter2, iter3]);
-
-        let consumer = Consumer {
-            last_high_watermark: -1,
-            client: Arc::new(mock_client),
-            max_batch_size: usize::MAX,
-            max_wait_ms: 500,
-            avg_record_size: record.approximate_size(),
-            terminated: false,
-            buffer: RecordsBuffer {
-                buffer: VecDeque::new(),
-                index: Box::new(iter),
-            },
-            fetch_fut: Fuse::terminated(),
-            total_fetched_bytes: 0,
-        };
-
-        let records = consumer.try_collect::<Vec<_>>().await.unwrap();
-        assert_eq!(
-            records
+    async fn test_consumer_range_boundaries() {
+        for (start, end, max_batch_size) in [
+            (0, 0, 1024),
+            (5, 5, 1024),
+            (6, 5, 1024),
+            (5, 6, 1024),
+            (5, 35, 128),
+        ] {
+            let record = test_record();
+            let consumer = ConsumerBuilder::default()
+                .client(Arc::new(MockFetchClient {
+                    record: record.clone(),
+                }))
+                .buffer(RecordsBuffer::new(RegionWalRange::new(
+                    start..end,
+                    max_batch_size,
+                )))
+                .avg_record_size(record.approximate_size())
+                .build()
+                .unwrap();
+            let offsets = consumer
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
                 .into_iter()
-                .map(|(x, _)| x.offset)
-                .collect::<Vec<_>>(),
-            [0, 1, 2, 7, 8, 11, 1024, 1025, 1026, 1027]
-        )
+                .map(|(record, _)| record.offset as u64)
+                .collect::<Vec<_>>();
+            assert_eq!(offsets, (start..end).collect::<Vec<_>>());
+        }
     }
 }

@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+use common_base::secrets::SecretString;
 use common_config::config::Configurable;
 use common_event_recorder::EventRecorderOptions;
 use common_memory_manager::OnExhaustedPolicy;
@@ -36,9 +37,10 @@ use crate::heartbeat::HeartbeatTask;
 use crate::instance::Instance;
 use crate::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
-    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions,
+    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions, WriteRetryOptions,
 };
 
+/// Configures frontend protocols, query execution, and distributed write retries.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FrontendOptions {
@@ -74,7 +76,15 @@ pub struct FrontendOptions {
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub datanode: DatanodeClientOptions,
-    pub user_provider: Option<String>,
+    /// Retry policy for retryable distributed write failures.
+    pub write_retry: WriteRetryOptions,
+    /// The user provider for authentication.
+    ///
+    /// The inline `static_user_provider:cmd:` form carries plaintext
+    /// passwords, so the value is held as a [`SecretString`] and serialized
+    /// with those passwords redacted.
+    #[serde(serialize_with = "auth::serialize_user_provider_option")]
+    pub user_provider: Option<SecretString>,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
     pub slow_query: SlowQueryOptions,
@@ -110,6 +120,7 @@ impl Default for FrontendOptions {
             meta_client: None,
             logging: LoggingOptions::default(),
             datanode: DatanodeClientOptions::default(),
+            write_retry: WriteRetryOptions::default(),
             user_provider: None,
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
@@ -192,6 +203,7 @@ mod tests {
     use async_trait::async_trait;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_config::Configurable;
     use common_error::ext::ErrorExt;
     use common_error::from_header_to_err_code_msg;
     use common_error::status_code::StatusCode;
@@ -224,6 +236,134 @@ mod tests {
 
     type GrpcStream<T> =
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
+
+    #[test]
+    fn test_user_provider_redacts_cmd_passwords_in_config() {
+        use common_base::secrets::ExposeSecret;
+
+        let options = FrontendOptions {
+            user_provider: Some(
+                "static_user_provider:cmd:alice=secret,bob=pbkdf2_sha256:4096:aa:bb"
+                    .to_string()
+                    .into(),
+            ),
+            ..Default::default()
+        };
+
+        let serialized = options.to_toml().unwrap();
+        assert!(serialized.contains("user_provider = \"[REDACTED]\""));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("pbkdf2_sha256"));
+
+        assert_eq!(
+            options
+                .user_provider
+                .as_ref()
+                .map(|value| value.expose_secret().as_str()),
+            Some("static_user_provider:cmd:alice=secret,bob=pbkdf2_sha256:4096:aa:bb")
+        );
+
+        let debug = format!("{options:?}");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("pbkdf2_sha256"));
+    }
+
+    #[test]
+    fn test_user_provider_file_path_is_not_redacted_in_config() {
+        let options = FrontendOptions {
+            user_provider: Some(
+                "static_user_provider:file:/etc/greptimedb/users"
+                    .to_string()
+                    .into(),
+            ),
+            ..Default::default()
+        };
+
+        assert!(
+            options
+                .to_toml()
+                .unwrap()
+                .contains("static_user_provider:file:/etc/greptimedb/users")
+        );
+    }
+
+    #[test]
+    fn test_pipeline_host_access_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert!(!defaults.pipeline.allow_vrl_host_access);
+        let options: FrontendOptions =
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+        assert!(options.pipeline.allow_vrl_host_access);
+        let serialized = toml::to_string(&options).unwrap();
+        let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.pipeline, restored.pipeline);
+    }
+
+    #[test]
+    fn test_write_retry_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert_eq!(defaults.write_retry, WriteRetryOptions::default());
+        let options: FrontendOptions = toml::from_str(
+            r#"
+[write_retry]
+max_retries = 5
+initial_backoff = "250ms"
+max_backoff = "5s"
+backoff_multiplier = 3.0
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            options.write_retry,
+            WriteRetryOptions {
+                max_retries: 5,
+                initial_backoff: Duration::from_millis(250),
+                max_backoff: Duration::from_secs(5),
+                backoff_multiplier: 3.0,
+            }
+        );
+        options.write_retry.validate().unwrap();
+        let serialized = toml::to_string(&options).unwrap();
+        let parsed: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.write_retry, parsed.write_retry);
+        let disabled: FrontendOptions = toml::from_str("[write_retry]\nmax_retries = 0").unwrap();
+        assert_eq!(disabled.write_retry.max_retries, 0);
+        assert_eq!(
+            disabled.write_retry.initial_backoff,
+            defaults.write_retry.initial_backoff
+        );
+    }
+
+    #[test]
+    fn test_write_retry_config_from_env() {
+        temp_env::with_vars(
+            [
+                ("FRONTEND_RETRY_TEST__WRITE_RETRY__MAX_RETRIES", Some("4")),
+                (
+                    "FRONTEND_RETRY_TEST__WRITE_RETRY__INITIAL_BACKOFF",
+                    Some("500ms"),
+                ),
+                ("FRONTEND_RETRY_TEST__WRITE_RETRY__MAX_BACKOFF", Some("8s")),
+                (
+                    "FRONTEND_RETRY_TEST__WRITE_RETRY__BACKOFF_MULTIPLIER",
+                    Some("1.5"),
+                ),
+            ],
+            || {
+                let options =
+                    FrontendOptions::load_layered_options(None, "FRONTEND_RETRY_TEST").unwrap();
+                assert_eq!(
+                    options.write_retry,
+                    WriteRetryOptions {
+                        max_retries: 4,
+                        initial_backoff: Duration::from_millis(500),
+                        max_backoff: Duration::from_secs(8),
+                        backoff_multiplier: 1.5,
+                    }
+                );
+            },
+        );
+    }
 
     #[test]
     fn test_logical_batcher_protocols_from_env() {

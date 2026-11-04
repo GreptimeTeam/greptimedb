@@ -22,8 +22,9 @@ use common_batcher::flush_policy::FlushTrigger;
 use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use common_batcher::pending_worker::PendingWorker as PendingCore;
 use common_batcher::worker_registry::WorkerRegistry;
-use common_meta::node_manager::NodeManagerRef;
+use common_query::WriteProgress;
 use common_telemetry::debug;
+use operator::write_dispatcher::WriteDispatcherRef;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use table::metadata::TableId;
@@ -31,20 +32,21 @@ use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc, oneshot};
 
 use crate::batcher::flow_notifier::FlowNotifier;
 use crate::batcher::logical_table::BatchKey;
-use crate::batcher::logical_table::batch::{Batch, flush_batch_with_managers, spawn_flush};
+use crate::batcher::logical_table::batch::{self, Batch};
 use crate::batcher::logical_table::batch_convert::{RecordBatchWithTsIdx, TableBatch};
-use crate::error::Error;
 use crate::metrics::{PENDING_BATCHES, PENDING_ROWS, PENDING_WORKERS};
 
 pub(in crate::batcher::logical_table) struct PendingBatch {
+    inputs: usize,
     pub(in crate::batcher::logical_table) tables: HashMap<TableId, TableBatch>,
     pub(in crate::batcher::logical_table) db_string: String,
     pub(in crate::batcher::logical_table) ctx: QueryContextRef,
 }
 
 pub(in crate::batcher::logical_table) struct FlushWaiter {
-    pub(in crate::batcher::logical_table) response_tx:
-        oneshot::Sender<std::result::Result<(), Arc<Error>>>,
+    pub(in crate::batcher::logical_table) _completion:
+        Option<session::write_progress::PendingWrite>,
+    pub(in crate::batcher::logical_table) response_tx: oneshot::Sender<WriteProgress>,
     pub(in crate::batcher::logical_table) _permit: Arc<OwnedSemaphorePermit>,
 }
 
@@ -53,12 +55,14 @@ pub(in crate::batcher::logical_table) struct PendingWorker {
     pub(in crate::batcher::logical_table) tx: mpsc::Sender<WorkerCommand>,
 }
 
-pub(in crate::batcher::logical_table) enum WorkerCommand {
+/// Commands accepted by a logical-table batching worker.
+pub(crate) enum WorkerCommand {
     Submit {
+        _completion: Option<session::write_progress::PendingWrite>,
         table_batches: Vec<(String, u32, RecordBatchWithTsIdx)>,
         total_rows: usize,
         ctx: QueryContextRef,
-        response_tx: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
+        response_tx: oneshot::Sender<WriteProgress>,
         _permit: Arc<OwnedSemaphorePermit>,
     },
     #[cfg(test)]
@@ -69,6 +73,7 @@ impl PendingBatch {
     pub(in crate::batcher::logical_table) fn new(ctx: QueryContextRef) -> Self {
         let db_string = ctx.get_db_string();
         Self {
+            inputs: 0,
             tables: HashMap::new(),
             db_string,
             ctx,
@@ -92,15 +97,16 @@ impl PendingBatch {
     }
 }
 
+/// Starts a worker that accumulates logical rows and dispatches physical flushes.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::batcher::logical_table) fn start_worker(
+pub(crate) fn start_worker(
     key: BatchKey,
     worker_tx: mpsc::Sender<WorkerCommand>,
     workers: Arc<WorkerRegistry<BatchKey, WorkerCommand>>,
     mut rx: mpsc::Receiver<WorkerCommand>,
     shutdown: broadcast::Sender<()>,
     partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    write_dispatcher: WriteDispatcherRef,
     catalog_manager: CatalogManagerRef,
     flow_notification_tx: FlowNotifier,
     worker_idle_timeout: Duration,
@@ -120,30 +126,34 @@ pub(in crate::batcher::logical_table) fn start_worker(
             tokio::select! {
                 cmd = rx.recv() => {
                     match cmd {
-                        Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit }) => {
+                        Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit, _completion }) => {
                             let submitted_at = tokio::time::Instant::now();
                             idle_timer.as_mut().reset(submitted_at + worker_idle_timeout);
 
                             pending_flush.submit(
-                                FlushWaiter { response_tx, _permit },
+                                FlushWaiter { response_tx, _permit, _completion },
                                 total_rows,
                             );
+                            let progress = ctx.write_progress().cloned();
                             let pending_batch = batch.get_or_insert_with(||{
                                 PENDING_BATCHES.inc();
                                 PendingBatch::new(ctx)
                             });
 
-                            for (table_name, table_id, record_batch) in table_batches {
+                            for (table_name, table_id, mut record_batch) in table_batches {
+                                record_batch.progress = progress.clone();
+                                record_batch.owner = pending_batch.inputs;
                                 pending_batch.add_table_batch(table_name, table_id, record_batch);
                             }
 
+                            pending_batch.inputs += 1;
                             PENDING_ROWS.add(total_rows as i64);
 
                             if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, Some(FlushTrigger::Submission)) {
-                                spawn_flush(
+                                batch::spawn_flush(
                                     flush,
                                     partition_manager.clone(),
-                                    node_manager.clone(),
+                                    write_dispatcher.clone(),
                                     catalog_manager.clone(),
                                     flow_notification_tx.clone(),
                                     flush_limiter.clone(),
@@ -152,10 +162,10 @@ pub(in crate::batcher::logical_table) fn start_worker(
                         }
                         None => {
                             if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, None) {
-                                flush_batch_with_managers(
+                                batch::flush_batch_with_managers(
                                     flush,
                                     partition_manager.clone(),
-                                    node_manager.clone(),
+                                    write_dispatcher.clone(),
                                     catalog_manager.clone(),
                                     flow_notification_tx.clone(),
                                 ).await;
@@ -189,10 +199,10 @@ pub(in crate::batcher::logical_table) fn start_worker(
                 }
                 _ = pending_flush.wait_flush() => {
                     if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, Some(FlushTrigger::Deadline)) {
-                        spawn_flush(
+                        batch::spawn_flush(
                             flush,
                             partition_manager.clone(),
-                            node_manager.clone(),
+                            write_dispatcher.clone(),
                             catalog_manager.clone(),
                             flow_notification_tx.clone(),
                             flush_limiter.clone(),
@@ -201,10 +211,10 @@ pub(in crate::batcher::logical_table) fn start_worker(
                 }
                 _ = shutdown_rx.recv() => {
                     if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, None) {
-                        flush_batch_with_managers(
+                        batch::flush_batch_with_managers(
                             flush,
                             partition_manager.clone(),
-                            node_manager.clone(),
+                            write_dispatcher.clone(),
                             catalog_manager.clone(),
                             flow_notification_tx.clone(),
                         ).await;
@@ -272,6 +282,7 @@ pub(in crate::batcher::logical_table) fn drain_batch(
 
 #[cfg(test)]
 mod tests {
+    use common_query::WriteProgress;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
@@ -286,6 +297,7 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::node_manager::NodeManagerRef;
     use moka::future::CacheBuilder;
+    use operator::write_dispatcher::WriteDispatcher;
     use partition::cache::new_partition_info_cache;
     use partition::manager::PartitionRuleManager;
     use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
@@ -301,7 +313,6 @@ mod tests {
     use crate::batcher::logical_table::test_util::{
         ConcurrentMockNodeManager, mock_aligned_tag_batch,
     };
-    use crate::error::Error;
     use crate::metrics::FLOW_NOTIFICATION_DROPPED;
 
     #[tokio::test]
@@ -313,12 +324,14 @@ mod tests {
             PendingCore::new(TimingFlushPolicy::try_new(Duration::from_secs(10), 1).unwrap());
         pending_flush.submit(
             FlushWaiter {
+                _completion: None,
                 response_tx,
                 _permit: Arc::new(permit),
             },
             1,
         );
         let mut batch = Some(PendingBatch {
+            inputs: 1,
             tables: HashMap::from([(
                 42,
                 TableBatch {
@@ -359,6 +372,7 @@ mod tests {
             let (response_tx, mut response_rx) = oneshot::channel();
             pending_flush.submit(
                 FlushWaiter {
+                    _completion: None,
                     response_tx,
                     _permit: Arc::new(semaphore.clone().acquire_owned().await.unwrap()),
                 },
@@ -502,6 +516,10 @@ mod tests {
         let node_manager: NodeManagerRef = Arc::new(ConcurrentMockNodeManager {
             datanodes: Arc::new(HashMap::new()),
         });
+        let write_dispatcher = Arc::new(WriteDispatcher::new(
+            node_manager,
+            partition_manager.clone(),
+        ));
         let catalog_manager = MemoryCatalogManager::with_default_setup();
         let (flow_notification_tx, _flow_notification_rx) =
             FlowNotifier::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
@@ -515,7 +533,7 @@ mod tests {
             worker_rx,
             shutdown.clone(),
             partition_manager,
-            node_manager,
+            write_dispatcher,
             catalog_manager,
             flow_notification_tx,
             worker_idle_timeout,
@@ -602,11 +620,12 @@ mod tests {
         worker_tx: &mpsc::Sender<WorkerCommand>,
         total_rows: usize,
         timestamp: i64,
-    ) -> oneshot::Receiver<std::result::Result<(), Arc<Error>>> {
+    ) -> oneshot::Receiver<WriteProgress> {
         let (response_tx, response_rx) = oneshot::channel();
         let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
         worker_tx
             .send(WorkerCommand::Submit {
+                _completion: None,
                 table_batches: vec![(
                     "cpu".to_string(),
                     42,
@@ -633,9 +652,9 @@ mod tests {
     }
 
     async fn receive_mock_flush_result(
-        response_rx: oneshot::Receiver<std::result::Result<(), Arc<Error>>>,
+        response_rx: oneshot::Receiver<WriteProgress>,
         context: &str,
-    ) -> std::result::Result<(), Arc<Error>> {
+    ) -> WriteProgress {
         // Under paused time the timeout auto-advances the clock and fires
         // deterministically if the flush never completes.
         tokio::time::timeout(WORKER_TEST_TIMEOUT, response_rx)
@@ -644,14 +663,12 @@ mod tests {
             .expect("flush result channel closed without a result")
     }
 
-    fn assert_missing_physical_table(result: std::result::Result<(), Arc<Error>>) {
-        let err = result.expect_err("the empty catalog should make the flush fail");
+    fn assert_missing_physical_table(result: WriteProgress) {
+        let err = result
+            .error
+            .expect("the empty catalog should make the flush fail");
         assert!(
-            matches!(
-                err.as_ref(),
-                Error::Internal { err_msg }
-                    if err_msg.contains("not found during pending flush")
-            ),
+            err.to_string().contains("not found during pending flush"),
             "unexpected flush error: {err}"
         );
     }

@@ -81,6 +81,7 @@ impl GreptimeRequestHandler {
         channel: Channel,
     ) -> Result<Output> {
         let header = request.header.as_ref();
+        let hints = crate::hint_headers::validate_public_hints(hints)?;
         let query_ctx = create_query_context(channel, header, hints, HashMap::new())?;
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",

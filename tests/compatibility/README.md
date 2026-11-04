@@ -15,6 +15,20 @@ read-preference defaulting and unrelated metadata preservation:
 cargo nextest run -p session -E 'test(test_legacy_query_context_wire_defaults_to_leader)'
 ```
 
+The [native histogram Remote Read fixture](wire/native_histogram_remote_read/README.md)
+checks the sampled encoder against independent Prometheus protobuf values,
+including exact integer counts, custom bounds, and NaN payloads:
+
+```shell
+cargo nextest run -p servers -E 'test(native_histogram_remote_read_wire_fixture)'
+```
+
+## Object store WAL fixtures
+
+Frozen objects of the object store WAL are checked byte for byte by the format tests of
+`log-store`. The SQL runner cannot cover the object store WAL: it owns `wal.provider`. See the
+[fixture notes](wal/object_store/README.md).
+
 ## Quick Start
 
 ```shell

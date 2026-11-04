@@ -33,6 +33,7 @@ overwrite_entry_start_id = true
 [storage]
 type = 'File'
 data_home = '{data_home}'
+probe_on_startup = false
 
 [meta_client_options]
 metasrv_addrs = ['{addrs.metasrv_addr}']

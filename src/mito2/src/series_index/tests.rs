@@ -720,13 +720,13 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         let (bucket, entry) = &plan.builds[0];
         let mut ranges = HashMap::new();
         for file in &bucket.files {
-            let entry = build_range_index(store, &region, &version, file.clone())
+            let entry = build_range_index(store, &region, &version.metadata, file.clone())
                 .await
                 .unwrap()
                 .unwrap();
             ranges.insert(entry.file_id, entry);
         }
-        let handle = build_series_index(store, &region, &version, bucket, entry, purger)
+        let handle = build_series_index(store, &region, &version.metadata, bucket, entry, purger)
             .await
             .unwrap();
         let reused_path = series_index_path(region.region_id, entry.index_uuid);

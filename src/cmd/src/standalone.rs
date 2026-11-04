@@ -26,6 +26,7 @@ use catalog::kvbackend::{CatalogManagerConfiguratorRef, KvBackendCatalogManagerB
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use common_base::Plugins;
+use common_base::secrets::SecretString;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{Configurable, metadata_store_dir};
 use common_datasource::object_store::{LocalFileAccess, configured_local_path};
@@ -351,7 +352,7 @@ pub struct StartCommand {
     #[clap(long)]
     tls_watch: bool,
     #[clap(long)]
-    user_provider: Option<String>,
+    user_provider: Option<SecretString>,
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
     pub env_prefix: String,
     /// The working home directory of this standalone instance.
@@ -681,6 +682,9 @@ impl StartCommand {
         ));
 
         let ddl_context = DdlContext {
+            affinity_resolver: None,
+            affinity_fallback: Default::default(),
+            peer_alloc_context_provider: None,
             node_manager: node_manager.clone(),
             cache_invalidator: layered_cache_registry.clone(),
             memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
@@ -1094,7 +1098,6 @@ mod tests {
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::object_store::ObjectStoreWalConfig;
     use common_wal::options::{ObjectStoreWalOptions, WalOptions};
-    use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
     use servers::grpc::GrpcOptions;
     use servers::server::ServerHandlers;
@@ -1286,11 +1289,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_try_from_start_command_to_anymap() {
-        let fe_opts = FrontendOptions {
-            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            ..Default::default()
-        };
+    async fn test_user_provider_cli_redacts_passwords() {
+        let command = StartCommand::try_parse_from([
+            "standalone",
+            "--user-provider",
+            "static_user_provider:cmd:test=cli-secret",
+        ])
+        .unwrap();
+        let debug = format!("{command:#?}");
+        assert!(!debug.contains("cli-secret"));
+        assert!(debug.contains("[REDACTED]"));
+
+        let fe_opts = command
+            .load_options(&Default::default())
+            .unwrap()
+            .component
+            .frontend_options();
 
         let mut plugins = Plugins::new();
         plugins.insert(StandaloneFlag);
@@ -1302,7 +1316,7 @@ mod tests {
         let result = provider
             .authenticate(
                 Identity::UserId("test", None),
-                Password::PlainText("test".to_string().into()),
+                Password::PlainText("cli-secret".to_string().into()),
             )
             .await;
         let _ = result.unwrap();
@@ -1321,6 +1335,8 @@ mod tests {
         let mut file = create_named_temp_file();
         let toml_str = r#"
             enable_memory_catalog = true
+            max_concurrent_queries = 8
+            concurrent_query_limiter_timeout = "250ms"
 
             [wal]
             provider = "raft_engine"
@@ -1369,7 +1385,7 @@ mod tests {
         write!(file, "{}", toml_str).unwrap();
         let cmd = StartCommand {
             config_file: Some(file.path().to_str().unwrap().to_string()),
-            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            user_provider: Some("static_user_provider:cmd:test=test".to_string().into()),
             ..Default::default()
         };
 
@@ -1379,6 +1395,11 @@ mod tests {
             .component;
         let fe_opts = options.frontend_options();
         let dn_opts = options.datanode_options();
+        assert_eq!(dn_opts.max_concurrent_queries, 8);
+        assert_eq!(
+            dn_opts.concurrent_query_limiter_timeout,
+            Duration::from_millis(250)
+        );
         let logging_opts = options.logging;
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(33), fe_opts.http.timeout);
@@ -1427,7 +1448,7 @@ mod tests {
     #[test]
     fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
-            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            user_provider: Some("static_user_provider:cmd:test=test".to_string().into()),
             mysql_addr: Some("127.0.0.1:4002".to_string()),
             postgres_addr: Some("127.0.0.1:4003".to_string()),
             ..Default::default()

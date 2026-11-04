@@ -30,6 +30,7 @@ use std::fmt::{Debug, Display};
 use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
+use common_meta::affinity::{AffinityFallback, AffinityResolverRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl::allocator::region_routes::RegionRoutesAllocatorRef;
@@ -148,6 +149,8 @@ impl PersistentContext {
 
 #[derive(Clone)]
 pub struct Context {
+    pub affinity_resolver: Option<AffinityResolverRef>,
+    pub affinity_fallback: AffinityFallback,
     pub persistent_ctx: PersistentContext,
     pub volatile_ctx: VolatileContext,
     pub table_metadata_manager: TableMetadataManagerRef,
@@ -248,6 +251,8 @@ impl Context {
         persistent_ctx: PersistentContext,
     ) -> Self {
         Self {
+            affinity_resolver: ddl_ctx.affinity_resolver.clone(),
+            affinity_fallback: ddl_ctx.affinity_fallback,
             persistent_ctx,
             table_metadata_manager: ddl_ctx.table_metadata_manager.clone(),
             memory_region_keeper: ddl_ctx.memory_region_keeper.clone(),
@@ -1016,6 +1021,7 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
 
 #[cfg(test)]
 mod tests {
+    use crate::procedure::test_util::{procedure_context_with_receivers, procedure_state_receiver};
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1052,8 +1058,7 @@ mod tests {
     use crate::procedure::repartition::repartition_end::RepartitionEnd;
     use crate::procedure::repartition::test_util::{
         TestingEnv, assert_parent_state, current_parent_region_routes, extract_subprocedure_ids,
-        new_parent_context, procedure_context_with_receivers, procedure_state_receiver, range_expr,
-        test_region_route, test_region_wal_options,
+        new_parent_context, range_expr, test_region_route, test_region_wal_options,
     };
     use crate::procedure::repartition::update_partition_metadata::{
         PartitionMetadataUpdate, UpdatePartitionMetadata,

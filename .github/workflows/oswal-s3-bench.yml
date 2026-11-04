@@ -10,6 +10,34 @@ on:
         description: 'Docker Hub greptime/greptimedb tag; nightly = the newest v*-nightly-* tag (latest is a release without the object store WAL)'
         type: string
         default: nightly
+      greptimedb_image:
+        description: 'Full image reference with a tag or digest; used instead of greptimedb_tag when set'
+        type: string
+        default: ''
+      images:
+        description: 'JSON list of 2..4 {"label", "image"} to compare on one instance instead of greptimedb_tag and greptimedb_image: every cell runs once per image, in an order that reverses every other round; a label is up to 8 lowercase letters and digits, an image a full reference with a tag or digest, the first the reference of the ratios'
+        type: string
+        default: ''
+      warmup:
+        description: Before round 1, run the first load cell once per image and leave it out of every statistic
+        type: boolean
+        default: false
+      configs:
+        description: 'WAL configurations: R (Raft Engine, sync_write), R0 (Raft Engine, standalone default), D (durable), E (enqueued)'
+        type: string
+        default: R,D,E
+      extra_env:
+        description: 'Environment for every GreptimeDB container: a JSON object or K=V lines'
+        type: string
+        default: ''
+      restart:
+        description: 'After each load, SIGKILL the server, restart it on the same prefix and data home, and time recovery; object store cells flush every 10ms'
+        type: boolean
+        default: false
+      groups:
+        description: 'JSON list of cell groups, each overriding configs, extra_env, concurrency, rounds, rows, restart, plus idle_seconds and partitions (regions of the loaded table), or mode crash with cycles, kill_after [min, max] and pin, or mode drop with write_seconds; empty = one group from the inputs above'
+        type: string
+        default: ''
       instance_type:
         description: EC2 instance type in the bucket region; the d of c6id gives a local NVMe instance store for the Raft Engine WAL
         type: string
@@ -27,7 +55,7 @@ on:
         type: number
         default: 1000
       rounds:
-        description: Rounds; the configuration order alternates between rounds (R, D, E then E, D, R)
+        description: Rounds; the configuration and image order alternates between rounds (R, D, E then E, D, R)
         type: number
         default: 2
       runtime_image:
@@ -47,6 +75,13 @@ permissions:
 env:
   SMOKE: ${{ inputs.smoke }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
+  GREPTIMEDB_IMAGE_INPUT: ${{ inputs.greptimedb_image }}
+  OSWAL_IMAGES: ${{ inputs.images }}
+  WARMUP: ${{ inputs.warmup }}
+  CONFIGS: ${{ inputs.configs }}
+  EXTRA_ENV: ${{ inputs.extra_env }}
+  RESTART: ${{ inputs.restart }}
+  OSWAL_GROUPS: ${{ inputs.groups }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   CONCURRENCY: ${{ inputs.concurrency }}
   ROWS: ${{ inputs.rows }}
@@ -61,7 +96,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       instance_type: ${{ steps.runner.outputs.instance_type }}
-      greptimedb_tag: ${{ steps.plan.outputs.greptimedb_tag }}
+      greptimedb_images: ${{ steps.images.outputs.greptimedb_images }}
       runtime_image: ${{ steps.runtime.outputs.runtime_image }}
     steps:
     - uses: actions/checkout@v4
@@ -77,8 +112,28 @@ jobs:
       run: |
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" \
           --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --restart "$RESTART" --groups "$OSWAL_GROUPS" \
+          --images "$OSWAL_IMAGES" --warmup "$WARMUP" \
           --timeout-minutes "$BENCHMARK_TIMEOUT_MINUTES" --ttl-hours "$JANITOR_TTL_HOURS"
-        python3 greptimedb/.github/scripts/oswal-s3-bench.py tag "$GREPTIMEDB_TAG"
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py image --tag "$GREPTIMEDB_TAG" --image "$GREPTIMEDB_IMAGE_INPUT" \
+          --images "$OSWAL_IMAGES"
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
+    - name: Pull every GreptimeDB image and record its version
+      id: images
+      env:
+        REQUESTED_IMAGES: ${{ steps.plan.outputs.requested_images }}
+      run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh check-images "$REQUESTED_IMAGES"
     - name: Resolve CI runner
       id: runner
       run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider AWS --instance-type "$REQUESTED_INSTANCE_TYPE"
@@ -87,7 +142,7 @@ jobs:
         BUCKET_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
         RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
       run: python3 greptimedb/.github/scripts/oswal-s3-bench.py regions --bucket "$BUCKET_REGION" --runner "$RUNNER_REGION"
-    - name: Check the runtime image
+    - name: Pin the runtime image digest
       id: runtime
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh check-runtime "$RUNTIME_IMAGE"
   provision:
@@ -132,7 +187,7 @@ jobs:
     timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
     env:
       INSTANCE_TYPE: ${{ inputs.smoke && 'ubuntu-latest' || needs.validate.outputs.instance_type }}
-      GREPTIMEDB_TAG: ${{ needs.validate.outputs.greptimedb_tag }}
+      GREPTIMEDB_IMAGES: ${{ needs.validate.outputs.greptimedb_images }}
       RUNTIME_IMAGE: ${{ needs.validate.outputs.runtime_image }}
       RUN_PREFIX: oswal-bench/${{ github.run_id }}-${{ github.run_attempt }}
       OWNER: o11ybench-oswal-${{ github.run_id }}-${{ github.run_attempt }}
@@ -157,17 +212,31 @@ jobs:
       run: |
         bash greptimedb/.github/scripts/pull-benchmark-image.sh greptime/minio:2024
         docker compose -f greptimedb/tests-integration/fixtures/docker-compose.yml up -d --wait minio
-    - name: Pull images and write the plan
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
+    - name: Pull and check images, write the plan
       run: |
         bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" --output "$PLAN" \
-          --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS"
-        python3 greptimedb/.github/scripts/oswal-s3-bench.py manifest --results "$RESULTS" \
+          --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --restart "$RESTART" --groups "$OSWAL_GROUPS" \
+          --images "$OSWAL_IMAGES" --warmup "$WARMUP"
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py manifest --results "$RESULTS" --images "$GREPTIMEDB_IMAGES" \
           --runtime-image "$RUNTIME_IMAGE" --instance-type "$INSTANCE_TYPE" --region "$S3_REGION" --prefix "$RUN_PREFIX"
     - name: Probe the bucket
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_SECRET_ACCESS_KEY }}
       run: uv run greptimedb/.github/scripts/oswal-s3-bench.py probe --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
     - name: Put the Raft Engine WAL on the instance store
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh wal-disk "$WAL_ROOT"
@@ -175,8 +244,8 @@ jobs:
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh generate
     - name: Load every cell
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_SECRET_ACCESS_KEY }}
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh cells
     - name: Summary
       if: always()
@@ -184,14 +253,14 @@ jobs:
     - name: Delete the run's S3 prefix
       if: always()
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_SECRET_ACCESS_KEY }}
       run: uv run greptimedb/.github/scripts/oswal-s3-bench.py cleanup --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
     - name: Check the results hold no credentials
       if: always()
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_SECRET_ACCESS_KEY }}
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh scrub
     - name: Upload results (no corpus)
       if: always()

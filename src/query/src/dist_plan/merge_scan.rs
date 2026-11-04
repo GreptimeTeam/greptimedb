@@ -68,6 +68,7 @@ use crate::dist_plan::dyn_filter_bridge::{
     CapturedDynFilter, capture_remote_dyn_filters_for_pushdown,
     query_context_with_refreshed_initial_dyn_filter_regs,
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
+    resolve_scalar_subquery_dyn_filters,
 };
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
@@ -126,6 +127,22 @@ fn remote_plan_row_bound(plan: &LogicalPlan) -> Option<usize> {
     }
 }
 
+fn pushdown_phase_slot(phase: FilterPushdownPhase) -> usize {
+    match phase {
+        FilterPushdownPhase::Pre => 0,
+        FilterPushdownPhase::Post => 1,
+    }
+}
+
+/// Producer-local ordinals must be unique across phases because they are part of the
+/// remote filter id; pre-phase filters use the upper half of the `u32` ordinal space.
+fn first_producer_local_ordinal(phase: FilterPushdownPhase) -> usize {
+    match phase {
+        FilterPushdownPhase::Pre => 1 << 31,
+        FilterPushdownPhase::Post => 0,
+    }
+}
+
 fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
     remote_dyn_filter_pushdown_enabled_from_extensions(&query_ctx.extensions())
         .map_err(|err| DataFusionError::External(Box::new(err)))
@@ -167,8 +184,20 @@ fn is_json_field(field: &Field) -> bool {
             == Some("Json")
 }
 
+/// Returns true when the remote field's nullability fits the expected field.
+///
+/// The remote physical optimizer may narrow a nullable column to non-nullable,
+/// as DataFusion's own schema invariant permits: `AggregateStatistics`
+/// replaces an aggregate over an empty region with a non-null literal. Batches
+/// are rebuilt with the expected schema, so the narrowing does not leak.
+/// Widening is rejected. Nested field nullability is part of the data type and
+/// still has to match exactly.
+fn nullability_compatible(expected_field: &Field, actual_field: &Field) -> bool {
+    expected_field.is_nullable() || !actual_field.is_nullable()
+}
+
 /// Returns true when two fields describe the same column semantics: same
-/// name, same data type, and same nullability.
+/// name, same data type, and compatible nullability.
 ///
 /// Arrow `Field` metadata is auxiliary information (indexing, encoding,
 /// compression hints, ...) and does not participate in the comparison. This
@@ -179,7 +208,7 @@ fn is_json_field(field: &Field) -> bool {
 fn fields_semantically_equal(expected_field: &Field, actual_field: &Field) -> bool {
     expected_field.name() == actual_field.name()
         && expected_field.data_type() == actual_field.data_type()
-        && expected_field.is_nullable() == actual_field.is_nullable()
+        && nullability_compatible(expected_field, actual_field)
 }
 
 /// Returns true when two fields are semantically equivalent JSON columns.
@@ -196,7 +225,7 @@ fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool 
     is_json_field(expected_field)
         && is_json_field(actual_field)
         && expected_field.name() == actual_field.name()
-        && expected_field.is_nullable() == actual_field.is_nullable()
+        && nullability_compatible(expected_field, actual_field)
         // Both must carry the same JSON marker.
         && expected_field.metadata().get(datatypes::schema::TYPE_KEY)
             == actual_field.metadata().get(datatypes::schema::TYPE_KEY)
@@ -212,14 +241,15 @@ fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool 
 /// Validates the remote schema before positional column handling.
 ///
 /// Field metadata (indexing/encoding/compression hints) is non-semantic at
-/// this boundary and is ignored: two fields are equal when their name, data
-/// type, and nullability match (see [`fields_semantically_equal`]). A
-/// timestamp timezone difference is the only intentional exception, accepted
-/// when the fields share the same timestamp unit, distinct timezones, and
-/// equal name and nullability. Top-level Arrow schema metadata is
-/// non-semantic at this boundary as well. JSON columns are compared
-/// semantically (see [`json_fields_compatible`]) because their wire and
-/// decoded representations use different physical arrow types.
+/// this boundary and is ignored: two fields are equal when their name and
+/// data type match and their nullability is compatible (see
+/// [`fields_semantically_equal`]). A timestamp timezone difference is the only
+/// intentional exception, accepted when the fields share the same timestamp
+/// unit, distinct timezones, equal name, and compatible nullability.
+/// Top-level Arrow schema metadata is non-semantic at this boundary as well.
+/// JSON columns are compared semantically (see [`json_fields_compatible`])
+/// because their wire and decoded representations use different physical
+/// arrow types.
 fn validate_remote_schema(
     expected: &ArrowSchema,
     actual: &ArrowSchema,
@@ -260,7 +290,7 @@ fn validate_remote_schema(
             ) if expected_unit == actual_unit
                 && expected_timezone != actual_timezone
                 && expected_field.name() == actual_field.name()
-                && expected_field.is_nullable() == actual_field.is_nullable()
+                && nullability_compatible(expected_field, actual_field)
         );
         if !timezone_only_difference {
             return Err(remote_schema_mismatch(format!(
@@ -470,7 +500,10 @@ pub struct MergeScanExec {
     query_ctx: QueryContextRef,
     /// Optional because RDF must fail open: missing ids skip RDF but keep normal query execution.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
-    captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
+    /// Filters captured by each filter pushdown phase, indexed by [`pushdown_phase_slot`].
+    /// The pre-optimization phase carries `FilterExec` predicates (e.g. scalar subquery
+    /// filters) and the post-optimization phase carries dynamic filters from joins and TopK.
+    captured_remote_dyn_filters: Arc<Mutex<[Vec<CapturedDynFilter>; 2]>>,
     target_partition: usize,
     enable_per_region_metrics: bool,
 }
@@ -603,6 +636,7 @@ impl MergeScanExec {
         } else {
             Vec::new()
         };
+        resolve_scalar_subquery_dyn_filters(&captured_remote_dyn_filters);
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
@@ -877,7 +911,7 @@ impl MergeScanExec {
     }
 
     fn captured_remote_dyn_filters(&self) -> Vec<CapturedDynFilter> {
-        self.captured_remote_dyn_filters.lock().unwrap().clone()
+        self.captured_remote_dyn_filters.lock().unwrap().concat()
     }
 
     pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
@@ -1079,7 +1113,7 @@ impl ExecutionPlan for MergeScanExec {
 
     fn handle_child_pushdown_result(
         &self,
-        _phase: FilterPushdownPhase,
+        phase: FilterPushdownPhase,
         child_pushdown_result: ChildPushdownResult,
         _config: &datafusion::config::ConfigOptions,
     ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
@@ -1093,7 +1127,7 @@ impl ExecutionPlan for MergeScanExec {
             // Reject remote pushdown instead of pretending success: this keeps
             // DataFusion/local dynamic filter semantics intact while disabling
             // only FE -> DN remote dynamic filter propagation.
-            self.captured_remote_dyn_filters.lock().unwrap().clear();
+            self.captured_remote_dyn_filters.lock().unwrap()[pushdown_phase_slot(phase)].clear();
             let new_self = Arc::new(self.clone());
 
             return Ok(FilterPushdownPropagation {
@@ -1107,7 +1141,7 @@ impl ExecutionPlan for MergeScanExec {
             common_telemetry::warn!(
                 "MergeScan remote dynamic filter producer id is not assigned; skipping remote dynamic filter pushdown"
             );
-            self.captured_remote_dyn_filters.lock().unwrap().clear();
+            self.captured_remote_dyn_filters.lock().unwrap()[pushdown_phase_slot(phase)].clear();
             let new_self = Arc::new(self.clone());
 
             return Ok(FilterPushdownPropagation {
@@ -1115,24 +1149,20 @@ impl ExecutionPlan for MergeScanExec {
                 updated_node: Some(new_self),
             });
         };
-        let remote_dyn_filter_pushdown =
-            capture_remote_dyn_filters_for_pushdown(remote_dyn_filter_producer_id, parent_filters);
-        *self.captured_remote_dyn_filters.lock().unwrap() =
-            remote_dyn_filter_pushdown.captured_dyn_filters;
+        let slot = pushdown_phase_slot(phase);
+        let mut captured_remote_dyn_filters = self.captured_remote_dyn_filters.lock().unwrap();
+        let remote_dyn_filter_pushdown = capture_remote_dyn_filters_for_pushdown(
+            remote_dyn_filter_producer_id,
+            first_producer_local_ordinal(phase),
+            &captured_remote_dyn_filters[1 - slot],
+            parent_filters,
+        );
+        captured_remote_dyn_filters[slot] = remote_dyn_filter_pushdown.captured_dyn_filters;
+        drop(captured_remote_dyn_filters);
         let new_self = Arc::new(self.clone());
 
         Ok(FilterPushdownPropagation {
-            filters: remote_dyn_filter_pushdown
-                .pushed_down
-                .into_iter()
-                .map(|pushdown_ready| {
-                    if pushdown_ready {
-                        PushedDown::Yes
-                    } else {
-                        PushedDown::No
-                    }
-                })
-                .collect(),
+            filters: remote_dyn_filter_pushdown.pushed_down,
             updated_node: Some(new_self),
         })
     }
@@ -1700,6 +1730,8 @@ mod tests {
         )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>;
         let captured = capture_remote_dyn_filters_for_pushdown(
             RemoteDynFilterProducerId::new(42),
+            0,
+            &[],
             vec![dyn_filter],
         );
         assert_eq!(captured.captured_dyn_filters.len(), 1);
@@ -2692,6 +2724,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qbs_merge_scan_remote_schema_identity_emits_expected_schema_on_nullability_narrowing()
+    {
+        let batch = record_batch(
+            int64_schema(&["a", "b"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([11])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+            ],
+        );
+        let expected_schema = ArrowSchema::new(vec![
+            Field::new("a", TestArrowDataType::Int64, true),
+            Field::new("b", TestArrowDataType::Int64, false),
+        ]);
+        let batches = collect_merge_scan(merge_scan_exec(
+            vec![(RegionId::new(1024, 1), batch)],
+            expected_schema.clone(),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(batches[0].schema().as_ref(), &expected_schema);
+    }
+
+    #[tokio::test]
     async fn qbs_merge_scan_remote_schema_identity_rejects_incompatible_type() {
         let batch = record_batch(
             Arc::new(Schema::new(vec![
@@ -2897,7 +2953,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_scan_remote_schema_identity_ignores_field_metadata_but_rejects_nullability_mismatch() {
+    fn merge_scan_remote_schema_identity_ignores_field_metadata_but_rejects_nullability_widening() {
         let expected = expected_int64_schema();
         let metadata_mismatch = ArrowSchema::new_with_metadata(
             vec![
@@ -2924,6 +2980,30 @@ mod tests {
         // semantic field comparison.
         assert!(validate_remote_schema(&expected, &metadata_mismatch, "test").is_ok());
         assert!(validate_remote_schema(&expected, &nullability_mismatch, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_accepts_top_level_nullability_narrowing_only() {
+        let state_type = |child_nullable| {
+            TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Field::new(
+                "min[value]",
+                TestArrowDataType::Int64,
+                child_nullable,
+            )]))
+        };
+        let schema = |nullable, child_nullable| {
+            ArrowSchema::new(vec![Field::new(
+                "__min_state(t.v)",
+                state_type(child_nullable),
+                nullable,
+            )])
+        };
+
+        // `AggregateStatistics` turns the state aggregate over an empty region
+        // into a non-null struct literal.
+        assert!(validate_remote_schema(&schema(true, true), &schema(false, true), "test").is_ok());
+        assert!(validate_remote_schema(&schema(false, true), &schema(true, true), "test").is_err());
+        assert!(validate_remote_schema(&schema(true, true), &schema(true, false), "test").is_err());
     }
 
     #[test]

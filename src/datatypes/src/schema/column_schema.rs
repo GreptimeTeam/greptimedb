@@ -69,6 +69,7 @@ pub const COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE: &str = "type";
 pub const COLUMN_COMPRESSION_OPT_KEY_TYPE: &str = "type";
 pub const COLUMN_COMPRESSION_OPT_KEY_LEVEL: &str = "level";
 pub const COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE: &str = "page_size";
+pub const COLUMN_COMPRESSION_OPT_KEY_ENCODING: &str = "encoding";
 
 pub const DEFAULT_GRANULARITY: u32 = 10240;
 
@@ -474,6 +475,17 @@ impl ColumnSchema {
                 ),
             }
         );
+        if options.encoding == Some(ColumnEncoding::DeltaBinaryPacked) {
+            ensure!(
+                self.data_type.is_timestamp() || self.data_type.as_arrow_type().is_integer(),
+                error::InvalidCompressionOptionSnafu {
+                    msg: format!(
+                        "encoding delta_binary_packed requires an integer or timestamp column, but column {} is {}",
+                        self.name, self.data_type
+                    ),
+                }
+            );
+        }
         Ok(())
     }
 
@@ -1018,6 +1030,24 @@ impl fmt::Display for CompressionType {
     }
 }
 
+/// Parquet value encodings for SST columns. Both replace the default dictionary encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnEncoding {
+    Plain,
+    /// Only valid for integer and timestamp columns.
+    DeltaBinaryPacked,
+}
+
+impl fmt::Display for ColumnEncoding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ColumnEncoding::Plain => write!(f, "plain"),
+            ColumnEncoding::DeltaBinaryPacked => write!(f, "delta_binary_packed"),
+        }
+    }
+}
+
 /// Parquet compression settings for a column in SSTs. Unset fields keep the SST defaults.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompressionOptions {
@@ -1027,6 +1057,8 @@ pub struct CompressionOptions {
     pub level: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<ReadableSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<ColumnEncoding>,
 }
 
 impl CompressionOptions {
@@ -1069,6 +1101,12 @@ impl CompressionOptions {
                 _ => page_size.as_bytes().to_string(),
             };
             map.insert(COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE.to_string(), page_size);
+        }
+        if let Some(encoding) = self.encoding {
+            map.insert(
+                COLUMN_COMPRESSION_OPT_KEY_ENCODING.to_string(),
+                encoding.to_string(),
+            );
         }
         map
     }
@@ -1129,10 +1167,25 @@ impl TryFrom<HashMap<String, String>> for CompressionOptions {
             })
             .transpose()?;
 
+        let encoding = options
+            .get(COLUMN_COMPRESSION_OPT_KEY_ENCODING)
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "plain" => Ok(ColumnEncoding::Plain),
+                "delta_binary_packed" => Ok(ColumnEncoding::DeltaBinaryPacked),
+                _ => error::InvalidCompressionOptionSnafu {
+                    msg: format!(
+                        "invalid encoding: {value}, expected: 'plain' or 'delta_binary_packed'"
+                    ),
+                }
+                .fail(),
+            })
+            .transpose()?;
+
         Ok(CompressionOptions {
             compression_type,
             level,
             page_size,
+            encoding,
         })
     }
 }
@@ -1525,6 +1578,7 @@ mod tests {
                 compression_type: CompressionType::Zstd,
                 level: Some(3),
                 page_size: Some(ReadableSize::mb(8)),
+                encoding: None,
             },
             options
         );
@@ -1558,6 +1612,17 @@ mod tests {
             serde_json::to_string(&page_only).unwrap()
         );
 
+        let delta = parse(&[("encoding", "DELTA_BINARY_PACKED")]).unwrap();
+        assert_eq!(Some(ColumnEncoding::DeltaBinaryPacked), delta.encoding);
+        assert_eq!(
+            r#"{"type":"zstd","encoding":"delta_binary_packed"}"#,
+            serde_json::to_string(&delta).unwrap()
+        );
+        assert_eq!(
+            delta,
+            parse(&[("encoding", delta.to_options_map()["encoding"].as_str())]).unwrap()
+        );
+
         for invalid in [
             &[("type", "lz4")][..],
             &[("level", "0")],
@@ -1565,6 +1630,7 @@ mod tests {
             &[("level", "high")],
             &[("page_size", "0")],
             &[("page_size", "large")],
+            &[("encoding", "dictionary")],
         ] {
             assert!(parse(invalid).is_err(), "{invalid:?}");
         }
@@ -1592,6 +1658,35 @@ mod tests {
         for data_type in [struct_type, list_type] {
             assert!(
                 ColumnSchema::new("n", data_type, true)
+                    .with_compression_options(options)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_delta_encoding_requires_integer_or_timestamp() {
+        let options = CompressionOptions {
+            encoding: Some(ColumnEncoding::DeltaBinaryPacked),
+            ..Default::default()
+        };
+        for data_type in [
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+        ] {
+            assert!(
+                ColumnSchema::new("c", data_type, true)
+                    .with_compression_options(options)
+                    .is_ok()
+            );
+        }
+        for data_type in [
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::float64_datatype(),
+        ] {
+            assert!(
+                ColumnSchema::new("c", data_type, true)
                     .with_compression_options(options)
                     .is_err()
             );
