@@ -100,6 +100,8 @@ pub struct AggregateFinalize {
     output_schema: DFSchemaRef,
     /// The field layout the split aggregate folds, on the grid its input is evaluated on.
     series_schema: Arc<SeriesSchema>,
+    /// The labels declared by the output schema, shared with the partition-local state producer.
+    grouping_tags: Vec<String>,
 }
 
 impl AggregateFinalize {
@@ -144,12 +146,44 @@ impl AggregateFinalize {
                 split.schema.fields.len()
             )));
         }
+        // State is keyed by the cut aggregate's output labels, not the final statement's projection:
+        // an outer aggregate that drops its input's labels must not empty the inner groups' keys.
+        let grouping_tags: Vec<String> = match &split.op.group {
+            Grouping::By(names) => names
+                .iter()
+                .filter(|name| name.as_ref() != "__name__")
+                .map(|name| name.to_string())
+                .collect(),
+            Grouping::Without(names) => {
+                // `by(names)` above is fully determined by the grouping itself. `without` is not:
+                // its keys are the prefix's labels minus `names`, and the prefix may create a label
+                // (`label_replace`) that the tree walker refuses to name. The declared output
+                // columns do name it - the planner builds them from the existing plan, which
+                // handles every rewrite - but only when the cut aggregate is the statement root.
+                // Beneath a suffix the statement's labels may be narrower than the cut's, so that
+                // shape keeps the existing plan rather than exporting state under keys that would
+                // merge groups the statement still separates.
+                if !matches!(split.suffix.expr, NativeExpr::Input(_)) {
+                    return Err(declined(
+                        "cannot derive cut labels for without grouping beneath a suffix",
+                    ));
+                }
+                output_schema
+                    .fields()
+                    .iter()
+                    .filter(|field| field.data_type() == &DataType::Utf8)
+                    .map(|field| field.name().clone())
+                    .filter(|tag| !names.iter().any(|name| name.as_ref() == tag))
+                    .collect()
+            }
+        };
         let partial = FusedSeries::try_new_partial(
             Arc::clone(&promql),
             NativeTree::try_new(split.prefix)?,
             binding.clone(),
             vec![rawinput],
             split.op.clone(),
+            &grouping_tags,
         )?;
         Ok(Self {
             promql,
@@ -161,6 +195,7 @@ impl AggregateFinalize {
             }),
             output_schema,
             series_schema: split.schema,
+            grouping_tags,
         })
     }
 
@@ -219,7 +254,7 @@ impl AggregateFinalize {
             Arc::clone(&self.suffix),
             Arc::clone(&self.series_schema),
             op,
-            self.binding.tags.clone(),
+            self.grouping_tags.clone(),
             tags,
             classification,
             output_schema,
@@ -228,6 +263,8 @@ impl AggregateFinalize {
 
     /// The readable form of the split, for its plan line only.
     fn key(&self) -> String {
+        // The state's label columns are an execution detail: two plans that differ only in them are
+        // the same statement, so they do not belong on the plan line or in the node's identity.
         format!("{:?} {:?} {:?}", self.op.kind, self.op.group, self.op.stage)
     }
 }
@@ -266,7 +303,7 @@ impl UserDefinedLogicalNodeCore for AggregateFinalize {
             ));
         }
         let input = inputs.swap_remove(0);
-        let expected = state_schema(&self.binding.tags);
+        let expected = state_schema(&self.grouping_tags);
         if input.schema().as_arrow() != expected.as_ref() {
             return Err(DataFusionError::Plan(format!(
                 "AggregateFinalize input must export aggregate state with schema {expected:?}, got {:?}",
@@ -282,6 +319,7 @@ impl UserDefinedLogicalNodeCore for AggregateFinalize {
             input,
             output_schema: Arc::clone(&self.output_schema),
             series_schema: Arc::clone(&self.series_schema),
+            grouping_tags: self.grouping_tags.clone(),
         })
     }
 }

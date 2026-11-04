@@ -21,8 +21,8 @@ use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
-    AggregateFinalize, EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate,
-    RawSeriesSource, SeriesDivide, SeriesNormalize,
+    AggregateFinalize, EmptyMetric, FusedOutputFormat, FusedSeries, InstantManipulate,
+    RangeManipulate, RawSeriesSource, SeriesDivide, SeriesNormalize,
 };
 use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -31,6 +31,30 @@ use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
+
+/// Whether `fused` is a canonical producer whose prefix and sources can run in one region.
+/// Its physical canonical router assembles the complete label sets; ordinary consumers above it
+/// do not carry the producer marker and retain their normal placement requirements.
+fn canonical_boundary_region_node(fused: &FusedSeries) -> bool {
+    if !fused.is_canonical_producer() {
+        return false;
+    }
+    fused.format() == FusedOutputFormat::SeriesFrame
+        && fused.canonical_producer_prefix_is_local()
+        && !fused.children().is_empty()
+        && fused.children().iter().all(|child| match child {
+            LogicalPlan::TableScan(_) => true,
+            LogicalPlan::Extension(extension)
+                if extension.node.as_any().is::<RawSeriesSource>() =>
+            {
+                matches!(
+                    extension.node.inputs().as_slice(),
+                    [LogicalPlan::TableScan(_)]
+                )
+            }
+            _ => false,
+        })
+}
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -245,6 +269,9 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
+                if canonical_boundary_region_node(fused) {
+                    return Commutativity::Commutative;
+                }
                 // The raw-series reader supports one scan, or the narrow same-table multi-scan
                 // one-to-one case. This classification is for region-local execution only.
                 let children = fused.children();
@@ -263,6 +290,8 @@ impl Categorizer {
                 }
                 let root = fused.tree().root();
                 let per_series = pointwise_operand(root) || independent_scan_pair(root);
+                // A gather of one raw scan does not establish region-global ownership. Cross-series
+                // consumers need their existing split or frontend placement.
                 if reads_across_series(root) && !per_series {
                     return Commutativity::NonCommutative;
                 }

@@ -321,6 +321,13 @@ impl LabelRewrite {
         }
     }
 
+    /// Destination label written by this rewrite.
+    pub fn destination(&self) -> &str {
+        match &self.0 {
+            Change::Replace { dst, .. } | Change::Join { dst, .. } => dst,
+        }
+    }
+
     /// Changes `metric` the way the function changes one series.
     pub fn apply(&self, metric: &mut SeriesLabels) -> Result<()> {
         let mut value = String::new();

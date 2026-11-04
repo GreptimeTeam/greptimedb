@@ -21,7 +21,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
-use datafusion_common::{Column, ScalarValue};
+use datafusion_common::{Column, DFSchema, ScalarValue};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
@@ -958,6 +958,24 @@ impl PlanRewriter {
                 .with_new_exprs(new_stage.expressions_consider_join(), vec![node.clone()])?;
         }
         self.set_expanded();
+
+        // Extra columns introduced for distributed operations may need to be removed. A complete
+        // frame that already has the required schema must not go through column projection: its
+        // declaration is schema metadata. Ordinary SQL keeps its existing identity projection.
+        let has_frame_metadata = |schema: &DFSchema| {
+            schema
+                .metadata()
+                .keys()
+                .any(|key| key.starts_with("greptime.series."))
+        };
+        if node.schema() == &schema && has_frame_metadata(schema.as_ref()) {
+            return Ok(node);
+        }
+        if has_frame_metadata(schema.as_ref()) || has_frame_metadata(node.schema().as_ref()) {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "distributed schema recovery cannot project a series frame".into(),
+            ));
+        }
 
         // recover the schema, this make sure after expand the schema is the same as old node
         // because after expand the raw top node might have extra columns i.e. sorting columns for `Sort` node

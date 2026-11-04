@@ -1410,7 +1410,7 @@ fn mutate_envelope_payload(
     mutate(&mut payload);
     let changed = postcard::to_stdvec(&payload).unwrap();
     let mut result = Vec::with_capacity(8 + changed.len());
-    result.extend(3u32.to_le_bytes());
+    result.extend(super::FUSED_SERIES_ENVELOPE_VERSION.to_le_bytes());
     result.extend((changed.len() as u32).to_le_bytes());
     result.extend(changed);
     result
@@ -1590,6 +1590,7 @@ fn partial_decode_rejects_format_schema_and_tag_order_mismatch() {
         partial_binding_of(&tree, &[HOST, JOB]),
         vec![input_plan(frame_schema())],
         partial_op(AggregateKind::Sum, &[HOST, JOB]),
+        &[HOST.to_string(), JOB.to_string()],
     )
     .unwrap();
     let bytes = node.serialize().unwrap();
@@ -2018,8 +2019,11 @@ fn rows(batches: &[RecordBatch]) -> Vec<Row> {
 }
 
 /// The canonical label set these tests collide on, as the runtime renders it in its refusal.
+///
+/// The wording is Prometheus' own for this defect - a vector holding two series under one label set -
+/// and the label set is rendered the way the reader writes it, without the empty value.
 const DUPLICATE_LABEL_SET: &str =
-    "the node produces two series under the label set [(\"host\", \"web-1\")]";
+    "vector cannot contain metrics with the same labelset {host=\"web-1\"}";
 
 /// Two raw series that are already one Prometheus identity are refused by the runtime that would
 /// have to answer both.
@@ -3232,6 +3236,7 @@ async fn physical_plan_accepts_scalar_root_without_sources() {
         binding,
         vec![],
         partial_op(AggregateKind::Sum, &[]),
+        &[],
     )
     .expect_err("scalar roots cannot be partial folds");
     assert!(partial_error.to_string().contains("one raw child"));
@@ -4543,6 +4548,7 @@ fn partial_node(kind: AggregateKind) -> FusedSeries {
         binding,
         vec![input_plan(frame_schema())],
         partial_op(kind, &[HOST]),
+        &[HOST.to_string()],
     )
     .expect("the binding matches the prefix tree")
 }
@@ -4563,6 +4569,10 @@ fn partial_plan(
         binding,
         vec![input_plan(frame_schema())],
         op,
+        &tags
+            .iter()
+            .map(|tag| (*tag).to_string())
+            .collect::<Vec<_>>(),
     )?
     .to_execution_plan(vec![(
         input,
@@ -4663,6 +4673,38 @@ async fn a_partial_fold_exports_state_from_every_partition() {
             "the exported rows name the group they were folded into"
         );
     }
+}
+
+/// Partial state encodes the aggregate grouping label, not the scan-side tag list.
+#[tokio::test]
+async fn partial_fold_exports_grouping_tags_instead_of_scan_tags() {
+    let tree = rate_tree();
+    let binding = partial_binding_of(&tree, &[HOST]);
+    let rows = series_samples(1.0);
+    let labels = [(HOST, "web"), (JOB, "shared")];
+    let node = FusedSeries::try_new_partial(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        vec![input_plan(frame_schema())],
+        partial_op(AggregateKind::Sum, &[JOB]),
+        &[JOB.to_string()],
+    )
+    .expect("grouping tags need not equal scan tags");
+    let exec = node
+        .to_execution_plan(vec![(
+            memory_exec(vec![frame(&labelled_chunk("web-0", &labels, &rows, true))]),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )])
+        .expect("the partial plan is executable");
+    let state = state_schema(&[JOB.to_string()]);
+    let batch = state_of(&exec, 0, &state).await;
+    assert_eq!(
+        vec![Some("shared".to_string()); GRID_LEN as usize],
+        group_label(&state, &batch),
+        "encoded state rows carry the grouping tag value"
+    );
 }
 
 /// Prefix series of one label set on disjoint grid points are legal in state mode.
@@ -4792,6 +4834,7 @@ fn a_prefix_that_reads_across_series_is_refused() {
         binding,
         vec![input_plan(frame_schema())],
         partial_op(AggregateKind::Sum, &[HOST]),
+        &[HOST.to_string()],
     )
     .expect_err("a prefix that folds a group per partition is not a per-series prefix");
     assert!(error.to_string().contains("reads across"), "{error}");

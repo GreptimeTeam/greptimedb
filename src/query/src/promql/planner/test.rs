@@ -2489,7 +2489,8 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     );
     // The scan below is chosen during physical planning, so the route cannot know whether it is
     // the legacy scan (`KeyThenTime`) or the two-phase one (`Contiguous`) and must bind the weaker
-    // guarantee both provide. `rate` compiles to one window over that raw input.
+    // guarantee both provide. `rate` compiles to one window over that raw input. The canonical
+    // merge planner test uses an evaluated subquery window.
     let NativeExpr::Window { input, .. } = &fused.tree().root().expr else {
         panic!("the root is not a window: {:?}", fused.tree().root().expr);
     };
@@ -2599,6 +2600,39 @@ async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
     let plan =
         build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
     assert!(plan.display_indent().to_string().contains("FusedSeries"));
+}
+
+/// A label rewrite that collapses the partition column cannot be answered by one region.
+///
+/// The canonical boundary's router only collects the pieces its own region's producer holds, so a
+/// table split into several regions would answer a canonical label set from whichever region held a
+/// piece of it. The route therefore declines that tree - and only that tree: `rate` on the same
+/// partitioned table keeps fusing, which the test above asserts. Declining means the existing
+/// planner's plan, exactly.
+#[tokio::test]
+async fn native_fused_partitioned_table_label_rewrite_falls_back() {
+    let query = r#"label_replace(some_metric, "tag_0", "same", "tag_0", ".*")"#;
+    let native =
+        build_native_fused_plan_with_provider(query, true, native_engine_provider(vec![0]).await)
+            .await;
+    let fallback =
+        build_native_fused_plan_with_provider(query, false, native_engine_provider(vec![0]).await)
+            .await;
+    assert!(
+        find_fused_series(&native).is_none(),
+        "a collapsing rewrite over a partitioned table must keep the existing plan: {}",
+        native.display_indent()
+    );
+    assert!(
+        !native.display_indent().to_string().contains("FusedSeries"),
+        "{}",
+        native.display_indent()
+    );
+    assert_eq!(
+        native.display_indent().to_string(),
+        fallback.display_indent().to_string(),
+        "the native setting must plan exactly what the existing planner plans"
+    );
 }
 
 /// Metric logical scans retain their table-id restriction on the direct fused scan input.
@@ -4568,27 +4602,26 @@ async fn native_fused_label_rewrites_keep_legacy_output_labels() {
         // ... and below another call, which is the same shape one level deeper.
         r#"abs(label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)"))"#,
         r#"abs(label_join(some_metric, "newlabel", "-", "tag_0", "tag_0"))"#,
-        // A second occurrence does not admit it either: the collision is the runtime's, not the
-        // placement's, so the pair keeps the existing plan as well.
+        // A rewrite that meets the same metric again is admitted too: what the runtime refuses is
+        // two series under one label set, not the shape, and the refusal is the Prometheus answer.
         r#"label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)") + on(newlabel) some_metric"#,
         r#"label_join(some_metric, "newlabel", "-", "tag_0", "tag_0") + some_metric"#,
     ] {
         let native = build_native_fused_plan(query, true).await;
         let display = native.display_indent().to_string();
         assert!(
-            find_fused_series(&native).is_none(),
-            "`{query}` writes a label the runtime would refuse twice, so it keeps the existing \
-             plan: {display}"
+            find_fused_series(&native).is_some(),
+            "`{query}` is a point-wise rewrite the native route admits: {display}"
         );
         assert!(
             display.contains("newlabel"),
-            "`{query}` must keep the projection that emits its new label: {display}"
+            "`{query}` must declare the rewritten label: {display}"
         );
         let without_flag = build_native_fused_plan(query, false).await;
-        assert_eq!(
+        assert_ne!(
             display,
             without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan, not an approximation of it"
+            "`{query}` must use the native plan only when it is enabled"
         );
     }
 }

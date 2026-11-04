@@ -276,6 +276,134 @@ fn instant(
 }
 
 #[test]
+fn window_and_limitk_collect_only_unified_contributions() {
+    let grid = grid(0, 1_000, 2);
+
+    let build = |node: NativeNode| {
+        let tree = NativeTree::try_new(node).unwrap();
+        let mut inputs = Vec::new();
+        let mut binary_before = 0;
+        RuntimeNode::build(
+            tree.root(),
+            &pool(),
+            &mut inputs,
+            &mut binary_before,
+            "root".to_string(),
+            None,
+        )
+        .unwrap()
+        .0
+    };
+
+    let raw_window = build(window_with(
+        evaluated_input(Arc::clone(&grid)),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: raw_merge, ..
+    } = raw_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        raw_merge.is_none(),
+        "unknown input keeps the old no-merge behavior"
+    );
+
+    let fragmented_window = build(window_with(
+        map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: fragmented_merge,
+        ..
+    } = fragmented_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        fragmented_merge.is_some(),
+        "reported fragments must be collected"
+    );
+
+    let merged_window = build(window_with(
+        merge(evaluated_input(Arc::clone(&grid))),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: merged_input,
+        ..
+    } = merged_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        merged_input.is_none(),
+        "already-unified contributions need no collection"
+    );
+
+    let raw_limitk = build(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ));
+    let RuntimeOp::Vector {
+        vector: Some(vector),
+        ..
+    } = raw_limitk.op
+    else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "input with unknown grouping is not merged here"
+    );
+
+    let limitk = || BoundVectorOp::LimitK {
+        k: 1.0,
+        group: Grouping::By(Arc::from([])),
+    };
+    let fragmented = map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]);
+    let fragmented_limitk = build(vector_op(fragmented, limitk()));
+    let RuntimeOp::Vector {
+        vector: Some(vector),
+        ..
+    } = fragmented_limitk.op
+    else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        vector.merge_input,
+        "limitk must merge fragmented input series"
+    );
+
+    let unified = merge(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]));
+    let unified_limitk = build(vector_op(unified, limitk()));
+    let RuntimeOp::Vector {
+        vector: Some(vector),
+        ..
+    } = unified_limitk.op
+    else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "limitk must not re-merge unified input"
+    );
+}
+
+#[test]
 fn timestamp_instant_rejects_negative_lookback() {
     let output_grid = grid(500, 1_000, 1);
     let mut root = instant(input(), -1, 0, Arc::clone(&output_grid));
@@ -9730,8 +9858,12 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
         .next_chunk()
         .expect_err("the output label set and occupied positions conflict");
     let message = error.to_string();
+    // The refusal names the defect the way Prometheus does: one label set holding two series. The
+    // scalar broadcast produced no label set of its own, so the rendering is empty and the two
+    // series are told apart only by what they produced.
     assert!(
-        message.contains("that both hold a value of field"),
+        message.contains("vector cannot contain metrics with the same labelset")
+            && message.contains("two series hold a value of field 0"),
         "expected the collision the node produces, got: {message:?}"
     );
     assert_eq!(
@@ -10851,7 +10983,8 @@ fn a_label_rewrite_relabels_series_and_refuses_a_shared_point() {
         .unwrap();
     let error = execution.next_chunk().unwrap_err().to_string();
     assert!(
-        error.contains("both hold a value of field 0 at position 1"),
+        error.contains("vector cannot contain metrics with the same labelset")
+            && error.contains("two series hold a value of field 0 at position 1"),
         "{error}"
     );
 }
