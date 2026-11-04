@@ -2,6 +2,9 @@ name: VMBench Long Range
 on:
   # A caller repeats only the inputs it cares about; the rest keep their defaults below.
   workflow_call:
+    # `choice` and `options` belong to `workflow_dispatch`; a called workflow takes `string`,
+    # `number` or `boolean`, so the allowed values move into the description. Every input has a
+    # default and is therefore optional: a caller repeats only what it wants to override.
     inputs:
       run_greptimedb:
         description: Run GreptimeDB
@@ -14,13 +17,10 @@ on:
         default: false
         required: false
       range_preset:
-        description: Long-range query window (fixed dataset per preset)
-        type: choice
-        options:
-        - 1w
-        - 1mo
+        description: 'Long-range query window (fixed dataset per preset): 1w or 1mo'
+        type: string
         default: 1w
-        required: true
+        required: false
       compare_greptimedb:
         description: Compare baseline and candidate sequentially on the same host (adds one full GreptimeDB run)
         type: boolean
@@ -35,67 +35,68 @@ on:
         description: Candidate Docker Hub greptime/greptimedb tag
         type: string
         default: latest
-        required: true
+        required: false
       victoriametrics_tag:
         description: Docker Hub victoriametrics/victoria-metrics tag or tag@sha256 digest
         type: string
         default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
-        required: true
+        required: false
       runtime_image:
         description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
         type: string
         default: auto
-        required: true
+        required: false
       provider:
-        description: Cloud provider for the benchmark runner
-        type: choice
-        options: [Aliyun, AWS]
+        description: 'Cloud provider for the benchmark runner: Aliyun or AWS'
+        type: string
         default: Aliyun
-        required: true
+        required: false
       instance_type:
         description: 'Instance type; auto = Aliyun: ecs.c9i.2xlarge, AWS: c7i.2xlarge (both 8 vCPU / 16 GiB). Enter a specific type to override.'
         type: string
         default: auto
-        required: true
+        required: false
       benchmark_root:
         description: Absolute disk-backed work directory (outside the o11ybench checkout)
         type: string
         default: /home/runner/benchmark-data
-        required: true
+        required: false
       system_disk_gib:
         description: 'System disk GiB: auto (or 0) = 80; enter 20..2048 to override'
         type: string
         default: auto
-        required: true
+        required: false
       benchmark_timeout_minutes:
         description: Benchmark job timeout in minutes (1..360)
         type: number
         default: 360
-        required: true
+        required: false
       janitor_ttl_hours:
         description: Instance lifetime before janitor eligibility (1..168 hours; at least timeout + 2h)
         type: number
         default: 8
-        required: true
+        required: false
       db_cpus:
         description: CPU limit per DB container
         type: string
         default: '8'
-        required: true
+        required: false
       db_memory:
         description: Memory limit per DB container
         type: string
         default: 16g
-        required: true
+        required: false
     secrets:
-      # The benchmark runner credentials; a caller passes them with `secrets: inherit`.
+      # The credentials the provision step reads; a caller passes them with `secrets: inherit`.
       AWS_ACCESS_KEY_ID:
         required: false
       AWS_SECRET_ACCESS_KEY:
         required: false
-      ALIYUN_ACCESS_KEY_ID:
+      ALICLOUD_ECS_ACCESS_KEY_ID:
         required: false
-      ALIYUN_ACCESS_KEY_SECRET:
+      ALICLOUD_ECS_ACCESS_KEY_SECRET:
+        required: false
+      GH_PERSONAL_ACCESS_TOKEN:
         required: false
   workflow_dispatch:
     inputs:
