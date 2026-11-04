@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, info, warn};
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -236,7 +236,7 @@ impl RegionManifestManager {
         manifest
             .removed_files
             .update_file_removed_cnt_to_stats(stats);
-        Ok(Self {
+        let manager = Self {
             store,
             last_version: manifest_version,
             checkpointer,
@@ -244,7 +244,8 @@ impl RegionManifestManager {
             staging_manifest: None,
             stats: stats.clone(),
             stopped: false,
-        })
+        };
+        Ok(manager)
     }
 
     /// Opens an existing manifest.
@@ -363,7 +364,7 @@ impl RegionManifestManager {
             version,
             open_start.elapsed(),
         );
-        Ok(Some(Self {
+        let manager = Self {
             store,
             last_version: manifest_version,
             checkpointer,
@@ -372,7 +373,8 @@ impl RegionManifestManager {
             staging_manifest: None,
             stats: stats.clone(),
             stopped: false,
-        }))
+        };
+        Ok(Some(manager))
     }
 
     /// Stops the manager.
@@ -394,18 +396,30 @@ impl RegionManifestManager {
         &mut self,
         target_version: ManifestVersion,
     ) -> Result<ManifestVersion> {
+        let (version, loaded_checkpoint) = self.install_manifest_to_inner(target_version).await?;
+        if !loaded_checkpoint && let Err(error) = self.store.update_manifest_size(version).await {
+            warn!(error; "Failed to update manifest size after sync for region {}", self.manifest.metadata.region_id);
+        }
+        Ok(version)
+    }
+
+    async fn install_manifest_to_inner(
+        &mut self,
+        target_version: ManifestVersion,
+    ) -> Result<(ManifestVersion, bool)> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["install_manifest_to"])
             .start_timer();
 
         let last_version = self.last_version();
+        let mut loaded_checkpoint = false;
         // Case 1: If the target version is less than the current version, return the current version.
         if last_version >= target_version {
             debug!(
                 "Target version {} is less than or equal to the current version {}, region: {}, skip install",
                 target_version, last_version, self.manifest.metadata.region_id
             );
-            return Ok(last_version);
+            return Ok((last_version, false));
         }
 
         ensure!(
@@ -435,9 +449,10 @@ impl RegionManifestManager {
                 last_version, self.manifest.metadata.region_id
             );
             let last_version = self.install_last_checkpoint().await?;
+            loaded_checkpoint = true;
             // Case 2.1: If the installed checkpoint version is greater than or equal to the target version, return the last version.
             if last_version >= target_version {
-                return Ok(last_version);
+                return Ok((last_version, true));
             }
 
             // Fetches manifests from the installed version strictly.
@@ -510,7 +525,7 @@ impl RegionManifestManager {
             version, last_version, self.manifest.metadata.region_id
         );
 
-        Ok(last_version)
+        Ok((last_version, loaded_checkpoint))
     }
 
     /// Installs the last checkpoint.

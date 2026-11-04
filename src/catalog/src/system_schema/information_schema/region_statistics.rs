@@ -75,7 +75,10 @@ const INIT_CAPACITY: usize = 42;
 /// - `query_scanned_bytes`: The total bytes scanned by queries since region opened.
 /// - `memtable_size`: The memtable size in bytes.
 /// - `disk_size`: The approximate disk size in bytes.
-/// - `manifest_size`: The manifest size in bytes.
+/// - `manifest_size`: Stored bytes of the latest observed checkpoint and subsequent
+///   deltas (compressed when enabled), excluding staging and `_last_checkpoint`.
+///   Older files retained on disk, including failed deletions, are not counted.
+///   Followers update this estimate on sync; metadata read failures can leave it stale.
 /// - `sst_size`: The sst data files size in bytes.
 /// - `index_size`: The sst index files size in bytes.
 /// - `engine`: The engine type.
