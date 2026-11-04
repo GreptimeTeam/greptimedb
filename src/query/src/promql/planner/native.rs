@@ -1189,9 +1189,7 @@ impl PromPlanner {
             NativeType::Samples(_) => native_output_tags(tree.root(), source_tags)?,
             NativeType::AggregateState(_) => return None,
         };
-        let Some(root_fields) = native_root_fields(tree.root()) else {
-            return None;
-        };
+        let root_fields = native_root_fields(tree.root())?;
         let mut column_names = std::collections::HashSet::new();
         let columns = std::iter::once(time)
             .chain(root_fields.iter().map(String::as_str))
