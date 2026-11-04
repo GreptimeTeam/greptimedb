@@ -906,7 +906,7 @@ impl partition::PartitionRule for WrongMaskSizeRule {
 }
 
 #[tokio::test]
-async fn test_mis_sized_partition_mask_is_rejected_before_creating_outputs() {
+async fn test_wrong_length_partition_mask_is_rejected_before_creating_outputs() {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(2);
     plan.partition_rule = Arc::new(WrongMaskSizeRule);
