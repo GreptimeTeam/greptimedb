@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::v1::region::StrictWindow;
 use api::v1::region::compact_request::Options;
@@ -28,10 +28,12 @@ use tokio::sync::{Barrier, mpsc, oneshot};
 
 use crate::compaction::memory_manager::{CompactionMemoryGuard, new_compaction_memory_manager};
 use crate::compaction::picker::PickerOutput;
+use crate::compaction::scheduler::history::PickKey;
 use crate::compaction::scheduler::planning::CompactionPlanningResult;
 use crate::compaction::scheduler::state::{CompactingFiles, CompactionPhase};
 use crate::compaction::scheduler::*;
 use crate::compaction::test_util::new_file_handle;
+use crate::compaction::twcs::PickClass;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::error::InvalidSchedulerStateSnafu;
@@ -420,13 +422,11 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
     let version = Arc::new(VersionControlBuilder::new().build());
     let id = version.region_id();
     scheduler.register_region(&version, &env.access_layer);
-    use crate::compaction::scheduler::history::PickKey;
-    use crate::compaction::twcs::PickClass;
     let key = PickKey {
         window: 0,
         class: PickClass::FileReduction,
     };
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     scheduler
         .region_status
         .get_mut(&id)
@@ -491,9 +491,6 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
 #[case::failed_plan(true)]
 #[tokio::test]
 async fn test_empty_plan_prunes_history_but_failed_plan_preserves_it(#[case] failed: bool) {
-    use crate::compaction::scheduler::history::PickKey;
-    use crate::compaction::twcs::PickClass;
-
     let env = SchedulerEnv::new().await;
     let (tx, _rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
@@ -509,7 +506,7 @@ async fn test_empty_plan_prunes_history_but_failed_plan_preserves_it(#[case] fai
         window: 0,
         class: PickClass::FileReduction,
     };
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let now = start + Duration::from_secs(120);
     status
         .pick_history
@@ -994,9 +991,6 @@ async fn test_ddl_fence_prevents_repeated_regular_followups() {
 
 #[tokio::test]
 async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
-    use crate::compaction::scheduler::history::PickKey;
-    use crate::compaction::twcs::PickClass;
-
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
@@ -1009,7 +1003,7 @@ async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
         window: -999,
         class: PickClass::FileReduction,
     };
-    let now = std::time::Instant::now();
+    let now = Instant::now();
     scheduler
         .region_status
         .get_mut(&region_id)
@@ -1044,9 +1038,6 @@ async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
 
 #[tokio::test]
 async fn test_cancelled_prepared_plan_preserves_resident_history() {
-    use crate::compaction::scheduler::history::PickKey;
-    use crate::compaction::twcs::PickClass;
-
     let executor = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(executor.clone());
     let (tx, mut rx) = mpsc::channel(4);
@@ -1060,7 +1051,7 @@ async fn test_cancelled_prepared_plan_preserves_resident_history() {
         window: -999,
         class: PickClass::FileReduction,
     };
-    let now = std::time::Instant::now();
+    let now = Instant::now();
     scheduler
         .region_status
         .get_mut(&id)
@@ -1086,9 +1077,6 @@ async fn test_cancelled_prepared_plan_preserves_resident_history() {
 
 #[tokio::test]
 async fn test_pick_result_installs_history_after_unrelated_flush() {
-    use crate::compaction::scheduler::history::PickKey;
-    use crate::compaction::twcs::PickClass;
-
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
@@ -1117,7 +1105,7 @@ async fn test_pick_result_installs_history_after_unrelated_flush() {
         window: -999,
         class: PickClass::FileReduction,
     };
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let old_age = start - Duration::from_secs(120);
     let waiting_age = start - Duration::from_secs(90);
     let history = &mut scheduler
@@ -1151,7 +1139,7 @@ async fn test_pick_result_installs_history_after_unrelated_flush() {
     assert_eq!(job_scheduler.num_jobs(), 1);
     assert!(selected.iter().all(FileHandle::compacting));
     let history = &scheduler.region_status[&region_id].pick_history;
-    let future = std::time::Instant::now() + Duration::from_secs(120);
+    let future = Instant::now() + Duration::from_secs(120);
     assert!(
         history
             .promoted_since_for_test(selected_key, future)

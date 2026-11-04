@@ -1370,13 +1370,10 @@ fn find_active_window_by_sequence<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::compaction::scheduler::history::{PickHistory, PickKey};
-    use crate::metrics::TWCS_SELECTED_CANDIDATES;
     use std::collections::HashSet;
     use std::num::NonZeroU64;
     use std::sync::Arc;
-    use std::time::Duration;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use common_base::Plugins;
     use common_time::range::TimestampRange;
@@ -1385,6 +1382,7 @@ mod tests {
     use super::*;
     use crate::cache::CacheManager;
     use crate::compaction::compactor::CompactionVersion;
+    use crate::compaction::scheduler::history::{PickHistory, PickKey};
     use crate::compaction::scheduler::pick_automatic_for_test;
     use crate::compaction::test_util::{
         compaction_region_with_ssts, new_file_handle, new_file_handle_with_sequence,
@@ -1393,6 +1391,7 @@ mod tests {
         primary_key_mapper_for_test,
     };
     use crate::config::MitoConfig;
+    use crate::metrics::TWCS_SELECTED_CANDIDATES;
     use crate::region::options::RegionOptions;
     use crate::sst::file::{FileMeta, Level};
     use crate::sst::version::SstVersion;
