@@ -285,6 +285,7 @@ struct FusedSeriesPayload {
     format: FusedOutputFormat,
     promql: Arc<str>,
     partial_fold: Option<BoundAggregate>,
+    grouping_tags: Option<Vec<String>>,
     output_schema: datafusion::arrow::datatypes::Schema,
 }
 
@@ -307,6 +308,7 @@ impl FusedSeries {
             format: self.format,
             promql: Arc::clone(&self.promql),
             partial_fold: self.partial_fold.clone(),
+            grouping_tags: self.grouping_tags.clone(),
             output_schema: self.output_schema.as_arrow().clone(),
         };
         let encoded = postcard::to_stdvec(&payload).map_err(|e| {
@@ -315,7 +317,7 @@ impl FusedSeries {
         let len = u32::try_from(encoded.len())
             .map_err(|_| DataFusionError::Plan("FusedSeries payload too large".into()))?;
         let mut out = Vec::with_capacity(8 + encoded.len());
-        out.extend(3u32.to_le_bytes());
+        out.extend(4u32.to_le_bytes());
         out.extend(len.to_le_bytes());
         out.extend(encoded);
         Ok(out)
@@ -330,7 +332,7 @@ impl FusedSeries {
             ));
         }
         let version = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-        if version != 3 {
+        if version != 4 {
             return Err(DataFusionError::Plan(format!(
                 "unsupported FusedSeries envelope version {version}"
             )));
@@ -364,6 +366,7 @@ impl FusedSeries {
             format,
             promql,
             partial_fold,
+            grouping_tags,
             output_schema,
         } = payload;
         let grid = Arc::new(
@@ -395,12 +398,9 @@ impl FusedSeries {
                     "partial FusedSeries must use PlainRows".into(),
                 ));
             }
-            let grouping_tags = output_schema
-                .fields()
-                .iter()
-                .filter(|field| field.data_type() == &datafusion::arrow::datatypes::DataType::Utf8)
-                .map(|field| field.name().clone())
-                .collect::<Vec<_>>();
+            let grouping_tags = grouping_tags.ok_or_else(|| {
+                DataFusionError::Plan("partial FusedSeries has no grouping tags".into())
+            })?;
             let partial =
                 Self::try_new_partial(promql, tree, binding, children, op, &grouping_tags)?;
             if partial.schema() != &output_schema {
