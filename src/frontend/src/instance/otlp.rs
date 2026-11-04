@@ -251,32 +251,25 @@ impl OpenTelemetryProtocolHandler for Instance {
                     })
                 })
                 .collect::<HashSet<_>>();
-            let (source_requests, other): (Vec<_>, Vec<_>) =
-                requests.inserts.into_iter().partition(|request| {
-                    metric_ctx.with_metric_engine
-                        && source_names.contains(request.table_name.as_str())
-                });
-            let prepared = if metric_ctx.with_metric_engine {
-                self.inserter
-                    .prepare_metric_row_inserts(
-                        RowInsertRequests {
-                            inserts: source_requests,
-                        },
-                        confirmed.clone(),
-                        &self.statement_executor,
-                        ctx.extension(PHYSICAL_TABLE_PARAM)
-                            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-                            .to_string(),
-                    )
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(error::ExecuteGrpcQuerySnafu)
-            } else {
-                error::NotSupportedSnafu {
-                    feat: "exemplars require metric-engine ingestion",
-                }
-                .fail()
-            };
+            let (source_requests, other): (Vec<_>, Vec<_>) = requests
+                .inserts
+                .into_iter()
+                .partition(|request| source_names.contains(request.table_name.as_str()));
+            let prepared = self
+                .inserter
+                .prepare_metric_row_inserts(
+                    RowInsertRequests {
+                        inserts: source_requests,
+                    },
+                    confirmed.clone(),
+                    &self.statement_executor,
+                    ctx.extension(PHYSICAL_TABLE_PARAM)
+                        .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+                        .to_string(),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu);
             let source_ready = prepared.is_ok();
             let sources = prepared
                 .as_ref()

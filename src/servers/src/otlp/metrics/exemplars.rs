@@ -76,7 +76,8 @@ pub(super) fn value(exemplar: &Exemplar) -> Result<f64> {
     }
 }
 
-/// Retains the emitted row's identity until destination defaults have been filled.
+/// Collects exemplars for metric-engine ingestion, retaining each emitted row's identity
+/// until destination defaults have been filled.
 pub(crate) fn append<'a>(
     output: &mut Vec<RowExemplars>,
     exemplars: impl IntoIterator<Item = &'a Exemplar>,
@@ -86,6 +87,12 @@ pub(crate) fn append<'a>(
 ) {
     let mut exemplars = exemplars.into_iter().peekable();
     if exemplars.peek().is_none() {
+        return;
+    }
+    if !ctx.with_metric_engine {
+        crate::metrics::EXEMPLARS_DROPPED_TOTAL
+            .with_label_values(&["otlp"])
+            .inc_by(exemplars.count() as u64);
         return;
     }
     let validate_name = |name: &[u8]| !name.is_empty();
@@ -163,6 +170,32 @@ mod tests {
     use crate::row_writer::TableData;
 
     #[test]
+    fn test_exemplars_require_metric_engine() {
+        let exemplar = Exemplar {
+            time_unix_nano: 1,
+            value: Some(exemplar::Value::AsDouble(0.5)),
+            ..Default::default()
+        };
+        let dropped = crate::metrics::EXEMPLARS_DROPPED_TOTAL.with_label_values(&["otlp"]);
+        for enabled in [false, true] {
+            let before = dropped.get();
+            let mut output = Vec::new();
+            append(
+                &mut output,
+                [&exemplar],
+                "latency",
+                0,
+                &OtlpMetricCtx {
+                    with_metric_engine: enabled,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(output.len(), usize::from(enabled));
+            assert_eq!(dropped.get() - before, u64::from(!enabled));
+        }
+    }
+
+    #[test]
     fn test_exemplar_labels_follow_otlp_translation_strategy() {
         use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
             Gauge, NumberDataPoint, number_data_point,
@@ -202,6 +235,7 @@ mod tests {
                     None,
                     None,
                     &OtlpMetricCtx {
+                        with_metric_engine: true,
                         metric_translation_strategy: strategy,
                         ..Default::default()
                     },
@@ -251,7 +285,10 @@ mod tests {
             span_id: vec![0xcd; 8],
             value: Some(exemplar::Value::AsDouble(0.32)),
         };
-        let ctx = OtlpMetricCtx::default();
+        let ctx = OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        };
         let mut output = Vec::new();
         append(&mut output, [&exemplar], "latency", table.num_rows(), &ctx);
         let first = output.pop().unwrap().finish(table.columns(), &row);

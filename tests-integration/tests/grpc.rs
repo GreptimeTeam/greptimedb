@@ -133,6 +133,7 @@ macro_rules! grpc_tests {
                 test_otel_arrow_auth,
                 test_otel_arrow_delta_histogram,
                 test_otel_arrow_exponential_histogram,
+                test_otel_arrow_exemplars_without_metric_engine,
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
@@ -1239,6 +1240,101 @@ pub async fn test_otel_arrow_delta_histogram(store_type: StorageType) {
     assert_eq!(ArrowStatusCode::Ok as i32, after_collision.status_code);
     assert!(after_collision.status_message.is_empty());
     let _ = server.shutdown().await;
+}
+
+pub async fn test_otel_arrow_exemplars_without_metric_engine(store_type: StorageType) {
+    use datatypes::arrow::array::BinaryArray;
+    use otel_arrow_rust::Consumer;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::metric;
+
+    let (_instance, server) = setup_grpc_server(
+        store_type,
+        "test_otel_arrow_exemplars_without_metric_engine",
+    )
+    .await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let db = Database::new_with_dbname(
+        format!("{DEFAULT_CATALOG_NAME}-{DEFAULT_SCHEMA_NAME}"),
+        Client::with_urls(vec![addr.clone()]),
+    );
+    let mut client = ArrowMetricsServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let mut batch = gauge_arrow_batch(20, false);
+    let exemplars = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt32Array::from(vec![0_u32])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![2_000_000_000])) as ArrayRef,
+        ),
+        (
+            arrow_consts::DOUBLE_VALUE,
+            Arc::new(Float64Array::from(vec![0.5])) as ArrayRef,
+        ),
+        (
+            arrow_consts::SPAN_ID,
+            Arc::new(BinaryArray::from_vec(vec![&[1_u8; 8]])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TRACE_ID,
+            Arc::new(BinaryArray::from_vec(vec![&[2_u8; 16]])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    batch.arrow_payloads.push(ArrowPayload {
+        schema_id: "exemplars-20".into(),
+        r#type: ArrowPayloadType::NumberDpExemplars as i32,
+        record: serialize_arrow_record_batch(&exemplars),
+    });
+    let decoded = Consumer::default()
+        .consume_metrics_batches(&mut batch.clone())
+        .unwrap();
+    let Some(metric::Data::Gauge(gauge)) =
+        &decoded.resource_metrics[0].scope_metrics[0].metrics[0].data
+    else {
+        panic!("expected a gauge")
+    };
+    assert_eq!(gauge.data_points[0].exemplars.len(), 1);
+
+    let request = Request::new(futures::stream::iter([
+        batch,
+        delta_histogram_arrow_batch(21, &[(3, &[1, 2], &[1.0])]),
+    ]));
+    let mut response = client.arrow_metrics(request).await.unwrap().into_inner();
+    for batch_id in [20, 21] {
+        let status = response.message().await.unwrap().unwrap();
+        assert_eq!(status.batch_id, batch_id);
+        assert_eq!(status.status_code, ArrowStatusCode::Ok as i32);
+        assert!(status.status_message.is_empty());
+    }
+    assert!(response.message().await.unwrap().is_none());
+    for (sql, count) in [
+        ("SELECT COUNT(*) AS c FROM otel_arrow_gauge", 1),
+        (
+            "SELECT COUNT(*) AS c FROM otel_arrow_delta_histogram_bucket",
+            2,
+        ),
+        (
+            "SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_name='metrics_exemplars'",
+            0,
+        ),
+    ] {
+        let OutputData::Stream(stream) = db.sql(sql).await.unwrap().data else {
+            panic!("expected a stream")
+        };
+        assert_eq!(
+            RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .pretty_print()
+                .unwrap(),
+            format!("+---+\n| c |\n+---+\n| {count} |\n+---+"),
+        );
+    }
+    server.shutdown().await.unwrap();
 }
 
 pub async fn test_otel_arrow_exponential_histogram(store_type: StorageType) {

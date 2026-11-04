@@ -1628,7 +1628,14 @@ mod tests {
         gauge.data_points[0].time_unix_nano =
             2 * common_catalog::consts::SEMANTIC_GRAPH_WINDOW_NANOS as u64;
         request.resource_metrics.push(rejected);
-        let mut prepared = prepare_metrics(request, &mut descriptor_ctx()).unwrap();
+        let mut prepared = prepare_metrics(
+            request,
+            &mut OtlpMetricCtx {
+                with_metric_engine: true,
+                ..descriptor_ctx()
+            },
+        )
+        .unwrap();
         assert!(prepared.has_exemplars());
         for request in &mut prepared.requests {
             let rows = request.rows.as_mut().unwrap();
@@ -1914,6 +1921,7 @@ mod tests {
                     AttributeType::DataPoint => gauge.data_points[0].attributes = attributes,
                 }
                 let mut ctx = OtlpMetricCtx {
+                    with_metric_engine: true,
                     metric_translation_strategy: strategy,
                     promote_all_resource_attrs: true,
                     promote_scope_attrs: true,
@@ -2901,9 +2909,14 @@ mod tests {
                     AggregationTemporality::Cumulative,
                 ),
             ];
-            let conversion =
-                to_grpc_insert_requests(metrics_request(metrics), &mut OtlpMetricCtx::default())
-                    .unwrap();
+            let conversion = to_grpc_insert_requests(
+                metrics_request(metrics),
+                &mut OtlpMetricCtx {
+                    with_metric_engine: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             assert_eq!(conversion.rows, 3);
             assert_eq!(conversion.outcome.accepted_data_points, 3);
             assert_eq!(conversion.outcome.rejected_data_points, 0);
@@ -2981,8 +2994,12 @@ mod tests {
                     data: Some(metric::Data::Histogram(histogram.clone())),
                     ..Default::default()
                 });
+            let ctx = OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            };
             let mut conversion =
-                to_grpc_insert_requests(request.clone(), &mut OtlpMetricCtx::default()).unwrap();
+                to_grpc_insert_requests(request.clone(), &mut ctx.clone()).unwrap();
             assert_eq!(conversion.outcome.accepted_data_points, 2, "{mode}");
             assert_eq!(
                 conversion.outcome.rejected_data_points,
@@ -2996,8 +3013,7 @@ mod tests {
             }
             request.resource_metrics[0].scope_metrics[0].metrics[1].data =
                 Some(metric::Data::Histogram(histogram));
-            let mut baseline =
-                to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
+            let mut baseline = to_grpc_insert_requests(request, &mut ctx.clone()).unwrap();
             conversion
                 .requests
                 .inserts

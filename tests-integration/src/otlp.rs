@@ -1604,6 +1604,108 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_without_metric_engine() {
+        use axum::body::Body;
+        use common_memory_manager::OnExhaustedPolicy;
+        use futures::SinkExt;
+        use http::{Request, StatusCode};
+        use prost::Message;
+        use servers::http::HttpServerBuilder;
+        use servers::postgres::PostgresServer;
+        use servers::request_memory_limiter::ServerMemoryLimiter;
+        use servers::server::Server;
+        use servers::tls::ReloadableTlsServerConfig;
+        use tower::ServiceExt;
+
+        let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_disabled")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        // The body fits, but expanding the discarded exemplars would exceed the quota.
+        let limiter = ServerMemoryLimiter::new(64 * 1024, OnExhaustedPolicy::Fail);
+        let server = HttpServerBuilder::new(Default::default())
+            .with_memory_limiter(limiter.clone())
+            .with_otlp_handler(instance.clone(), false)
+            .build();
+        let app = server.build(server.make_app()).unwrap();
+        let request = exemplar_metric_request(64);
+        let response = app
+            .oneshot(
+                Request::post("/v1/otlp/v1/metrics")
+                    .header("content-type", "application/x-protobuf")
+                    .body(Body::from(request.encode_to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(limiter.used_bytes(), 0);
+
+        let mut server = PostgresServer::new(
+            instance.clone(),
+            instance.clone(),
+            false,
+            Arc::new(ReloadableTlsServerConfig::try_new(Default::default()).unwrap()),
+            0,
+            common_runtime::global_runtime(),
+            None,
+            None,
+        )
+        .with_otlp_handler(instance.clone(), false)
+        .with_memory_limiter(limiter.clone());
+        server.start("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (client, connection) = tokio_postgres::connect(
+            &format!(
+                "host=127.0.0.1 port={} dbname=public",
+                server.bind_addr().unwrap().port()
+            ),
+            tokio_postgres::NoTls,
+        )
+        .await
+        .unwrap();
+        let connection = tokio::spawn(connection);
+        let mut sink = Box::pin(
+            client
+                .copy_in("COPY FROM STDIN WITH (FORMAT otlp)")
+                .await
+                .unwrap(),
+        );
+        let mut request = request;
+        for metric in &mut request.resource_metrics[0].scope_metrics[0].metrics {
+            let Some(metric::Data::Gauge(gauge)) = &mut metric.data else {
+                unreachable!()
+            };
+            gauge.data_points[0].time_unix_nano += 1_000_000_000;
+        }
+        sink.as_mut()
+            .send(bytes::Bytes::from(request.encode_to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(sink.as_mut().finish().await.unwrap(), 64);
+        assert_eq!(limiter.used_bytes(), 0);
+        drop(sink);
+        drop(client);
+        connection.await.unwrap().unwrap();
+        server.shutdown().await.unwrap();
+
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "public"));
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*)=2 FROM exemplar_memory_0",
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='metrics_exemplars'",
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_exemplar_otlp_memory_limit() {
         use std::io::Write;
 
@@ -1630,7 +1732,10 @@ WITH(
             let limit = if count == 1 {
                 let conversion = servers::otlp::metrics::to_grpc_insert_requests(
                     request.clone(),
-                    &mut OtlpMetricCtx::default(),
+                    &mut OtlpMetricCtx {
+                        with_metric_engine: true,
+                        ..Default::default()
+                    },
                 )
                 .unwrap();
                 let bytes = servers::exemplar::estimated_row_bytes(std::iter::once(
@@ -2064,7 +2169,6 @@ WITH(
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_exemplar_otlp_source_identity() {
-        use common_error::ext::ErrorExt;
         use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
 
         for (with_metric_engine, batching) in [(false, false), (true, false), (true, true)] {
@@ -2111,13 +2215,8 @@ WITH(
                 ..Default::default()
             });
             let result = instance.metrics(request, ctx.clone(), None).await;
+            assert_eq!(result.unwrap().accepted_data_points, 1);
             if !with_metric_engine {
-                assert!(
-                    result
-                        .unwrap_err()
-                        .output_msg()
-                        .contains("require metric-engine ingestion")
-                );
                 assert_trace_v2_query(
                     instance,
                     "SELECT COUNT(*)=3 FROM latency_bucket",
@@ -2128,7 +2227,6 @@ WITH(
                 assert_trace_v2_query(instance, "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='metrics_exemplars'", ctx).await.unwrap();
                 continue;
             }
-            assert_eq!(result.unwrap().accepted_data_points, 1);
             assert_trace_v2_query(
                 instance,
                 "SELECT COUNT(*)=2 FROM metrics_exemplars",
@@ -3251,8 +3349,14 @@ WITH(
                 ..Default::default()
             },
         );
+        let mut metric_ctx = ctx.fork();
+        metric_ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let request = metric_request(vec![metric]);
         let err = instance
-            .metrics(metric_request(vec![metric]), ctx.clone(), None)
+            .metrics(request.clone(), Arc::new(metric_ctx), None)
             .await
             .unwrap_err();
         assert_eq!(err.status_code(), StatusCode::PermissionDenied);
@@ -3263,10 +3367,25 @@ WITH(
         assert_trace_v2_query(
             instance,
             "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='allowed_metric'",
-            ctx,
+            ctx.clone(),
         )
         .await
         .unwrap();
+        assert_eq!(
+            instance
+                .metrics(request, ctx.clone(), None)
+                .await
+                .unwrap()
+                .accepted_data_points,
+            1
+        );
+        assert_eq!(
+            std::mem::take(&mut *checker.calls.lock().unwrap()),
+            vec![vec!["allowed_metric"]]
+        );
+        assert_trace_v2_query(instance, "SELECT COUNT(*)=1 FROM allowed_metric", ctx)
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
