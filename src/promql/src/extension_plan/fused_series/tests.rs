@@ -1410,7 +1410,7 @@ fn mutate_envelope_payload(
     mutate(&mut payload);
     let changed = postcard::to_stdvec(&payload).unwrap();
     let mut result = Vec::with_capacity(8 + changed.len());
-    result.extend(3u32.to_le_bytes());
+    result.extend(4u32.to_le_bytes());
     result.extend((changed.len() as u32).to_le_bytes());
     result.extend(changed);
     result
