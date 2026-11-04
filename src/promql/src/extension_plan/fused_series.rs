@@ -406,7 +406,7 @@ impl FusedSeries {
         output_schema: DFSchemaRef,
         format: FusedOutputFormat,
     ) -> DataFusionResult<Self> {
-        validate_binding(&tree, &binding, children.len())?;
+        validate_binding(&tree, &binding, &children)?;
         if format == FusedOutputFormat::SeriesFrame && children.len() > 1 {
             return Err(DataFusionError::Plan(
                 "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
@@ -440,7 +440,7 @@ impl FusedSeries {
         children: Vec<LogicalPlan>,
         op: BoundAggregate,
     ) -> DataFusionResult<Self> {
-        validate_binding(&tree, &binding, children.len())?;
+        validate_binding(&tree, &binding, &children)?;
         if children.len() != 1 {
             return Err(DataFusionError::Plan(
                 "FusedSeries partial fold requires one raw child".into(),
@@ -597,7 +597,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
         _exprs: Vec<Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        validate_binding(&self.tree, &self.binding, inputs.len())?;
+        validate_binding(&self.tree, &self.binding, &inputs)?;
         Ok(Self {
             promql: Arc::clone(&self.promql),
             tree: self.tree.clone(),
@@ -721,12 +721,35 @@ fn collect_source_schemas(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesS
     Ok(schemas.into_iter().map(|(_, schema)| schema).collect())
 }
 
+/// Whether this input reports the metric each of its rows came from, by naming it itself.
+///
+/// A discovered selector binds one source per metric, so the name comes from the sources rather
+/// than from a single name on the node.
+fn source_names_its_metric(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Extension(extension) => extension
+            .node
+            .as_any()
+            .downcast_ref::<super::RawSeriesSource>()
+            .is_some_and(|source| !source.metric_name().is_empty()),
+        LogicalPlan::Union(union) => union
+            .inputs
+            .iter()
+            .all(|input| source_names_its_metric(input)),
+        _ => false,
+    }
+}
+
 fn validate_binding(
     tree: &NativeTree,
     binding: &FusedSeriesBinding,
-    child_count: usize,
+    children: &[LogicalPlan],
 ) -> DataFusionResult<()> {
-    if binding.tags.iter().any(|tag| tag == METRIC_NAME) && binding.metric_name.is_none() {
+    // A `__name__` tag is filled either by one bound metric name or by the sources themselves.
+    if binding.tags.iter().any(|tag| tag == METRIC_NAME)
+        && binding.metric_name.is_none()
+        && !children.iter().all(source_names_its_metric)
+    {
         return Err(DataFusionError::Plan(format!(
             "FusedSeries declares {METRIC_NAME:?} but binds no metric name"
         )));
@@ -737,7 +760,7 @@ fn validate_binding(
     if schemas.is_empty() {
         tree.root().validate()?;
     }
-    if schemas.len() != child_count {
+    if schemas.len() != children.len() {
         return Err(DataFusionError::Plan(
             "FusedSeries source indexes must densely match its children".into(),
         ));
