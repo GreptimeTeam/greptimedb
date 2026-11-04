@@ -35,8 +35,6 @@ on:
         type: string
         required: false
         default: ""
-    secrets:
-      inherit: false
   pull_request:
     branches: [narthex]
   push:
@@ -222,6 +220,10 @@ jobs:
   vm-performance:
     name: vmbench lite (candidate, narthex baseline, VictoriaMetrics)
     needs: build
+    # The benchmark provisions an ephemeral cloud runner and needs the Aliyun/AWS credentials and the
+    # runner token, none of which a pull request from a fork receives. It runs where they exist: the
+    # nightly schedule and a manual dispatch.
+    if: ${{ github.event_name != 'pull_request' }}
     uses: ./.github/workflows/vmbench-long-range.yml
     with:
       # A PR compares the PR's build with the branch it targets; a push compares the merged result
