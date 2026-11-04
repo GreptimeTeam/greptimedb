@@ -176,7 +176,9 @@ impl Inserter {
                 let unit = target
                     .and_then(table_time_index_unit)
                     .or_else(|| physical.and_then(table_time_index_unit))
-                    .unwrap_or(TimeUnit::Millisecond);
+                    // The physical table will be auto-created in the configured
+                    // unit, so validate its rows in that unit as well.
+                    .unwrap_or(self.auto_create_physical_table_timestamp_unit);
                 if let Some(rows) = &mut request.rows {
                     convert_rows_time_unit(rows, unit)?;
                 }

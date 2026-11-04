@@ -898,6 +898,7 @@ pub fn build_test_prom_server(
             frontend_ref.table_flownode_set_cache().clone(),
             true,
             frontend_ref.clone(),
+            common_time::timestamp::TimeUnit::Millisecond,
             Duration::from_millis(50),
             1000,
             4,
