@@ -43,3 +43,7 @@ source-coverage extension, exercised by `frozen_sample_catalog_coverage`. Empty
 object lists isolate catalog decoding; the existing part fixture tests actual
 payload reads. Legacy entries cover one SST. Daily entries cover the entire
 listed source set and become ineligible if any source disappears.
+
+`sparse-daily-catalog-entry.json` freezes explicit populated-day coverage per source.
+Older daily catalogs decode with empty coverage and are rebuilt before reuse.
+The source Parquet files and sample payload encoding are unchanged.

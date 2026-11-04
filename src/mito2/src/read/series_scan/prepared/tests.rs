@@ -610,6 +610,27 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     );
 
     build(&engine, &region).await;
+    // A partial-day query still uses grouped samples when other sources were time-pruned.
+    let mut bounded_request = request.clone();
+    bounded_request.filters.push(col("ts").gt_eq(lit(1500_i64)));
+    let bounded = engine
+        .handle_query(region.region_id, bounded_request)
+        .await
+        .unwrap();
+    let bounded_labels = labels(bounded.metadata());
+    let prepared = bounded
+        .prepare_series(&ctx, &metrics, &bounded_labels)
+        .await
+        .unwrap()
+        .expect("time-pruned daily sources remain prepared");
+    let chunks = prepared
+        .read_series(0..prepared.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(samples(&chunks), vec![(2000, 1.0)]);
+
     let mut raw_scanner = engine
         .handle_query(region.region_id, request.clone())
         .await
@@ -1869,5 +1890,52 @@ async fn series_pushdown_skips_unrelated_table_payloads() {
         .unwrap();
     assert!(selected.is_empty());
     assert!(reads.lock().unwrap().len() < full_reads);
+    engine.stop().await.unwrap();
+}
+
+/// Sparse timestamps must not create empty-day artifacts, and new SSTs must leave existing
+/// source groups intact. Reopening exercises the persisted explicit coverage used by preflight.
+#[tokio::test]
+async fn daily_samples_preserve_sparse_coverage_and_existing_groups() {
+    let (_env, engine, region) = fixture().await;
+    const LATER: i64 = 20_000 * 86_400_000;
+    write(&engine, &region, 0, 0, Some(1.0)).await;
+    write(&engine, &region, 0, LATER, Some(2.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let original = region.series_index_version();
+    assert_eq!(original.samples.len(), 2);
+    assert_eq!(
+        original
+            .samples
+            .values()
+            .map(|h| h.entry().window.unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        [0, 20_000].into()
+    );
+    let store = region.series_index_store.clone().unwrap();
+    let (purger, _receiver) = crate::series_index::series_index_channel(store.clone());
+    let reopened =
+        crate::series_index::load_version_control(&store, region.region_id, &purger).await;
+    for file in region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+    {
+        assert!(crate::series_index::artifact::samples_cover_file(
+            &reopened.current().samples,
+            file
+        ));
+    }
+    write(&engine, &region, 0, 3000, Some(3.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let updated = region.series_index_version();
+    assert_eq!(updated.samples.len(), original.samples.len() + 1);
+    for (id, old) in &original.samples {
+        assert_eq!(updated.samples[id].entry(), old.entry());
+    }
     engine.stop().await.unwrap();
 }

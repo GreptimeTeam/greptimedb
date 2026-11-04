@@ -322,6 +322,7 @@ pub(crate) async fn build_samples(
         SamplesEntry {
             source_file_ids: Vec::new(),
             window: None,
+            source_windows: Default::default(),
             file_id: file_id.file_id(),
             artifact,
         },
@@ -342,43 +343,29 @@ pub(crate) fn sample_day(timestamp: common_time::Timestamp) -> i64 {
     })
 }
 
-/// Plans independent daily outputs. SSTs spanning midnight participate in both windows.
-pub(crate) fn sample_windows(files: &[FileHandle]) -> Vec<(i64, Vec<FileHandle>)> {
-    let mut windows = std::collections::BTreeMap::<i64, Vec<FileHandle>>::new();
-    for file in files {
-        let (start, end) = file.time_range();
-        for day in sample_day(start)..=sample_day(end) {
-            windows.entry(day).or_default().push(file.clone());
+/// Retires completed daily outputs if building the remaining days fails or is cancelled.
+#[derive(Default)]
+struct UnpublishedSamples(Vec<crate::series_index::artifact::SamplesFileHandle>);
+
+impl Drop for UnpublishedSamples {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.mark_deleted();
         }
     }
-    for files in windows.values_mut() {
-        files.sort_unstable_by_key(|file| file.file_id().file_id().to_string());
-    }
-    // Bound the merge fan-in independently of the number of SSTs in a day.
-    // Each group owns disjoint source IDs; coverage is checked per source/day.
-    windows
-        .into_iter()
-        .flat_map(|(day, files)| {
-            files
-                .chunks(64)
-                .map(|group| (day, group.to_vec()))
-                .collect::<Vec<_>>()
-        })
-        .collect()
 }
 
-/// Merges a pinned set of SSTs into one daily generation, preserving all row versions.
+/// Reads a bounded, pinned source group once and routes its rows into nonempty daily outputs.
 /// The existing sample writer bounds both blocks and output file sizes.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn build_sample_window(
+pub(crate) async fn build_sample_windows(
     store: &ObjectStore,
     region: &MitoRegionRef,
     version: &VersionRef,
     files: &[FileHandle],
-    day: i64,
     backend: &dyn crate::series_index::format::SamplesFormat,
     purger: &IndexFilePurger,
-) -> Result<crate::series_index::artifact::SamplesFileHandle> {
+) -> Result<Vec<crate::series_index::artifact::SamplesFileHandle>> {
     use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
     use crate::sst::file::RegionFileId;
     use datatypes::arrow::array::BooleanArray;
@@ -396,6 +383,10 @@ pub(crate) async fn build_sample_window(
         .column_schema
         .name
         .clone();
+    let coverage = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::<
+        store_api::storage::FileId,
+        std::collections::BTreeSet<i64>,
+    >::new()));
     let mut sources = Vec::<BoxedRecordBatchStream>::new();
     for file in files {
         let (context, mut selection) = region
@@ -409,6 +400,8 @@ pub(crate) async fn build_sample_window(
         let context = Arc::new(context);
         let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
         let timestamp_name = timestamp_name.clone();
+        let coverage = coverage.clone();
+        let source_id = file.file_id().file_id();
         sources.push(Box::pin(try_stream! {
             while let Some((row_group, selection)) = selection.pop_first() {
                 let parquet = context.reader_builder().build(context.build_context(row_group, Some(selection), None)).await?;
@@ -419,54 +412,110 @@ pub(crate) async fn build_sample_window(
                     let batch = match &compat { Some(compat) => compat.compat(batch)?, None => batch };
                     let column = batch.column_by_name(&timestamp_name).context(UnexpectedSnafu { reason: "missing daily sample timestamp" })?;
                     let (values, unit) = timestamp_array_to_primitive(column).context(UnexpectedSnafu { reason: "invalid daily sample timestamp" })?;
-                    let mask = BooleanArray::from(values.values().iter().map(|v| sample_day(common_time::Timestamp::new(*v, unit.into())) == day).collect::<Vec<_>>());
-                    let batch = filter_record_batch(&batch, &mask).map_err(|e| crate::error::UnexpectedSnafu { reason: e.to_string() }.build())?;
-                    if batch.num_rows() > 0 { yield batch; }
+                    {
+                        let mut coverage = coverage.lock();
+                        coverage.entry(source_id).or_default().extend(values.values().iter()
+                            .map(|v| sample_day(common_time::Timestamp::new(*v, unit.into()))));
+                    }
+                    yield batch;
                 }
             }
         }));
     }
-    let generation = store_api::storage::FileId::random();
-    let prefix =
-        crate::series_index::samples::samples_prefix(region.region_id.as_u64(), generation);
     let mut merged = Box::pin(
         FlatMergeReader::new(schema, sources, 8192, None)
             .await?
             .into_stream(),
     );
-    let mut writer = backend
-        .writer(
-            version.metadata.clone(),
-            store.clone(),
-            &prefix,
-            generation,
-            generation,
-        )
-        .await?;
+    let mut writers = std::collections::BTreeMap::<
+        i64,
+        (
+            store_api::storage::FileId,
+            Box<dyn crate::series_index::format::FormatWriter>,
+        ),
+    >::new();
     let result: Result<()> = async {
         while let Some(batch) = merged.try_next().await? {
-            writer.write(&batch).await?;
+            let column = batch
+                .column_by_name(&timestamp_name)
+                .context(UnexpectedSnafu {
+                    reason: "missing daily sample timestamp",
+                })?;
+            let (values, unit) = timestamp_array_to_primitive(column).context(UnexpectedSnafu {
+                reason: "invalid daily sample timestamp",
+            })?;
+            let days: Vec<_> = values
+                .values()
+                .iter()
+                .map(|v| sample_day(common_time::Timestamp::new(*v, unit.into())))
+                .collect();
+            for day in days
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                if let std::collections::btree_map::Entry::Vacant(entry) = writers.entry(day) {
+                    let generation = store_api::storage::FileId::random();
+                    let prefix = crate::series_index::samples::samples_prefix(
+                        region.region_id.as_u64(),
+                        generation,
+                    );
+                    let writer = backend
+                        .writer(
+                            version.metadata.clone(),
+                            store.clone(),
+                            &prefix,
+                            generation,
+                            generation,
+                        )
+                        .await?;
+                    entry.insert((generation, writer));
+                }
+                let mask = BooleanArray::from(days.iter().map(|d| *d == day).collect::<Vec<_>>());
+                let batch = filter_record_batch(&batch, &mask).map_err(|e| {
+                    UnexpectedSnafu {
+                        reason: e.to_string(),
+                    }
+                    .build()
+                })?;
+                if let Some((_, writer)) = writers.get_mut(&day) {
+                    writer.write(&batch).await?;
+                }
+            }
         }
         Ok(())
     }
     .await;
     if let Err(error) = result {
-        if let Err(cleanup) = writer.abort().await {
-            warn!(cleanup; "Failed to abort daily samples build");
+        for (_, (_, writer)) in writers {
+            if let Err(cleanup) = writer.abort().await {
+                warn!(cleanup; "Failed to abort daily samples build");
+            }
         }
         return Err(error);
     }
-    let artifact = writer.finish().await?;
-    Ok(SamplesFileHandle::new(
-        RegionFileId::new(region.region_id, generation),
-        SamplesEntry {
-            file_id: generation,
-            artifact,
-            source_file_ids: files.iter().map(|f| f.file_id().file_id()).collect(),
-            window: Some(day),
-        },
-        purger.clone(),
-    ))
+    let source_windows: std::collections::HashMap<_, Vec<_>> = coverage
+        .lock()
+        .iter()
+        .map(|(id, days)| (*id, days.iter().copied().collect()))
+        .collect();
+    let mut handles = UnpublishedSamples::default();
+    for (day, (generation, writer)) in writers {
+        // Finished generations remain unpublished until the complete source group succeeds.
+        let artifact = writer.finish().await?;
+        handles.0.push(SamplesFileHandle::new(
+            RegionFileId::new(region.region_id, generation),
+            SamplesEntry {
+                file_id: generation,
+                artifact,
+                source_file_ids: files.iter().map(|f| f.file_id().file_id()).collect(),
+                window: Some(day),
+                source_windows: source_windows.clone(),
+            },
+            purger.clone(),
+        ));
+    }
+    Ok(std::mem::take(&mut handles.0))
 }
 
 #[cfg(test)]

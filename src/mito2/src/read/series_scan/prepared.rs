@@ -183,11 +183,12 @@ fn collect_inputs(
                 .insert(row_group.row_group_index);
         }
     }
-    // A grouped artifact contains every source's rows and cannot answer a partial
-    // source assignment. This also rejects generations containing retired SSTs.
+    // Grouped artifacts may also contain sources excluded solely by time pruning.
+    // Sequence-pruned, unassigned, and retired sources remain ineligible.
     let assigned = files
         .keys()
         .map(|i| input.files[*i].file_id().file_id())
+        .chain(input.time_pruned_files.iter().copied())
         .collect();
     let eligible_samples = index
         .version
@@ -329,6 +330,7 @@ impl ColumnarPreparedSource {
         let assigned: HashSet<_> = files
             .iter()
             .map(|i| input.files[*i].file_id().file_id())
+            .chain(input.time_pruned_files.iter().copied())
             .collect();
         for handle in index
             .version

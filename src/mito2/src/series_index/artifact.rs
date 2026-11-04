@@ -68,6 +68,9 @@ pub(crate) struct SamplesEntry {
     /// UTC day number since the Unix epoch; absent for legacy per-SST artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) window: Option<i64>,
+    /// Complete nonempty UTC-day coverage discovered in one pass over each source.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) source_windows: std::collections::HashMap<FileId, Vec<i64>>,
 }
 
 impl SamplesEntry {
@@ -101,14 +104,20 @@ pub(crate) fn samples_cover_file(
     {
         return true;
     }
-    let (start, end) = file.time_range();
-    (crate::series_index::builder::sample_day(start)
-        ..=crate::series_index::builder::sample_day(end))
-        .all(|day| {
-            samples
-                .values()
-                .any(|h| h.entry().window == Some(day) && h.entry().covers(id))
-        })
+    samples.values().any(|handle| {
+        let Some(days) = handle.entry().source_windows.get(&id) else {
+            // Earlier daily catalogs require rebuilding to establish actual row coverage.
+            return false;
+        };
+        !days.is_empty()
+            && days.iter().all(|day| {
+                samples.values().any(|h| {
+                    h.entry().window == Some(*day)
+                        && h.entry().covers(id)
+                        && h.entry().source_windows == handle.entry().source_windows
+                })
+            })
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +188,15 @@ mod tests {
             "../../../../tests/compatibility/wire/mito_columnar_samples/daily-catalog-entry.json"
         ))
         .unwrap();
+        assert!(daily.source_windows.is_empty());
+        let sparse: SamplesEntry = serde_json::from_str(include_str!(
+            "../../../../tests/compatibility/wire/mito_columnar_samples/sparse-daily-catalog-entry.json"
+        )).unwrap();
+        assert_eq!(sparse.source_windows[&legacy.file_id], vec![0, 3]);
+        assert_eq!(
+            sparse,
+            serde_json::from_str(&serde_json::to_string(&sparse).unwrap()).unwrap()
+        );
         let mut visible: HashSet<_> = daily.source_file_ids.iter().copied().collect();
         assert!(daily.sources_visible(&visible));
         assert!(daily.covers(legacy.file_id));
