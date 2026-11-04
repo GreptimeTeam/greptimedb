@@ -467,6 +467,14 @@ pub fn extract_tables_from_prom_expr_checked(
     extract_tables_from_prom_expr(expr, &mut names).then_some(names.into_iter())
 }
 
+/// Extracts the tables referenced by a [`PromExpr`] that can be resolved statically,
+/// ignoring the ones that cannot.
+pub fn extract_tables_from_prom_expr_partial(expr: &PromExpr) -> Vec<ObjectName> {
+    let mut names = HashSet::new();
+    extract_tables_from_prom_expr(expr, &mut names);
+    names.into_iter().collect()
+}
+
 fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName>) -> bool {
     struct TableCollector<'a> {
         names: &'a mut HashSet<ObjectName>,

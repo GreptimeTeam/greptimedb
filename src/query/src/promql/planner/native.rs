@@ -64,7 +64,7 @@ use promql_parser::parser::{
     BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
     VectorMatchCardinality, VectorSelector, token,
 };
-use session::context::QueryContextRef;
+use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 
@@ -506,12 +506,44 @@ impl PromPlanner {
                         .schema_name
                         .clone()
                         .unwrap_or_else(|| self.table_provider.query_ctx().current_schema());
+                    // Authorization is decided before anything is read: a table the caller may not
+                    // see never becomes a source, so its name reaches neither the plan nor an error.
+                    let scope = self.table_provider.query_ctx().metric_discovery_scope();
+                    if matches!(scope, MetricDiscoveryScope::Unavailable) {
+                        return Ok(None);
+                    }
                     let mut metrics = self
                         .table_provider
                         .logical_metric_tables(&effective_schema)
                         .await
                         .map_err(|error| DataFusionError::External(Box::new(error)))
                         .context(DataFusionPlanningSnafu)?;
+                    if let MetricDiscoveryScope::Allowed(allowed) = scope {
+                        let catalog = self.table_provider.query_ctx().current_catalog();
+                        // Borrowed keys, so a wide allowlist is one pass to build and one lookup
+                        // per metric rather than a scan of the allowlist for each of them.
+                        let permitted = allowed
+                            .iter()
+                            .map(|target| {
+                                (
+                                    target.catalog.as_str(),
+                                    target.schema.as_str(),
+                                    target.table.as_str(),
+                                )
+                            })
+                            .collect::<std::collections::HashSet<_>>();
+                        metrics.retain(|table| {
+                            let info = table.table_info();
+                            // Reject metadata that disagrees with where the table was enumerated.
+                            info.catalog_name == catalog
+                                && info.schema_name == effective_schema
+                                && permitted.contains(&(
+                                    info.catalog_name.as_str(),
+                                    info.schema_name.as_str(),
+                                    info.name.as_str(),
+                                ))
+                        });
+                    }
                     metrics.retain(|table| {
                         name_matchers
                             .iter()
