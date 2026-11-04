@@ -32,7 +32,6 @@ use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{
     CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, new_read_only_meta_kv_backend,
 };
-use catalog::process_manager::ProcessManager;
 use client::Client;
 use client::client_manager::NodeClients;
 use cmd::frontend::create_heartbeat_task;
@@ -634,7 +633,7 @@ impl GreptimeDbClusterBuilder {
             catalog_manager,
             datanode_clients,
             meta_client.clone(),
-            Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
+            fe_opts.create_process_manager(None),
         )
         .with_local_file_access(self.local_file_access.clone())
         .with_local_cache_invalidator(cache_registry)

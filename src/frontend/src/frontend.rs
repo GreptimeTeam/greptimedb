@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use catalog::process_manager::{ProcessManager, ProcessManagerRef};
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::SecretString;
 use common_config::config::Configurable;
@@ -22,7 +23,7 @@ use common_memory_manager::OnExhaustedPolicy;
 use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
-use meta_client::MetaClientOptions;
+use meta_client::{MetaClientOptions, MetaClientRef};
 use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,33 @@ impl Default for FrontendOptions {
     }
 }
 
+impl FrontendOptions {
+    /// Returns the address this frontend advertises to the rest of the cluster.
+    ///
+    /// It is used as the heartbeat peer address and as the identity of the
+    /// frontend in the process list. When a dedicated internal gRPC server is
+    /// configured, it is that server's address, because the internal server is
+    /// the one that serves the frontend management service and peers connect to
+    /// it. Otherwise the public gRPC address is used: the peer address only
+    /// promises to be reachable by other components.
+    pub fn peer_addr(&self) -> String {
+        let grpc = self.internal_grpc.as_ref().unwrap_or(&self.grpc);
+        servers::addrs::resolve_addr(&grpc.bind_addr, Some(&grpc.server_addr))
+    }
+
+    /// Creates the process manager that tracks this frontend's running queries.
+    ///
+    /// The manager identifies this frontend by [`Self::peer_addr`], the same
+    /// address other frontends discover from metasrv. It must not use the public
+    /// gRPC address: a frontend with a dedicated internal gRPC server would fail
+    /// to recognize itself among the discovered peers, list its own queries
+    /// twice, and send `KILL` requests to an address that does not serve the
+    /// frontend management service.
+    pub fn create_process_manager(&self, meta_client: Option<MetaClientRef>) -> ProcessManagerRef {
+        Arc::new(ProcessManager::new(self.peer_addr(), meta_client))
+    }
+}
+
 impl Configurable for FrontendOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&[
@@ -217,7 +245,7 @@ mod tests {
     use meta_client::MetaClientRef;
     use meta_client::client::MetaClientBuilder;
     use servers::batcher::BatchingProtocol;
-    use servers::grpc::{FlightCompression, GRPC_SERVER};
+    use servers::grpc::{FlightCompression, GRPC_SERVER, GrpcOptions};
     use servers::http::HTTP_SERVER;
     use servers::http::result::greptime_result_v1::GreptimedbV1Response;
     use servers::server::Server;
@@ -285,6 +313,25 @@ mod tests {
                 .unwrap()
                 .contains("static_user_provider:file:/etc/greptimedb/users")
         );
+    }
+
+    #[test]
+    fn test_peer_addr_prefers_internal_grpc_server() {
+        let mut options = FrontendOptions::default();
+        options.grpc.bind_addr = "127.0.0.1:4001".to_string();
+        options.grpc.server_addr = "10.0.0.1:4001".to_string();
+
+        assert_eq!("10.0.0.1:4001", options.peer_addr());
+
+        options.internal_grpc = Some(GrpcOptions {
+            bind_addr: "127.0.0.1:4010".to_string(),
+            server_addr: "10.0.0.1".to_string(),
+            ..Default::default()
+        });
+
+        // The port falls back to the internal bind address when the advertised
+        // address does not carry one.
+        assert_eq!("10.0.0.1:4010", options.peer_addr());
     }
 
     #[test]
