@@ -20,7 +20,7 @@ use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
@@ -335,7 +335,13 @@ impl TwcsPicker {
         if !all_candidates {
             // Manual/stateless callers retain their existing early-exit policy.
             picks.sort_by_key(|candidate| candidate.pick.class);
-            picks.truncate(max_outputs);
+            if picks.len() > max_outputs {
+                debug!(
+                    "Region ({:?}) compaction output limit ({}) reached, remaining candidates discarded",
+                    region_id, max_outputs
+                );
+                picks.truncate(max_outputs);
+            }
         }
         Ok(TwcsCandidates {
             candidates: picks,
