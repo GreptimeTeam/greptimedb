@@ -353,6 +353,11 @@ impl AccessLayer {
             .await
     }
 
+    /// Writes an SST whose output is registered with `context.guard`.
+    ///
+    /// The write cache is bypassed, upload concurrency is fixed to one, and
+    /// the guard runs before either the SST or its index becomes visible.
+    /// `context.limits` bounds the encoder and footer workspace.
     #[cfg(feature = "enterprise")]
     pub(crate) async fn write_sst_with_guard(
         &self,
@@ -403,7 +408,7 @@ impl AccessLayer {
                 )
                 .await?
         } else {
-            // Write cache is disabled.
+            // Write cache is disabled, or bypassed by an SST write guard.
             let store = self.object_store.clone();
             let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
             let puffin_factory = if limits.is_some() {
