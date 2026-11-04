@@ -13,8 +13,9 @@
 //!
 //! The caller selects and pins the inputs (for example, from LEVEL_SHARED), and
 //! supplies their effective metadata in every target. This primitive deliberately
-//! does not select files, change persisted levels, publish manifests, or fold row
-//! versions. Output protection and eventual publication belong to its caller.
+//! does not select files, change existing persisted levels, publish manifests, or
+//! fold row versions. Output protection and eventual publication belong to its
+//! caller; see [MultiRegionCompactionOutput::files] for the output level convention.
 
 mod memory;
 mod source;
@@ -101,6 +102,10 @@ pub struct MultiRegionCompactionStats {
 
 /// Complete per-target outputs, including explicit empty partitions.
 pub struct MultiRegionCompactionOutput {
+    /// Output files, initially assigned to level 1 (L1).
+    ///
+    /// The caller owns publication and must set [FileMeta::level] before
+    /// publishing if its intended output level differs from L1.
     pub files: BTreeMap<RegionId, Vec<FileMeta>>,
     /// Complete footer/index statistics for target hook delivery; not fabricated from FileMeta.
     pub sst_infos: BTreeMap<RegionId, Vec<SstInfo>>,
