@@ -1217,7 +1217,13 @@ pub async fn setup_pg_server_with_slow_query_threshold(
             None,
         )
         .with_influxdb_handler(fe_instance_ref.clone())
-        .with_otlp_handler(fe_instance_ref.clone(), true),
+        .with_otlp_handler(fe_instance_ref.clone(), true)
+        .with_prom_remote_write(
+            fe_instance_ref.clone(),
+            Some(fe_instance_ref.clone()),
+            true,
+            Default::default(),
+        ),
     );
 
     pg_server
@@ -1265,7 +1271,13 @@ pub async fn setup_pg_server_with_user_provider(
             None,
         )
         .with_influxdb_handler(fe_instance_ref.clone())
-        .with_otlp_handler(fe_instance_ref.clone(), true),
+        .with_otlp_handler(fe_instance_ref.clone(), true)
+        .with_prom_remote_write(
+            fe_instance_ref.clone(),
+            Some(fe_instance_ref.clone()),
+            true,
+            Default::default(),
+        ),
     );
 
     pg_server
@@ -1325,7 +1337,13 @@ pub async fn setup_pg_server_with_prom_native_histogram(
             None,
         )
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(instance.fe_instance().clone(), true),
+        .with_otlp_handler(instance.fe_instance().clone(), true)
+        .with_prom_remote_write(
+            instance.fe_instance().clone(),
+            Some(instance.fe_instance().clone()),
+            true,
+            Default::default(),
+        ),
     );
 
     pg_server
