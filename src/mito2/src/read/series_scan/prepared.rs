@@ -497,6 +497,10 @@ impl ColumnarPreparedSource {
                 } else {
                     None
                 };
+                let mut encoded_key_bytes = 0_u64;
+                let mut tag_values = 0_u64;
+                let mut duplicate_rows = 0_u64;
+                let mut batch_series = 0_u64;
                 for row in 0..batch.num_rows() {
                     let id = MetricSeriesId {
                         table_id: table.value(row),
@@ -526,16 +530,10 @@ impl ColumnarPreparedSource {
                                 &mut key,
                             )
                             .map_err(|e| invalid(e.to_string()))?;
-                        *preparation_metrics
-                            .bytes
-                            .entry("prepare_encoded_keys")
-                            .or_default() += key.len() as u64;
+                        encoded_key_bytes += key.len() as u64;
                     }
                     if let Some(previous) = candidates.get(&id) {
-                        *preparation_metrics
-                            .counts
-                            .entry("prepare_duplicate_rows")
-                            .or_default() += 1;
+                        duplicate_rows += 1;
                         let conflict = if let Some((previous_batch, previous_row)) =
                             &previous.metadata_row
                         {
@@ -574,10 +572,7 @@ impl ColumnarPreparedSource {
                             );
                         }
                     }
-                    *preparation_metrics
-                        .counts
-                        .entry("prepare_tag_values")
-                        .or_default() += values.len() as u64;
+                    tag_values += values.len() as u64;
                     let bytes = key.len()
                         + if direct_labels { size_of::<u64>() } else { 0 }
                         + values.values().flatten().map(String::len).sum::<usize>()
@@ -588,10 +583,7 @@ impl ColumnarPreparedSource {
                         .try_grow(bytes)
                         .map_err(|e| invalid(e.to_string()))?;
                     let metric = if let Some(label_batch) = &label_batch {
-                        *preparation_metrics
-                            .counts
-                            .entry("prepare_batch_series")
-                            .or_default() += 1;
+                        batch_series += 1;
                         let RawLabelSource::PrimaryKey { metric_name, .. } = &labels else {
                             return Err(invalid("expected bound labels"));
                         };
@@ -629,6 +621,22 @@ impl ColumnarPreparedSource {
                         },
                     );
                 }
+                *preparation_metrics
+                    .bytes
+                    .entry("prepare_encoded_keys")
+                    .or_default() += encoded_key_bytes;
+                *preparation_metrics
+                    .counts
+                    .entry("prepare_tag_values")
+                    .or_default() += tag_values;
+                *preparation_metrics
+                    .counts
+                    .entry("prepare_duplicate_rows")
+                    .or_default() += duplicate_rows;
+                *preparation_metrics
+                    .counts
+                    .entry("prepare_batch_series")
+                    .or_default() += batch_series;
                 preparation_metrics.add_elapsed("columnar_prepare_candidates", started.elapsed());
             }
         }
