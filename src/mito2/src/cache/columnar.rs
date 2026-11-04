@@ -231,4 +231,34 @@ mod tests {
         .unwrap();
         assert_eq!(&[4], retry.as_slice());
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_misses_share_the_admitted_value() {
+        let strategy = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder().sst_meta_cache_size(8192).build(),
+        ));
+        let cache = strategy.columnar_metadata(FileId::random()).unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(64));
+        let tasks = (0..64)
+            .map(|_| {
+                let cache = cache.clone();
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    load(Some(&cache), "shared-generation".into(), |_| 64, async {
+                        barrier.wait().await;
+                        Ok(vec![1_u8; 64])
+                    })
+                    .await
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let values = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::try_join_all(tasks),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(values.iter().all(|value| Arc::ptr_eq(value, &values[0])));
+    }
 }
