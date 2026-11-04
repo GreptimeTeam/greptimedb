@@ -1031,7 +1031,7 @@ mod tests {
                                     index,
                                 ))
                                     as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
-                                raw_schema.field(index).name().to_string(),
+                                raw_schema.field(index).name().clone(),
                             )
                         })
                         .collect::<Vec<_>>(),
