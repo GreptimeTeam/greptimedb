@@ -20,6 +20,9 @@ inputs:
   image-id:
     description: The EC2 image id
     required: true
+  ec2-volume-size:
+    description: Root volume size in GiB (uses the AMI default when omitted)
+    required: false
   security-group-id:
     description: The EC2 security group id
     required: true
@@ -61,6 +64,7 @@ runs:
       with:
         mode: start
         ec2-image-id: ${{ inputs.image-id }}
+        ec2-volume-size: ${{ inputs.ec2-volume-size }}
         ec2-instance-type: ${{ steps.get-ec2-instance-type.outputs.instance-type }}
         subnet-id: ${{ inputs.subnet-id }}
         security-group-id: ${{ inputs.security-group-id }}
