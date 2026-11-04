@@ -298,6 +298,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Set up Linux runner
+        uses: ./.github/actions/setup-linux-runner
+        with:
+          tools: make shasum
+
       - name: Prepare riscv64 dev-builder image
         shell: bash
         env:

@@ -1,19 +1,41 @@
-name: Set up benchmark dependencies
+name: Set up Linux runner dependencies
 description: Reuse installed tools and install missing dependencies on an Ubuntu self-hosted runner
+inputs:
+  tools:
+    description: Space-separated commands to install if missing (Ubuntu package names, except shasum)
+    required: false
+    default: curl
+  expected-architecture:
+    description: Optional uname architecture required by the workload
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
     - name: Check host and install missing tools
       shell: bash
+      env:
+        REQUIRED_TOOLS: ${{ inputs.tools }}
+        EXPECTED_ARCH: ${{ inputs.expected-architecture }}
       run: |
         set -euo pipefail
-        [[ "$(uname -m)" == x86_64 ]]
+        if [[ -n "$EXPECTED_ARCH" ]]; then
+          [[ "$(uname -m)" == "$EXPECTED_ARCH" ]]
+        fi
         command -v git
         missing=()
-        for tool in curl jq python3 rsync; do
-          command -v "$tool" >/dev/null || missing+=("$tool")
+        read -r -a tools <<< "$REQUIRED_TOOLS"
+        for tool in "${tools[@]}"; do
+          if ! command -v "$tool" >/dev/null; then
+            case "$tool" in
+              shasum) missing+=(libdigest-sha-perl) ;;
+              *) missing+=("$tool") ;;
+            esac
+          fi
         done
         if ((${#missing[@]})); then
+          . /etc/os-release
+          [[ "$ID" == ubuntu ]]
           sudo -n apt-get update
           sudo -n env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends "${missing[@]}"
         fi
@@ -24,6 +46,8 @@ runs:
         if ! command -v docker >/dev/null; then
           . /etc/os-release
           [[ "$ID" == ubuntu ]]
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends curl ca-certificates
           sudo -n install -m 0755 -d /etc/apt/keyrings
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo -n tee /etc/apt/keyrings/docker.asc >/dev/null
           sudo -n chmod a+r /etc/apt/keyrings/docker.asc
