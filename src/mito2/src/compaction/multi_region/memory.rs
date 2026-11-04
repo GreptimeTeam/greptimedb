@@ -27,6 +27,12 @@ use crate::error::{IndexOptionsSnafu, MultiRegionCompactionResourceSnafu, Result
 use crate::sst::parquet::writer::SstWriteLimits;
 
 pub(crate) const BATCH_SIZE: usize = 64;
+/// Cap on the rows of one output row group.
+///
+/// Every resident target admits an encoder sized by this count, while readers
+/// and index row ids only require uniform groups except for the last one.
+/// Ordinary compaction forwards the region option uncapped; this executor caps
+/// it so the working set stays inside the task budget.
 pub(crate) const MAX_ROW_GROUP_SIZE: usize = 1024;
 
 /// Admission includes every resident writer, not just concurrently polled tasks.

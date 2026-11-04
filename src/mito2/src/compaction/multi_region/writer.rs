@@ -138,6 +138,8 @@ impl<'a> TargetWriter<'a> {
         WriteOptions {
             write_buffer_size: ReadableSize(self.limits.batch as u64),
             max_file_size: Some(self.max_file_size),
+            // Capped so each admitted encoder stays within the task budget; see
+            // [memory::MAX_ROW_GROUP_SIZE].
             row_group_size: self
                 .target
                 .options
