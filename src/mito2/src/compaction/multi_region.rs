@@ -62,10 +62,16 @@ pub struct MultiRegionCompactionPlan {
     pub targets: BTreeMap<RegionId, MultiRegionTarget>,
     /// Working-set admission budget, including all resident writers and their finish workspace.
     /// This bounds managed buffers and estimates codec/index allocations, not process RSS.
+    /// It must be large enough that the per-buffer share still covers the storage
+    /// multipart minimum, otherwise the plan is rejected before any output.
     pub memory_limit: usize,
+    /// Soft size limit, in bytes, of one output SST. A file rolls over at the next
+    /// series boundary after it is exceeded, so a single series may stay in one file.
     pub max_output_file_size: usize,
     /// Aligned start of the only task window, in seconds since the epoch.
     pub window_start: i64,
+    /// Width of the only task window in seconds; the window is
+    /// `[window_start, window_start + window_seconds)`.
     pub window_seconds: i64,
 }
 
