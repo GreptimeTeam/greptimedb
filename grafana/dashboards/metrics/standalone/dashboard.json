@@ -13962,7 +13962,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (result) (\n  changes(greptime_region_balancer_actions_total[$__rate_interval])\n)",
+              "expr": "sum by (result) (\n  increase(greptime_region_balancer_actions_total[$__rate_interval])\n)",
               "hide": false,
               "instant": false,
               "legendFormat": "{{result}}",
@@ -14064,7 +14064,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (gate, reason) (changes(greptime_region_balancer_gate_stop_total[$__rate_interval]))",
+              "expr": "sum by (gate, reason) (increase(greptime_region_balancer_gate_stop_total[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{gate}} / {{reason}}",
@@ -14399,7 +14399,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (result) (changes(greptime_auto_repartition_actions_total[$__rate_interval]))",
+              "expr": "sum by (result) (increase(greptime_auto_repartition_actions_total[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{result}}",
@@ -14415,7 +14415,7 @@
             "type": "prometheus",
             "uid": "${metrics}"
           },
-          "description": "Auto repartition gate stop count by gate and reason",
+          "description": "Repartition gate stop increments. Baseline failures are expanded into bounded reasons; the aggregate invalid_baseline series is excluded to avoid double counting. Detailed table/region decisions remain available in Logs.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -14501,12 +14501,25 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (gate, reason) (changes(greptime_auto_repartition_gate_stop_total[$__rate_interval]))",
+              "expr": "sum by (gate, reason) (increase(greptime_auto_repartition_gate_stop_total{reason!=\"invalid_baseline\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{gate}} / {{reason}}",
               "range": true,
               "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${metrics}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (reason) (increase(greptime_auto_repartition_invalid_baseline_total[$__rate_interval]))",
+              "hide": false,
+              "instant": false,
+              "legendFormat": "baseline / {{reason}}",
+              "range": true,
+              "refId": "B"
             }
           ],
           "title": "Auto Repartition Gate Stops",

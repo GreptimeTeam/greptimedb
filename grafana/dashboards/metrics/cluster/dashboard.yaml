@@ -1904,7 +1904,7 @@ groups:
           queries:
             - expr: |-
                 sum by (result) (
-                  changes(greptime_region_balancer_actions_total[$__rate_interval])
+                  increase(greptime_region_balancer_actions_total[$__rate_interval])
                 )
               datasource:
                 type: prometheus
@@ -1915,7 +1915,7 @@ groups:
           description: Region balancer gate stop count by gate and reason
           unit: short
           queries:
-            - expr: sum by (gate, reason) (changes(greptime_region_balancer_gate_stop_total[$__rate_interval]))
+            - expr: sum by (gate, reason) (increase(greptime_region_balancer_gate_stop_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -1955,21 +1955,26 @@ groups:
           description: Auto repartition action count by result
           unit: short
           queries:
-            - expr: sum by (result) (changes(greptime_auto_repartition_actions_total[$__rate_interval]))
+            - expr: sum by (result) (increase(greptime_auto_repartition_actions_total[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '{{result}}'
         - title: Auto Repartition Gate Stops
           type: timeseries
-          description: Auto repartition gate stop count by gate and reason
+          description: Repartition gate stop increments. Baseline failures are expanded into bounded reasons; the aggregate invalid_baseline series is excluded to avoid double counting. Detailed table/region decisions remain available in Logs.
           unit: short
           queries:
-            - expr: sum by (gate, reason) (changes(greptime_auto_repartition_gate_stop_total[$__rate_interval]))
+            - expr: sum by (gate, reason) (increase(greptime_auto_repartition_gate_stop_total{reason!="invalid_baseline"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '{{gate}} / {{reason}}'
+            - expr: sum by (reason) (increase(greptime_auto_repartition_invalid_baseline_total[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: baseline / {{reason}}
         - title: Auto Repartition Sampling P99
           type: timeseries
           description: Auto repartition sampling elapsed time by stage
