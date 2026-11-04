@@ -687,6 +687,7 @@ async fn malformed_framing_and_payload_corruption() {
 #[case(vec![1000, 2000], 1, true)]
 #[case(vec![-1, 0, 86_399_999, 86_400_000], 3, true)]
 #[case(vec![86_399_999, 86_400_000], 2, false)]
+#[case((1000..1065).collect(), 2, true)]
 #[tokio::test]
 async fn real_samples_reconcile_reopen_and_retire(
     #[case] expected_times: Vec<i64>,
