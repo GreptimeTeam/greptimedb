@@ -51,7 +51,11 @@ use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::limit::LocalLimitExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::prelude::SessionContext;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::series::Label;
+use datatypes::series::frame::{
+    FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeTag,
+};
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
@@ -59,11 +63,13 @@ use datatypes::series::raw::RawTimestamps;
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use futures::TryStreamExt;
+use store_api::region_engine::RawLabelSource;
 
 use super::*;
 use crate::extension_plan::test_util::prepare_test_data;
 use crate::grid_series::{render_label_set, series_bytes};
 use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
+use crate::vector_match::MatchingLabels;
 
 const TEST_FIXTURE_VOLUME: usize = 4;
 const GRID_START: i64 = 0;
@@ -552,6 +558,63 @@ fn raw_chunk(
     .expect("a legal raw chunk")
 }
 
+/// The description a dense key of one string column `host` declares.
+///
+/// A region hands this node what it scanned, and what it scanned names its labels rather than
+/// carrying them, so this is the shape the node meets in a real plan.
+fn host_decode() -> LabelDecodeSpec {
+    LabelDecodeSpec {
+        version: LABEL_DECODE_VERSION,
+        metric_name: "m".to_string(),
+        encoding: LabelDecodeEncoding::Dense,
+        primary_key: vec![LabelDecodeColumn {
+            column_id: 1,
+            name: "host".to_string(),
+            physical_type: ConcreteDataType::string_datatype(),
+        }],
+        logical_tags: vec![LabelDecodeTag {
+            column_id: 1,
+            name: "host".to_string(),
+        }],
+    }
+}
+
+/// The dense key bytes of `{host="<host>"}`.
+fn key_bytes(host: &str) -> Buffer {
+    let mut bytes = Vec::new();
+    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
+
+    DensePrimaryKeyCodec::with_fields(vec![(
+        1,
+        SortField::new(ConcreteDataType::string_datatype()),
+    )])
+    .encode_values(
+        &[(1, datatypes::prelude::Value::String(host.into()))],
+        &mut bytes,
+    )
+    .expect("a dense key of one string");
+    Buffer::from(bytes)
+}
+
+/// One chunk of the dense key of `{host="<host>"}`, carrying no labels of its own.
+fn keyed_raw_chunk(
+    host: &str,
+    times: &[i64],
+    values: Vec<Option<f64>>,
+    last: bool,
+) -> RawSeriesChunk {
+    let fields = vec![Samples::from_float(Float64Array::from(values))];
+    RawSeriesChunk::try_new(
+        &raw_schema(),
+        key_bytes(host),
+        None,
+        RawTimestamps::try_new(ScalarBuffer::from(times.to_vec())).expect("ascending timestamps"),
+        SeriesFields::try_from_vec(fields).expect("one sample per timestamp per field"),
+        last,
+    )
+    .expect("a legal raw chunk")
+}
+
 /// `{__name__="m", host="<host>"}`.
 fn raw_metric(host: &str) -> SeriesLabels {
     SeriesLabels::try_new(
@@ -576,6 +639,8 @@ struct RawScript {
     chunks: std::vec::IntoIter<RawSeriesChunk>,
     schema: Arc<SeriesSchema>,
     binding: store_api::region_engine::RawLabelSource,
+    /// The description its frames declare, or `None` when they carry their labels.
+    decode: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     gate: Option<Arc<Switch>>,
     gate_chunks: bool,
@@ -611,6 +676,9 @@ impl RawSeriesStream for RawScript {
     fn label_source(&self) -> &store_api::region_engine::RawLabelSource {
         &self.binding
     }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.decode.as_ref()
+    }
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
     }
@@ -620,6 +688,7 @@ impl RawSeriesStream for RawScript {
 struct RawScripted {
     partitions: Vec<RawPartition>,
     series_schema: Arc<SeriesSchema>,
+    decode: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     properties: Arc<PlanProperties>,
 }
@@ -650,7 +719,37 @@ impl RawScripted {
         Arc::new(Self {
             partitions,
             series_schema,
+            decode: None,
             ordering,
+            properties,
+        })
+    }
+
+    /// The child over `partitions` whose frames name their labels by their key instead.
+    ///
+    /// This is what a region hands the node when it scanned the series itself, so a test that
+    /// routes by labels has to start from it rather than from an already-labelled frame.
+    fn plan_keyed(partitions: Vec<RawPartition>) -> Arc<dyn ExecutionPlan> {
+        let series_schema = raw_schema();
+        let decode = host_decode();
+        let frame = common_query::series_frame::frame_schema_with(
+            &series_schema,
+            FrameLabelMode::Key,
+            Some(&decode),
+            SeriesOrdering::KeyThenTime,
+        )
+        .expect("a key schema declares a key frame and its ordering");
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(frame),
+            Partitioning::UnknownPartitioning(partitions.len()),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Arc::new(Self {
+            partitions,
+            series_schema,
+            decode: Some(decode),
+            ordering: SeriesOrdering::KeyThenTime,
             properties,
         })
     }
@@ -705,6 +804,7 @@ impl ExecutionPlan for RawScripted {
             chunks: spec.chunks.into_iter(),
             schema: Arc::clone(&self.series_schema),
             binding: store_api::region_engine::RawLabelSource::Explicit,
+            decode: self.decode.clone(),
             // The packed batches have to declare what this child's own plan declares: the
             // sequence validator and the receiver both read the ordering off the frame, so a
             // stream that reported a different one would be validated under the wrong contract.
@@ -713,6 +813,168 @@ impl ExecutionPlan for RawScripted {
             gate_chunks: spec.gate_chunks,
         }))
     }
+}
+
+/// Every output partition of a raw plan, decoded, with the error it ended with if any.
+async fn drain_raw_all(
+    plan: &Arc<SeriesRepartitionExec>,
+    context: &Arc<TaskContext>,
+) -> Vec<Result<Vec<RawSeriesChunk>, BoxedError>> {
+    let mut outputs = Vec::new();
+    for partition in 0..plan.properties().partitioning.partition_count() {
+        let frames = plan
+            .execute(partition, Arc::clone(context))
+            .expect("the partition exists");
+        outputs.push(
+            unpack_raw_series(frames, Some(raw_schema()))
+                .expect("the frame decodes")
+                .try_collect()
+                .await,
+        );
+    }
+    outputs
+}
+
+/// A key-labelled raw input is what a region produces, and routing it is the node's whole job.
+///
+/// The frame names its labels through its key rather than carrying them, so the node has to decode
+/// before it can group or hash them. Refusing the frame would make every single-table selector
+/// unroutable, which is the shape the matching policies exist for.
+#[tokio::test]
+async fn a_key_labelled_raw_input_is_routed() {
+    let child = RawScripted::plan_keyed(vec![RawPartition {
+        chunks: vec![keyed_raw_chunk("a", &[1], vec![Some(1.0)], true)],
+        gate: None,
+        gate_chunks: false,
+    }]);
+    let plan = Arc::new(raw_node(child, 2));
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let outputs = drain_raw_all(&plan, &context).await;
+    let published = outputs
+        .into_iter()
+        .flat_map(|output| output.expect("a routed key chain succeeds"))
+        .collect::<Vec<_>>();
+    assert_eq!(published.len(), 1, "one identity is published once");
+    assert_eq!(
+        published[0].metric.as_ref(),
+        Some(&raw_metric("a")),
+        "the node hands its consumer labels, which is what makes its output explicit"
+    );
+    assert_eq!(
+        published[0].time.as_buffer().to_vec(),
+        vec![1],
+        "the samples survive the decode"
+    );
+}
+
+/// Matching routing over a key-labelled input puts one label set in one owner.
+///
+/// The two chunks of `host="a"` arrive in different partitions, as two scan partitions of one
+/// series would. Their labels are only readable after decoding, so this fails if the node routes
+/// before it decodes: the pieces would then land in different owners instead of joining.
+///
+/// What the owner publishes is one identity, but its frame may present that identity as several
+/// chunks: a merge keeps the source sample segments, and the frame cannot span a segment boundary.
+/// What the consumer relies on is that the pieces of one label set arrive together and that only
+/// the last of them closes the identity.
+#[tokio::test]
+async fn matching_routes_a_key_labelled_input_by_its_decoded_labels() {
+    let policy = MatchingLabels::On(vec![Arc::from("host")]);
+    let child = RawScripted::plan_keyed(vec![
+        RawPartition {
+            chunks: vec![
+                // `is_last` closes this input's contribution, not the series: the other input
+                // still holds a piece of `host="a"`, and the two must reach one owner.
+                keyed_raw_chunk("a", &[1], vec![Some(1.0)], true),
+            ],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![
+                keyed_raw_chunk("a", &[2], vec![Some(3.0)], true),
+                keyed_raw_chunk("b", &[1], vec![Some(2.0)], true),
+            ],
+            gate: None,
+            gate_chunks: false,
+        },
+    ]);
+    let plan = Arc::new(
+        raw_node_with_routing(child, 2, SeriesRouting::Matching(policy))
+            .expect("matching accepts a key-labelled raw frame"),
+    );
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let outputs = drain_raw_all(&plan, &context).await;
+    // Which owner published each label set, its samples in order, and how many times it closed.
+    let mut owners: std::collections::BTreeMap<String, (usize, Vec<i64>, usize)> =
+        std::collections::BTreeMap::new();
+    for (owner, output) in outputs.into_iter().enumerate() {
+        for chunk in output.expect("each owner succeeds") {
+            let host = render_label_set(&label_set(
+                chunk
+                    .metric
+                    .as_ref()
+                    .expect("a published chunk is labelled"),
+            ));
+            let entry = owners.entry(host).or_insert_with(|| (owner, Vec::new(), 0));
+            assert_eq!(
+                entry.0, owner,
+                "one label set must land in one owner, not be split across two"
+            );
+            entry.1.extend(chunk.time.as_buffer().iter().copied());
+            entry.2 += usize::from(chunk.is_last);
+        }
+    }
+    let a = owners
+        .get("{__name__=\"m\", host=\"a\"}")
+        .unwrap_or_else(|| panic!("host a is published by one owner: {owners:?}"));
+    assert_eq!(a.1, vec![1, 2], "both pieces of host a are one identity");
+    assert_eq!(a.2, 1, "the identity is closed exactly once");
+    let b = owners
+        .get("{__name__=\"m\", host=\"b\"}")
+        .unwrap_or_else(|| panic!("host b is published by one owner: {owners:?}"));
+    assert_eq!(b.1, vec![1]);
+    assert_eq!(b.2, 1, "the identity is closed exactly once");
+}
+
+/// `RawPrimaryKey` routing still groups a key-labelled input by its stored key.
+///
+/// Decoding is a side effect of the label-carrying output, not of the policy: the key is what this
+/// policy hashes, so two pieces of one key must still meet in one owner even though the node had to
+/// decode them to publish them.
+#[tokio::test]
+async fn raw_primary_key_still_groups_a_key_labelled_input_by_its_key() {
+    let child = RawScripted::plan_keyed(vec![
+        RawPartition {
+            chunks: vec![keyed_raw_chunk("a", &[1], vec![Some(1.0)], true)],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![keyed_raw_chunk("a", &[2], vec![Some(3.0)], true)],
+            gate: None,
+            gate_chunks: false,
+        },
+    ]);
+    let plan = Arc::new(raw_node(child, 2));
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let outputs = drain_raw_all(&plan, &context).await;
+    let mut owners = Vec::new();
+    for (owner, output) in outputs.into_iter().enumerate() {
+        for chunk in output.expect("each owner succeeds") {
+            assert_eq!(
+                chunk.metric.as_ref(),
+                Some(&raw_metric("a")),
+                "the key decodes to the same labels in both pieces"
+            );
+            owners.extend(chunk.time.as_buffer().iter().map(|_| owner));
+        }
+    }
+    assert_eq!(owners.len(), 2, "both pieces are published");
+    assert_eq!(
+        owners[0], owners[1],
+        "two pieces of one stored key must meet in one owner"
+    );
 }
 
 /// The raw owner over `child` routing by an explicit policy.
@@ -1440,6 +1702,297 @@ async fn completed_identity_is_published_before_inputs_finish() {
     assert!(errors.is_empty(), "later output succeeds: {errors:?}");
     received.extend(rest);
     assert_chains_are_whole(&received);
+}
+
+/// CompleteDisjoint releases an identity while another input is deterministically gated.
+#[tokio::test]
+async fn complete_disjoint_publishes_before_gated_input_contributes_or_eof() {
+    let metric = labels("disjoint-early");
+    let gate = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![
+            GatedPartition::open(vec![Step::chunk(chunk(metric.clone(), 0, 1, true))]),
+            GatedPartition {
+                before: Vec::new(),
+                after: Vec::new(),
+                switch: Some(Arc::clone(&gate)),
+            },
+        ],
+        Arc::new(Switch::default()),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let plan = Arc::new(SeriesRepartitionExec::try_new_complete_disjoint(child, 1).unwrap());
+    let context = SessionContext::default().task_ctx();
+    let mut stream = output_of(&plan, 0, &context);
+    let first = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::poll_fn(|cx| stream.as_mut().poll_next(cx)),
+    )
+    .await
+    .expect("identity appears while the other partition is gated")
+    .expect("one identity is emitted")
+    .expect("identity succeeds");
+    assert!(first.1, "the chain is final on its first publication");
+    assert_eq!(metric, first.0.metric);
+    assert!(
+        !gate.is_open(),
+        "the other input has neither contributed nor reached EOF"
+    );
+    gate.open();
+}
+
+/// A Sample Fused node passes a final identity to CompleteDisjoint before a gated partition EOF.
+#[tokio::test]
+async fn fused_instant_complete_disjoint_publishes_before_other_input_eof() {
+    use crate::extension_plan::{FusedOutputFormat, FusedSeries, FusedSeriesBinding};
+    use crate::native::plan::{
+        BoundInput, BoundInstant, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+    };
+
+    let grid = grid();
+    let raw_schema = raw_schema();
+    let raw = NativeType::Samples(Arc::clone(&raw_schema));
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: Arc::clone(&raw_schema.fields),
+        eval_grid: Some(Arc::clone(&grid)),
+    }));
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
+                    output: raw.clone(),
+                    ordering: datatypes::series::SeriesOrdering::Contiguous,
+                }),
+                output: raw,
+            }),
+            op: BoundInstant {
+                lookback_ms: 0,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::Sample,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: output.clone(),
+    })
+    .unwrap();
+    let frame_schema = common_query::series_frame::raw_series_frame_schema_with_ordering(
+        &raw_schema,
+        &RawLabelSource::Explicit,
+        datatypes::series::SeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let output_frame_schema = FusedSeries::series_frame_schema(&tree).unwrap();
+    let logical = FusedSeries::try_new_with_format(
+        Arc::from("m"),
+        tree,
+        FusedSeriesBinding {
+            grid: Arc::clone(&grid),
+            metric_name: Some(Arc::from("cpu")),
+            time_index: "time".into(),
+            tags: vec!["host".into()],
+        },
+        vec![datafusion::logical_expr::LogicalPlan::EmptyRelation(
+            datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(
+                    datafusion::common::DFSchema::try_from(frame_schema.clone()).unwrap(),
+                ),
+            },
+        )],
+        Arc::new(datafusion::common::DFSchema::try_from(output_frame_schema).unwrap()),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let open = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "instant",
+                Some(labels("instant")),
+                &[0],
+                vec![Some(1.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: Vec::new(),
+            gate: Some(Arc::clone(&open)),
+            gate_chunks: false,
+        },
+    ]);
+    let fused = logical
+        .to_execution_plan(vec![(
+            child,
+            RawLabelSource::Explicit,
+            datatypes::series::SeriesOrdering::Contiguous,
+        )])
+        .unwrap();
+    let routed = Arc::new(SeriesRepartitionExec::try_new_complete_disjoint(fused, 1).unwrap());
+    let context = SessionContext::default().task_ctx();
+    let mut stream = output_of(&routed, 0, &context);
+    let first = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::poll_fn(|cx| stream.as_mut().poll_next(cx)),
+    )
+    .await
+    .expect("sample output appears before the other input EOF")
+    .expect("one identity is published")
+    .expect("identity succeeds");
+    assert!(first.1, "the fused chain is final on publication");
+    assert_eq!(labels("instant"), first.0.metric);
+    assert!(!open.is_open(), "the other partition remains gated");
+    open.open();
+}
+
+/// MergeInputs keeps the same identity behind the missing-input barrier.
+#[tokio::test]
+async fn merge_inputs_waits_for_gated_input_before_publishing_identity() {
+    let metric = labels("disjoint-early");
+    let gate = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![
+            GatedPartition::open(vec![Step::chunk(chunk(metric.clone(), 0, 1, true))]),
+            GatedPartition {
+                before: Vec::new(),
+                after: Vec::new(),
+                switch: Some(Arc::clone(&gate)),
+            },
+        ],
+        Arc::new(Switch::default()),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let plan = Arc::new(SeriesRepartitionExec::try_new(child, 1).unwrap());
+    let context = SessionContext::default().task_ctx();
+    let mut stream = output_of(&plan, 0, &context);
+    assert!(
+        futures::future::poll_fn(|cx| match stream.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await,
+        "default mode is pending while the second input is gated"
+    );
+    gate.open();
+    let first = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::poll_fn(|cx| stream.as_mut().poll_next(cx)),
+    )
+    .await
+    .expect("input release finishes")
+    .expect("series appears")
+    .expect("identity succeeds");
+    assert_eq!(metric, first.0.metric);
+}
+
+/// CompleteDisjoint publishes and releases each identity without retaining history.
+#[tokio::test]
+async fn complete_disjoint_memory_does_not_grow_with_published_identity_history() {
+    const IDENTITIES: usize = 2_000;
+    const LABEL_VALUE_LEN: usize = 1_024;
+    const MEMORY_BUDGET: usize = 4 * 1024 * 1024;
+    let fixture = labels(&"x".repeat(LABEL_VALUE_LEN));
+    let steps = (0..IDENTITIES)
+        .map(|index| {
+            let identity = SeriesLabels::try_new(
+                fixture.name().map(Arc::<str>::from),
+                vec![Label {
+                    name: Arc::from("host"),
+                    value: Arc::from(format!("{index:04}-{}", "x".repeat(LABEL_VALUE_LEN - 5))),
+                }],
+            )
+            .expect("test identity is legal");
+            Step::chunk(chunk(identity, 1, 1, true))
+        })
+        .collect();
+    let finish_first = Arc::new(Switch::default());
+    let gate_other = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![
+            GatedPartition {
+                before: steps,
+                after: Vec::new(),
+                switch: Some(Arc::clone(&finish_first)),
+            },
+            GatedPartition {
+                before: Vec::new(),
+                after: Vec::new(),
+                switch: Some(Arc::clone(&gate_other)),
+            },
+        ],
+        Arc::clone(&finish_first),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(MEMORY_BUDGET));
+    let context = task_context(&pool);
+    let plan = Arc::new(SeriesRepartitionExec::try_new_complete_disjoint(child, 1).unwrap());
+    let mut stream = output_of(&plan, 0, &context);
+    finish_first.open();
+    let drain = async {
+        for index in 0..IDENTITIES {
+            let (series, finality) = stream
+                .next()
+                .await
+                .expect("a ready complete chain is not blocked by the live input")
+                .expect("complete producer chains route successfully");
+            assert!(finality, "each complete chain is final when published");
+            assert_eq!(
+                labels(&format!("{index:04}-{}", "x".repeat(LABEL_VALUE_LEN - 5))),
+                series.metric,
+                "each full identity appears exactly once in producer order"
+            );
+            assert_eq!(Some(1), series.time.first_position());
+            assert_eq!(1, series.time.len());
+            let (position, row) = series.time.positions().next().expect("one time point");
+            assert_eq!(1, position);
+            assert_eq!(0, row);
+            assert_eq!(1_000, series.time.timestamp(0).expect("timestamp at point"));
+            let value = series.fields.as_slice()[0]
+                .iter()
+                .next()
+                .expect("one sample");
+            let datatypes::series::samples::SampleRef::Float(value) = value else {
+                panic!("expected float sample");
+            };
+            assert_eq!(1.0, value);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), drain)
+        .await
+        .expect("all identities make progress while the producer remains live");
+    assert!(
+        !gate_other.is_open(),
+        "the input remains live after its identities drain"
+    );
+
+    // The previous implementation retained each published identity key and its history reservation
+    // until stream teardown. This lower bound excludes the group/map overhead, making it conservative:
+    // 2,000 host values of 1,019 bytes alone exceed 1.9 MiB. The 4 MiB pool allows transient queued chains, but the
+    // fully drained state must be far below the retained-history charge.
+    let old_history_lower_bound = IDENTITIES * (LABEL_VALUE_LEN - 5);
+    assert!(old_history_lower_bound > MEMORY_BUDGET / 4);
+    assert!(
+        old_history_lower_bound < MEMORY_BUDGET,
+        "budget also admits the historical charge"
+    );
+    assert!(
+        pool.reserved() < MEMORY_BUDGET / 4,
+        "drained identities must not retain their historical keys"
+    );
+
+    gate_other.open();
+    let eof = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("input EOF is observable");
+    assert!(eof.is_none(), "the stream closes after EOF");
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "all transient reservations are released"
+    );
 }
 
 /// A one-fragment large identity needs no merge workspace and fits its own finite payload budget.
@@ -2198,6 +2751,7 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
         SeriesOrdering::Contiguous,
+        super::IdentityCompletion::MergeInputs,
     );
     wait_until("both identities and EOF are queued", || {
         producer_stopped(&shared)
@@ -4227,6 +4781,7 @@ async fn a_recorded_failure_reaches_every_output_once() {
                 &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
                 2,
                 SeriesOrdering::Contiguous,
+                super::IdentityCompletion::MergeInputs,
             ))),
         }) as SendableEvaluatedSeriesStream);
     }
@@ -4562,6 +5117,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
                         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
                         2,
                         SeriesOrdering::Contiguous,
+                        super::IdentityCompletion::MergeInputs,
                     ))),
                 }),
                 Arc::clone(&series_schema),
@@ -4672,6 +5228,7 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
                     &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
                     2,
                     SeriesOrdering::Contiguous,
+                    super::IdentityCompletion::MergeInputs,
                 ))),
             }),
             Arc::clone(&schema()),
@@ -4832,6 +5389,7 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
             &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
             1,
             SeriesOrdering::Contiguous,
+            super::IdentityCompletion::MergeInputs,
         ))),
     });
     let future = route_partition(
@@ -5424,6 +5982,7 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
         SeriesOrdering::Contiguous,
+        super::IdentityCompletion::MergeInputs,
     );
     wait_until("internal producer finishes", || producer_stopped(&shared)).await;
     // Queue, EOF, and identity-group metadata are charged alongside the retained chunks; the
@@ -5721,6 +6280,7 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
         SeriesOrdering::Contiguous,
+        super::IdentityCompletion::MergeInputs,
     );
     wait_until("histogram producer queues the whole chain", || {
         producer_stopped(&shared)

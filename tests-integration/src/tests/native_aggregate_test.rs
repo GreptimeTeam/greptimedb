@@ -51,9 +51,9 @@
 //! by, so their answers are the ones the untagged fixture gives.
 //!
 //! A query the native route declines is checked the other way round. [`check_fallback_case`] runs
-//! shapes the compiler has no node for - `scalar(v)`, a fold over two sources and a subquery - with
-//! the native request on and with it off, and requires that no native node ran in either plan and
-//! that both runs report rows derived from the fixture by hand. A hint that quietly
+//! shapes the compiler has no node for - `scalar(v)` and a subquery - with the native request on and
+//! with it off, and requires that no native node ran in either plan and that both runs report rows
+//! derived from the fixture by hand. A hint that quietly
 //! took the route for one of them would show a fused producer or a frontend merge in the plans that
 //! executed, which is what is observed.
 //!
@@ -83,6 +83,8 @@ use datatypes::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringA
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
+use promql::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+use promql::vector_match::MatchingLabels;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::dist_plan::MergeScanExec;
 use query::options::QueryOptions;
@@ -300,10 +302,9 @@ struct QueryResult {
 }
 
 impl QueryResult {
-    /// Reads the batches of one PromQL result. The value column is found by type: the frontend names
-    /// it after the expression it computes (`sum(v)` and the like), so that name is checked against
-    /// the legacy run instead of being assumed here. `count` reports an integer, so every numeric
-    /// type is accepted; the timestamp column was taken first and is therefore not a candidate.
+    /// Reads the batches of one PromQL result. The value column is found by type rather than name;
+    /// its schema name is preserved in `columns`. `count` reports an integer, so every numeric type
+    /// is accepted; the timestamp column was taken first and is therefore not a candidate.
     fn from_batches(batches: &RecordBatches, query: &str) -> Self {
         let schema = batches.schema();
         let fields = schema.arrow_schema().fields();
@@ -408,6 +409,9 @@ struct AggregateCase {
     /// split cut out. The producer then exports that aggregate's *state*, not an answer, so a
     /// group's values are finished by the merge above it rather than once per partition.
     partial_state: Option<&'static str>,
+    /// Native output schema. The native aggregate preserves its source field name (`v`), rather
+    /// than the legacy planner's computed-expression name.
+    native_value_column: &'static str,
 }
 
 /// Builds one case from a PromQL expression and its `(labels, value)` rows.
@@ -428,6 +432,7 @@ fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool
         per_partition,
         root_values: None,
         partial_state: None,
+        native_value_column: "v",
     }
 }
 
@@ -561,14 +566,15 @@ async fn native_hybrid_binary_05_06_08() {
         displayable(frontend.as_ref()).indent(false)
     );
 
-    // Both operands have two `job="other"` series at `EVAL_MILLIS` (inserted above), so this
-    // checks a genuine in-lookback many-to-many duplicate group on both sides. Prometheus refuses
-    // the right-side duplicate (`VectorBinop` in engine.go). The preceding `api` query remains a
-    // separate single-match, successful case.
-    let unpartitioned = format!(
-        "{HYBRID_MATCH_LEFT}{{job=\"other\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}"
-    );
+    // The left selector is a nonempty single `api` series, while the unpartitioned RHS also
+    // contains the duplicated `other` group. Prometheus rejects duplicate match groups on the
+    // RHS even when the left side does not select that group. Keep the preceding successful `api`
+    // query as coverage for the matching pair itself.
+    let unpartitioned =
+        format!("{HYBRID_MATCH_LEFT}{{job=\"api\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}");
+    let mark = observer.mark();
     let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, SCAN_PARTITIONS.to_string());
     query_ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
     let output = instance
         .do_query(&tql_eval(&unpartitioned), Arc::new(query_ctx))
@@ -586,6 +592,111 @@ async fn native_hybrid_binary_05_06_08() {
             "found duplicate series for the match group {job=\"other\"} on the right hand-side"
         ),
         "{unpartitioned}: {error}"
+    );
+
+    // Inspect the *failing query's* binary node, not a re-plan or a separate probe. Its operand
+    // counters count valid instant values after the matching routers and before duplicate checking.
+    let capture = NativeCapture::from_plans(&observer.since(mark));
+    let binary = capture
+        .fused
+        .iter()
+        .filter(|node| node.children().len() == 2)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        1,
+        binary.len(),
+        "{unpartitioned}: expected one native binary"
+    );
+    let binary = binary[0];
+    let plan = displayable(binary.as_ref()).indent(false).to_string();
+    assert_eq!(
+        SCAN_PARTITIONS,
+        binary.properties().output_partitioning().partition_count(),
+        "{unpartitioned}: binary partition count:\n{plan}"
+    );
+    for (side, child) in binary.children().iter().enumerate() {
+        let router = child
+            .downcast_ref::<SeriesRepartitionExec>()
+            .unwrap_or_else(|| panic!("{unpartitioned}: operand {side} has no router:\n{plan}"));
+        assert_eq!(SCAN_PARTITIONS, router.outputs(), "{unpartitioned}: {plan}");
+        assert_eq!(
+            &SeriesRouting::Matching(MatchingLabels::On(vec![Arc::from("job")])),
+            router.routing_policy(),
+            "{unpartitioned}: operand {side} routing policy:\n{plan}"
+        );
+    }
+    let left =
+        fused_node_count_per_partition(binary, "native.root.left.output_values", &unpartitioned);
+    let right =
+        fused_node_count_per_partition(binary, "native.root.right.output_values", &unpartitioned);
+    assert!(
+        left.iter().chain(&right).all(Option::is_some),
+        "{unpartitioned}: operand metrics must be registered for every partition: left={left:?}, right={right:?}"
+    );
+    // The fixture has one LHS api series, one RHS api series, and two RHS other series.
+    // The on(job) routers co-locate each group, so the only way to get these exact counts is
+    // api on the LHS partition and both other samples on a different matching partition.
+    let left_partition = left
+        .iter()
+        .position(|count| *count == Some(1))
+        .unwrap_or_else(|| panic!("{unpartitioned}: missing single left value: {left:?}"));
+    let other_partition = right
+        .iter()
+        .position(|count| *count == Some(2))
+        .unwrap_or_else(|| panic!("{unpartitioned}: missing duplicated right group: {right:?}"));
+    assert_ne!(
+        left_partition, other_partition,
+        "{unpartitioned}: left={left:?}, right={right:?}"
+    );
+    let mut expected_left = vec![Some(0); SCAN_PARTITIONS];
+    expected_left[left_partition] = Some(1);
+    let mut expected_right = vec![Some(0); SCAN_PARTITIONS];
+    expected_right[left_partition] = Some(1);
+    expected_right[other_partition] = Some(2);
+    // Exact vectors also fix totals at 1 and 3 and require every other partition to be empty.
+    assert_eq!(
+        expected_left, left,
+        "{unpartitioned}: LHS values per partition"
+    );
+    assert_eq!(
+        expected_right, right,
+        "{unpartitioned}: RHS values per partition"
+    );
+    common_telemetry::info!(
+        "`{unpartitioned}` operand values per matching partition: left={left:?}, right={right:?}"
+    );
+
+    // The identical RHS contains duplicates, but a globally empty LHS suppresses their error.
+    let empty_left = format!(
+        "{HYBRID_MATCH_LEFT}{{instance=\"missing\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}"
+    );
+    let (empty, capture) = run_query(&instance, &empty_left, true, &observer).await;
+    assert_rows(&empty.rows, &[], &format!("empty left `{empty_left}`"));
+    let binary = capture
+        .fused
+        .iter()
+        .filter(|node| node.children().len() == 2)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        1,
+        binary.len(),
+        "{empty_left}: expected native two-source binary"
+    );
+    let control_left =
+        fused_node_count_per_partition(binary[0], "native.root.left.output_values", &empty_left);
+    let control_right =
+        fused_node_count_per_partition(binary[0], "native.root.right.output_values", &empty_left);
+    assert_eq!(
+        vec![Some(0); SCAN_PARTITIONS],
+        control_left,
+        "{empty_left}: left must be globally empty"
+    );
+    assert_eq!(
+        expected_right, control_right,
+        "{empty_left}: the same duplicated RHS must reach the binary"
+    );
+    common_telemetry::info!(
+        "`{empty_left}` operand values per matching partition: left={control_left:?}, right={control_right:?}"
     );
 
     check_hybrid_binary_cases(&instance, &observer).await;
@@ -1138,6 +1249,28 @@ fn assert_rows(actual: &[ResultRow], expected: &[ResultRow], context: &str) {
     }
 }
 
+/// Asserts the native schema against the value field and labels expected from the fixture.
+fn assert_native_schema(
+    native: &QueryResult,
+    value_column: &str,
+    expected_rows: &[ResultRow],
+    query: &str,
+) {
+    assert!(
+        !expected_rows.is_empty(),
+        "`{query}`: native schema needs independently expected nonempty rows"
+    );
+    let mut expected = vec!["ts".to_string(), value_column.to_string()];
+    expected.extend(expected_rows[0].labels.keys().cloned());
+    let mut actual = native.columns.clone();
+    expected.sort();
+    actual.sort();
+    assert_eq!(
+        expected, actual,
+        "`{query}`: unexpected native output schema"
+    );
+}
+
 /// Asserts the native route preserves legacy label/time columns and names its value field explicitly.
 fn assert_native_columns(
     native: &QueryResult,
@@ -1178,31 +1311,55 @@ fn assert_native_columns(
 ///
 /// An entry stays [`None`] when the producer never registered the metric for a partition, which is a
 /// different failure from a partition that produced nothing; both are reported as they are.
+fn fused_node_output_values_per_partition(
+    fused: &Arc<dyn ExecutionPlan>,
+    context: &str,
+) -> Vec<Option<usize>> {
+    fused_node_count_per_partition(fused, ROOT_OUTPUT_VALUES_METRIC, context)
+}
+
+/// Reads a named native count from the fused node's registered per-partition metrics.
+fn fused_node_count_per_partition(
+    fused: &Arc<dyn ExecutionPlan>,
+    metric_name: &str,
+    context: &str,
+) -> Vec<Option<usize>> {
+    let mut per_partition = vec![None; SCAN_PARTITIONS];
+    let plan = displayable(fused.as_ref()).indent(false).to_string();
+    let metrics = fused
+        .metrics()
+        .unwrap_or_else(|| panic!("{context}: the fused producer reports no metrics:\n{plan}"));
+    for metric in metrics.iter() {
+        let MetricValue::Count { count, .. } = metric.value() else {
+            continue;
+        };
+        if metric.value().name() != metric_name {
+            continue;
+        }
+        let partition = metric.partition().unwrap_or_else(|| {
+            panic!("{context}: `{metric_name}` is not labelled with its partition")
+        });
+        assert!(
+            partition < SCAN_PARTITIONS,
+            "{context}: partition {partition} is beyond the {SCAN_PARTITIONS} the scan was \
+             asked for; plan:\n{plan}"
+        );
+        per_partition[partition] = Some(per_partition[partition].unwrap_or(0) + count.value());
+    }
+    per_partition
+}
+
+/// The `native.root.output_values` counts of all fused producers in `capture`, per partition.
 fn fused_output_values_per_partition(capture: &NativeCapture, context: &str) -> Vec<Option<usize>> {
     let mut per_partition = vec![None; SCAN_PARTITIONS];
     for fused in &capture.fused {
-        let plan = displayable(fused.as_ref()).indent(false).to_string();
-        let metrics = fused
-            .metrics()
-            .unwrap_or_else(|| panic!("{context}: the fused producer reports no metrics:\n{plan}"));
-        for metric in metrics.iter() {
-            let MetricValue::Count { count, .. } = metric.value() else {
-                continue;
-            };
-            if metric.value().name() != ROOT_OUTPUT_VALUES_METRIC {
-                continue;
+        for (partition, count) in fused_node_output_values_per_partition(fused, context)
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(count) = count {
+                per_partition[partition] = Some(per_partition[partition].unwrap_or(0) + count);
             }
-            let partition = metric.partition().unwrap_or_else(|| {
-                panic!(
-                    "{context}: `{ROOT_OUTPUT_VALUES_METRIC}` is not labelled with its partition"
-                )
-            });
-            assert!(
-                partition < SCAN_PARTITIONS,
-                "{context}: partition {partition} is beyond the {SCAN_PARTITIONS} the scan was \
-                 asked for"
-            );
-            per_partition[partition] = Some(per_partition[partition].unwrap_or(0) + count.value());
         }
     }
     per_partition
@@ -1428,6 +1585,128 @@ async fn check_fallback_case(
     }
 }
 
+/// Checks a split across two independently scanned sources.
+async fn check_two_source_segregation(
+    instance: &Arc<Instance>,
+    observer: &NativePlanObserver,
+    promql: &str,
+    expected: &[ResultRow],
+) {
+    let query = tql_eval(promql);
+    let (legacy, legacy_capture) = run_query(instance, promql, false, observer).await;
+    assert!(
+        legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty(),
+        "`{query}`: legacy run must not plan native nodes"
+    );
+    assert_rows(&legacy.rows, expected, &format!("legacy `{query}`"));
+
+    let (native, capture) = run_query(instance, promql, true, observer).await;
+    // The value column this statement reports differs from the legacy plan's, and that is a known
+    // gap rather than an intended rename: the segmented parent names its value columns from the
+    // compiled tree, where a matching binary takes its left operand's field name, while the existing
+    // planner names a computed column after its expression. Every other native case in this file
+    // reports the legacy names because it is answered by the aggregate split, whose output schema is
+    // built from the legacy plan's columns. Restoring the legacy name for a segmented statement
+    // needs a rename above the parent node - its own schema has to keep the compiled field names its
+    // output columns are classified by - and that is deliberately not part of this change.
+    //
+    // Both schemas are pinned instead, so a future change to either naming rule shows up here
+    // instead of passing on values alone. QueryResult preserves this order for this statement.
+    assert_eq!(
+        vec![
+            "ts".to_string(),
+            "native_agg_counter.sum(prom_rate(ts_range,v,ts,Int64(300000))) / \
+             native_agg_gauge.sum(native_agg_gauge.v)"
+                .to_string(),
+        ],
+        legacy.columns,
+        "`{query}`: the legacy plan names the value column after its expression"
+    );
+    assert_eq!(
+        vec!["ts".to_string(), "v".to_string()],
+        native.columns,
+        "`{query}`: the segmented native plan reports the compiled field name"
+    );
+    assert_rows(&native.rows, expected, &format!("native `{query}`"));
+    let parent_plan = capture
+        .fused
+        .iter()
+        .find(|node| node.children().len() == 2)
+        .unwrap_or_else(|| {
+            panic!(
+                "`{query}`: no two-child fused parent; plans: {:#?}",
+                capture.fused
+            )
+        });
+    let parent_display = displayable(parent_plan.as_ref()).indent(false).to_string();
+    assert_eq!(
+        2,
+        parent_plan.children().len(),
+        "`{query}`: frontend fused parent must have two source segments:\n{parent_display}"
+    );
+    assert_eq!(
+        3,
+        capture.fused.len(),
+        "`{query}`: expected 3 fused nodes: one frontend parent plus one segment per source, \
+         so a regression merging them back into one node is visible; plans: {:#?}",
+        capture
+            .fused
+            .iter()
+            .map(|node| displayable(node.as_ref()).indent(false).to_string())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        capture.finalize.is_empty(),
+        "`{query}`: two-source native execution must not create a frontend merge; parent:\n{parent_display}"
+    );
+    let segments = capture
+        .fused
+        .iter()
+        .filter(|node| !Arc::ptr_eq(node, parent_plan))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        2,
+        segments.len(),
+        "`{query}`: expected two source segments; parent:\n{parent_display}"
+    );
+    let mut vectors = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        let plan = displayable(segment.as_ref()).indent(false).to_string();
+        assert_eq!(
+            1,
+            segment.children().len(),
+            "`{query}`: segment {index} must have one child; plan:\n{plan}"
+        );
+        assert_fused_reads_scan_directly(segment, &format!("native `{query}` segment {index}"));
+        vectors.push(fused_node_output_values_per_partition(
+            segment,
+            &format!("native `{query}` segment {index}"),
+        ));
+    }
+    common_telemetry::info!(
+        "`{query}` segmented native per-partition `{ROOT_OUTPUT_VALUES_METRIC}` counts: \
+         {vectors:?}"
+    );
+    for (index, values) in vectors.iter().enumerate() {
+        let plan = displayable(segments[index].as_ref())
+            .indent(false)
+            .to_string();
+        if values.iter().all(Option::is_none) {
+            panic!(
+                "`{query}`: segment {index} does not publish `{ROOT_OUTPUT_VALUES_METRIC}`; \
+                 both segment vectors: {vectors:?}; parent plan:\n{parent_display}; segment plan:\n{plan}"
+            );
+        }
+        assert!(
+            values
+                .iter()
+                .all(|count| count.is_some_and(|count| count > 0)),
+            "`{query}`: each source segment must produce values on all {SCAN_PARTITIONS} partitions; \
+             both segment vectors: {vectors:?}; parent plan:\n{parent_display}; segment plan:\n{plan}"
+        );
+    }
+}
+
 /// Checks one case on both routes: the legacy run first, then the native one.
 async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, case: &AggregateCase) {
     let promql = case.promql.as_str();
@@ -1440,6 +1719,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, promql, true, observer).await;
+    assert_native_schema(&native, case.native_value_column, &case.expected, &query);
     assert_native_columns(&native, &legacy, &query, "v");
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
 
@@ -1638,6 +1918,7 @@ async fn native_aggregate_topk_over_global_partitions() {
         }
     }
     expected.sort_by(|a, b| (a.ts_millis, &a.labels).cmp(&(b.ts_millis, &b.labels)));
+    assert_native_schema(&native, "v", &expected, &sql);
     assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
     assert_eq!(1, capture.fused.len());
     assert_eq!(1, capture.finalize.len());
@@ -1981,6 +2262,15 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     assert_eq!(1, capture.fused.len(), "`time()` runs one fused node");
     assert!(capture.finalize.is_empty(), "`time()` needs no merge");
 
+    let two_source_promql = format!("sum(rate({COUNTER_TABLE}[5m])) / sum({GAUGE_TABLE})");
+    check_two_source_segregation(
+        &instance,
+        &observer,
+        &two_source_promql,
+        &case(two_source_promql.clone(), &[(&[], 15.0 / 30.0)], false).expected,
+    )
+    .await;
+
     // The shapes the native compiler declines, each declined for its own reason, and each checked on
     // the plans that really ran: none may hold a fused producer or a frontend merge, and both routes
     // must answer what the fixture derives by hand.
@@ -1988,9 +2278,9 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     // `scalar` reports the one value present at a point only when exactly one series is present at
     // it, so the five counter series make it NaN; a route that folded one partition at a time would
     // report the number of whichever partition held a single series, so the NaN also says the whole
-    // vector was read at once. The division folds two *different* tables - 15 over 30 - and a
-    // subquery evaluates its own body on a grid of its own: both read across series and neither can
-    // be answered by a producer per partition, so both keep the existing plan. The subquery's window
+    // vector was read at once. A subquery evaluates its own body on a grid of its own: it reads
+    // across series and cannot be answered by a producer per partition, so it keeps the existing
+    // plan. The subquery's window
     // spans the two inner points `EVAL_SECS - 1` and `EVAL_SECS`, at each of which the same
     // extrapolated rate answers 15 - both samples stay further from the window's ends than the 66s
     // threshold - so the maximum is 15 as well.
@@ -1998,11 +2288,6 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         case(
             format!("scalar({COUNTER_TABLE})"),
             &[(&[], f64::NAN)],
-            false,
-        ),
-        case(
-            format!("sum(rate({COUNTER_TABLE}[5m])) / sum({GAUGE_TABLE})"),
-            &[(&[], 15.0 / 30.0)],
             false,
         ),
         case(
@@ -2079,6 +2364,7 @@ async fn native_histogram_quantile_over_the_cut_answers_what_the_complete_input_
             native.rows.len(),
             legacy.rows.len()
         );
+        assert_native_schema(&native, "v", &legacy.rows, &query);
         assert_native_columns(&native, &legacy, &query, "v");
         // The equivalence the admission rests on: the rows the same statement reports over the
         // complete input, labels included.

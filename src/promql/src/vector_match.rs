@@ -1681,10 +1681,21 @@ impl DuplicateEvidence {
         self.exit_claim(true);
     }
 
+    fn clear_slots(&self) {
+        let mut final_verdict = self.final_verdict.lock().unwrap();
+        let mut slots = self.slots.lock().unwrap();
+        final_verdict.take();
+        slots.clear();
+        let reservation = self.reservation.lock().unwrap();
+        let size = reservation.size();
+        reservation.shrink(size);
+    }
+
     fn exit_claim(&self, aborted: bool) -> bool {
         if aborted {
             self.aborted
                 .store(true, std::sync::atomic::Ordering::Release);
+            self.clear_slots();
         }
         let last = loop {
             let current = self.remaining.load(std::sync::atomic::Ordering::Acquire);
@@ -1705,13 +1716,18 @@ impl DuplicateEvidence {
             }
         };
         if last {
+            let mut final_verdict = self.final_verdict.lock().unwrap();
             if !self.aborted.load(std::sync::atomic::Ordering::Acquire) {
-                *self.final_verdict.lock().unwrap() = self.current_verdict();
+                *final_verdict = self.current_verdict();
             }
+            let retained_bytes = final_verdict
+                .as_ref()
+                .map(|candidate| candidate_owned_bytes(&candidate.group))
+                .unwrap_or(0);
             self.slots.lock().unwrap().clear();
             let reservation = self.reservation.lock().unwrap();
-            let size = reservation.size();
-            reservation.shrink(size);
+            let release = reservation.size().saturating_sub(retained_bytes);
+            reservation.shrink(release);
         }
         last && !self.aborted.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -1721,6 +1737,19 @@ impl DuplicateEvidence {
             return self.final_verdict.lock().unwrap().clone();
         }
         self.current_verdict()
+    }
+
+    /// Takes the completed verdict and releases the memory retained for its candidate.
+    pub fn take_verdict(&self) -> Option<DuplicateCandidate> {
+        if self.remaining.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            return None;
+        }
+        let mut final_verdict = self.final_verdict.lock().unwrap();
+        let candidate = final_verdict.take()?;
+        let reservation = self.reservation.lock().unwrap();
+        let size = reservation.size();
+        reservation.shrink(size);
+        Some(candidate)
     }
 
     fn current_verdict(&self) -> Option<DuplicateCandidate> {
@@ -1755,6 +1784,9 @@ impl DuplicateEvidence {
         filling: bool,
     ) -> Result<()> {
         let mut slots = self.slots.lock().unwrap();
+        if self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
         let slot = slots.entry((node_index, field)).or_default();
         if let Some(existing_len) = slot.grid_len {
             if existing_len != lhs_present.len() || existing_len != rhs_present.len() {
@@ -1817,6 +1849,9 @@ impl DuplicateEvidence {
         timestamp: i64,
     ) -> Result<()> {
         let mut slots = self.slots.lock().unwrap();
+        if self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
         let slot = slots.entry((node_index, field)).or_default();
         if slot.grid_len.is_some_and(|len| point >= len) {
             return Err(DataFusionError::Internal(

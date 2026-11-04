@@ -3660,6 +3660,11 @@ fn duplicate_evidence_last_exit_clears_slots_and_abort_releases_claims() {
     assert!(!evidence.complete());
     assert!(evidence.complete());
     assert_eq!(evidence.slot_count(), 0);
+    let retained = pool.reserved();
+    assert!(retained > 0);
+    assert_eq!(evidence.verdict().unwrap().point, 2);
+    assert_eq!(evidence.take_verdict().unwrap().point, 2);
+    assert!(evidence.take_verdict().is_none());
     assert_eq!(pool.reserved(), 0);
 
     let aborted = super::DuplicateEvidence::new(&pool, 2);
@@ -3670,6 +3675,41 @@ fn duplicate_evidence_last_exit_clears_slots_and_abort_releases_claims() {
     assert!(!aborted.complete());
     assert_eq!(pool.reserved(), 0);
     assert_eq!(aborted.slot_count(), 0);
+}
+
+#[test]
+fn duplicate_evidence_abort_immediately_clears_unclaimed_partition_evidence() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 2);
+    evidence
+        .publish(0, 0, &[true; 3], &[true; 3], false)
+        .unwrap();
+    evidence
+        .record_candidate(
+            0,
+            0,
+            1,
+            Arc::new(vec![(Arc::from("host"), Arc::from("retained-label"))]),
+            "left",
+            1,
+        )
+        .unwrap();
+    assert!(pool.reserved() > 0);
+
+    evidence.abort();
+
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(evidence.slot_count(), 0);
+    evidence
+        .publish(1, 0, &[true; 3], &[true; 3], false)
+        .unwrap();
+    evidence
+        .record_candidate(1, 0, 1, Arc::new(vec![]), "left", 1)
+        .unwrap();
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(evidence.slot_count(), 0);
+    assert!(!evidence.complete());
 }
 
 #[test]

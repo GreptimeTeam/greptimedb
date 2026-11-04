@@ -330,7 +330,7 @@ pub(crate) fn make_stream(
                     && first <= previous.as_slice()
                 {
                     upstream_error = Some(InvalidRecordBatchSnafu {
-                        reason: "legacy series primary keys are not strictly increasing".to_string(),
+                        reason: "raw series primary keys are not strictly increasing".to_string(),
                     }.build());
                     break;
                 }
@@ -437,7 +437,7 @@ pub(crate) fn make_stream(
                         && old.primary_key.as_slice() != current.primary_key.as_slice()
                         && current.primary_key.as_slice() <= old.primary_key.as_slice()
                     {
-                        yield Err(invalid("legacy series primary keys are not strictly increasing")); return;
+                        yield Err(invalid("raw series primary keys are not strictly increasing")); return;
                     }
                     if let Some(old) = pending.as_ref()
                         && old.primary_key.as_slice() == current.primary_key.as_slice()

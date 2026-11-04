@@ -1472,7 +1472,7 @@ async fn a_key_closed_by_a_package_must_not_continue_in_a_later_one() {
     };
     assert_eq!(
         reason,
-        "legacy series primary keys are not strictly increasing"
+        "raw series primary keys are not strictly increasing"
     );
     assert!(output.next().await.is_none());
 }
@@ -1505,7 +1505,7 @@ async fn a_series_continued_after_its_package_is_terminal() {
     };
     assert_eq!(
         reason,
-        "legacy series primary keys are not strictly increasing"
+        "raw series primary keys are not strictly increasing"
     );
     assert!(output.next().await.is_none());
 }
