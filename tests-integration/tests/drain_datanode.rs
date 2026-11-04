@@ -328,7 +328,8 @@ async fn drain_regular_tables(name: &str, pinned: bool, parallelism: usize, kafk
         .collect();
     others.sort_unstable();
     let target = pinned.then_some(others[0]);
-    let excluded = others[1];
+    // Fence the preferred automatic target so ignoring scheduling state fails the test.
+    let excluded = if pinned { others[1] } else { others[0] };
     cluster
         .metasrv
         .node_scheduling_manager()
