@@ -6,7 +6,7 @@ Three jobs check the native PromQL route independently. They live in
 
 | Job | What it proves | Where |
 | --- | --- | --- |
-| `promql-sqlness` | Every PromQL sqlness case still answers, with the native route switched on, against its own `.result` | `narthex-promql-cases.py`, `narthex-native-route.py` |
+| `promql-sqlness` | The whole standalone environment still answers, with the native route switched on, against its own `.result` | `narthex-native-route.py` |
 | `prometheus-compat` | GreptimeDB's answers match the pinned Prometheus engine, case by case | `tests/narthex-compat/`, `narthex-prometheus-compat.py` |
 | `vm-performance` | Candidate, the `narthex` baseline and VictoriaMetrics, on one machine | `.github/workflows/vmbench-long-range.yml` (reused) |
 
@@ -19,44 +19,31 @@ now; see the note below.
 
 The native route needs `in_process_region_transport`, which only the standalone server installs
 (`src/cmd/src/standalone.rs`). A distributed server answers every PromQL statement on the existing
-route. Consequences, both reflected in the selector below:
+route, so the job runs `--env-filter '^standalone$'`.
 
-- `promql-sqlness` runs the native snapshot comparison for **standalone** cases.
-- `distributed` cases keep a `.result` equal to `.result`. That is a compatibility check -
-  "the switch does not break the distributed answer" - and is **not** evidence that a distributed
-  statement ran natively.
+`distributed` cases share their `.result` with `standalone` through the `distributed/common` symlink.
+They are not part of this job: the switch cannot change their plan, so a green distributed run would
+say nothing about the native route.
 
-## Selecting the cases
+## What the job runs
 
-`narthex-promql-cases.py` reads the statements in every `.sql` under `tests/cases` and selects the
-ones holding a PromQL statement. It follows symlinks and de-duplicates, so the shared
-`distributed/common` tree is not run twice, and it ignores comments, so a fixture that mentions
-PromQL while explaining it is plain SQL is not selected.
+`sqlness-runner bare -c tests/cases --enable-native-promql --env-filter '^standalone$'`, against the
+checked-in expectations, with no copy of the case tree. That is sqlness' own workflow: it compares
+each case with its `.result` and writes the output it produced into that same file. A case that
+disagrees fails the run, and the job records `git diff -- tests/cases` as an artifact, so a reviewer
+reads the change against the commit.
 
-Selection is by content, not by directory name: PromQL cases live under `common/promql`, but also
-under `common/tql`, `flow-tql`, `optimizer` and `tql-explain-analyze`, and a new directory would
-otherwise be missed.
+Accepting a new expectation is therefore the ordinary loop: run, read the diff, commit it. The next
+run passes because the file now holds the reviewed output - which is the point, not an accident.
 
-## Why the run is staged
-
-`sqlness` filters cases by `environment:file_stem`, which cannot distinguish
-`common/promql/offset` from `common/subquery/offset` in the same environment. It also rewrites the
-expectation file it just read before reporting the diff. Both are handled by staging:
-
-1. `--command stage` builds a temporary tree holding only the selected cases. The `.sql` files are
-   symlinks to the repository, so there is still one copy of every statement.
-2. The expectation is a **copy** of the committed `.result`, so a run that writes a wrong
-   answer cannot make the next run agree with it - the copy is discarded every time.
-3. `--command collect` prints the staged expectations that a run rewrote as a diff against the
-   committed ones. Nothing is copied back automatically; a changed expectation is reviewed.
-
-A case with no committed `.result` fails the job **before** any server starts
-(`--command check`), so a new PromQL case cannot pass by quietly reading the ordinary expectation.
+Covering the whole environment is deliberate. The switch is a server-wide setting, so any case could
+see it; a selector that picked only the files mentioning PromQL would also have to stay correct as
+new directories appear.
 
 ## Route evidence
 
 A passing `.result` does not say which route answered. `narthex-native-route.py` reads the
-run's own output and classifies each statement:
+`.result` files a run wrote and classifies each statement:
 
 - `native` when the statement's plan holds `FusedSeries`;
 - `legacy` when it holds a legacy evaluator (`PromInstantManipulateExec`, ...) and no fused node.
@@ -71,9 +58,6 @@ Setting one without the other silently runs the existing route, so the runner ta
 
 - `--enable-native-promql` renders `[query] experimental_native_promql = true` into the generated
   config **and** sends `query.experimental_native_promql=true` as a per-request hint.
-
-The result file is chosen separately by `--result-extension result`. Choosing the file does
-not enable the route.
 
 ## Prometheus conformance
 

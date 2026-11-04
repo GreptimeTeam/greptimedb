@@ -18,7 +18,7 @@ name: Narthex Native CI
 # fallback: a suite that passes with the switch on does not by itself show that a statement ran
 # natively. These jobs check the native route directly, each on its own axis:
 #
-#   promql-sqlness    every PromQL sqlness case, each case keeps its own `.result`
+#   promql-sqlness    the standalone environment, each case against its own `.result`
 #   prometheus-compat GreptimeDB against the pinned Prometheus engine, answer by answer
 #   vm-performance    candidate, the narthex baseline and VictoriaMetrics on one machine
 #
@@ -125,53 +125,34 @@ jobs:
         with:
           name: narthex-native-bins
           path: bins
-      - name: Check every selected case has a native expectation
-        # Runs before any server starts: a new PromQL case must ship its expectation.
-        run: python3 .github/scripts/narthex-promql-cases.py --command check
-      - name: Stage the selected standalone cases
-        run: |
-          python3 .github/scripts/narthex-promql-cases.py \
-            --command stage --env standalone --staging-dir "$RUNNER_TEMP/narthex-cases"
-      - name: Run the native route against the committed expectations
+      - name: Run the standalone environment on the native route
         run: |
           RUST_BACKTRACE=1 ./bins/sqlness-runner bare \
-            -c "$RUNNER_TEMP/narthex-cases" \
+            -c tests/cases \
             --bins-dir ./bins \
             --enable-native-promql \
-            --result-extension result \
             --env-filter '^standalone$' \
             --preserve-state 2>&1 | tee "$RUNNER_TEMP/sqlness-native.log"
+      - name: Record what the run changed
+        if: always()
+        # sqlness compares a case against its checked-in `.result` and writes what it just produced
+        # into that same file, which is how an expectation is updated. The review point is this diff
+        # against the commit, not the file the next run reads.
+        run: git diff -- tests/cases >"$RUNNER_TEMP/results.diff" || true
       - name: Check that every planned statement ran natively
         if: always()
-        # A sqlness log quotes a case's output only when it disagrees with the expectation, so a run
-        # that passed reports no plan at all. The staged expectations are this run's own output -
-        # sqlness replaces the file it compared against with what the case produced - so the route
-        # is read from them.
+        # The `.result` files are this run's output: sqlness replaced each one it compared against.
+        # Only `TQL EXPLAIN`/`TQL ANALYZE` statements report a plan, so the check covers those.
         run: |
-          files=$(find "$RUNNER_TEMP/narthex-cases" -name '*.result' 2>/dev/null || true)
-          if [ -z "$files" ]; then
-            echo "no staged expectation to read: the staging step did not run"
-            exit 0
-          fi
+          files=$(find tests/cases/standalone -name '*.result')
           python3 .github/scripts/narthex-native-route.py --require-native --input $files
-      - name: Report every rewritten expectation as a diff
-        if: always()
-        # sqlness rewrites the expectation it compared against, so the staged copy alone cannot say
-        # whether the run disagreed. `failures` reads the run's own log and prints, per unexpected
-        # case, the output the run wrote in its place.
-        run: |
-          python3 .github/scripts/narthex-promql-cases.py \
-            --command failures --staging-dir "$RUNNER_TEMP/narthex-cases" \
-            --run-log "$RUNNER_TEMP/sqlness-native.log" || true
-          python3 .github/scripts/narthex-promql-cases.py \
-            --command collect --env standalone --staging-dir "$RUNNER_TEMP/narthex-cases" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: narthex-sqlness-native
           path: |
             ${{ runner.temp }}/sqlness-native.log
-            ${{ runner.temp }}/narthex-cases/**/*.result
+            ${{ runner.temp }}/results.diff
           retention-days: 7
 
   prometheus-compat:

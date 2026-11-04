@@ -57,15 +57,6 @@ pub struct SqlnessConfig {
     #[clap(short, long, default_value = ".*")]
     pub test_filter: String,
 
-    /// Extension of the expected-result files, without the leading dot.
-    ///
-    /// A case `foo.sql` is compared against `foo.<extension>` and the file is rewritten with the
-    /// actual output during the run. The default keeps the checked-in `foo.result`; a run that
-    /// exercises a different execution route passes its own extension so the two expectations stay
-    /// separate files instead of overwriting each other.
-    #[clap(long, default_value = "result")]
-    pub result_extension: String,
-
     /// Which environments to run, as a regexp matched against each environment directory name.
     ///
     /// `.*` runs every environment the case directory holds. The native PromQL route needs an

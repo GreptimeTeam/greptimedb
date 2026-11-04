@@ -201,7 +201,6 @@ impl BareCommand {
             .test_filter(self.config.test_filter)
             .follow_links(true)
             .env_config_file(self.config.env_config_file)
-            .result_extension(self.config.result_extension.clone())
             .env_filter(self.config.env_filter.clone())
             .interceptor_registry(interceptor_registry)
             .parallelism(parallelism.instance)

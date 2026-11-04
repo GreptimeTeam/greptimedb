@@ -69,7 +69,6 @@ impl KubeCommand {
             .test_filter(self.config.test_filter)
             .follow_links(true)
             .env_config_file(self.config.env_config_file)
-            .result_extension(self.config.result_extension.clone())
             .interceptor_registry(interceptor_registry)
             .build()
             .unwrap();
