@@ -39,9 +39,10 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
-    TIMESTAMP_END_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY,
-    default_engine, is_ddl_reserved_table, trace_operations_table_name, trace_services_table_name,
+    DEFAULT_PRIVATE_SCHEMA_NAME, METRICS_EXEMPLARS_TABLE, PARENT_SPAN_ID_COLUMN,
+    SERVICE_NAME_COLUMN, SPAN_ID_COLUMN, TIMESTAMP_END_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
+    trace_operations_table_name, trace_services_table_name,
 };
 use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
@@ -54,8 +55,7 @@ use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{
-    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, METRICS_EXEMPLARS_TABLE, greptime_timestamp,
-    greptime_value,
+    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, greptime_timestamp, greptime_value,
 };
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
@@ -2208,7 +2208,9 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
                 .get(store_api::metric_engine_consts::PRIMARY_KEY_ENCODING)
                 .is_some_and(|v| v.eq_ignore_ascii_case("sparse")),
         InvalidInsertRequestSnafu {
-            reason: "metrics_exemplars requires Mito, append_mode=true and primary_key_encoding=sparse"
+            reason: format!(
+                "{METRICS_EXEMPLARS_TABLE} requires Mito, append_mode=true and primary_key_encoding=sparse"
+            )
         }
     );
     let columns = meta.schema.column_schemas();

@@ -778,7 +778,7 @@ mod tests {
 
         let errors = frontend::OTLP_RESOURCE_INFO_WRITE_ERRORS.get();
         let outcome =
-            OpenTelemetryProtocolHandler::metrics(&*instance, request, QueryContext::arc())
+            OpenTelemetryProtocolHandler::metrics(&*instance, request, QueryContext::arc(), None)
                 .await
                 .unwrap();
         assert_eq!(

@@ -56,6 +56,7 @@ use crate::error::Result;
 use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
+use crate::request_memory_limiter::ServerMemoryLimiter;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
@@ -200,11 +201,13 @@ pub trait PromStoreProtocolHandler {
 
 #[async_trait]
 pub trait OpenTelemetryProtocolHandler: PipelineHandler {
-    /// Handling opentelemetry metrics request
+    /// Handles metrics, reserving row expansion against the transport's limiter.
+    /// The accompanying byte count includes permits already held by this request.
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
+        memory_limiter: Option<(ServerMemoryLimiter, u64)>,
     ) -> Result<MetricsIngestOutcome>;
 
     /// Handling opentelemetry traces request

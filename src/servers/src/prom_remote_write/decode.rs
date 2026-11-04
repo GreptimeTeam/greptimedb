@@ -596,7 +596,7 @@ mod tests {
             );
         }
         assert!(
-            crate::exemplar::estimated_row_bytes(&requests).unwrap()
+            crate::exemplar::estimated_row_bytes(requests.values().map(Vec::as_slice)).unwrap()
                 >= count * (metric.len() + label.len())
         );
     }

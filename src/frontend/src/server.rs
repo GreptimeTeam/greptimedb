@@ -432,6 +432,7 @@ where
                 )
                 .with_influxdb_handler(instance.clone())
                 .with_otlp_handler(instance.clone(), with_metric_engine)
+                .with_memory_limiter(self.server_memory_limiter.clone())
                 .with_batching_enabled(postgres_batching),
             ) as Box<dyn Server>;
 

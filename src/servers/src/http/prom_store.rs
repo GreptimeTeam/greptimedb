@@ -235,7 +235,7 @@ async fn remote_write_v1(
         query_ctx
     } else {
         // Reserve for row expansion before copying shared metric names and series labels.
-        let bytes = crate::exemplar::estimated_row_bytes(&exemplars)
+        let bytes = crate::exemplar::estimated_row_bytes(exemplars.values().map(Vec::as_slice))
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or_else(|| {
                 error::MemoryLimitExceededSnafu.into_error(

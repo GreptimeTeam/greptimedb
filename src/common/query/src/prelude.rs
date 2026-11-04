@@ -91,8 +91,6 @@ pub fn greptime_native_histogram() -> &'static str {
 const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 /// Default value column name constant for backward compatibility.
 const GREPTIME_VALUE: &str = "greptime_value";
-/// Shared exemplar destination within each source metric's schema.
-pub const METRICS_EXEMPLARS_TABLE: &str = "metrics_exemplars";
 /// Query-visible source metric name stored in the exemplar table.
 pub const EXEMPLAR_METRIC_COLUMN: &str = "greptime_metric";
 /// JSON2 object containing exemplar-owned labels.
