@@ -2501,6 +2501,7 @@ dependencies = [
  "arrow 59.2.0",
  "arrow-schema 59.2.0",
  "async-trait",
+ "auth",
  "axum 0.8.4",
  "bincode",
  "catalog",
