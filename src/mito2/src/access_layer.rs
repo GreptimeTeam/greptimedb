@@ -425,7 +425,7 @@ impl AccessLayer {
         };
 
         // Put parquet metadata to cache manager.
-        if !sst_info.is_empty() && cache_manager.sst_meta_cache_enabled() {
+        if !sst_info.is_empty() && cache_manager.sst_meta_cache_on_write_enabled() {
             let runtime = match op_type {
                 OperationType::Compact => common_runtime::compact_runtime(),
                 OperationType::Flush => common_runtime::global_runtime(),
@@ -916,6 +916,116 @@ mod tests {
                 encoded
             );
         }
+    }
+
+    #[rstest::rstest]
+    #[case::flush(OperationType::Flush, false)]
+    #[case::local_compaction(OperationType::Compact, false)]
+    #[case::input_only_compaction(OperationType::Compact, true)]
+    #[tokio::test]
+    async fn test_written_sst_metadata_cache_policy(
+        #[case] op_type: OperationType,
+        #[case] input_only: bool,
+    ) {
+        use crate::cache::CacheStrategy;
+        use crate::sst::file::FileMeta;
+        use crate::sst::file_purger::NoopFilePurger;
+        use crate::sst::parquet::reader::MetadataCacheMetrics;
+        use crate::test_util::sst_util::{
+            new_flat_source_from_record_batches, new_record_batch_by_range, sst_region_metadata,
+        };
+
+        let mut env = TestEnv::new().await;
+        let store = env.init_object_store_manager();
+        let access_layer = AccessLayer::new(
+            "test",
+            PathType::Bare,
+            store,
+            env.get_puffin_manager(),
+            env.get_intermediate_manager(),
+        );
+        let builder = CacheManager::builder().sst_meta_cache_size(1024 * 1024);
+        let cache = Arc::new(if input_only {
+            builder.disable_sst_meta_cache_on_write().build()
+        } else {
+            builder.build()
+        });
+        let metadata = Arc::new(sst_region_metadata());
+        let region_id = metadata.region_id;
+        let infos =
+            access_layer
+                .write_sst(
+                    SstWriteRequest {
+                        op_type,
+                        metadata,
+                        source: new_flat_source_from_record_batches(vec![
+                            new_record_batch_by_range(&["a", "b"], 0, 16),
+                        ]),
+                        cache_manager: cache.clone(),
+                        max_sequence: None,
+                        sst_write_format: FormatType::Flat,
+                        preserve_row_sequence: false,
+                        index_options: Default::default(),
+                        index_config: Default::default(),
+                        inverted_index_config: Default::default(),
+                        fulltext_index_config: Default::default(),
+                        bloom_filter_index_config: Default::default(),
+                    },
+                    &WriteOptions::default(),
+                    &mut Metrics::new(WriteType::Compaction),
+                )
+                .await
+                .unwrap();
+        assert_eq!(1, infos.len());
+        // A prewarming task owns a cache reference until both tiers are populated.
+        // Drain it before checking absence so the negative assertion cannot race it.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while Arc::strong_count(&cache) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let info = &infos[0];
+        let file_id = RegionFileId::new(region_id, info.file_id);
+        let cached = cache
+            .get_sst_meta_data(
+                file_id,
+                &mut MetadataCacheMetrics::default(),
+                PageIndexPolicy::Skip,
+                &common_runtime::compact_runtime(),
+            )
+            .await;
+        assert_eq!(!input_only, cached.is_some());
+
+        let file = FileHandle::new(
+            FileMeta {
+                region_id,
+                file_id: info.file_id,
+                file_size: info.file_size,
+                ..Default::default()
+            },
+            Arc::new(NoopFilePurger),
+        );
+        let path = file.file_path(access_layer.table_dir(), access_layer.path_type());
+        let reader = access_layer
+            .read_sst(file)
+            .cache(CacheStrategy::Compaction(cache));
+        let mut cold = MetadataCacheMetrics::default();
+        let (first, _) = reader
+            .read_parquet_metadata(&path, info.file_size, &mut cold, PageIndexPolicy::Skip)
+            .await
+            .unwrap();
+        assert_eq!(input_only, cold.num_reads > 0);
+        let mut warm = MetadataCacheMetrics::default();
+        let (second, _) = reader
+            .read_parquet_metadata(&path, info.file_size, &mut warm, PageIndexPolicy::Skip)
+            .await
+            .unwrap();
+        assert_eq!(16, second.parquet_metadata().file_metadata().num_rows());
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(0, warm.num_reads);
+        assert_eq!(1, warm.mem_cache_hit);
     }
 
     #[tokio::test]

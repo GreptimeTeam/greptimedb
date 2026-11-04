@@ -344,7 +344,14 @@ impl CompactionRegionOpener {
             region_options: req.region_options.clone(),
             engine_config: self.mito_config.clone(),
             region_metadata: region_metadata.clone(),
-            cache_manager: Arc::new(CacheManager::default()),
+            // Lets the scan reuse the input footers read while planning the merge.
+            cache_manager: Arc::new(
+                CacheManager::builder()
+                    .sst_meta_cache_size(mito_config.sst_meta_cache_size.as_bytes())
+                    // This per-job cache has no readers for the newly written outputs.
+                    .disable_sst_meta_cache_on_write()
+                    .build(),
+            ),
             access_layer,
             manifest_ctx,
             current_version,
@@ -1308,6 +1315,112 @@ mod tests {
                 "put_done={put_done}, delete_done={delete_done}"
             );
         }
+    }
+
+    #[rstest::rstest]
+    #[case::primary_key(false)]
+    #[case::flat(true)]
+    #[tokio::test]
+    async fn test_compaction_skips_missing_input(#[case] flat_format: bool) {
+        use datatypes::arrow::array::AsArray;
+        use datatypes::arrow::datatypes::TimestampMillisecondType;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::engine::compaction_test::put_and_flush;
+        use crate::test_util::{CreateRequestBuilder, TestEnv, rows_schema};
+
+        let mut env = TestEnv::new().await;
+        let config = MitoConfig {
+            default_flat_format: flat_format,
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let engine = env.create_engine(config.clone()).await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new().build();
+        let columns = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        // Nine files cross the eight-footer concurrency limit.
+        for file in 0..9 {
+            put_and_flush(&engine, region_id, &columns, file * 2..file * 2 + 2).await;
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version();
+        let mut inputs: Vec<_> = version.ssts.levels()[0].files().cloned().collect();
+        assert_eq!(9, inputs.len());
+        inputs.sort_unstable_by_key(|file| file.meta_ref().sequence);
+        let missing = inputs[4].clone();
+        let output = CompactionOutput {
+            output_level: 1,
+            inputs,
+            filter_deleted: true,
+            output_time_range: None,
+        };
+        // Delete after selecting the inputs; a fresh cache avoids hiding the missing
+        // footer behind the metadata populated by flush.
+        let context = CompactionContext {
+            region_id,
+            region_options: version.options.clone(),
+            version_options: version.options.clone(),
+            engine_config: Arc::new(config),
+            region_metadata: version.metadata.clone(),
+            cache_manager: Arc::new(
+                CacheManager::builder()
+                    .sst_meta_cache_size(1024 * 1024)
+                    .build(),
+            ),
+            access_layer: region.access_layer.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
+            plugins: Plugins::new(),
+        };
+        region
+            .access_layer
+            .object_store()
+            .delete(&missing.file_path(
+                region.access_layer.table_dir(),
+                region.access_layer.path_type(),
+            ))
+            .await
+            .unwrap();
+        let (files, _) = DefaultSstMerger
+            .merge_single_output(context, output, WriteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(1, files.len());
+        let outputs: Vec<_> = files.into_iter().map(new_file_handle).collect();
+        let mut reader = CompactionSstReaderBuilder {
+            metadata: version.metadata.clone(),
+            sst_layer: region.access_layer.clone(),
+            cache: Arc::new(CacheManager::default()),
+            inputs: &outputs,
+            append_mode: false,
+            filter_deleted: true,
+            time_range: None,
+            merge_mode: MergeMode::LastRow,
+            read_parallelism: 1,
+        }
+        .build_flat_sst_reader()
+        .await
+        .unwrap();
+        let mut timestamps = Vec::new();
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            timestamps.extend_from_slice(
+                batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_primitive::<TimestampMillisecondType>()
+                    .values(),
+            );
+        }
+        let expected: Vec<i64> = (0..18)
+            .filter(|ts| !(8..10).contains(ts))
+            .map(|ts| ts * 1000)
+            .collect();
+        assert_eq!(expected, timestamps);
     }
 
     /// An [`SstMerger`] that returns pre-configured results per call index.
