@@ -343,9 +343,7 @@ pub(crate) fn sample_day(timestamp: common_time::Timestamp) -> i64 {
 }
 
 /// Plans independent daily outputs. SSTs spanning midnight participate in both windows.
-pub(crate) fn sample_windows(
-    files: &[FileHandle],
-) -> std::collections::BTreeMap<i64, Vec<FileHandle>> {
+pub(crate) fn sample_windows(files: &[FileHandle]) -> Vec<(i64, Vec<FileHandle>)> {
     let mut windows = std::collections::BTreeMap::<i64, Vec<FileHandle>>::new();
     for file in files {
         let (start, end) = file.time_range();
@@ -356,7 +354,17 @@ pub(crate) fn sample_windows(
     for files in windows.values_mut() {
         files.sort_unstable_by_key(|file| file.file_id().file_id().to_string());
     }
+    // Bound the merge fan-in independently of the number of SSTs in a day.
+    // Each group owns disjoint source IDs; coverage is checked per source/day.
     windows
+        .into_iter()
+        .flat_map(|(day, files)| {
+            files
+                .chunks(64)
+                .map(|group| (day, group.to_vec()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Merges a pinned set of SSTs into one daily generation, preserving all row versions.

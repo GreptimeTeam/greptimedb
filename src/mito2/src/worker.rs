@@ -532,7 +532,7 @@ async fn series_index_store_from_config(
 }
 
 /// Bump when the rebuildable local index layout becomes incompatible.
-const SERIES_INDEX_CACHE_VERSION: &str = "1";
+const SERIES_INDEX_CACHE_VERSION: &str = "2";
 
 /// Resets incompatible caches before any worker or reader can use their catalogs.
 async fn initialize_series_index_cache(store: &ObjectStore) -> Result<()> {

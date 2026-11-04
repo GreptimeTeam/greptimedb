@@ -452,3 +452,22 @@ unchanged layout alone does not make them readable by version-1 implementations.
 The local cache root contains a layout-version marker. Startup clears the entire
 series-index cache when this marker is absent or incompatible, then rebuilds
 artifacts through existing maintenance. Source SST identity remains in metadata.
+
+### Local cache rollout
+
+Daily consolidation is the default for the opt-in columnar samples backend,
+including manual reconciliation. Legacy-format defaults are unchanged. A day may
+contain several generations with disjoint source sets (at most 64 SSTs per merge),
+and each generation may contain multiple bounded part files. Source Parquet files
+are never rewritten.
+
+The local series-index cache layout version is 2. On upgrade from layout 1,
+startup resets the rebuildable index cache before opening regions; ordinary SST
+reads remain available while artifacts rebuild. Rolling back to a layout-1 binary
+likewise resets the incompatible cache. Allow for rebuild time and I/O in either
+direction; do not reuse daily catalogs with an older reader outside this startup
+check. Existing per-SST catalog entries remain readable by the new reader.
+
+A prepared scan uses a grouped artifact only when all of its sources belong to
+that scan's assignment. Partial coverage or a stale source set selects the
+ordinary SST path until reconciliation supplies complete valid coverage.

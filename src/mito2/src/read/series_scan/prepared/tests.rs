@@ -1316,6 +1316,43 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
             .contains("foreign SST")
     );
 
+    // A daily artifact cannot supply just one source from its grouped coverage.
+    let mut partial = make_context();
+    partial.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
+        index: 0,
+        row_group_index: -1,
+    }]
+    .into();
+    assert!(!validate_inputs(&partial, &ranges[..1]).unwrap());
+
+    // A catalog can outlive a source generation until reconciliation runs.
+    let mut stale = make_context();
+    let index = stale.input.series_index.as_mut().unwrap();
+    let (purger, _purges) = crate::series_index::purger::series_index_channel(store.clone());
+    let samples = index
+        .version
+        .samples
+        .iter()
+        .map(|(id, handle)| {
+            let mut entry = handle.entry().clone();
+            entry.source_file_ids.push(FileId::random());
+            (
+                *id,
+                crate::series_index::artifact::SamplesFileHandle::new(
+                    handle.file_id(),
+                    entry,
+                    purger.clone(),
+                ),
+            )
+        })
+        .collect();
+    index.version = Arc::new(SeriesIndexVersion {
+        samples,
+        series_indexes: index.version.series_indexes.clone(),
+        ..Default::default()
+    });
+    assert!(!validate_inputs(&stale, &ranges).unwrap());
+
     // Missing columnar samples are a not-ready answer, not an error.
     let mut context = make_context();
     let index = context.input.series_index.as_mut().unwrap();

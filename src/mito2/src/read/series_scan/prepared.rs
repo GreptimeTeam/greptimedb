@@ -183,6 +183,19 @@ fn collect_inputs(
                 .insert(row_group.row_group_index);
         }
     }
+    // A grouped artifact contains every source's rows and cannot answer a partial
+    // source assignment. This also rejects generations containing retired SSTs.
+    let assigned = files
+        .keys()
+        .map(|i| input.files[*i].file_id().file_id())
+        .collect();
+    let eligible_samples = index
+        .version
+        .samples
+        .iter()
+        .filter(|(_, handle)| handle.entry().sources_visible(&assigned))
+        .map(|(id, handle)| (*id, handle.clone()))
+        .collect();
     let mut indexes = HashSet::new();
     let file_indices = files.keys().copied().collect();
     for (file_idx, groups) in files {
@@ -216,7 +229,7 @@ fn collect_inputs(
         if !covered {
             ready = false;
         }
-        if !crate::series_index::artifact::samples_cover_file(&index.version.samples, file)
+        if !crate::series_index::artifact::samples_cover_file(&eligible_samples, file)
             || index.version.samples.values().any(|h| {
                 h.entry().covers(file.file_id().file_id())
                     && h.entry().artifact.format != ArtifactFormat::ColumnarSamples
@@ -321,7 +334,7 @@ impl ColumnarPreparedSource {
             .version
             .samples
             .values()
-            .filter(|h| assigned.iter().any(|id| h.entry().covers(*id)))
+            .filter(|h| h.entry().sources_visible(&assigned))
         {
             let reader = crate::series_index::samples::reader::SamplesReader::open_cached(
                 index.store.clone(),
