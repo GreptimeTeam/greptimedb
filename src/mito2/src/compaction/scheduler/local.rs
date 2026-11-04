@@ -73,6 +73,24 @@ impl Drop for InflightCompaction {
     }
 }
 
+/// Keeps the inflight gauge balanced for the whole job lifetime, including
+/// unwinds out of the task and a job dropped after authorization but before
+/// its first poll.
+struct InflightCompaction(IntGauge);
+
+impl InflightCompaction {
+    fn start(gauge: IntGauge) -> Self {
+        gauge.inc();
+        Self(gauge)
+    }
+}
+
+impl Drop for InflightCompaction {
+    fn drop(&mut self) {
+        self.0.dec();
+    }
+}
+
 /// A request's local units. All transitions run on the owning region worker.
 #[derive(Debug)]
 pub(crate) struct LocalCompaction {
@@ -365,10 +383,9 @@ impl CompactionScheduler {
                     .await;
             });
             let job = Box::pin(async move {
-                INFLIGHT_COMPACTION_COUNT.inc();
+                let _inflight = InflightCompaction::start(INFLIGHT_COMPACTION_COUNT.clone());
                 task.run().await;
                 drop(task);
-                INFLIGHT_COMPACTION_COUNT.dec();
             });
             if let Err(err) = self.coordinator.schedule(
                 region_id,
@@ -501,6 +518,19 @@ mod tests {
             made_progress: false,
             cancellation_requested: false,
         }
+    }
+
+    #[test]
+    fn test_inflight_accounting_survives_task_unwind() {
+        let gauge = IntGauge::new("test_inflight_compaction", "isolated inflight gauge").unwrap();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _inflight = InflightCompaction::start(gauge.clone());
+            assert_eq!(1, gauge.get());
+            panic!("inflight accounting unwind fixture");
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(0, gauge.get());
     }
 
     fn task_entry() -> CompactionTaskEntry {
