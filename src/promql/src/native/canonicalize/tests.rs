@@ -28,14 +28,14 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::merge_label_rewrites;
-use crate::histogram_eval::HistogramFunction;
+use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType,
+    NativeType, ParameterizedOp,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::select::SortOrder;
@@ -133,6 +133,27 @@ fn rewrite(inner: NativeNode, dst: &str, src: &str) -> NativeNode {
 /// `abs(inner)`: a point-wise map that keeps the label set's primary key.
 fn abs_map(inner: NativeNode) -> NativeNode {
     map_ops(inner, vec![MapOp::Math(MathOp::Abs)])
+}
+
+/// `histogram_count(inner)`: point-wise over the grid, but it drops every float sample it reads.
+fn histogram_count(inner: NativeNode) -> NativeNode {
+    map_ops(
+        inner,
+        vec![MapOp::Histogram(NativeHistogramFunction::Count)],
+    )
+}
+
+/// `clamp_min(inner, argument)`: a point-wise function whose bound argument is a scalar on its grid.
+fn clamp_min(inner: NativeNode, argument: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(inner),
+            op: ParameterizedOp::ClampMin,
+            parameters: vec![argument],
+        },
+        output,
+    }
 }
 
 /// `sum without() (inner)` at `stage`, which folds every series it is handed into one group.
@@ -550,8 +571,118 @@ fn a_pointwise_map_reads_each_piece_as_it_is() {
         &scan_tags(),
     );
     assert_eq!(1, merges(&tree));
-    // The merge is the root, above the point-wise map: the map reads pieces, its consumer does not.
-    assert!(matches!(tree.root().expr, NativeExpr::Merge { .. }));
+    // The map stays the root and its input is the merge: a map reads pieces point-wise, but a point
+    // it reads can be one it drops, so the collection has to happen below it.
+    let NativeExpr::Map { input, .. } = &tree.root().expr else {
+        panic!("the root stays the point-wise map");
+    };
+    let NativeExpr::Merge { input } = &input.expr else {
+        panic!("the map is handed one series per label set");
+    };
+    assert!(matches!(input.expr, NativeExpr::Map { .. }));
+    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    assert_eq!(1, merges(&twice));
+    assert_eq!(tree.to_string(), twice.to_string());
+}
+
+/// `histogram_count(label_replace(x, "host", "same", "host", ".*"))`: the map that erases the
+/// samples the collision would be judged on, so the merge has to sit between the rewrite and it.
+#[test]
+fn a_sample_dropping_map_collects_below_itself() {
+    let out = grid(0, 1000, 2);
+    let aliasing = map_ops(
+        selected(&out),
+        vec![MapOp::Label(Arc::new(
+            LabelRewrite::replace("host", "same", "host", ".*").unwrap(),
+        ))],
+    );
+    let tree = passed(histogram_count(aliasing), &scan_tags());
+    assert_eq!(1, merges(&tree), "one merge, below the sample-dropping map");
+    let NativeExpr::Map { input, .. } = &tree.root().expr else {
+        panic!("the root stays `histogram_count`");
+    };
+    let NativeExpr::Merge { input } = &input.expr else {
+        panic!("`histogram_count` reads one series per label set rather than the pieces");
+    };
+    let NativeExpr::Map { input, op } = &input.expr else {
+        panic!("the merge sits above the rewrite and below the map");
+    };
+    assert!(
+        op.ops.iter().any(|op| matches!(op, MapOp::Label(_))),
+        "the collected node is the rewrite"
+    );
+    assert!(
+        matches!(input.expr, NativeExpr::Instant { .. }),
+        "the rewrite still reads the selection it read before"
+    );
+    // A second pass over the collected tree changes nothing: the merge answers one series per label
+    // set, so nothing below the map aliases any more.
+    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    assert_eq!(1, merges(&twice));
+    assert_eq!(tree.to_string(), twice.to_string());
+}
+
+#[test]
+fn a_pointwise_map_over_a_clean_input_gains_no_merge() {
+    let out = grid(0, 1000, 2);
+    // No rewrite anywhere in the tree, so no two pieces can share a label set.
+    let tree = passed(abs_map(abs_map(selected(&out))), &scan_tags());
+    assert_eq!(0, merges(&tree));
+    let NativeExpr::Map { input, .. } = &tree.root().expr else {
+        panic!("the root stays the point-wise map");
+    };
+    assert!(matches!(input.expr, NativeExpr::Map { .. }));
+    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    assert_eq!(tree.to_string(), twice.to_string());
+}
+
+#[test]
+fn a_sample_dropping_map_over_a_fresh_destination_gains_no_merge() {
+    let out = grid(0, 1000, 2);
+    // `dst` names no label the scan reports, so the rewrite cannot alias and the map's input needs
+    // no collection even though the map drops samples.
+    let tree = passed(
+        histogram_count(rewrite(selected(&out), "dst", "host")),
+        &scan_tags(),
+    );
+    assert_eq!(0, merges(&tree), "a fresh destination cannot alias");
+    let NativeExpr::Map { input, .. } = &tree.root().expr else {
+        panic!("the root stays `histogram_count`");
+    };
+    assert!(matches!(input.expr, NativeExpr::Map { .. }));
+}
+
+#[test]
+fn a_parameterized_map_collects_below_itself() {
+    let out = grid(0, 1000, 2);
+    // A clamp may empty a point as well, so its input is collected below it exactly as a map's is;
+    // the bound argument is a scalar and carries no label set to collect.
+    let tree = passed(
+        clamp_min(
+            rewrite(selected(&out), "host", "host"),
+            scalar(0.0, Arc::clone(&out)),
+        ),
+        &scan_tags(),
+    );
+    assert_eq!(1, merges(&tree));
+    let NativeExpr::ParameterizedMap {
+        input, parameters, ..
+    } = &tree.root().expr
+    else {
+        panic!("the root stays the parameterized map");
+    };
+    let NativeExpr::Merge { input } = &input.expr else {
+        panic!("the parameterized map is handed one series per label set");
+    };
+    assert!(matches!(input.expr, NativeExpr::Map { .. }));
+    assert_eq!(1, parameters.len());
+    assert!(
+        matches!(parameters[0].expr, NativeExpr::Scalar(_)),
+        "a scalar argument is not collected"
+    );
+    let twice = merge_label_rewrites(&tree, &scan_tags()).unwrap();
+    assert_eq!(1, merges(&twice));
+    assert_eq!(tree.to_string(), twice.to_string());
 }
 
 #[test]

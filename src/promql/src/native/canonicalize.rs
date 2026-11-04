@@ -28,7 +28,8 @@
 //! reports. A tree with no such rewrite gains no merge at all, so a per-series query keeps every
 //! scan partition and pays nothing for this pass.
 //!
-//! Where a merge is added is a property of the consumer, not of the rewrite:
+//! Where a merge is added is a property of the consumer, and of what the operations between the
+//! consumer and the rewrite do to one sample:
 //!
 //! | consumer | merge below it? | why |
 //! | --- | --- | --- |
@@ -38,10 +39,18 @@
 //! | `Binary`/`Set` over two vectors | yes, on both sides | each side is matched by label, and the kernel refuses two values of one field at a point only after the pair was matched |
 //! | `Info` | yes, on both sides | it looks the info series up by identifying labels, so the pieces of one label set have to be one series first |
 //! | `Window` over an evaluated vector | yes | a window folds a range of one series, so it reads the series whole |
-//! | `Map`, `Timestamp`, `Instant`, a scalar broadcast | no | point-wise per piece; a merge would only move the error the `Emitted` check already reports |
+//! | `Map`, `ParameterizedMap` | yes, below it | point-wise, but not sample-preserving: the histogram functions drop float samples, math ignores native histograms, and a parameterized clamp can empty a point - and the label set a point's occupancy is judged under is the rewritten one, so a merge above such a map would be handed the occupancy that is already gone |
+//! | `Timestamp`, `Instant`, a scalar broadcast | no | each rewrites the value of a sample it read and keeps that sample's position, so no occupancy is lost and the pieces are still told apart where the rewrite left them |
 //!
 //! A merge is never added below a raw scan, a scalar or aggregate state: it binds samples evaluated
 //! on a grid, and no consumer asks for one over those.
+//!
+//! Canonicalizing a map's input is what makes the histogram case work: in
+//! `histogram_count(label_replace(x, "host", "same", "host", ".*"))` two scan partitions each
+//! rewrite one series to `{host="same"}` and `histogram_count` drops both - they are float samples -
+//! before anything could report that the two now share a label set at one point. The merge is
+//! inserted between the rewrite and `histogram_count`, so the canonical router judges the occupancy
+//! the rewrite created and reports the collision instead of an empty answer.
 //!
 //! Running the pass over its own output changes nothing: the node that gained a merge then answers
 //! one series per label set, so [`duplicates_canonical_labels`] is `false` for it and a second run
@@ -142,20 +151,24 @@ fn rewrite(node: &NativeNode, source_tags: &[Vec<String>]) -> DfResult<NativeNod
             input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
         },
-        // A map is point-wise, so it reads each piece as it is; what it does to a label set is a fact
-        // about its output, asked at the consumer of that output and not here.
+        // A map is point-wise, but a point can drop out of its output: the histogram functions drop
+        // float samples, math drops native histograms, and a parameterized clamp can empty a point.
+        // The occupancy that tells two pieces of one label set apart is the rewritten frame's, so a
+        // merge above this map would be handed an occupancy the map may already have erased - the
+        // pieces have to be collected where they still hold their samples, below it.
         NativeExpr::Map { input, op } => NativeExpr::Map {
-            input: Box::new(rewrite(input, source_tags)?),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
         },
-        // A parameterized map's parameters are scalars on the input's grid; the input itself is read
-        // point-wise like a map's.
+        // A parameterized map's parameters are scalars, rewritten but never collected - a scalar
+        // carries no label set. Its input is read point-wise like a map's and, for the same reason,
+        // its pieces are collected below it rather than above it.
         NativeExpr::ParameterizedMap {
             input,
             op,
             parameters,
         } => NativeExpr::ParameterizedMap {
-            input: Box::new(rewrite(input, source_tags)?),
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: *op,
             parameters: parameters
                 .iter()

@@ -2604,6 +2604,92 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         "the two colliding series must occupy different execution partitions, got {nonempty:?}"
     );
 
+    // `histogram_count` is point-wise but not sample-preserving: it drops every float sample, and
+    // `probe` holds floats. A canonical merge placed *above* it would be handed an occupancy the
+    // map has already erased, so the very same rewritten label set would answer nothing instead of
+    // the error Prometheus reports for two values at one point. The merge therefore sits below the
+    // map, and the two rewritten series - in different partitions, as established just above - meet
+    // in the router before `histogram_count` runs. The existing plan is not asserted to agree here:
+    // this is the Prometheus error contract, which the native route owes on its own.
+    observer.clear();
+    let histogram = run(
+        r#"histogram_count(label_replace(probe{host=~"a|b"}, "host", "same", "host", ".*"))"#,
+        "(0, 0, '1s')",
+    )
+    .await;
+    let histogram_error = match histogram {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        histogram_error.contains("cannot contain metrics with the same labelset"),
+        "the canonical boundary must judge the rewritten label set before `histogram_count` drops \
+         the float samples it is judged on, got: {histogram_error}"
+    );
+    let histogram_plan = observer.root_plan();
+    let histogram_router = canonical_router(&observer).unwrap_or_else(|| {
+        panic!(
+            "`histogram_count` over a collapsing rewrite routes by canonical label set: {} \
+             regions {:?}",
+            display_plan_tree(&histogram_plan),
+            observer
+                .region_plans()
+                .iter()
+                .map(display_plan_tree)
+                .collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(
+        histogram_router.children()[0].name(),
+        "FusedSeriesExec",
+        "the router reads the canonical producer: {}",
+        display_plan_tree(&histogram_plan)
+    );
+    let histogram_producer = histogram_router.children()[0].clone();
+    // The boundary's own tree is the merge over the rewrite: `histogram_count` is not in it, so the
+    // router that validates the collected label set runs below the map rather than above it. The
+    // node's explain line names the whole statement, so the tree is read from its own header on.
+    let producer_display = datafusion::physical_plan::displayable(histogram_producer.as_ref())
+        .indent(false)
+        .to_string();
+    let producer_tree = producer_display
+        .split_once("NativeTree")
+        .map(|(_, tree)| format!("NativeTree{tree}"))
+        .unwrap_or_else(|| panic!("the producer renders its tree: {producer_display}"));
+    assert!(
+        producer_tree.contains("Merge"),
+        "the producer's tree is the canonical merge itself: {producer_tree}"
+    );
+    assert!(
+        !producer_tree.contains("histogram_count"),
+        "the merge is below `histogram_count`, not above it: {producer_tree}"
+    );
+    // What each producer partition read, and what it published. The published values are the ones
+    // the query's own map would have dropped: they exist because the merge ran below it, and they
+    // come from two partitions because the two colliding series were scanned in two.
+    let read = nonempty_partitions(&histogram_producer, "native.root.input_samples");
+    assert!(
+        read.len() > 1,
+        "the two colliding series are read in different execution partitions: {read:?}"
+    );
+    let published = nonempty_partitions(&histogram_producer, "native.root.output_values");
+    assert!(
+        published.len() > 1,
+        "the merge below `histogram_count` publishes the rewritten series, one per partition, \
+         although the map above it drops floats: {published:?}"
+    );
+    // No gather: the router keeps the scan's width instead of collecting every piece into one
+    // execution, which is what a boundary above the map would have had to fall back to.
+    assert_eq!(
+        4,
+        histogram_router
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "the canonical router keeps the scan width: {}",
+        display_plan_tree(&histogram_plan)
+    );
+
     // Rewriting an existing distinguishing tag can collapse distinct label sets. The canonical
     // boundary must reject the overlap with the same error the existing plan reports.
     for (shape, expr) in [
