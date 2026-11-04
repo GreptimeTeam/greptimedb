@@ -484,6 +484,19 @@ impl GreptimeDbClusterBuilder {
 
                 opts
             };
+            // Shared object storage must not make datanodes share a local WAL.
+            if self.shared_home_dir.is_some()
+                && let DatanodeWalConfig::RaftEngine(config) = &mut opts.wal
+                && config.dir.is_none()
+            {
+                config.dir = Some(
+                    std::path::Path::new(&opts.storage.data_home)
+                        .join(format!("wal-{datanode_id}"))
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                );
+            }
             opts.node_id = Some(datanode_id);
             if self.real_datanode_grpc_addr {
                 // Give every datanode its own address, so that the other datanodes can
