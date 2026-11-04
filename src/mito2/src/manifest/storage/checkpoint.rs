@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use object_store::{ErrorKind, ObjectStore};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -104,6 +104,7 @@ impl<T: Tracker> CheckpointStorage<T> {
         // Try to get from cache first
         if let Some(data) = get_from_cache(self.manifest_cache.as_ref(), &path).await {
             verify_checksum(&data, metadata.checksum)?;
+            self.record_cached_checkpoint_size(version, &path).await;
             return Ok(Some((version, data)));
         }
 
@@ -145,6 +146,8 @@ impl<T: Tracker> CheckpointStorage<T> {
                             get_from_cache(self.manifest_cache.as_ref(), &fall_back_path).await
                         {
                             verify_checksum(&data, metadata.checksum)?;
+                            self.record_cached_checkpoint_size(version, &fall_back_path)
+                                .await;
                             return Ok(Some((version, data)));
                         }
 
@@ -186,6 +189,14 @@ impl<T: Tracker> CheckpointStorage<T> {
     /// Load the latest checkpoint.
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+        let Some(metadata) = self.read_last_checkpoint_metadata().await? else {
+            return Ok(None);
+        };
+        self.load_checkpoint(metadata).await
+    }
+
+    /// Reads the small checkpoint pointer without loading its payload.
+    pub(crate) async fn read_last_checkpoint_metadata(&self) -> Result<Option<CheckpointMetadata>> {
         let last_checkpoint_path = self.last_checkpoint_path();
 
         // Fetch from remote object store without cache
@@ -206,7 +217,37 @@ impl<T: Tracker> CheckpointStorage<T> {
             last_checkpoint_path, checkpoint_metadata
         );
 
-        self.load_checkpoint(checkpoint_metadata).await
+        Ok(Some(checkpoint_metadata))
+    }
+
+    /// A cache hit contains decoded bytes; accounting failures must not prevent recovery.
+    async fn record_cached_checkpoint_size(&self, version: ManifestVersion, path: &str) {
+        match self.object_store.stat(path).await {
+            Ok(metadata) => self.size_tracker.record(version, metadata.content_length()),
+            Err(error) => warn!(error; "Failed to account for cached checkpoint {}", path),
+        }
+    }
+
+    /// Records stored checkpoint bytes, including the legacy uncompressed path.
+    pub(crate) async fn record_checkpoint_size(&self, version: ManifestVersion) -> Result<()> {
+        let path = self.checkpoint_file_path(version);
+        let metadata = match self.object_store.stat(&path).await {
+            Ok(metadata) => metadata,
+            Err(error)
+                if error.kind() == ErrorKind::NotFound
+                    && self.compress_type != FALL_BACK_COMPRESS_TYPE =>
+            {
+                let path = gen_path(
+                    &self.path,
+                    &checkpoint_file(version),
+                    FALL_BACK_COMPRESS_TYPE,
+                );
+                self.object_store.stat(&path).await.context(OpenDalSnafu)?
+            }
+            Err(error) => return Err(error).context(OpenDalSnafu),
+        };
+        self.size_tracker.record(version, metadata.content_length());
+        Ok(())
     }
 
     /// Save the checkpoint manifest file.
@@ -234,7 +275,6 @@ impl<T: Tracker> CheckpointStorage<T> {
             data,
         )
         .await?;
-        self.size_tracker.record(version, checkpoint_size as u64);
 
         // Because last checkpoint file only contain size and version, which is tiny, so we don't compress it.
         let last_checkpoint_path = self.last_checkpoint_path();
@@ -257,6 +297,7 @@ impl<T: Tracker> CheckpointStorage<T> {
             .await
             .context(OpenDalSnafu)?;
 
+        self.size_tracker.record(version, checkpoint_size as u64);
         Ok(())
     }
 }

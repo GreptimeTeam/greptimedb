@@ -276,9 +276,9 @@ impl RegionManifestManager {
         let checkpoint = Self::last_checkpoint(&mut store).await?;
         let last_checkpoint_version = checkpoint
             .as_ref()
-            .map(|(checkpoint, _)| checkpoint.last_version)
+            .map(|checkpoint| checkpoint.last_version)
             .unwrap_or(MIN_VERSION);
-        let mut manifest_builder = if let Some((checkpoint, _)) = checkpoint {
+        let mut manifest_builder = if let Some(checkpoint) = checkpoint {
             info!(
                 "Recover region manifest {} from checkpoint version {}",
                 options.manifest_dir, checkpoint.last_version
@@ -305,8 +305,6 @@ impl RegionManifestManager {
 
         for (manifest_version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
-            // set manifest size after last checkpoint
-            store.set_delta_file_size(manifest_version, raw_action_list.len() as u64);
             for action in action_list.actions {
                 match action {
                     RegionMetaAction::Change(action) => {
@@ -465,8 +463,6 @@ impl RegionManifestManager {
             RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
 
         for (manifest_version, raw_action_list) in manifests {
-            self.store
-                .set_delta_file_size(manifest_version, raw_action_list.len() as u64);
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
             for action in action_list.actions {
                 match action {
@@ -520,17 +516,13 @@ impl RegionManifestManager {
     /// Installs the last checkpoint.
     pub(crate) async fn install_last_checkpoint(&mut self) -> Result<ManifestVersion> {
         let last_version = self.last_version();
-        let Some((checkpoint, checkpoint_size)) = Self::last_checkpoint(&mut self.store).await?
-        else {
+        let Some(checkpoint) = Self::last_checkpoint(&mut self.store).await? else {
             return NoCheckpointSnafu {
                 region_id: self.manifest.metadata.region_id,
                 last_version,
             }
             .fail();
         };
-        self.store.reset_manifest_size();
-        self.store
-            .set_checkpoint_file_size(checkpoint.last_version, checkpoint_size);
         let builder = RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint);
         let manifest = builder.try_build()?;
         let last_version = self.set_version(manifest.manifest_version);
@@ -736,15 +728,15 @@ impl RegionManifestManager {
     /// Fetches the last [RegionCheckpoint] from storage.
     ///
     /// If the checkpoint is not found, returns `None`.
-    /// Otherwise, returns the checkpoint and the size of the checkpoint.
+    /// Otherwise, returns the decoded checkpoint.
     pub(crate) async fn last_checkpoint(
         store: &mut ManifestObjectStore,
-    ) -> Result<Option<(RegionCheckpoint, u64)>> {
+    ) -> Result<Option<RegionCheckpoint>> {
         let last_checkpoint = store.load_last_checkpoint().await?;
 
         if let Some((_, bytes)) = last_checkpoint {
             let checkpoint = RegionCheckpoint::decode(&bytes)?;
-            Ok(Some((checkpoint, bytes.len() as u64)))
+            Ok(Some(checkpoint))
         } else {
             Ok(None)
         }

@@ -262,7 +262,7 @@ impl ManifestObjectStore {
     /// Delete manifest files that version < end.
     /// If keep_last_checkpoint is true, the last checkpoint file will be kept.
     /// ### Return
-    /// The number of deleted files.
+    /// The number of files whose deletion was acknowledged by the object store.
     pub async fn delete_until(
         &self,
         end: ManifestVersion,
@@ -336,9 +336,9 @@ impl ManifestObjectStore {
 
         // Try batch delete first. On failure, fall back to per-file deletes.
         // This is a workaround for S3-compatible object stores that do not support batch delete. See issue #7986.
-        let mut succeeded = vec![false; del_entries.len()];
+        let mut deleted = 0;
         match self.object_store.delete_iter(paths.clone()).await {
-            Ok(()) => succeeded.fill(true),
+            Ok(()) => deleted = total,
             Err(batch_err) => {
                 warn!(
                     batch_err;
@@ -354,23 +354,8 @@ impl ManifestObjectStore {
                         );
                         break;
                     }
-                    succeeded[i] = true;
+                    deleted += 1;
                 }
-            }
-        }
-
-        let mut deleted = 0usize;
-        for (i, (_, is_checkpoint, version)) in del_entries.iter().enumerate() {
-            if !succeeded[i] {
-                continue;
-            }
-            deleted += 1;
-            if *is_checkpoint {
-                self.size_tracker
-                    .remove(&size_tracker::FileKey::Checkpoint(*version));
-            } else {
-                self.size_tracker
-                    .remove(&size_tracker::FileKey::Delta(*version));
             }
         }
 
@@ -405,7 +390,11 @@ impl ManifestObjectStore {
     /// Load the latest checkpoint.
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        self.checkpoint_storage.load_last_checkpoint().await
+        let checkpoint = self.checkpoint_storage.load_last_checkpoint().await?;
+        if let Some((version, _)) = &checkpoint {
+            self.retain_manifest_size_after(*version);
+        }
+        Ok(checkpoint)
     }
 
     /// Compute the size(Byte) in manifest size map.
@@ -413,19 +402,34 @@ impl ManifestObjectStore {
         self.size_tracker.total()
     }
 
-    /// Resets the size of all files.
-    pub(crate) fn reset_manifest_size(&mut self) {
-        self.size_tracker.reset();
+    /// Accounts for the latest checkpoint already covered by this follower's replay.
+    /// Only a changed or previously unaccounted checkpoint needs a stat.
+    pub(crate) async fn update_manifest_size(
+        &self,
+        replayed_version: ManifestVersion,
+    ) -> Result<()> {
+        let Some(metadata) = self
+            .checkpoint_storage
+            .read_last_checkpoint_metadata()
+            .await?
+        else {
+            return Ok(());
+        };
+        if metadata.version > replayed_version {
+            return Ok(());
+        }
+        if !self.size_tracker.contains_checkpoint(metadata.version) {
+            self.checkpoint_storage
+                .record_checkpoint_size(metadata.version)
+                .await?;
+        }
+        self.retain_manifest_size_after(metadata.version);
+        Ok(())
     }
 
-    /// Set the size of the delta file by delta version.
-    pub(crate) fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
-        self.size_tracker.record_delta(version, size);
-    }
-
-    /// Set the size of the checkpoint file by checkpoint version.
-    pub(crate) fn set_checkpoint_file_size(&self, version: ManifestVersion, size: u64) {
-        self.size_tracker.record_checkpoint(version, size);
+    /// Prunes logical accounting independently of physical cleanup success.
+    pub(crate) fn retain_manifest_size_after(&self, version: ManifestVersion) {
+        self.size_tracker.retain_after(version);
     }
 
     /// Fetch all staging manifest files and return them as (version, action_list) pairs.
@@ -701,8 +705,10 @@ mod tests {
         // delete 3 manifest files
         assert_eq!(log_store.delete_until(3, false).await.unwrap(), 3);
 
-        // manifest files size after delete
-        assert_eq!(log_store.total_manifest_size(), 39);
+        // Physical deletion does not define the logical recovery set.
+        assert_eq!(log_store.total_manifest_size(), 63);
+        log_store.retain_manifest_size_after(5);
+        assert_eq!(log_store.total_manifest_size(), 23);
 
         // delete all manifest files
         assert_eq!(
@@ -713,7 +719,7 @@ mod tests {
             3
         );
 
-        assert_eq!(log_store.total_manifest_size(), 0);
+        assert_eq!(log_store.total_manifest_size(), 23);
     }
 
     #[tokio::test]
@@ -739,8 +745,10 @@ mod tests {
         // delete 3 manifest files
         assert_eq!(log_store.delete_until(3, false).await.unwrap(), 3);
 
-        // manifest files size after delete
-        assert_eq!(log_store.total_manifest_size(), 97);
+        // Physical deletion does not define the logical recovery set.
+        assert_eq!(log_store.total_manifest_size(), 181);
+        log_store.retain_manifest_size_after(5);
+        assert_eq!(log_store.total_manifest_size(), 41);
 
         // delete all manifest files
         assert_eq!(
@@ -751,7 +759,7 @@ mod tests {
             3
         );
 
-        assert_eq!(log_store.total_manifest_size(), 0);
+        assert_eq!(log_store.total_manifest_size(), 41);
     }
 
     #[tokio::test]

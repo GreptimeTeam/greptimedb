@@ -332,7 +332,6 @@ async fn generate_checkpoint_with_compression_types(
         .await
         .unwrap()
         .unwrap()
-        .0
 }
 
 fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>) {
