@@ -68,7 +68,7 @@ pub enum RangeFunction {
 impl RangeFunction {
     /// Whether the result drops the metric name, as Prometheus does for every range function
     /// except `last_over_time` and `first_over_time`.
-    pub(crate) fn drops_metric_name(self) -> bool {
+    pub fn drops_metric_name(self) -> bool {
         !matches!(self, Self::LastOverTime | Self::FirstOverTime)
     }
 

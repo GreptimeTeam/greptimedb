@@ -67,6 +67,7 @@ use dashmap::DashMap;
 use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
+use futures::TryStreamExt;
 use futures::{Stream, StreamExt, future};
 use lazy_static::lazy_static;
 use operator::delete::DeleterRef;
@@ -75,7 +76,8 @@ use operator::statement::{StatementExecutor, StatementExecutorRef};
 use partition::manager::PartitionRuleManagerRef;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
-use promql_parser::label::Matcher;
+use promql_parser::label::{METRIC_NAME, MatchOp, Matcher};
+use promql_parser::util::{ExprVisitor, walk_expr};
 use query::QueryEngineRef;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
@@ -94,7 +96,7 @@ use servers::prometheus_handler::{
     ParsedPromQuery, PrometheusHandler, resolve_schema_from_matchers,
 };
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::{Channel, QueryContextRef};
+use session::context::{Channel, MetricDiscoveryScope, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::ast::ObjectNamePartExt;
@@ -104,7 +106,10 @@ use sql::statements::comment::CommentObject;
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
-use sql::util::{extract_tables_from_prom_expr_checked, extract_tables_from_statement_checked};
+use sql::util::{
+    extract_tables_from_prom_expr_checked, extract_tables_from_prom_expr_partial,
+    extract_tables_from_statement_checked,
+};
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 use tracing::Span;
@@ -1438,6 +1443,204 @@ impl Instance {
     }
 }
 
+/// What one PromQL expression needs in order to be answered by discovering metrics.
+#[derive(Default)]
+struct MetricDiscoveryVisitor {
+    needs_discovery: bool,
+    /// True only while every selector that names no exact table is one discovery can answer. If
+    /// any selector is not discoverable, the check must stay unresolved rather than be replaced by
+    /// a set that silently stops naming a table the query reads.
+    all_unresolved_are_discoverable: bool,
+    schemas: HashSet<String>,
+    current_schema: String,
+}
+
+impl MetricDiscoveryVisitor {
+    /// Whether this selector is answered by enumerating the schema's metric tables.
+    ///
+    /// The planner decides the same thing before it scans anything, and the two answers have to
+    /// match: this walk authorizes what the planner will scan, so a selector the planner declines
+    /// must not authorize a whole schema here. It is one function in `query`, called from both.
+    fn is_discovery_selector(selector: &promql_parser::parser::VectorSelector) -> bool {
+        query::promql::planner::discovers_metric_name(selector)
+    }
+
+    fn inspect_selector(&mut self, selector: &promql_parser::parser::VectorSelector) {
+        let names = selector.matchers.find_matchers(METRIC_NAME);
+        let exact_name =
+            selector.name.is_some() || (names.len() == 1 && names[0].op == MatchOp::Equal);
+        let discover = Self::is_discovery_selector(selector);
+        if !exact_name {
+            self.all_unresolved_are_discoverable &= discover;
+        }
+        if !discover {
+            return;
+        }
+        self.needs_discovery = true;
+        let effective_schema = selector
+            .matchers
+            .matchers
+            .iter()
+            .rev()
+            .find(|m| {
+                (m.name == "__schema__" || m.name == "__database__") && m.op == MatchOp::Equal
+            })
+            .map(|m| m.value.clone())
+            .unwrap_or_else(|| self.current_schema.clone());
+        self.schemas.insert(effective_schema);
+    }
+}
+
+impl ExprVisitor for MetricDiscoveryVisitor {
+    type Error = std::convert::Infallible;
+
+    fn pre_visit(
+        &mut self,
+        expr: &promql_parser::parser::Expr,
+    ) -> std::result::Result<bool, Self::Error> {
+        match expr {
+            promql_parser::parser::Expr::VectorSelector(selector) => {
+                self.inspect_selector(selector);
+            }
+            promql_parser::parser::Expr::MatrixSelector(selector) => {
+                self.inspect_selector(&selector.vs);
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+}
+
+impl Instance {
+    /// Bounds the metric tables this request may discover by the caller's grants, before anything
+    /// reads the catalog. `Unavailable` would make the planner decline discovery entirely, so this
+    /// always resolves to something explicit.
+    async fn prepare_metric_discovery_scope(
+        &self,
+        expr: &promql_parser::parser::Expr,
+        query_ctx: &mut QueryContextRef,
+    ) -> server_error::Result<()> {
+        // Discovery scope is consumed by the native PromQL route only. The extension
+        // is deliberately opt-in, matching `native_promql_requested` in query's planner.
+        if !query_ctx
+            .extension(query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        {
+            Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
+            return Ok(());
+        }
+        let checker = self.plugins.get::<PermissionCheckerRef>();
+        if !checker.as_ref().uses_table_targets() {
+            Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
+            return Ok(());
+        }
+        let mut visitor = MetricDiscoveryVisitor {
+            needs_discovery: false,
+            all_unresolved_are_discoverable: true,
+            schemas: HashSet::new(),
+            current_schema: query_ctx.current_schema(),
+        };
+        let _ = walk_expr(&mut visitor, expr);
+        if !visitor.needs_discovery {
+            return Ok(());
+        }
+        let schemas = visitor.schemas;
+        let mut allowed = HashSet::new();
+        for schema in schemas {
+            let mut tables = self
+                .catalog_manager
+                .tables(query_ctx.current_catalog(), &schema, Some(query_ctx))
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteQuerySnafu)?;
+            tables.sort_by_key(|table| table.table_info().name.clone());
+            for table in tables {
+                let info = table.table_info();
+                if info.meta.engine != store_api::metric_engine_consts::METRIC_ENGINE_NAME
+                    || info.is_physical_table()
+                {
+                    continue;
+                }
+                if info.catalog_name != query_ctx.current_catalog() || info.schema_name != schema {
+                    continue;
+                }
+                let target = PermissionTableTarget::new(
+                    query_ctx.current_catalog(),
+                    &schema,
+                    info.name.as_str(),
+                );
+                match checker
+                    .as_ref()
+                    .check_permission_with_table_targets(
+                        query_ctx.current_user(),
+                        PermissionReq::Action(PROMQL_QUERY),
+                        PermissionTableTargets::resolved(vec![target.clone()]),
+                    )
+                    .context(AuthSnafu)
+                {
+                    Ok(_) => {
+                        allowed.insert(target);
+                    }
+                    // A rejected metric is skipped rather than failing the query, which is what
+                    // makes discovery mean "every metric you can see": a table the caller cannot
+                    // read is one the expression never mentions, the same way a query naming it
+                    // would be rejected only where it names it. The split route instead rejects a
+                    // query whose name matchers reach a denied table, so the same regex query
+                    // answers with the readable metrics here and with `PermissionDenied` there.
+                    Err(error)
+                        if error.status_code()
+                            == common_error::status_code::StatusCode::PermissionDenied => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Allowed(allowed));
+        Ok(())
+    }
+
+    /// Fails closed: a path that must have set the scope and did not is an internal error, not a
+    /// silent return to an unfiltered discovery.
+    fn validate_metric_discovery_scope(
+        expr: &promql_parser::parser::Expr,
+        scope: &MetricDiscoveryScope,
+    ) -> server_error::Result<()> {
+        let mut visitor = MetricDiscoveryVisitor {
+            needs_discovery: false,
+            all_unresolved_are_discoverable: true,
+            schemas: HashSet::new(),
+            current_schema: String::new(),
+        };
+        let _ = walk_expr(&mut visitor, expr);
+        if visitor.needs_discovery && matches!(scope, MetricDiscoveryScope::Unavailable) {
+            return Err(server_error::Error::Internal {
+                err_msg: "Metric discovery reached without an authorization scope".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The statically named tables of an expression, kept even when another selector cannot be
+    /// resolved. The complete extractor would answer "no tables at all" for that expression and
+    /// drop these, which is how a mixed query lost the tables it names explicitly.
+    fn prom_expr_permission_targets_partial(
+        &self,
+        expr: &promql_parser::parser::Expr,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<PermissionTableTarget>> {
+        extract_tables_from_prom_expr_partial(expr)
+            .into_iter()
+            .map(|name| {
+                table_idents_to_full_name(&name, query_ctx).map(|(catalog, schema, table)| {
+                    PermissionTableTarget::new(catalog, schema, table)
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+}
+
 #[async_trait]
 impl PrometheusHandler for Instance {
     #[tracing::instrument(skip_all)]
@@ -1462,8 +1665,47 @@ impl PrometheusHandler for Instance {
 
         self.check_prom_query_privilege(&query_ctx)?;
 
-        let targets =
+        let parsed_expr = match query.statement() {
+            QueryStatement::Promql(eval_stmt, _) => &eval_stmt.expr,
+            _ => unreachable!("query is parsed from promql"),
+        };
+        // Authorization precedes any catalog read for discovery, so a denied name never reaches
+        // the plan, an error message, or an output column.
+        let mut scoped_ctx = query_ctx.clone();
+        self.prepare_metric_discovery_scope(parsed_expr, &mut scoped_ctx)
+            .await?;
+        let query_ctx = scoped_ctx;
+        Self::validate_metric_discovery_scope(parsed_expr, query_ctx.metric_discovery_scope())?;
+        let mut targets =
             self.prom_queries_permission_targets(std::slice::from_ref(&query), &query_ctx)?;
+        if matches!(targets, PermissionTableTargets::Unresolved) {
+            let mut visitor = MetricDiscoveryVisitor {
+                needs_discovery: false,
+                all_unresolved_are_discoverable: true,
+                schemas: HashSet::new(),
+                current_schema: query_ctx.current_schema(),
+            };
+            let _ = walk_expr(&mut visitor, parsed_expr);
+            if visitor.needs_discovery && visitor.all_unresolved_are_discoverable {
+                match query_ctx.metric_discovery_scope() {
+                    MetricDiscoveryScope::Allowed(allowed) => {
+                        let mut resolved =
+                            self.prom_expr_permission_targets_partial(parsed_expr, &query_ctx)?;
+                        resolved.extend(allowed.iter().cloned());
+                        targets = PermissionTableTargets::resolved(resolved);
+                    }
+                    // The partial answer, because a selector that cannot be resolved statically
+                    // is what brought the query here: the complete one would answer "no tables",
+                    // dropping the named ones that the same query also reads.
+                    MetricDiscoveryScope::Unrestricted => {
+                        targets = PermissionTableTargets::resolved(
+                            self.prom_expr_permission_targets_partial(parsed_expr, &query_ctx)?,
+                        );
+                    }
+                    MetricDiscoveryScope::Unavailable => {}
+                }
+            }
+        }
         self.check_query_target_permission(targets, &query_ctx)
             .await?;
 
