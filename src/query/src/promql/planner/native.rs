@@ -1545,11 +1545,13 @@ impl PromPlanner {
                 None
             };
             if let Some((partial, final_tree)) = split {
-                // The split's output is the suffix's, and the state it exports is float: the gate
-                // above already declines a histogram entering an aggregate, and this declines a
-                // histogram answer whose aggregate sits elsewhere, because the merge folds float
-                // state. The partial stage may introduce labels before aggregation, so the columns
-                // come from the complete tree rather than from the suffix alone.
+                // The split's output is the suffix's, so a histogram answer is only carried when the
+                // cut aggregate's exported state is a histogram's too: `sum`/`avg` over native
+                // histograms merge their own state across the boundary. A histogram answer whose
+                // aggregate sits elsewhere - above the cut, or built by a function of a float -
+                // still keeps the existing plan, because no state of this route carries it. The
+                // partial stage may introduce labels before aggregation, so the columns come from
+                // the complete tree rather than from the suffix alone.
                 let histogram_state = split_exports_histogram_state(&partial);
                 if root_kind != FieldKind::Float
                     && !(root_kind == FieldKind::Histogram && histogram_state)
@@ -1598,6 +1600,17 @@ impl PromPlanner {
                     time,
                     grid,
                 )));
+            }
+            // A tree that folds native histograms anywhere and whose split declined keeps the
+            // existing plan instead of being segmented. Segmentation cuts the tree into segments
+            // that each fold their own samples and appends the pieces above them, so a group whose
+            // contributions are spread over partitions would be folded once per segment - which for
+            // a histogram sum means merging histograms that never met, and for a histogram average
+            // means a mean of means. `cut_as_segment` returning false only declines to cut that
+            // subtree and the collectors recurse into its children, so the refusal is here, at the
+            // point the segment decision is made.
+            if binds_histogram_state_anywhere(root) {
+                return Ok(None);
             }
         }
         // A segment of a plan split over regions keeps the raw source as its input rather than a
