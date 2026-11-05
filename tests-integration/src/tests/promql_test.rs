@@ -12820,6 +12820,41 @@ async fn native_promql_matrix_root_matches_legacy() {
     let legacy = run_timestamps(&instance, &observer, pre_epoch_anchored, false).await;
     assert_eq!(native, legacy, "anchored pre-epoch subquery root");
 
+    // A matrix root whose inner expression is folded rather than merely selected reaches the
+    // split-aggregate lowering, which builds its own final node: that node has to publish on the
+    // grid the tree was compiled on, which is the subquery's child grid. `sum(...)` answers without
+    // the tag, so it is compared on its timestamps alone.
+    let sum_expr = "sum(native_matrix_root)[5m:1m]";
+    let sql = format!("TQL EVAL (600, 600, '1m') {sum_expr}");
+    let native = run_timestamps(&instance, &observer, &sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "matrix root over an aggregate did not run natively: {sum_expr}"
+    );
+    let legacy = run_timestamps(&instance, &observer, &sql, false).await;
+    assert_eq!(native, legacy, "{sum_expr}");
+    assert_eq!(
+        native.iter().map(|row| row.0).collect::<Vec<_>>(),
+        [360_000, 420_000, 480_000, 540_000, 600_000],
+        "{sum_expr} did not answer on the subquery's child grid"
+    );
+
+    for expr in [
+        "(sum by (host) (rate(native_matrix_root[2m])))[5m:1m]",
+        "(sum by (host) (rate(native_matrix_root[2m])))[5m:1m] @ 600",
+        "(sum by (host) (rate(native_matrix_root[2m])) * 2)[5m:1m]",
+    ] {
+        let sql = format!("TQL EVAL (600, 600, '1m') {expr}");
+        let native = run(&instance, &observer, &sql, true).await;
+        assert!(
+            observer.fused().is_some(),
+            "matrix root over a folded inner expression did not run natively: {expr}"
+        );
+        let legacy = run(&instance, &observer, &sql, false).await;
+        assert_eq!(native, legacy, "{expr}");
+        assert!(!native.is_empty(), "{expr} produced no rows");
+    }
+
     let range_query = "TQL EVAL (600, 1200, '1m') native_matrix_root[5m:1m]";
     let err = instance
         .do_query(range_query, native_query_context(true, 4))

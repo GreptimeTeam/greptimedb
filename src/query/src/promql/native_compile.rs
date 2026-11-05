@@ -1881,6 +1881,71 @@ fn window_selection(
 /// than a number either caller may choose.
 const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
 
+/// The grid a subquery's inner expression is evaluated on, and the window that reads it.
+///
+/// Both halves of the native route need the same answer: the compiler binds the grid into the node,
+/// where it tells the window which points its input was evaluated at, and the planner binds the tree
+/// it compiles to the grid its rows carry. A second derivation would let the two disagree about the
+/// default step or the conversion of the range, and a tree bound to a grid it was not compiled on
+/// cannot be planned, so the numbers are derived here once.
+pub(crate) struct SubqueryGrid {
+    /// The interval the range function folds, and how far back from the anchor it reads.
+    pub(crate) window: RangeWindow,
+    /// The grid `subquery.expr` is evaluated on.
+    pub(crate) grid: Arc<EvalGrid>,
+}
+
+/// Derives the [`SubqueryGrid`] of `subquery`, whose outer statement is evaluated on `outer`.
+///
+/// The child grid is one point per `step` over the interval the subquery's window reads, which its
+/// `@` anchor, offset and range decide; without an anchor it is the statement's own range. Every
+/// number is converted checked, so a range or a step too large to name a millisecond is reported as
+/// itself rather than wrapped into a different interval.
+///
+/// `None` when the anchored interval contains no step boundary, which names no evaluation point at
+/// all. Declining is the caller's decision: the compiler reports the shape it cannot fold, while the
+/// planner keeps the plan the existing path builds.
+pub(crate) fn subquery_child_grid(
+    stmt: &EvalStmt,
+    outer: &EvalGrid,
+    subquery: &SubqueryExpr,
+) -> Result<Option<SubqueryGrid>> {
+    // The anchor is resolved by the same function a range selector's is, so `start()`, `end()` and a
+    // literal — including a negative one — mean the same thing in both shapes.
+    let anchor_ms = selector_anchor_ms(&subquery.at, stmt)?;
+    let range_ms = range_millis(subquery.range.as_millis())?;
+    // A subquery step of zero names no evaluation point at all, so it is reported as its own value
+    // rather than as an empty grid.
+    let step_ms = match subquery.step {
+        Some(step) => millis(step.as_millis()).ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "the subquery's step of {}ms is out of range",
+                step.as_millis()
+            ))
+        })?,
+        None => DEFAULT_SUBQUERY_STEP_MS,
+    };
+    if step_ms <= 0 {
+        return Err(DataFusionError::Plan(format!(
+            "the subquery's step is {step_ms}ms, and a step has to be longer than zero"
+        )));
+    }
+    let offset_ms = selector_offset_ms(&subquery.offset)?;
+    let window = RangeWindow {
+        range_ms,
+        offset_ms,
+        anchor_ms,
+        modifier: None,
+    };
+    let Some(spec) = subquery_grid(outer.spec(), window, step_ms)? else {
+        return Ok(None);
+    };
+    // Keep subquery grids deferred: selector binding needs only their spec endpoints, not a
+    // materialized timestamp vector proportional to the range.
+    let grid = Arc::new(EvalGrid::try_deferred(spec).map_err(grid_error)?);
+    Ok(Some(SubqueryGrid { window, grid }))
+}
+
 /// Binds `function` over `subquery`, whose inner expression is evaluated on a grid of its own.
 ///
 /// A range function folds a matrix, and PromQL writes a matrix two ways. A range selector reads raw
@@ -1900,16 +1965,7 @@ fn subquery_window(
     function: RangeFunction,
     subquery: &SubqueryExpr,
 ) -> Result<NativeNode> {
-    let SubqueryExpr {
-        expr,
-        range,
-        step,
-        offset,
-        at,
-    } = subquery;
-    // The anchor is resolved by the same function a range selector's is, so `start()`, `end()` and a
-    // literal — including a negative one — mean the same thing in both shapes.
-    let anchor_ms = selector_anchor_ms(at, context.stmt)?;
+    let SubqueryExpr { expr, .. } = subquery;
     // A subquery evaluates an expression and hands the window one value per grid point per field, so
     // the expression inside it has to be a vector: a scalar has no fields for the window to fold.
     if expr.value_type() != ValueType::Vector {
@@ -1919,39 +1975,16 @@ fn subquery_window(
             expr.value_type()
         )));
     }
-    let range_ms = range_millis(range.as_millis())?;
-    // A subquery step of zero names no evaluation point at all, so it is reported as its own value
-    // rather than as an empty grid.
-    let step_ms = match step {
-        Some(step) => millis(step.as_millis()).ok_or_else(|| {
-            DataFusionError::Plan(format!(
-                "the subquery's step of {}ms is out of range",
-                step.as_millis()
-            ))
-        })?,
-        None => DEFAULT_SUBQUERY_STEP_MS,
-    };
-    if step_ms <= 0 {
-        return Err(DataFusionError::Plan(format!(
-            "the subquery's step is {step_ms}ms, and a step has to be longer than zero"
+    let Some(SubqueryGrid {
+        window,
+        grid: child_grid,
+    }) = subquery_child_grid(context.stmt, &context.grid, subquery)?
+    else {
+        return Err(not_implemented(&format!(
+            "the subquery `{subquery}`, which names no evaluation point in its anchored interval or \
+             the statement's range"
         )));
-    }
-    let offset_ms = selector_offset_ms(offset)?;
-    let window = RangeWindow {
-        range_ms,
-        offset_ms,
-        anchor_ms,
-        modifier: None,
     };
-    let child_spec = subquery_grid(context.grid.spec(), window, step_ms)?.ok_or_else(|| {
-        not_implemented(&format!(
-            "the subquery over {range_ms}ms at {step_ms}ms per step, which names no evaluation point \
-             in its anchored interval or the statement's range"
-        ))
-    })?;
-    // Keep subquery grids deferred: selector binding needs only their spec endpoints, not a
-    // materialized timestamp vector proportional to the range.
-    let child_grid = Arc::new(EvalGrid::try_deferred(child_spec).map_err(grid_error)?);
     let inner = compile_expr(
         &Context {
             stmt: context.stmt,
