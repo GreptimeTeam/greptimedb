@@ -4601,7 +4601,6 @@ dependencies = [
  "parquet-variant-compute",
  "parquet-variant-json",
  "paste",
- "regex",
  "serde",
  "serde_json",
  "snafu 0.8.6",

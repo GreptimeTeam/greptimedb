@@ -14,12 +14,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow_schema::{Field, Fields};
 use common_base::bytes::Bytes;
-use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
@@ -389,16 +388,35 @@ impl Display for JsonType {
 }
 
 /// Converts a json type value to string
+///
+/// The binary jsonb is serialized directly with `serde_json`, so both object keys and
+/// string values are escaped by `serde_json`. `RawJsonb::to_string()` is deliberately
+/// avoided, since it falls back to the lossy raw bytes when serialization fails.
+///
+/// Some write paths (e.g. `COPY FROM` csv/json/parquet files, or a JSON parameter bound
+/// as text through the MySQL protocol) currently store the JSON *text* as the column
+/// bytes instead of binary jsonb, and such data may already be persisted. When the bytes
+/// are not valid jsonb but are valid JSON text, they are re-encoded as jsonb and then
+/// serialized the same way, so the output is still escaped by `serde_json`. Anything else
+/// is reported as an error.
 pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
     if val.is_empty() {
         return Ok("".to_string());
     }
-    match jsonb::from_slice(val) {
-        Ok(jsonb_value) => {
-            let serialized = jsonb_value.to_string();
-            fix_unicode_point(&serialized)
-        }
-        Err(e) => InvalidJsonbSnafu { error: e }.fail(),
+    match serde_json::to_string(&jsonb::RawJsonb::new(val)) {
+        Ok(s) => Ok(s),
+        Err(e) => match jsonb::parse_value_standard_mode(val) {
+            Ok(json) => serde_json::to_string(&jsonb::RawJsonb::new(&json.to_vec())).map_err(|e| {
+                InvalidJsonSnafu {
+                    value: e.to_string(),
+                }
+                .build()
+            }),
+            Err(_) => InvalidJsonSnafu {
+                value: e.to_string(),
+            }
+            .fail(),
+        },
     }
 }
 
@@ -407,59 +425,6 @@ pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
     jsonb::from_slice(val)
         .map(Into::into)
         .map_err(|error| InvalidJsonbSnafu { error }.build())
-}
-
-/// Normalizes a JSON string by converting Rust-style Unicode escape sequences to JSON-compatible format.
-///
-/// The input is scanned for Rust-style Unicode code
-/// point escapes of the form `\\u{H...}` (a backslash, `u`, an opening brace,
-/// followed by 1–6 hexadecimal digits, and a closing brace). Each such escape is
-/// converted into JSON-compatible UTF‑16 escape sequences:
-///
-/// - For code points in the Basic Multilingual Plane (≤ `0xFFFF`), the escape is
-///   converted to a single JSON `\\uXXXX` sequence with four uppercase hex digits.
-/// - For code points above `0xFFFF` and less than Unicode max code point `0x10FFFF`,
-///   the code point is encoded as a UTF‑16 surrogate pair and emitted as two consecutive
-///   `\\uXXXX` sequences (as JSON format required).
-///
-/// After this normalization, the function returns the normalized string
-fn fix_unicode_point(json: &str) -> Result<String> {
-    static UNICODE_CODE_POINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-        // Match literal "\u{...}" sequences, capturing 1–6 (code point range) hex digits
-        // inside braces.
-        Regex::new(r"\\u\{([0-9a-fA-F]{1,6})}").unwrap_or_else(|e| panic!("{}", e))
-    });
-
-    let v = UNICODE_CODE_POINT_PATTERN.replace_all(json, |caps: &Captures| {
-        // Extract the hex payload (without braces) and parse to a code point.
-        let hex = &caps[1];
-        let Ok(code) = u32::from_str_radix(hex, 16) else {
-            // On parse failure, leave the original escape sequence unchanged.
-            return caps[0].to_string();
-        };
-
-        if code <= 0xFFFF {
-            // Basic Multilingual Plane: JSON can represent this directly as \uXXXX.
-            format!("\\u{:04X}", code)
-        } else if code > 0x10FFFF {
-            // Beyond max Unicode code point
-            caps[0].to_string()
-        } else {
-            // Supplementary planes: JSON needs UTF-16 surrogate pairs.
-            // Convert the code point to a 20-bit value.
-            let code = code - 0x10000;
-
-            // High surrogate: top 10 bits, offset by 0xD800.
-            let high = 0xD800 + ((code >> 10) & 0x3FF);
-
-            // Low surrogate: bottom 10 bits, offset by 0xDC00.
-            let low = 0xDC00 + (code & 0x3FF);
-
-            // Emit two \uXXXX escapes in sequence.
-            format!("\\u{:04X}\\u{:04X}", high, low)
-        }
-    });
-    Ok(v.to_string())
 }
 
 /// Parses a string to a json type value
@@ -488,59 +453,99 @@ mod tests {
         Ok(())
     }
 
-    use super::*;
-
     #[test]
-    fn test_fix_unicode_point() -> Result<()> {
-        let valid_cases = vec![
-            (r#"{"data": "simple ascii"}"#, r#"{"data": "simple ascii"}"#),
-            (
-                r#"{"data":"Greek sigma: \u{03a3}"}"#,
-                r#"{"data":"Greek sigma: \u03A3"}"#,
-            ),
-            (
-                r#"{"data":"Joker card: \u{1f0df}"}"#,
-                r#"{"data":"Joker card: \uD83C\uDCDF"}"#,
-            ),
-            (
-                r#"{"data":"BMP boundary: \u{ffff}"}"#,
-                r#"{"data":"BMP boundary: \uFFFF"}"#,
-            ),
-            (
-                r#"{"data":"Supplementary min: \u{10000}"}"#,
-                r#"{"data":"Supplementary min: \uD800\uDC00"}"#,
-            ),
-            (
-                r#"{"data":"Supplementary max: \u{10ffff}"}"#,
-                r#"{"data":"Supplementary max: \uDBFF\uDFFF"}"#,
-            ),
-        ];
-        for (input, expect) in valid_cases {
-            let v = fix_unicode_point(input)?;
-            assert_eq!(v, expect);
-        }
-
-        let invalid_escape_cases = vec![
-            (
-                r#"{"data": "Invalid hex: \u{gggg}"}"#,
-                r#"{"data": "Invalid hex: \u{gggg}"}"#,
-            ),
-            (
-                r#"{"data": "Empty braces: \u{}"}"#,
-                r#"{"data": "Empty braces: \u{}"}"#,
-            ),
-            (
-                r#"{"data": "Out of range: \u{1100000}"}"#,
-                r#"{"data": "Out of range: \u{1100000}"}"#,
-            ),
-        ];
-        for (input, expect) in invalid_escape_cases {
-            let v = fix_unicode_point(input)?;
-            assert_eq!(v, expect);
-        }
-
+    fn test_jsonb_to_string_escapes_object_keys()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let expected = serde_json::json!({
+            "": 1,
+            "a\"b": {"c\\d": ["x", {"e\nf\tg\u{1}": true}], "h": null},
+            "plain": "v\"q",
+        });
+        let input = expected.to_string();
+        let value = jsonb::parse_value(input.as_bytes()).map_err(|e| e.to_string())?;
+        let text = jsonb_to_string(&value.to_vec())?;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text)?, expected);
+        assert!(text.contains(r#""a\"b":"#), "{text}");
         Ok(())
     }
+
+    #[test]
+    fn test_jsonb_to_string_preserves_literal_unicode_escape_key() {
+        let input = r#"{"\\u{1f600}":"value"}"#;
+        let bytes = parse_string_to_jsonb(input).unwrap();
+        let text = jsonb_to_string(&bytes).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            serde_json::from_str::<serde_json::Value>(input).unwrap(),
+        );
+
+        // A BMP literal key round-trips unchanged as well.
+        let input = r#"{"\\u{41}":"value"}"#;
+        let bytes = parse_string_to_jsonb(input).unwrap();
+        let text = jsonb_to_string(&bytes).unwrap();
+        assert_eq!(text, input);
+    }
+
+    #[test]
+    fn test_jsonb_to_string_escapes_string_values() {
+        // Literal `\u{...}` text and a NUL in a value must still render as valid JSON
+        // that round-trips to the same value.
+        for input in [
+            r#"{"k":"\\u{1f600}"}"#,
+            r#"{"k":"\\u{41}"}"#,
+            r#"{"k":"a\u0000b"}"#,
+            r#"["\\u{1f600}","\u0000"]"#,
+        ] {
+            let bytes = parse_string_to_jsonb(input).unwrap();
+            let text = jsonb_to_string(&bytes).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                serde_json::from_str::<serde_json::Value>(input).unwrap(),
+                "{input} -> {text}"
+            );
+        }
+
+        // U+2028 is emitted as-is, which is still valid JSON.
+        let bytes = parse_string_to_jsonb("{\"k\":\"a\\u2028b\"}").unwrap();
+        assert_eq!(jsonb_to_string(&bytes).unwrap(), "{\"k\":\"a\u{2028}b\"}");
+    }
+
+    #[test]
+    fn test_jsonb_to_string_rejects_invalid_jsonb() {
+        assert!(jsonb_to_string(&[1, 2, 3, 4]).is_err());
+        assert_eq!(jsonb_to_string(&[]).unwrap(), "");
+    }
+
+    #[test]
+    fn test_jsonb_to_string_accepts_json_text_bytes() {
+        // Bytes written as JSON text rather than binary jsonb (e.g. by `COPY FROM`).
+        assert_eq!(
+            jsonb_to_string(br#"{"foo":"bar"}"#).unwrap(),
+            r#"{"foo":"bar"}"#
+        );
+        assert_eq!(
+            jsonb_to_string(br#"{"a":null, "foo":"bar"}"#).unwrap(),
+            r#"{"a":null,"foo":"bar"}"#
+        );
+        // Keys and values coming from text are still escaped by serde_json.
+        assert_eq!(
+            jsonb_to_string(br#"{"a\"b":"c\u0000d"}"#).unwrap(),
+            r#"{"a\"b":"c\u0000d"}"#
+        );
+        assert!(jsonb_to_string(b"{not json").is_err());
+    }
+
+    #[test]
+    fn test_jsonb_to_string_keeps_compact_format() -> Result<()> {
+        let value = jsonb::parse_value(br#"{"b": [1, 2.5, "x"], "a": {"c": false}}"#).unwrap();
+        assert_eq!(
+            jsonb_to_string(&value.to_vec())?,
+            r#"{"a":{"c":false},"b":[1,2.5,"x"]}"#
+        );
+        Ok(())
+    }
+
+    use super::*;
 
     #[test]
     fn test_json_type_include() {
