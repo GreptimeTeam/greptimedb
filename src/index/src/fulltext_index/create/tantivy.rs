@@ -55,6 +55,10 @@ pub struct TantivyFulltextIndexCreator {
     /// Shared with blocking work so cancellation cannot unlink an active index.
     directory: Arc<TempIndexDirectory>,
 
+    /// Pauses the real commit at its blocking boundary in lifecycle tests.
+    #[cfg(test)]
+    before_commit: Option<Arc<dyn Fn() + Send + Sync>>,
+
     /// The configuration of the fulltext index.
     config: Config,
 }
@@ -158,6 +162,8 @@ impl TantivyFulltextIndexCreator {
             rowid_field,
             max_rowid: 0,
             directory,
+            #[cfg(test)]
+            before_commit: None,
             config,
         })
     }
@@ -166,11 +172,17 @@ impl TantivyFulltextIndexCreator {
         if self.finishing.is_none() {
             let writer = self.writer.take().context(FinishedSnafu)?;
             let directory = self.directory.clone();
+            #[cfg(test)]
+            let before_commit = self.before_commit.clone();
             self.finishing = Some(common_runtime::spawn_blocking_global(move || {
                 let _directory = directory;
                 // Declare the writer after the lease so error unwinding also
                 // drops/joins it before releasing the directory.
                 let mut writer = writer;
+                #[cfg(test)]
+                if let Some(before_commit) = before_commit {
+                    before_commit();
+                }
                 writer.commit().context(TantivySnafu)?;
                 writer.wait_merging_threads().context(TantivySnafu)
             }));
@@ -314,10 +326,7 @@ mod tests {
         for stage in ["active", "finished", "aborted"] {
             let root = create_temp_dir("tantivy-drop-");
             let path = root.path().join("index");
-            let mut creator = TantivyFulltextIndexCreator::new(&path, Config::default(), 1)
-                .await
-                .unwrap();
-            creator.push_text("indexed text").await.unwrap();
+            let mut creator = creator_with_text(&path).await;
             assert!(path.join("meta.json").exists());
             match stage {
                 "finished" => {
@@ -345,10 +354,7 @@ mod tests {
     async fn test_abort_after_cancelled_finish_cleans_temporary_files() {
         let root = create_temp_dir("tantivy-cancel-finish-");
         let path = root.path().join("index");
-        let mut creator = TantivyFulltextIndexCreator::new(&path, Config::default(), 1)
-            .await
-            .unwrap();
-        creator.push_text("indexed text").await.unwrap();
+        let mut creator = creator_with_text(&path).await;
         let blocked = Arc::new(tokio::sync::Notify::new());
         let mut writer = MockPuffinWriter {
             blocked: Some(blocked.clone()),
@@ -367,46 +373,57 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// Moves the writer into a blocking task that has not finished yet, which
-    /// is the state left behind when `finish()` is cancelled mid-commit.
-    fn interrupt_finalization(
-        creator: &mut TantivyFulltextIndexCreator,
-    ) -> std::sync::mpsc::Sender<()> {
-        let writer = creator.writer.take().expect("writer must still be active");
-        let directory = creator.directory.clone();
+    async fn creator_with_text(path: &Path) -> TantivyFulltextIndexCreator {
+        let mut creator = TantivyFulltextIndexCreator::new(path, Config::default(), 1)
+            .await
+            .unwrap();
+        creator.push_text("indexed text").await.unwrap();
+        creator
+    }
+
+    /// Cancels the real `finish()` while its commit is blocked, leaving the
+    /// production retained handle and directory lease in flight.
+    async fn creator_with_blocked_commit(
+        path: &Path,
+    ) -> (TantivyFulltextIndexCreator, std::sync::mpsc::Sender<()>) {
+        let mut creator = creator_with_text(path).await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let commit_started = started.clone();
         let (release, released) = std::sync::mpsc::channel();
-        creator.finishing = Some(common_runtime::spawn_blocking_global(move || {
-            // Both leases stay alive until the simulated commit returns.
-            let _directory = directory;
-            let _writer = writer;
-            released.recv().expect("release signal");
-            Ok(())
+        let released = Arc::new(std::sync::Mutex::new(released));
+        creator.before_commit = Some(Arc::new(move || {
+            commit_started.notify_one();
+            released.lock().unwrap().recv().unwrap();
         }));
-        release
+        let mut writer = MockPuffinWriter::default();
+        {
+            let finishing = creator.finish(&mut writer, "index", PutOptions::default());
+            tokio::pin!(finishing);
+            tokio::select! {
+                _ = started.notified() => {}
+                result = &mut finishing => panic!("finish did not reach commit: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("commit stalled"),
+            }
+        }
+        assert!(creator.finishing.is_some());
+        (creator, release)
     }
 
     #[tokio::test]
     async fn test_abort_joins_retained_finalization() {
         let root = create_temp_dir("tantivy-retained-finalize-");
         let path = root.path().join("index");
-        let mut creator = TantivyFulltextIndexCreator::new(&path, Config::default(), 1)
-            .await
-            .unwrap();
-        creator.push_text("indexed text").await.unwrap();
-        let release = interrupt_finalization(&mut creator);
-        let pending_path = path.clone();
+        let (mut creator, release) = creator_with_blocked_commit(&path).await;
         let aborting = tokio::spawn(async move {
             creator.abort().await.unwrap();
             creator
         });
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(
-            !aborting.is_finished(),
-            "abort must join the in-flight finalization"
-        );
-        assert!(pending_path.exists());
+        assert!(path.exists());
         release.send(()).unwrap();
-        let mut creator = aborting.await.unwrap();
+        let mut creator = tokio::time::timeout(std::time::Duration::from_secs(10), aborting)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(creator.finishing.is_none());
         assert!(!path.exists());
         // Repeating abort must stay idempotent.
@@ -417,12 +434,9 @@ mod tests {
     async fn test_drop_with_retained_finalization_cleans_temporary_files() {
         let root = create_temp_dir("tantivy-drop-retained-");
         let path = root.path().join("index");
-        let mut creator = TantivyFulltextIndexCreator::new(&path, Config::default(), 1)
-            .await
-            .unwrap();
-        creator.push_text("indexed text").await.unwrap();
-        let release = interrupt_finalization(&mut creator);
+        let (creator, release) = creator_with_blocked_commit(&path).await;
         drop(creator);
+        assert!(path.exists());
         release.send(()).unwrap();
         assert_directory_removed(&path).await;
     }

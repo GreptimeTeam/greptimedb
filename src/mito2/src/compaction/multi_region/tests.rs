@@ -17,7 +17,7 @@ use std::time::Duration;
 use api::v1::{OpType, SemanticType};
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryDictionaryBuilder, BooleanArray, DictionaryArray,
-    StringArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
+    StringArray, StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
 };
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::{DataType, Field, UInt32Type};
@@ -103,6 +103,8 @@ struct Fixture {
     config: Arc<MitoConfig>,
 }
 
+type TestRow = (u32, i64, u64, u8, Option<u64>);
+
 impl Fixture {
     async fn new(encoding: PrimaryKeyEncoding, format: FormatType, physical_sequence: u64) -> Self {
         Self::with_source(encoding, format, |metadata| {
@@ -154,60 +156,47 @@ impl Fixture {
                 .value(0)
                 .to_vec()
         });
-        let source = new_flat_source_from_record_batches(batches);
-        let info = layer
-            .write_sst(
-                write_request(metadata.clone(), source, &config, format),
-                &WriteOptions::default(),
-                &mut Metrics::new(WriteType::Flush),
-            )
-            .await
-            .unwrap()
-            .remove(0);
-        let source = FileMeta {
-            region_id: metadata.region_id,
-            file_id: info.file_id,
-            time_range: info.time_range,
-            file_size: info.file_size,
-            num_rows: info.num_rows as u64,
-            num_row_groups: info.num_row_groups,
-            max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-            ..Default::default()
-        };
-        Self {
+        let mut fixture = Self {
             env,
             layer,
-            metadata,
-            source,
+            metadata: metadata.clone(),
+            source: FileMeta::default(),
             config,
-        }
+        };
+        let info = fixture
+            .write_source(metadata.clone(), batches, format)
+            .await;
+        fixture.source = file_meta(info, metadata.region_id);
+        fixture
     }
 
-    async fn write_additional_source(&self, batches: Vec<RecordBatch>) -> FileMeta {
-        let info = self
-            .layer
+    async fn write_source(
+        &self,
+        metadata: RegionMetadataRef,
+        batches: Vec<RecordBatch>,
+        format: FormatType,
+    ) -> SstInfo {
+        self.layer
             .write_sst(
                 write_request(
-                    self.metadata.clone(),
+                    metadata,
                     new_flat_source_from_record_batches(batches),
                     &self.config,
-                    FormatType::Flat,
+                    format,
                 ),
                 &WriteOptions::default(),
                 &mut Metrics::new(WriteType::Flush),
             )
             .await
             .unwrap()
-            .remove(0);
-        FileMeta {
-            file_id: info.file_id,
-            time_range: info.time_range,
-            file_size: info.file_size,
-            num_rows: info.num_rows as u64,
-            num_row_groups: info.num_row_groups,
-            max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-            ..self.source.clone()
-        }
+            .remove(0)
+    }
+
+    async fn write_additional_source(&self, batches: Vec<RecordBatch>) -> FileMeta {
+        let info = self
+            .write_source(self.metadata.clone(), batches, FormatType::Flat)
+            .await;
+        file_meta(info, self.metadata.region_id)
     }
 
     fn plan(&self, regions: u32) -> MultiRegionCompactionPlan {
@@ -294,6 +283,10 @@ impl Fixture {
         )
     }
 
+    async fn compact(&self, plan: MultiRegionCompactionPlan) -> MultiRegionCompactionOutput {
+        compact_regions(plan, self.context(None).0).await.unwrap()
+    }
+
     /// Reads an output exactly as the owning region will once the returned
     /// metadata is published: partition filtering and sequence override are
     /// both derived from that metadata.
@@ -302,39 +295,12 @@ impl Fixture {
         file: FileMeta,
         metadata: RegionMetadataRef,
     ) -> Vec<RecordBatch> {
-        let mut reader = self
-            .layer
-            .read_sst(FileHandle::new(file, Arc::new(NoopFilePurger)))
-            .expected_metadata(Some(metadata))
-            .cache(CacheStrategy::Disabled)
-            .build()
-            .await
-            .unwrap()
-            .unwrap();
-        let mut batches = Vec::new();
-        while let Some(batch) = reader.next_record_batch().await.unwrap() {
-            batches.push(batch);
-        }
-        batches
-    }
-
-    async fn read_output(
-        &self,
-        mut file: FileMeta,
-        metadata: RegionMetadataRef,
-    ) -> Vec<RecordBatch> {
         let expected_region = file.region_id;
         let expected_rows = file.num_rows;
-        // Inspect the physical contents: a partition filter or sequence override
-        // on read must not hide incorrectly routed/written records.
-        file.sequence = None;
-        file.preserve_row_sequence = true;
-        let mut unfiltered = (*metadata).clone();
-        unfiltered.set_partition_expr(None);
         let mut reader = self
             .layer
             .read_sst(FileHandle::new(file, Arc::new(NoopFilePurger)))
-            .expected_metadata(Some(Arc::new(unfiltered)))
+            .expected_metadata(Some(metadata.clone()))
             .cache(CacheStrategy::Disabled)
             .build()
             .await
@@ -361,6 +327,116 @@ impl Fixture {
                 .sum::<u64>()
         );
         batches
+    }
+
+    async fn read_published_output_rows(
+        &self,
+        file: FileMeta,
+        metadata: RegionMetadataRef,
+    ) -> Vec<TestRow> {
+        self.decode_base_rows(self.read_published_output(file, metadata).await)
+    }
+
+    async fn read_output(
+        &self,
+        mut file: FileMeta,
+        metadata: RegionMetadataRef,
+    ) -> Vec<RecordBatch> {
+        // Inspect the physical contents: a partition filter or sequence override
+        // on read must not hide incorrectly routed/written records.
+        file.sequence = None;
+        file.preserve_row_sequence = true;
+        let mut unfiltered = (*metadata).clone();
+        unfiltered.set_partition_expr(None);
+        self.read_published_output(file, Arc::new(unfiltered)).await
+    }
+
+    async fn read_output_rows(&self, file: FileMeta, metadata: RegionMetadataRef) -> Vec<TestRow> {
+        self.decode_base_rows(self.read_output(file, metadata).await)
+    }
+
+    fn decode_base_rows(&self, batches: Vec<RecordBatch>) -> Vec<TestRow> {
+        let mut decoded = Vec::new();
+        for batch in batches {
+            let sequences = batch
+                .column(sequence_column_index(batch.num_columns()))
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let operations = batch
+                .column(batch.num_columns() - 1)
+                .as_any()
+                .downcast_ref::<UInt8Array>()
+                .unwrap();
+            let keys = cast(
+                batch.column(primary_key_column_index(batch.num_columns())),
+                &DataType::Binary,
+            )
+            .unwrap();
+            let keys = keys.as_any().downcast_ref::<BinaryArray>().unwrap();
+            let tags = cast(batch.column_by_name("tag_0").unwrap(), &DataType::Utf8).unwrap();
+            let tags = tags.as_any().downcast_ref::<StringArray>().unwrap();
+            let times = crate::read::timestamp_array_to_i64_slice(
+                batch.column(time_index_column_index(batch.num_columns())),
+            );
+            let values = batch
+                .column_by_name("field_0")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            for (row, timestamp) in times.iter().enumerate() {
+                let series: u32 = tags.value(row).parse().unwrap();
+                let expected_key =
+                    if self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+                        new_sparse_primary_key(
+                            &[tags.value(row), "series"],
+                            &self.metadata,
+                            1000 + series % 2,
+                            series as u64,
+                        )
+                    } else {
+                        crate::test_util::sst_util::new_primary_key(&[tags.value(row), "series"])
+                    };
+                assert_eq!(expected_key, keys.value(row));
+                decoded.push((
+                    series,
+                    *timestamp,
+                    sequences.value(row),
+                    operations.value(row),
+                    values.is_valid(row).then(|| values.value(row)),
+                ));
+            }
+        }
+        decoded
+    }
+}
+
+fn expected_source_rows(regions: u32, id: RegionId, sequence: u64) -> Vec<TestRow> {
+    let mut rows = Vec::new();
+    for series in
+        (id.region_sequence() * 32 / regions)..(((id.region_sequence() + 1) * 32 / regions).min(31))
+    {
+        rows.extend([
+            (series, 0, sequence, OpType::Put as u8, Some(10)),
+            (series, 0, sequence, OpType::Put as u8, Some(20)),
+            (series, 0, sequence, OpType::Delete as u8, None),
+            (series, 1_000, sequence, OpType::Put as u8, Some(30)),
+        ]);
+    }
+    rows
+}
+
+fn file_meta(info: SstInfo, region_id: RegionId) -> FileMeta {
+    FileMeta {
+        region_id,
+        file_id: info.file_id,
+        time_range: info.time_range,
+        file_size: info.file_size,
+        num_rows: info.num_rows as u64,
+        num_row_groups: info.num_row_groups,
+        max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+        ..Default::default()
     }
 }
 
@@ -469,78 +545,27 @@ async fn test_single_scan_routes_all_versions_without_folding(
                 assert_eq!(1, file.level);
                 assert_eq!(id, file.region_id);
                 assert_eq!(id != fixture.metadata.region_id, file.preserve_row_sequence);
-                for batch in fixture.read_output(file, target.metadata.clone()).await {
-                    let sequences = batch
-                        .column(sequence_column_index(batch.num_columns()))
-                        .as_any()
-                        .downcast_ref::<UInt64Array>()
-                        .unwrap();
-                    let expected = if id == fixture.metadata.region_id && sequence != 0 {
-                        sequence
-                    } else {
-                        100 + id.region_sequence() as u64
-                    };
-                    assert!(sequences.values().iter().all(|actual| *actual == expected));
-                    let operations = batch
-                        .column(batch.num_columns() - 1)
-                        .as_any()
-                        .downcast_ref::<UInt8Array>()
-                        .unwrap();
-                    total_deletes += operations
-                        .values()
-                        .iter()
-                        .filter(|op| **op == OpType::Delete as u8)
-                        .count();
-                    let keys = cast(
-                        batch.column(primary_key_column_index(batch.num_columns())),
-                        &DataType::Binary,
-                    )
-                    .unwrap();
-                    let keys = keys.as_any().downcast_ref::<BinaryArray>().unwrap();
-                    let tags =
-                        cast(batch.column_by_name("tag_0").unwrap(), &DataType::Utf8).unwrap();
-                    let tags = tags.as_any().downcast_ref::<StringArray>().unwrap();
-                    let times = crate::read::timestamp_array_to_i64_slice(
-                        batch.column(time_index_column_index(batch.num_columns())),
-                    );
-                    let values = batch
-                        .column_by_name("field_0")
-                        .unwrap()
-                        .as_any()
-                        .downcast_ref::<UInt64Array>()
-                        .unwrap();
-                    for (row, timestamp) in times.iter().enumerate() {
-                        let series: u32 = tags.value(row).parse().unwrap();
-                        let expected_key = if encoding == PrimaryKeyEncoding::Sparse {
-                            new_sparse_primary_key(
-                                &[tags.value(row), "series"],
-                                &fixture.metadata,
-                                1000 + series % 2,
-                                series as u64,
-                            )
-                        } else {
-                            crate::test_util::sst_util::new_primary_key(&[
-                                tags.value(row),
-                                "series",
-                            ])
-                        };
-                        assert_eq!(expected_key, keys.value(row));
-                        actual_rows.push((
-                            series,
-                            *timestamp,
-                            sequences.value(row),
-                            operations.value(row),
-                            values.is_valid(row).then(|| values.value(row)),
-                        ));
-                    }
-                }
+                let rows = fixture
+                    .read_output_rows(file, target.metadata.clone())
+                    .await;
+                let expected = if id == fixture.metadata.region_id && sequence != 0 {
+                    sequence
+                } else {
+                    100 + id.region_sequence() as u64
+                };
+                assert!(rows.iter().all(|row| row.2 == expected));
+                total_deletes += rows
+                    .iter()
+                    .filter(|row| row.3 == OpType::Delete as u8)
+                    .count();
+                actual_rows.extend(rows);
             }
             let expected_sequence = if id == fixture.metadata.region_id && sequence != 0 {
                 sequence
             } else {
                 100 + id.region_sequence() as u64
             };
-            let mut expected_rows = Vec::new();
+            let mut expected_rows = expected_source_rows(regions, id, expected_sequence);
             for series in (id.region_sequence() * 32 / regions)
                 ..(((id.region_sequence() + 1) * 32 / regions).min(31))
             {
@@ -557,18 +582,6 @@ async fn test_single_scan_routes_all_versions_without_folding(
                     ],
                     tied
                 );
-                expected_rows.extend([
-                    (series, 0, expected_sequence, OpType::Put as u8, Some(10)),
-                    (series, 0, expected_sequence, OpType::Put as u8, Some(20)),
-                    (series, 0, expected_sequence, OpType::Delete as u8, None),
-                    (
-                        series,
-                        1_000,
-                        expected_sequence,
-                        OpType::Put as u8,
-                        Some(30),
-                    ),
-                ]);
             }
             actual_rows.sort();
             expected_rows.sort();
@@ -597,30 +610,41 @@ async fn test_failed_target_never_returns_a_partial_table_result() {
 }
 
 #[rstest::rstest]
-#[case::merge_mode_ignored(false)]
-#[case::preserve_row_sequence(true)]
+#[case::last_row(false, crate::region::options::MergeMode::LastRow)]
+#[case::last_non_null(false, crate::region::options::MergeMode::LastNonNull)]
+#[case::preserve_row_sequence(true, crate::region::options::MergeMode::LastRow)]
 #[tokio::test]
-async fn test_table_stage_does_not_fold_versions(#[case] preserve_sequence: bool) {
+async fn test_table_stage_does_not_fold_versions(
+    #[case] preserve_sequence: bool,
+    #[case] merge_mode: crate::region::options::MergeMode,
+) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(8);
     for target in plan.targets.values_mut() {
-        target.options.append_mode = true;
+        target.options.append_mode = preserve_sequence;
         target.options.preserve_row_sequence = preserve_sequence;
-        // Nothing in the table stage may fold versions by this mode.
-        target.options.merge_mode = Some(crate::region::options::MergeMode::LastRow);
+        target.options.merge_mode = Some(merge_mode);
     }
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let targets = plan.targets.clone();
+    let output = fixture.compact(plan).await;
     assert_eq!(124, output.stats.output_rows);
-    for (id, files) in &output.files {
+    for (id, files) in output.files {
+        let mut rows = Vec::new();
         for file in files {
-            // Only targets that see the input as foreign have a trusted bound.
             assert_eq!(
-                preserve_sequence && *id != fixture.metadata.region_id,
+                preserve_sequence && id != fixture.metadata.region_id,
                 file.preserve_row_sequence
             );
+            rows.extend(
+                fixture
+                    .read_output_rows(file, targets[&id].metadata.clone())
+                    .await,
+            );
         }
+        let mut expected = expected_source_rows(8, id, 100 + id.region_sequence() as u64);
+        rows.sort();
+        expected.sort();
+        assert_eq!(expected, rows);
     }
 }
 
@@ -643,9 +667,7 @@ async fn test_long_tag_stream_is_lossless_and_insufficient_admission_creates_no_
     for target in plan.targets.values_mut() {
         Arc::make_mut(&mut target.metadata).set_partition_expr(None);
     }
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let output = fixture.compact(plan).await;
     assert_eq!(102400, output.stats.output_rows);
     assert!(output.stats.estimated_memory_bytes <= 128 * 1024 * 1024);
     // The long-tag regression still checks every physical row. There is no
@@ -710,9 +732,7 @@ async fn test_schema_defaults_are_materialized_without_losing_old_versions() {
         target.metadata = Arc::new(builder.build().unwrap());
     }
     let targets = plan.targets.clone();
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let output = fixture.compact(plan).await;
     assert_eq!(124, output.stats.output_rows);
     for (region_id, files) in output.files {
         for file in files {
@@ -757,9 +777,7 @@ async fn test_multiple_sources_merge_versions_in_each_target_sequence_domain(
         target.inputs.insert(input.file_id(), input);
     }
     let targets = plan.targets.clone();
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let output = fixture.compact(plan).await;
     assert_eq!(2, output.stats.source_files);
     assert_eq!(248, output.stats.source_rows);
     assert_eq!(248, output.stats.output_rows);
@@ -769,12 +787,10 @@ async fn test_multiple_sources_merge_versions_in_each_target_sequence_domain(
         } else {
             [101, if unknown_bound { 7 } else { 201 }]
         };
-        let mut observed = HashSet::new();
-        let mut published = HashSet::new();
-        // Kept for the published-metadata read after the physical checks.
+        let mut observed = Vec::new();
+        let mut published = Vec::new();
         let files_for_publish = files.clone();
         let published_row_count: u64 = files.iter().map(|file| file.num_rows).sum();
-        let mut published_rows = 0u64;
         for file in files {
             assert_eq!(
                 if unknown_bound && id.region_sequence() == 1 {
@@ -788,56 +804,40 @@ async fn test_multiple_sources_merge_versions_in_each_target_sequence_domain(
                 id.region_sequence() != 0 && !unknown_bound,
                 file.preserve_row_sequence
             );
-            for batch in fixture
-                .read_output(file.clone(), targets[&id].metadata.clone())
-                .await
-            {
-                let sequence = batch
-                    .column(sequence_column_index(batch.num_columns()))
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap();
-                observed.extend(sequence.values().iter().copied());
-                let keys = cast(
-                    batch.column(primary_key_column_index(batch.num_columns())),
-                    &DataType::Binary,
-                )
-                .unwrap();
-                let keys = keys.as_any().downcast_ref::<BinaryArray>().unwrap();
-                let times = crate::read::timestamp_array_to_i64_slice(
-                    batch.column(time_index_column_index(batch.num_columns())),
-                );
-                for row in 1..batch.num_rows() {
-                    if keys.value(row - 1) == keys.value(row) && times[row - 1] == times[row] {
-                        assert!(sequence.value(row - 1) >= sequence.value(row));
-                    }
-                }
-            }
-        }
-        assert_eq!(expected.into_iter().collect::<HashSet<_>>(), observed);
-        // Publishing the returned metadata must not change any row sequence:
-        // the region reader derives partition filtering and overrides from it.
-        for file in files_for_publish {
-            for batch in fixture
-                .read_published_output(file, targets[&id].metadata.clone())
-                .await
-            {
-                let sequence = batch
-                    .column(sequence_column_index(batch.num_columns()))
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap();
-                published.extend(sequence.values().iter().copied());
-                published_rows += batch.num_rows() as u64;
-            }
+            observed.extend(
+                fixture
+                    .read_output_rows(file, targets[&id].metadata.clone())
+                    .await,
+            );
         }
         assert_eq!(
-            published_row_count, published_rows,
+            expected.into_iter().collect::<HashSet<_>>(),
+            observed.iter().map(|row| row.2).collect::<HashSet<_>>()
+        );
+        for pair in observed.windows(2) {
+            if pair[0].0 == pair[1].0 && pair[0].1 == pair[1].1 {
+                assert!(pair[0].2 >= pair[1].2);
+            }
+        }
+        // Publishing the returned metadata must not change any complete row,
+        // including duplicate versions and their payload association.
+        for file in files_for_publish {
+            published.extend(
+                fixture
+                    .read_published_output_rows(file, targets[&id].metadata.clone())
+                    .await,
+            );
+        }
+        assert_eq!(
+            published_row_count,
+            published.len() as u64,
             "published metadata drops rows of region {id}"
         );
+        observed.sort();
+        published.sort();
         assert_eq!(
             observed, published,
-            "published metadata changes the read sequences of region {id}"
+            "published metadata changes rows of region {id}"
         );
     }
 }
@@ -920,60 +920,86 @@ async fn test_wrong_length_partition_mask_is_rejected_before_creating_outputs() 
     assert!(protection.files.lock().unwrap().is_empty());
 }
 
-/// Builds dense-encoded metadata with a JSON2 field written before `ts`, so the
+struct Json2Column {
+    name: &'static str,
+    column_id: u32,
+    source_layout: JsonSettings,
+    target_layout: JsonSettings,
+    rows: [serde_json::Value; 2],
+}
+
+impl Json2Column {
+    fn source_array(&self) -> ArrayRef {
+        let jsonb = Arc::new(BinaryArray::from_iter_values(
+            self.rows
+                .iter()
+                .map(|row| parse_string_to_jsonb(&row.to_string()).unwrap())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|value| value.as_slice()),
+        )) as ArrayRef;
+        let field = Field::new(self.name, DataType::Binary, true)
+            .with_extension_type(Json2ExtensionType::default());
+        JsonArray::from(&jsonb)
+            .rewrite_to_v2(&field, &self.source_layout, &self.source_layout)
+            .unwrap()
+    }
+
+    fn expected_rows(&self) -> [serde_json::Value; 2] {
+        self.rows.clone().map(|mut row| {
+            for hint in self.target_layout.type_hints() {
+                row.as_object_mut()
+                    .unwrap()
+                    .entry(hint.path[0].clone())
+                    .or_insert(serde_json::Value::Null);
+            }
+            row
+        })
+    }
+}
+
+/// Builds dense-encoded metadata with JSON2 fields before `ts`, so the
 /// time index stays the last user column as the flat format requires.
-fn json2_compaction_metadata(settings: &JsonSettings, region_id: RegionId) -> RegionMetadataRef {
-    let mut json_schema =
-        ColumnSchema::new("j", ConcreteDataType::json2(JsonNativeType::object()), true);
-    json_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
-        settings.clone(),
-    ))));
-    let mut builder = RegionMetadataBuilder::new(region_id);
-    builder
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "tag_0".to_string(),
-                ConcreteDataType::string_datatype(),
-                true,
-            ),
-            semantic_type: SemanticType::Tag,
-            column_id: 0,
-        })
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "tag_1".to_string(),
-                ConcreteDataType::string_datatype(),
-                true,
-            ),
-            semantic_type: SemanticType::Tag,
-            column_id: 1,
-        })
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "field_0".to_string(),
-                ConcreteDataType::uint64_datatype(),
-                true,
-            ),
-            semantic_type: SemanticType::Field,
-            column_id: 2,
-        })
-        .push_column_metadata(ColumnMetadata {
-            column_schema: json_schema,
-            semantic_type: SemanticType::Field,
-            column_id: 4,
-        })
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "ts".to_string(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            ),
-            semantic_type: SemanticType::Timestamp,
-            column_id: 3,
-        })
-        .primary_key(vec![0, 1])
-        .primary_key_encoding(PrimaryKeyEncoding::Dense);
-    Arc::new(builder.build().unwrap())
+fn json2_compaction_metadata(
+    columns: &[Json2Column],
+    region_id: RegionId,
+    target_layout: bool,
+) -> RegionMetadataRef {
+    let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense);
+    metadata.region_id = region_id;
+    let json_start = metadata.column_metadatas.len() - 1;
+    for (offset, column) in columns.iter().enumerate() {
+        let settings = if target_layout {
+            &column.target_layout
+        } else {
+            &column.source_layout
+        };
+        let mut schema = ColumnSchema::new(
+            column.name,
+            ConcreteDataType::json2(JsonNativeType::object()),
+            true,
+        );
+        schema.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            settings.clone(),
+        ))));
+        metadata.column_metadatas.insert(
+            json_start + offset,
+            ColumnMetadata {
+                column_schema: schema,
+                semantic_type: SemanticType::Field,
+                column_id: column.column_id,
+            },
+        );
+    }
+    Arc::new(
+        RegionMetadataBuilder::from_existing(metadata)
+            .build()
+            .unwrap(),
+    )
+}
+
+fn json2_settings(hints: Vec<JsonTypeHint>) -> JsonSettings {
+    JsonSettings::try_new(hints, Some(0)).unwrap()
 }
 
 fn json2_hint(path: &str, data_type: ConcreteDataType) -> JsonTypeHint {
@@ -985,140 +1011,123 @@ fn json2_hint(path: &str, data_type: ConcreteDataType) -> JsonTypeHint {
     }
 }
 
+fn read_json2_row(batch: &RecordBatch, column: &Json2Column) -> serde_json::Value {
+    let field = batch.schema_ref().field_with_name(column.name).unwrap();
+    assert!(
+        Json2PhysicalLayout::try_from_root(field)
+            .unwrap()
+            .is_version_2()
+    );
+    assert_eq!(
+        &json2_physical_data_type(&column.target_layout),
+        field.data_type()
+    );
+    let projected = JsonArray::from(batch.column_by_name(column.name).unwrap())
+        .project_to_v2(field, &DataType::Binary)
+        .unwrap();
+    assert_eq!(1, projected.len());
+    JsonArray::from(&projected).try_get_value(0).unwrap()
+}
+
 /// A source SST written with an older JSON2 layout must be rewritten into the
 /// target layout, keeping values that lived in the remainder field.
 #[tokio::test]
 async fn test_json2_rewrite_preserves_values_through_multiregion_compaction() {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
-    let source_settings = JsonSettings::try_new(
-        vec![json2_hint("a", ConcreteDataType::int64_datatype())],
-        Some(0),
-    )
-    .unwrap();
-    let target_settings = JsonSettings::try_new(
-        vec![
-            json2_hint("a", ConcreteDataType::int64_datatype()),
-            json2_hint("b", ConcreteDataType::string_datatype()),
-        ],
-        Some(0),
-    )
-    .unwrap();
-    let region_id = RegionId::new(1, 0);
-    let source_metadata = json2_compaction_metadata(&source_settings, region_id);
-    let target_metadata = json2_compaction_metadata(&target_settings, region_id);
-
-    let rows = [json!({"a": 1, "b": "x"}), json!({"a": 2})];
-    let legacy_jsonb = Arc::new(BinaryArray::from_iter_values(
-        rows.iter()
-            .map(|row| parse_string_to_jsonb(&row.to_string()).unwrap())
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|value| value.as_slice()),
-    )) as ArrayRef;
-    let legacy_field =
-        Field::new("j", DataType::Binary, true).with_extension_type(Json2ExtensionType::default());
-    let physical = JsonArray::from(&legacy_jsonb)
-        .rewrite_to_v2(&legacy_field, &source_settings, &source_settings)
-        .unwrap();
-
-    // The base batch supplies tags, the primary key and the internal columns.
+    let json_columns = [
+        Json2Column {
+            name: "j",
+            column_id: 4,
+            source_layout: json2_settings(vec![json2_hint(
+                "a",
+                ConcreteDataType::int64_datatype(),
+            )]),
+            target_layout: json2_settings(vec![
+                json2_hint("a", ConcreteDataType::int64_datatype()),
+                json2_hint("b", ConcreteDataType::string_datatype()),
+            ]),
+            rows: [json!({"a": 1, "b": "x"}), json!({"a": 2})],
+        },
+        Json2Column {
+            name: "k",
+            column_id: 5,
+            source_layout: json2_settings(vec![json2_hint(
+                "left",
+                ConcreteDataType::string_datatype(),
+            )]),
+            target_layout: json2_settings(vec![
+                json2_hint("left", ConcreteDataType::string_datatype()),
+                json2_hint("right", ConcreteDataType::int64_datatype()),
+            ]),
+            rows: [
+                json!({"left": "first", "right": 7}),
+                json!({"left": "second"}),
+            ],
+        },
+    ];
+    let source_region = RegionId::new(1, 0);
+    let source_metadata = json2_compaction_metadata(&json_columns, source_region, false);
     let base = new_record_batch_with_custom_sequence(&["000", "series"], 0, 2, 100);
     let mut columns = base.columns().to_vec();
-    // `j` sits before `ts`, which must stay immediately before the internal columns.
-    columns.insert(3, physical.clone());
+    let mut tags = StringDictionaryBuilder::<UInt32Type>::new();
+    let mut primary_keys = BinaryDictionaryBuilder::<UInt32Type>::new();
+    for tag in ["000", "020"] {
+        tags.append_value(tag);
+        primary_keys
+            .append(crate::test_util::sst_util::new_primary_key(&[
+                tag, "series",
+            ]))
+            .unwrap();
+    }
+    columns[0] = Arc::new(tags.finish());
+    columns[4] = Arc::new(primary_keys.finish());
     let mut options = FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Dense);
-    options
-        .concretized_json_types
-        .insert("j".to_string(), physical.data_type().clone());
+    for (index, column) in json_columns.iter().enumerate() {
+        let physical = column.source_array();
+        options
+            .concretized_json_types
+            .insert(column.name.to_string(), physical.data_type().clone());
+        columns.insert(3 + index, physical);
+    }
     let source_batch = RecordBatch::try_new(
         to_flat_sst_arrow_schema(&source_metadata, &options),
         columns,
     )
     .unwrap();
-
     let info = fixture
-        .layer
-        .write_sst(
-            write_request(
-                source_metadata.clone(),
-                new_flat_source_from_record_batches(vec![source_batch]),
-                &fixture.config,
-                FormatType::Flat,
-            ),
-            &WriteOptions::default(),
-            &mut Metrics::new(WriteType::Flush),
-        )
-        .await
-        .unwrap()
-        .remove(0);
-    let mut source = FileMeta {
-        region_id,
-        file_id: info.file_id,
-        time_range: info.time_range,
-        file_size: info.file_size,
-        num_rows: info.num_rows as u64,
-        num_row_groups: info.num_row_groups,
-        max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-        ..Default::default()
-    };
+        .write_source(source_metadata, vec![source_batch], FormatType::Flat)
+        .await;
+    let mut source = file_meta(info, source_region);
     source.sequence = NonZeroU64::new(100);
 
-    let plan = MultiRegionCompactionPlan {
-        partition_rule: Arc::new(
-            MultiDimPartitionRule::try_new(vec!["tag_0".into()], vec![0], vec![], false).unwrap(),
-        ),
-        sources: vec![source.clone()],
-        targets: [(
-            region_id,
-            MultiRegionTarget {
-                metadata: target_metadata.clone(),
-                options: RegionOptions {
-                    append_mode: true,
-                    preserve_row_sequence: true,
-                    sst_format: Some(FormatType::Flat),
-                    ..Default::default()
-                },
-                inputs: [(source.file_id(), source.clone())].into_iter().collect(),
-            },
-        )]
-        .into_iter()
-        .collect(),
-        memory_limit: 256 * 1024 * 1024,
-        max_output_file_size: 1024 * 1024,
-        window_start: 0,
-        window_seconds: 3600,
-    };
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let mut plan = fixture.plan(2);
+    plan.sources = vec![source.clone()];
+    for target in plan.targets.values_mut() {
+        target.metadata = json2_compaction_metadata(&json_columns, target.metadata.region_id, true);
+        target.inputs = [(source.file_id(), source.clone())].into_iter().collect();
+    }
+    plan.memory_limit = 256 * 1024 * 1024;
+    let targets = plan.targets.clone();
+    let output = fixture.compact(plan).await;
 
-    let mut observed = Vec::new();
-    for file in output.files[&region_id].clone() {
-        for batch in fixture.read_output(file, target_metadata.clone()).await {
-            let field = batch.schema_ref().field_with_name("j").unwrap().clone();
-            assert!(
-                Json2PhysicalLayout::try_from_root(&field)
-                    .unwrap()
-                    .is_version_2()
-            );
-            assert_eq!(
-                &json2_physical_data_type(&target_settings),
-                field.data_type()
-            );
-            let projected = JsonArray::from(batch.column_by_name("j").unwrap())
-                .project_to_v2(&field, &DataType::Binary)
-                .unwrap();
-            let num_rows = projected.len();
-            let projected = JsonArray::from(&projected);
-            for row in 0..num_rows {
-                observed.push(projected.try_get_value(row).unwrap());
+    for (id, files) in &output.files {
+        let mut rows = 0;
+        for file in files {
+            for batch in fixture
+                .read_output(file.clone(), targets[id].metadata.clone())
+                .await
+            {
+                rows += batch.num_rows();
+                for column in &json_columns {
+                    assert_eq!(
+                        column.expected_rows()[id.region_sequence() as usize],
+                        read_json2_row(&batch, column)
+                    );
+                }
             }
         }
+        assert_eq!(1, rows, "one row must route to {id}");
     }
-    assert_eq!(2, observed.len());
-    assert_eq!(Some(1), observed[0]["a"].as_i64());
-    assert_eq!(Some("x"), observed[0]["b"].as_str());
-    assert_eq!(Some(2), observed[1]["a"].as_i64());
     assert_eq!(2, output.stats.output_rows);
 }
 
@@ -1142,21 +1151,18 @@ async fn test_unmatched_partition_values_use_the_table_default_region() {
         });
     }
     let targets = plan.targets.clone();
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let output = fixture.compact(plan).await;
     assert_eq!(124, output.stats.output_rows);
     for (id, files) in output.files {
         let mut series = HashSet::new();
         for file in files {
-            for batch in fixture
-                .read_output(file, targets[&id].metadata.clone())
-                .await
-            {
-                let tags = cast(batch.column_by_name("tag_0").unwrap(), &DataType::Utf8).unwrap();
-                let tags = tags.as_any().downcast_ref::<StringArray>().unwrap();
-                series.extend(tags.iter().flatten().map(|tag| tag.parse::<u32>().unwrap()));
-            }
+            series.extend(
+                fixture
+                    .read_output_rows(file, targets[&id].metadata.clone())
+                    .await
+                    .into_iter()
+                    .map(|row| row.0),
+            );
         }
         let range = if id.region_sequence() == 0 {
             0..20
@@ -1187,28 +1193,18 @@ async fn test_nullable_field_partitioning_preserves_delete_records() {
         });
     }
     let targets = plan.targets.clone();
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let output = fixture.compact(plan).await;
     assert_eq!(124, output.stats.output_rows);
     for (id, files) in output.files {
         let mut counts = (0, 0);
         for file in files {
-            for batch in fixture
-                .read_output(file, targets[&id].metadata.clone())
-                .await
-            {
-                counts.0 += batch.num_rows();
-                let values = batch
-                    .column_by_name("field_0")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap();
-                counts.1 += values.null_count();
-                for value in values.iter().flatten() {
-                    assert_eq!(id.region_sequence() == 0, value < 20);
-                }
+            let rows = fixture
+                .read_output_rows(file, targets[&id].metadata.clone())
+                .await;
+            counts.0 += rows.len();
+            counts.1 += rows.iter().filter(|row| row.4.is_none()).count();
+            for value in rows.iter().filter_map(|row| row.4) {
+                assert_eq!(id.region_sequence() == 0, value < 20);
             }
         }
         assert_eq!(62, counts.0);
@@ -1411,17 +1407,17 @@ async fn test_negative_subsecond_timestamp_stays_in_its_half_open_window() {
     .await;
     let mut plan = fixture.plan(1);
     plan.window_start = -3600;
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let output = fixture.compact(plan).await;
     assert_eq!(2, output.stats.output_rows);
     let mut times = Vec::new();
     for file in output.files.into_values().flatten() {
-        for batch in fixture.read_output(file, fixture.metadata.clone()).await {
-            times.extend_from_slice(crate::read::timestamp_array_to_i64_slice(
-                batch.column(time_index_column_index(batch.num_columns())),
-            ));
-        }
+        times.extend(
+            fixture
+                .read_output_rows(file, fixture.metadata.clone())
+                .await
+                .into_iter()
+                .map(|row| row.1),
+        );
     }
     assert_eq!(vec![-3_600_000, -1], times);
 }
@@ -1478,39 +1474,24 @@ async fn test_equal_key_group_crosses_batches_and_preserves_opposite_target_admi
         ));
     }
     let targets = plan.targets.clone();
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let output = fixture.compact(plan).await;
     assert_eq!(512, output.stats.output_rows);
     for (id, files) in output.files {
         let mut rows = Vec::new();
         for file in files {
             assert_eq!(NonZeroU64::new(22), file.sequence);
-            for batch in fixture
-                .read_output(file, targets[&id].metadata.clone())
-                .await
-            {
-                let values = batch
-                    .column_by_name("field_0")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap();
-                let seq = batch
-                    .column(sequence_column_index(batch.num_columns()))
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap();
-                for row in 0..batch.num_rows() {
-                    let payload = values.value(row);
-                    let expected = match (id.region_sequence(), payload < 256) {
-                        (0, true) | (1, false) => 11,
-                        _ => 22,
-                    };
-                    assert_eq!(expected, seq.value(row));
-                    rows.push((seq.value(row), payload));
-                }
-            }
+            let decoded = fixture
+                .read_output_rows(file, targets[&id].metadata.clone())
+                .await;
+            rows.extend(decoded.into_iter().map(|row| {
+                let payload = row.4.unwrap();
+                let expected = match (id.region_sequence(), payload < 256) {
+                    (0, true) | (1, false) => 11,
+                    _ => 22,
+                };
+                assert_eq!(expected, row.2);
+                (row.2, payload)
+            }));
         }
         assert!(rows.windows(2).all(|pair| pair[0].0 >= pair[1].0));
         let mut payloads = rows.into_iter().map(|row| row.1).collect::<Vec<_>>();
@@ -1678,7 +1659,7 @@ async fn test_streaming_merge_preserves_overlapping_versions_and_field_routing(
             );
         }
         let file_count = files.len();
-        let mut windows = BTreeMap::<i64, Vec<_>>::new();
+        let mut actual_rows = Vec::new();
         for (file, info) in files.into_iter().zip(&output.sst_infos[&id]) {
             assert!(protection.files.lock().unwrap().contains(&file.file_id()));
             assert_eq!(id, file.region_id);
@@ -1706,110 +1687,69 @@ async fn test_streaming_merge_preserves_overlapping_versions_and_field_routing(
                 "region={id}, window={file_window}, rows={}, file={path}",
                 file.num_rows
             );
-            for batch in fixture
-                .read_output(file, targets[&id].metadata.clone())
-                .await
-            {
-                let tags = cast(batch.column_by_name("tag_0").unwrap(), &DataType::Utf8).unwrap();
-                let tags = tags.as_any().downcast_ref::<StringArray>().unwrap();
-                let timestamps = crate::read::timestamp_array_to_i64_slice(
-                    batch.column(time_index_column_index(batch.num_columns())),
-                );
-                let sequences = batch
-                    .column(sequence_column_index(batch.num_columns()))
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap();
-                let operations = batch
-                    .column(batch.num_columns() - 1)
-                    .as_any()
-                    .downcast_ref::<UInt8Array>()
-                    .unwrap();
-                let values = batch
-                    .column_by_name("field_0")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap();
-                for (row, timestamp) in timestamps.iter().copied().enumerate() {
-                    assert_eq!(file_window, timestamp.div_euclid(3_600_000));
-                    windows.entry(file_window).or_default().push((
-                        tags.value(row).parse::<u32>().unwrap(),
-                        timestamp,
-                        sequences.value(row),
-                        operations.value(row),
-                        values.is_valid(row).then(|| values.value(row)),
-                    ));
-                }
-            }
+            let rows = fixture
+                .read_output_rows(file, targets[&id].metadata.clone())
+                .await;
+            assert!(
+                rows.iter()
+                    .all(|row| row.1.div_euclid(3_600_000) == file_window)
+            );
+            actual_rows.extend(rows);
         }
-        let mut expected = BTreeMap::new();
-        for window in 0..1 {
-            let mut rows = Vec::new();
-            for series in 0..31 {
-                for tick in 0..128 {
-                    for source in 0..5 {
-                        for version in 0..4 {
-                            let ordinal = tick * 4 + version;
-                            let payload = (version != 2).then_some(source * 1000 + ordinal as u64);
-                            // Independent oracle: do not reuse PartitionRule to
-                            // compute the expected routing of the physical rows.
-                            let owner = if multi_column {
-                                if series < 10 && payload.is_some_and(|value| value >= 2000) {
-                                    1
-                                } else if series >= 10 && payload.is_some_and(|value| value < 2000)
-                                {
-                                    2
-                                } else {
-                                    0
-                                }
-                            } else if series < 10 {
-                                0
-                            } else if series < 21 {
+        let mut expected = Vec::new();
+        for series in 0..31 {
+            for tick in 0..128 {
+                for source in 0..5 {
+                    for version in 0..4 {
+                        let ordinal = tick * 4 + version;
+                        let payload = (version != 2).then_some(source * 1000 + ordinal as u64);
+                        // Independent oracle: do not reuse PartitionRule to
+                        // compute the expected routing of the physical rows.
+                        let owner = if multi_column {
+                            if series < 10 && payload.is_some_and(|value| value >= 2000) {
                                 1
-                            } else {
+                            } else if series >= 10 && payload.is_some_and(|value| value < 2000) {
                                 2
-                            };
-                            if owner != id.region_sequence() {
-                                continue;
+                            } else {
+                                0
                             }
-                            rows.push((
-                                series,
-                                window * 3_600_000 + tick,
-                                if id.region_sequence() == 0 { 5 } else { 777 },
-                                if version == 2 {
-                                    OpType::Delete as u8
-                                } else {
-                                    OpType::Put as u8
-                                },
-                                payload,
-                            ));
+                        } else if series < 10 {
+                            0
+                        } else if series < 21 {
+                            1
+                        } else {
+                            2
+                        };
+                        if owner != id.region_sequence() {
+                            continue;
                         }
+                        expected.push((
+                            series,
+                            tick,
+                            if id.region_sequence() == 0 { 5 } else { 777 },
+                            if version == 2 {
+                                OpType::Delete as u8
+                            } else {
+                                OpType::Put as u8
+                            },
+                            payload,
+                        ));
                     }
                 }
             }
-            expected.insert(window, rows);
         }
         // Check the actual order before comparing multisets. Equal full keys
         // can interleave sources; unequal keys must remain ordered across SSTs.
-        for rows in windows.values() {
-            for pair in rows.windows(2) {
-                let key = |row: &(u32, i64, u64, u8, Option<u64>)| {
-                    (row.0, row.1, std::cmp::Reverse(row.2))
-                };
-                assert!(key(&pair[0]) <= key(&pair[1]), "unordered output for {id}");
-            }
+        for pair in actual_rows.windows(2) {
+            let key = |row: &TestRow| (row.0, row.1, std::cmp::Reverse(row.2));
+            assert!(key(&pair[0]) <= key(&pair[1]), "unordered output for {id}");
         }
-        for rows in windows.values_mut() {
-            rows.sort();
-        }
-        for rows in expected.values_mut() {
-            rows.sort();
-        }
-        assert_eq!(expected, windows, "missing or changed rows for {id}");
+        actual_rows.sort();
+        expected.sort();
+        assert_eq!(expected, actual_rows, "missing or changed rows for {id}");
         common_telemetry::info!(
             "verified region={id}, files={file_count}, rows={}",
-            windows.values().map(Vec::len).sum::<usize>()
+            actual_rows.len()
         );
     }
     for path in source_paths {
@@ -2140,9 +2080,7 @@ async fn test_private_routing_annotations_do_not_shadow_user_columns() {
         target.metadata = Arc::new(metadata);
     }
     let target = plan.targets[&RegionId::new(1, 1)].metadata.clone();
-    let output = compact_regions(plan, fixture.context(None).0)
-        .await
-        .unwrap();
+    let output = fixture.compact(plan).await;
     assert!(output.files[&RegionId::new(1, 0)].is_empty());
     assert_eq!(124, output.stats.output_rows);
     for file in output.files[&RegionId::new(1, 1)].iter().cloned() {
@@ -2158,8 +2096,11 @@ async fn test_private_routing_annotations_do_not_shadow_user_columns() {
     }
 }
 
+#[rstest::rstest]
+#[case::trusted_zero(true)]
+#[case::legacy_override(false)]
 #[tokio::test]
-async fn test_zero_versions_are_not_published_with_a_legacy_sequence_override() {
+async fn test_zero_versions_follow_trust_and_legacy_override(#[case] trusted: bool) {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         vec![
             new_record_batch_with_custom_sequence(&["000", "series"], 0, 1, 0),
@@ -2167,8 +2108,15 @@ async fn test_zero_versions_are_not_published_with_a_legacy_sequence_override() 
         ]
     })
     .await;
-    let plan = fixture.plan(2);
-    let target = &plan.targets[&RegionId::new(1, 0)];
+    let mut plan = fixture.plan(2);
+    if trusted {
+        for target in plan.targets.values_mut() {
+            for input in target.inputs.values_mut() {
+                input.preserve_row_sequence = true;
+            }
+        }
+    }
+    let target = plan.targets[&RegionId::new(1, 0)].clone();
     let input = target.inputs[&fixture.source.file_id()].clone();
     let mut original = fixture
         .layer
@@ -2190,6 +2138,24 @@ async fn test_zero_versions_are_not_published_with_a_legacy_sequence_override() 
         sequences.value(0),
         "the original target really observes version zero"
     );
+    if trusted {
+        let output = fixture.compact(plan).await;
+        let mut rows = Vec::new();
+        for file in &output.files[&RegionId::new(1, 0)] {
+            assert!(file.preserve_row_sequence);
+            rows.extend(
+                fixture
+                    .read_published_output_rows(file.clone(), target.metadata.clone())
+                    .await,
+            );
+        }
+        assert_eq!(
+            vec![(0, 0, 0, OpType::Put as u8, Some(0))],
+            rows,
+            "trusted zero versions must survive publication"
+        );
+        return;
+    }
     let error = compact_regions(plan, fixture.context(None).0)
         .await
         .err()
@@ -2303,14 +2269,7 @@ async fn test_admission_includes_each_tantivy_creator_even_in_async_mode(
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut baseline = fixture.plan(2);
     baseline.memory_limit = 64 * 1024 * 1024;
-    assert_eq!(
-        124,
-        compact_regions(baseline, fixture.context(None).0)
-            .await
-            .unwrap()
-            .stats
-            .output_rows
-    );
+    assert_eq!(124, fixture.compact(baseline).await.stats.output_rows);
     let mut plan = fixture.plan(2);
     plan.memory_limit = 64 * 1024 * 1024;
     add_fulltext_column(&mut plan);
