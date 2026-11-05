@@ -1274,12 +1274,12 @@ impl PromPlanner {
             // lands and keeps the one-hop plan. The question is the one the state router asks of
             // the same aggregate, so both hops route by the group the merge finalizes by.
             let split = if !multi_input && selectors.len() == 1 {
-                let depth = if state_needs_several_owners(compiled.tree.root()) {
+                let depth = if state_needs_several_owners(tree.root()) {
                     SplitDepth::Two
                 } else {
                     SplitDepth::One
                 };
-                FusedSeries::split_aggregate(&compiled.tree, &time, depth)
+                FusedSeries::split_aggregate(&tree, &time, depth)
                     .context(DataFusionPlanningSnafu)?
             } else {
                 None

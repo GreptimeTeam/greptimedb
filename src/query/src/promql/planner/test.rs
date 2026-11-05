@@ -2791,6 +2791,32 @@ async fn native_fused_partitioned_table_label_rewrite_falls_back() {
     );
 }
 
+/// A collapsing label rewrite keeps its canonical boundary when the aggregate is split.
+///
+/// `sum(label_replace(m, "tag_0", "same", "tag_0", ".*"))` gives every series one label set, so the
+/// canonicalization pass puts a `Merge` under the aggregate. The splitter must see that tree, not
+/// the raw one: its per-series prefix cannot express the merge, so it declines and the statement
+/// keeps the plan the existing route builds. Splitting the raw tree would have let two partitions'
+/// contributions to one label set reach the state router as separate groups.
+#[tokio::test]
+async fn native_fused_collapsing_rewrite_under_an_aggregate_keeps_the_canonical_boundary() {
+    let query = r#"sum(label_replace(some_metric, "tag_0", "same", "tag_0", ".*"))"#;
+    let native =
+        build_native_fused_plan_with_provider(query, true, native_test_table_provider().await)
+            .await;
+    let display = native.display_indent().to_string();
+    assert!(
+        !display.contains("partial state") && !display.contains("PartialReduce"),
+        "a collapsing rewrite under an aggregate must not split: {display}"
+    );
+    // The tree still plans, but as a segmented node that keeps the canonical merge the rewrite
+    // needs; what it must not do is hand the rewrite to a state producer's per-series prefix.
+    assert!(
+        display.contains("canonical merge"),
+        "the canonical boundary must survive: {display}"
+    );
+}
+
 /// Metric logical scans retain their table-id restriction on the direct fused scan input.
 #[tokio::test]
 async fn native_fused_metric_engine_table_is_accepted() {
