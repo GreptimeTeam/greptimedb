@@ -384,8 +384,8 @@ fn charge_samples(
 /// Wraps the error of a chunk this node cannot fold.
 ///
 /// Only a chunk that does not fit the schema is the node's own refusal; anything else is the
-/// kernel saying it does not compute this shape at all -- a native histogram in a float aggregate,
-/// for instance -- and a caller that falls back to another planner on `NotImplemented` still can.
+/// kernel saying it does not compute this shape at all -- exporting native histogram state, for
+/// instance -- and a caller that falls back to another planner on `NotImplemented` still can.
 /// Wrapping that one in an `Execution` would deny it.
 fn folded_chunk(aggregate: &str, error: DataFusionError) -> DataFusionError {
     match error {
