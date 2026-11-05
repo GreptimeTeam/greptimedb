@@ -34,10 +34,10 @@ use std::sync::Arc;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{Series, SeriesSchema};
 
+use crate::aggregate::validate_aggregate_series;
 use crate::aggregate::{AggregateOp, FloatAggregator, FloatMerger, Grouping};
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::series_bytes;
-use crate::map::validate_float_series;
 use crate::native::execute::{NodeBuffer, evaluated_bytes};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, Grouping as BoundGrouping,
@@ -59,6 +59,9 @@ pub(crate) struct AggregateRuntime {
     /// addressed on. A `Complete` aggregate neither adds nor drops a field, and it evaluates on its
     /// input's grid, so one schema describes both sides.
     schema: Arc<SeriesSchema>,
+    /// The kind this node folds by, as the runtime's own enum, so the chunk check can ask what the
+    /// operation accepts.
+    fold_op: AggregateOp,
     /// The fold. `None` once [`Self::compute`] has taken it, which is also what says the node has
     /// nothing left to fold into.
     accumulator: Option<FloatAggregator>,
@@ -123,6 +126,7 @@ impl AggregateRuntime {
             buffer.resize(merger.state_bytes())?;
             return Ok(Self {
                 op,
+                fold_op: kind,
                 schema,
                 accumulator: None,
                 merger: Some(merger),
@@ -152,6 +156,7 @@ impl AggregateRuntime {
         buffer.resize(initial.state_bytes())?;
         Ok(Self {
             op,
+            fold_op: kind,
             schema,
             accumulator: Some(initial),
             merger: None,
@@ -186,7 +191,7 @@ impl AggregateRuntime {
         // `Series` keeps its fields public, so a chunk can be built by struct literal against
         // another schema; the states are indexed by absolute position on this node's grid, so a
         // chunk of another field count or another grid would be folded into the wrong places.
-        validate_float_series(&self.schema, &chunk.series)
+        validate_aggregate_series(&self.schema, &chunk.series, self.fold_op)
             .map_err(|error| folded_chunk(&self.describe(), error))?;
         let Some(accumulator) = self.accumulator.as_mut() else {
             return Err(no_fold(&self.describe()));

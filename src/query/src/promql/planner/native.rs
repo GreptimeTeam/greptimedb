@@ -60,8 +60,9 @@ use promql::extension_plan::{
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series, uniform_field_kind,
+    AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series,
+    uniform_field_kind,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
@@ -2468,13 +2469,19 @@ fn scan_operand(node: &NativeNode) -> bool {
 /// `count_over_time` over a histogram stays eligible.
 fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
     match &node.expr {
-        // An aggregate folds float state, so it is refused unless the kind entering it is
+        // `count` and `group` ask whether a sample is present, so a histogram is one contribution
+        // and the fold never reads a value: they accept whatever kind enters them, and only a
+        // nested aggregate under them can still carry a histogram into a fold that reads values.
+        //
+        // Every other aggregate folds float state, so it is refused unless the kind entering it is
         // provably a float. "Cannot name it" is not "not a histogram": a canonical merge
         // (`label_replace` collapsing a label) and a set operation both hand on the samples they
         // were given without the walk describing them, and reading that silence as float is what
         // admitted `sum(label_replace(h, ...))` to a native fold over histograms.
-        NativeExpr::Aggregate { input, .. } => {
-            !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float))
+        NativeExpr::Aggregate { input, op } => {
+            let presence_only = matches!(op.kind, AggregateKind::Count | AggregateKind::Group);
+            (!presence_only
+                && !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float)))
                 || aggregate_reads_histogram(input, input_kind)
         }
         NativeExpr::Input(_)
