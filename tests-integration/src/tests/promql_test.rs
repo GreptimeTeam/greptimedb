@@ -3449,10 +3449,18 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
     // the two metrics apart even though their ordinary labels are identical. A window function drops
     // the name, so the grouping case reads the raw selector.
     for (expression, expected) in [
-        (r#"sum(increase({host="a"}[5m]))"#, vec![10.0, 14.0]),
+        (
+            r#"sum(increase({host="a"}[5m]))"#,
+            vec![(None, 10.0), (None, 14.0)],
+        ),
         (
             r#"sum by (__name__) ({host="a"})"#,
-            vec![6.0, 6.0, 8.0, 8.0],
+            vec![
+                (Some("dist_native_disc_a_frag".to_string()), 6.0),
+                (Some("dist_native_disc_a_frag".to_string()), 8.0),
+                (Some("dist_native_disc_z_wide".to_string()), 6.0),
+                (Some("dist_native_disc_z_wide".to_string()), 8.0),
+            ],
         ),
     ] {
         let output = instance
@@ -3479,21 +3487,40 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
             OutputData::RecordBatches(batches) => batches,
             _ => unreachable!("PromQL returns record batches"),
         };
+        // Neither column is located by position: the result puts `__name__` last, and an aggregate
+        // that folds the name away drops the column instead of emptying it, so a missing `__name__`
+        // is exactly "no metric name".
         let mut rows = Vec::new();
         for batch in batches {
+            let names = batch.column_by_name("__name__").map(|column| {
+                cast(column.as_ref(), &DataType::Utf8)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .clone()
+            });
             let values = batch
-                .columns()
-                .iter()
-                .find(|column| column.data_type() == &DataType::Float64)
+                .column_by_name("val")
                 .expect("one value column")
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .unwrap();
             for row in 0..batch.num_rows() {
-                rows.push(values.value(row));
+                rows.push((
+                    names.as_ref().map(|names| names.value(row).to_string()),
+                    values.value(row),
+                ));
             }
         }
-        rows.sort_by(f64::total_cmp);
+        // The name travels with the value: a plan that grouped by the wrong name, or dropped the
+        // name, would still report the same numbers, so the assertion is on the (name, value) pairs.
+        rows.sort_by(|left, right| {
+            left.0
+                .as_deref()
+                .cmp(&right.0.as_deref())
+                .then(left.1.total_cmp(&right.1))
+        });
         assert_eq!(expected, rows, "{expression}");
     }
 }
