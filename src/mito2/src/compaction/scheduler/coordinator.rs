@@ -35,8 +35,9 @@ use crate::metrics::{
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{Job, LocalScheduler, SchedulerRef};
 
-/// Already prepared work. Its task owns the existing execution ID, cancellation
-/// state and input leases; no second grant message can outlive that ownership.
+/// Prepared work consumed on submission to the coordinator, preventing repeated
+/// admission of the same unit. Its task owns the execution ID, cancellation state
+/// and input leases.
 pub(crate) struct ReadyUnit {
     /// Time the unit became ready; feeds `COMPACTION_ADMISSION_WAIT`.
     queued_at: Instant,
