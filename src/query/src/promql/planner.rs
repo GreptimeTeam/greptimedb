@@ -21,6 +21,21 @@ pub use native::{NATIVE_PROMQL_EXTENSION_KEY, discovers_metric_name};
 
 mod set_operator;
 
+/// The request extension that asks a planned result to carry the metric name of each row.
+///
+/// A Prometheus response names each row of a set operator after the side it came from, so the plan
+/// that produces it carries that name in a declared column. Nothing else does: a TQL or SQL caller
+/// reports the statement's own columns, and that name is not one of them.
+pub const PROMETHEUS_RESPONSE_EXTENSION_KEY: &str = "prometheus_response";
+
+/// Whether the request asks for the per-row metric name column; see
+/// [`PROMETHEUS_RESPONSE_EXTENSION_KEY`].
+pub fn prometheus_response_requested(query_ctx: &session::context::QueryContextRef) -> bool {
+    query_ctx
+        .extension(PROMETHEUS_RESPONSE_EXTENSION_KEY)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 

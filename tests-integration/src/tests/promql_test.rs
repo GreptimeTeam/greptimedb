@@ -6128,7 +6128,6 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
                 .collect::<std::collections::BTreeMap<_, _>>()
         };
         let mut union = Vec::new();
-        let mut union_named = Vec::new();
         let mut ratio = Vec::new();
         let mut filled = Vec::new();
         for host in 0..2_i64 {
@@ -6138,36 +6137,24 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
                 let b = (100 + second) as f64;
                 union.push((second * 1_000, labels(&[("host", &name), ("kind", "x")]), a));
                 union.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
-                // `or` reports both operands, so on the native route each row keeps the name of the
-                // table it came from. The legacy route names rows in the response instead, so its
-                // rows are compared against `union`, which carries no name column.
-                union_named.push((
-                    second * 1_000,
-                    labels(&[("__name__", "native_xs_a"), ("host", &name), ("kind", "x")]),
-                    a,
-                ));
-                union_named.push((
-                    second * 1_000,
-                    labels(&[("__name__", "native_xs_b"), ("host", &name), ("az", "z")]),
-                    b,
-                ));
+                // `or` reports both operands. A TQL result reports the statement's own columns, so
+                // neither route's rows carry a `__name__`: the per-row name column is planned only
+                // for a Prometheus response.
+
                 ratio.push((second * 1_000, labels(&[("host", &name)]), a / b));
                 filled.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
             }
         }
         union.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
-        union_named.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
         ratio.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
         filled.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
         // The existing plan fails to execute the match over two differently named time indexes
         // (it reads a tag column as the time index), so only the native answer is checked there.
         for (query, columns, expected, legacy_expected) in [
             (
-                // A set operator reports both operands, so the plan carries each row's own
-                // metric name and the result exposes it as a column.
                 "native_xs_a or native_xs_b",
-                vec!["__name__", "az", "host", "kind", "ts", "val"],
-                union_named,
+                vec!["az", "host", "kind", "ts", "val"],
+                union.clone(),
                 Some(union),
             ),
             (
@@ -6321,10 +6308,10 @@ async fn native_promql_three_selector_trees_bind_every_occurrence() {
             3,
         ),
         (
-            // `or` reports both sides, so the plan carries each row's own metric name. The
-            // arithmetic entry below drops it, as Prometheus does.
+            // `or` reports both sides; a TQL result reports the statement's own columns, so the
+            // per-row name column a Prometheus response reads is not one of them.
             "native_3_a{host=\"h0\"} and native_3_b or native_3_c",
-            vec!["__name__", "host", "kind", "ts", "val"],
+            vec!["host", "kind", "ts", "val"],
             at_five(|h| if h == 0.0 { 5.0 } else { 100.0 + h }),
             3,
         ),

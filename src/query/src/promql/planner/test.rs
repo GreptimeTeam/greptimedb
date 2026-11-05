@@ -51,7 +51,7 @@ use promql::native::plan::{AggregateStage, BoundVectorOp, NativeExpr, NativeNode
 use promql::vector_match::MatchingLabels;
 use promql_parser::label::Labels;
 use promql_parser::parser;
-use session::context::{MetricDiscoveryScope, QueryContext};
+use session::context::{MetricDiscoveryScope, QueryContext, QueryContextBuilder, QueryContextRef};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::Table;
 use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder};
@@ -946,11 +946,40 @@ async fn build_test_table_provider_with_tsid_tag_names(
     .await
 }
 
+/// The query context of a request whose result is served as a Prometheus response.
+fn prometheus_response_query_ctx() -> QueryContextRef {
+    Arc::new(
+        QueryContextBuilder::default()
+            .set_extension(
+                crate::promql::planner::PROMETHEUS_RESPONSE_EXTENSION_KEY.to_string(),
+                "true".to_string(),
+            )
+            .build(),
+    )
+}
+
 async fn build_test_table_provider_with_tsid_tag_fields_and_field_order_and_times(
     table_specs: &[((String, String), usize, usize)],
     tag_names: &[Vec<String>],
     logical_field_order: Option<&[usize]>,
     logical_times: &[String],
+) -> DfTableSourceProvider {
+    build_test_table_provider_with_tsid_tag_fields_and_ctx(
+        table_specs,
+        tag_names,
+        logical_field_order,
+        logical_times,
+        QueryContext::arc(),
+    )
+    .await
+}
+
+async fn build_test_table_provider_with_tsid_tag_fields_and_ctx(
+    table_specs: &[((String, String), usize, usize)],
+    tag_names: &[Vec<String>],
+    logical_field_order: Option<&[usize]>,
+    logical_times: &[String],
+    base_ctx: QueryContextRef,
 ) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
 
@@ -1135,7 +1164,7 @@ async fn build_test_table_provider_with_tsid_tag_fields_and_field_order_and_time
     // The scope is what discovery consults before it reads anything, and its default declines, so
     // a fixture that wants discovery to run has to say so.
     let query_ctx = {
-        let base = QueryContext::arc();
+        let base = base_ctx;
         let mut ctx = (*base).clone();
         ctx.set_metric_discovery_scope(SCOPE.with(|scope| {
             scope
@@ -1157,6 +1186,25 @@ thread_local! {
 
 /// A schema of logical metric tables, one tag and one field each, all served through the one
 /// physical table the fixture registers. A selector that names no metric enumerates these.
+async fn metric_discovery_provider_for_response(names: &[&str]) -> DfTableSourceProvider {
+    let specs = names
+        .iter()
+        .map(|name| ((DEFAULT_SCHEMA_NAME.to_string(), (*name).to_string()), 1, 1))
+        .collect::<Vec<_>>();
+    let tags = names
+        .iter()
+        .map(|_| vec!["tag_0".to_string()])
+        .collect::<Vec<_>>();
+    build_test_table_provider_with_tsid_tag_fields_and_ctx(
+        &specs,
+        &tags,
+        None,
+        &vec!["timestamp".to_string(); specs.len()],
+        prometheus_response_query_ctx(),
+    )
+    .await
+}
+
 async fn metric_discovery_provider(names: &[&str]) -> DfTableSourceProvider {
     let specs = names
         .iter()
@@ -2058,37 +2106,57 @@ async fn do_single_instant_function_call(fn_name: &'static str, plan_name: &str)
     assert_eq!(plan.display_indent_schema().to_string(), expected);
 }
 
-/// A discovered selector reports each series' identity as a `__name__` tag, and the operator
-/// decides whether that survives. The first case is the whole point of the feature: two metrics
-/// whose ordinary labels are equal are told apart by name alone.
+/// Whether a result carries the per-row name column follows the request, not the operator.
+///
+/// A discovered selector reports each series' identity as a `__name__` tag, so a response served
+/// from such a statement can name every row after its own metric. It declares that column only when
+/// the operator keeps the name: a range function, a math kernel and a folding aggregate report a
+/// value of their own and drop it, exactly as they do for a `__name__` label. A caller that is not a
+/// Prometheus response reports the statement's own columns and declares none of it.
 #[tokio::test]
-async fn native_metric_discovery_names_each_metric_where_the_operator_keeps_it() {
-    for (query, expected) in [
-        // The selection itself keeps the name.
+async fn native_name_column_follows_the_request() {
+    for (query, keeps_name) in [
+        // The selection itself keeps the name, and a filtering comparison reports the kept samples
+        // with their labels.
         ("{tag_0=\"x\"}", true),
-        // A filtering comparison reports the kept side's samples with their labels.
         ("{tag_0=\"x\"} > 0", true),
+        // Grouping by the name is how an aggregate keeps it.
+        ("sum by (__name__) ({tag_0=\"x\"})", true),
         // A range function, a math kernel and a folding aggregate all report values of their own.
         ("rate({tag_0=\"x\"}[5m])", false),
         ("abs({tag_0=\"x\"})", false),
         ("sum({tag_0=\"x\"})", false),
-        // Grouping by the name is how an aggregate keeps it.
-        ("sum by (__name__) ({tag_0=\"x\"})", true),
     ] {
-        let plan = build_native_fused_plan_with_provider(
+        let statement_plan = build_native_fused_plan_with_provider(
             query,
             true,
             metric_discovery_provider(&["alpha_total", "beta_total"]).await,
         )
         .await;
-        // The response layer reads the plan's own output schema, so that is what has to carry the
-        // name. For an aggregate the root is the finalize node, not the fused producer under it.
-        let has_name = plan
+        assert!(
+            !statement_plan
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == METRIC_NAME),
+            "{query}: a caller's own columns carry no name column: {statement_plan:?}"
+        );
+
+        let response_plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            metric_discovery_provider_for_response(&["alpha_total", "beta_total"]).await,
+        )
+        .await;
+        let declares = response_plan
             .schema()
             .fields()
             .iter()
             .any(|field| field.name() == METRIC_NAME);
-        assert_eq!(expected, has_name, "{query}: {plan:?}");
+        assert_eq!(
+            keeps_name, declares,
+            "{query}: an operator that keeps the name declares the column, one that drops it does not: {response_plan:?}"
+        );
     }
 }
 
@@ -3743,10 +3811,9 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
             "{query}"
         );
         // This pair route is not an aggregate route: it publishes the node's own field names.
-        // `or` reports the series of both sides, so its rows say each one's own name.
-        let expected = if query.contains(" or ") {
-            vec!["__name__", "field_0", "tag_0", "timestamp"]
-        } else if query.contains("on()") || query.contains("ignoring(tag_0)") {
+        // A caller's own columns: only a Prometheus response asks for the per-row name column, so
+        // the `or` query carries no `__name__` here.
+        let expected = if query.contains("on()") || query.contains("ignoring(tag_0)") {
             vec!["field_0", "timestamp"]
         } else {
             vec!["field_0", "tag_0", "timestamp"]
@@ -7804,14 +7871,14 @@ async fn or_operator_with_unknown_metric_does_not_require_tsid() {
     );
 }
 
-/// The native `or` reports the name of each side's rows through the `__name__` tag column, which
-/// its runtime resolves to the metric name of every series it reports.
+/// A Prometheus response names each row of an `or` after the side it came from: the plan declares
+/// the column, and the runtime answers it from the metric name of every series it reports.
 #[tokio::test]
-async fn native_or_declares_the_name_of_each_row() {
+async fn native_or_declares_the_name_of_each_row_for_a_response() {
     let plan = build_native_fused_plan_with_provider(
         "alpha_total or beta_total",
         true,
-        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+        metric_discovery_provider_for_response(&["alpha_total", "beta_total"]).await,
     )
     .await;
     assert!(find_fused_series(&plan).is_some(), "{plan:?}");
