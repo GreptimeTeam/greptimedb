@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::series::Label;
+use datatypes::series::aggregate_state::StatePayload;
 use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
@@ -1410,6 +1411,11 @@ fn to_layout(mut partial: PartialAggregate) -> PartialAggregate {
             .flat_map(|field| field.iter_mut())
             .flatten()
         {
+            // Only the numeric payload reaches this helper: `state_fields` describes numeric
+            // accumulators, and every state these folds produce is one.
+            let StatePayload::Float(state) = state else {
+                panic!("a numeric fold produced a histogram state")
+            };
             let mut stripped = AccumulatorState::default();
             for field in kept {
                 match field {
@@ -1532,7 +1538,7 @@ fn merge_charges_the_capacity_of_an_input_partial() {
         result.unwrap();
         peak
     };
-    let slack = 1023 * std::mem::size_of::<Option<AccumulatorState>>();
+    let slack = 1023 * std::mem::size_of::<Option<StatePayload>>();
     assert!(
         peak(spare) >= peak(partial).saturating_add(slack),
         "spare capacity was not admitted"
@@ -1950,10 +1956,10 @@ fn a_merge_rejects_state_that_does_not_fit() {
         vec![datatypes::series::time::GridSpan::new(200, 1)],
     )
     .unwrap();
-    late.groups[0].states[0] = vec![Some(AccumulatorState {
+    late.groups[0].states[0] = vec![Some(StatePayload::Float(AccumulatorState {
         value: 1.0,
         ..Default::default()
-    })];
+    }))];
     assert!(merger.merge(late).is_err());
     assert!(merger.finish().unwrap().is_empty());
 }

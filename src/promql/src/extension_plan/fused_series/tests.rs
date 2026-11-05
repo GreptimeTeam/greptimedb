@@ -65,7 +65,9 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::SessionContext;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent, StateSeries};
+use datatypes::series::aggregate_state::{
+    AggregateStateKind, StateComponent, StatePayload, StateSeries,
+};
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
     LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, pack_raw_series_chunk,
@@ -5068,7 +5070,9 @@ async fn a_constant_broadcast_prefix_exports_the_values_the_constant_computes() 
                     batch
                         .states
                         .first()
-                        .and_then(|field| field.get(position).copied().flatten())
+                        .and_then(|field| field.get(position))
+                        .and_then(|state| state.as_ref())
+                        .and_then(StatePayload::float)
                         .map(|state| state.value)
                 })
                 .collect::<Vec<_>>()
@@ -6670,7 +6674,11 @@ async fn histogram_split_routes_whole_state_batches_and_preserves_each_bound() {
                 .map(|state| {
                     (
                         state.metric.get("le").unwrap().to_string(),
-                        state.states[0][0].unwrap().value,
+                        state.states[0][0]
+                            .as_ref()
+                            .and_then(StatePayload::float)
+                            .unwrap()
+                            .value,
                     )
                 })
                 .collect();
