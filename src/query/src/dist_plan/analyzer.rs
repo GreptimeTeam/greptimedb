@@ -21,7 +21,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
-use datafusion_common::{Column, ScalarValue};
+use datafusion_common::{Column, DFSchema, ScalarValue};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
@@ -37,7 +37,8 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::{AggregateFinalize, FusedSeries, SeriesDivide};
+use promql::extension_plan::{FusedOutputFormat, FusedSeries, SeriesDivide};
+use promql::native::plan::{AggregateStage, NativeExpr, NativeType};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -115,9 +116,9 @@ pub struct DistPlannerAnalyzer {
     ///
     /// A region input normally has to be encoded to Substrait before it can leave the frontend, and
     /// [`PlanRewriter::should_expand`] cuts the plan at the first node that does not encode. In
-    /// process, a native fused plan (a `FusedSeries` node, or the `AggregateFinalize` merge over one)
-    /// travels as a `LogicalPlan` instead and skips that gate; other plans retain the ordinary
-    /// encoding checks.
+    /// process, a native fused plan (a `FusedSeries` node, or a `FusedSeries` pair reading a
+    /// `Partial` producer's state) travels as a `LogicalPlan` instead and skips that gate; other
+    /// plans retain the ordinary encoding checks.
     ///
     /// Whoever builds the query engine sets this, once, from the transport it wired. It is neither a
     /// query-time decision nor a property of a region.
@@ -447,7 +448,8 @@ enum RewriterStatus {
 struct PlanRewriter {
     /// Whether the whole plan encodes, allowing per-node checks to be skipped.
     whole_plan_encodable: bool,
-    /// In-process root shapes can contain AggregateFinalize, which has no Substrait serializer.
+    /// In-process root shapes can contain the `Final` half of a split aggregate, which reads every
+    /// partition's state and so has no Substrait serializer.
     skip_in_process_encodability: bool,
     /// Whether an in-process root fused plan was recognized for placement-gate evaluation.
     in_process_fused_root: bool,
@@ -572,40 +574,57 @@ fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
 }
 
 /// Whether `plan` is the native route's whole plan: a `FusedSeries` node over its scan, or the
-/// `AggregateFinalize` merge of exactly such a node's partition-local state.
+/// `Final` half of a split aggregate over the `Partial` half that reads such a scan.
 ///
-/// The merge is the one shape that puts a node above the fused producer: it runs on the frontend over
-/// the state every partition exports, and the producer below it still reads its own scan. Every other
-/// plan keeps the ordinary encoding checks.
+/// The split is the one shape that puts a node above the fused producer: the `Final` half runs on the
+/// frontend over the state every partition exported, and the `Partial` half below it still reads its
+/// own scan. Every other plan keeps the ordinary encoding checks.
 ///
-/// The producer is checked by what it exports, not only by its node kind: a `FusedSeries` that
-/// answers with computed values is not a merge input, and merging those values as if they were
-/// partitions' contributions would report one partition's answer as the whole group's. The check is
-/// not implied by the constructor either — `with_exprs_and_inputs` hands a node whatever input an
-/// optimizer rebuilt, so a merge can hold a replacement producer its own constructor never saw.
+/// The exception applies only when the outer node reads aggregate state, and its inner producer is
+/// a `SeriesFrame` over one table scan whose root is a `Partial` aggregate producing
+/// `AggregateState`. A `SeriesFrame` can also contain evaluated values, so its format and input
+/// shape alone do not establish that it exports state.
+///
+/// One wrapper may sit above the root: the projection that publishes a statement's own column names
+/// over a node whose internal fields are the metric's. It counts only when every expression is a
+/// column or an alias of one, and only one such wrapper is allowed - a computed expression or a
+/// second projection is an ordinary plan and keeps the encoding checks.
 fn is_in_process_plan(plan: &LogicalPlan) -> bool {
-    if is_fused_series_plan(plan) {
+    let (root, projected) = match plan {
+        LogicalPlan::Projection(projection) => (projection.input.as_ref(), Some(projection)),
+        _ => (plan, None),
+    };
+    if let Some(projection) = projected
+        && (matches!(projection.input.as_ref(), LogicalPlan::Projection(_))
+            || projection.expr.iter().any(|expr| match expr {
+                Expr::Column(_) => false,
+                Expr::Alias(alias) => !matches!(alias.expr.as_ref(), Expr::Column(_)),
+                _ => true,
+            }))
+    {
+        return false;
+    }
+    let LogicalPlan::Extension(extension) = root else {
+        return false;
+    };
+    let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>() else {
+        return false;
+    };
+    if !fused.reads_aggregate_state() {
+        // A node reading its own scans is the route's whole plan by itself: one scan, or the
+        // same-table one-to-one pair the route admits over two.
         return true;
     }
-    let LogicalPlan::Extension(extension) = plan else {
+    let [LogicalPlan::Extension(partial)] = fused.children() else {
         return false;
     };
-    if !extension.node.as_any().is::<AggregateFinalize>() {
-        return false;
-    }
-    // The merge's own child, as this rewrite walks it: the producer over its scan.
-    let inputs = extension.node.inputs();
-    let [LogicalPlan::Extension(partial)] = inputs.as_slice() else {
+    let Some(partial) = partial.node.as_any().downcast_ref::<FusedSeries>() else {
         return false;
     };
-    let Some(fused) = partial.node.as_any().downcast_ref::<FusedSeries>() else {
-        return false;
-    };
-    fused.partial_fold().is_some()
-        && matches!(
-            partial.node.inputs().as_slice(),
-            [LogicalPlan::TableScan(_)]
-        )
+    partial.format() == FusedOutputFormat::SeriesFrame
+        && matches!(partial.children(), [LogicalPlan::TableScan(_)])
+        && matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial)
+        && matches!(&partial.tree().root().output, NativeType::AggregateState(_))
 }
 
 impl PlanRewriter {
@@ -958,6 +977,24 @@ impl PlanRewriter {
                 .with_new_exprs(new_stage.expressions_consider_join(), vec![node.clone()])?;
         }
         self.set_expanded();
+
+        // Extra columns introduced for distributed operations may need to be removed. A complete
+        // frame that already has the required schema must not go through column projection: its
+        // declaration is schema metadata. Ordinary SQL keeps its existing identity projection.
+        let has_frame_metadata = |schema: &DFSchema| {
+            schema
+                .metadata()
+                .keys()
+                .any(|key| key.starts_with("greptime.series."))
+        };
+        if node.schema() == &schema && has_frame_metadata(schema.as_ref()) {
+            return Ok(node);
+        }
+        if has_frame_metadata(schema.as_ref()) || has_frame_metadata(node.schema().as_ref()) {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "distributed schema recovery cannot project a series frame".into(),
+            ));
+        }
 
         // recover the schema, this make sure after expand the schema is the same as old node
         // because after expand the raw top node might have extra columns i.e. sorting columns for `Sort` node

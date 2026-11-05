@@ -16,13 +16,11 @@
 //! is keyed by absolute grid index, never by local row number; sparse state and trimmed output
 //! do not expand the full grid.
 
-mod state;
+pub(crate) mod state;
 #[cfg(test)]
 mod tests;
 
-pub use state::{
-    AccumulatorState, FloatMerger, PartialAggregate, PartialGroup, StateField, merge_count_values,
-};
+pub use state::{AccumulatorState, FloatMerger, PartialAggregate, StateField, merge_count_values};
 
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
