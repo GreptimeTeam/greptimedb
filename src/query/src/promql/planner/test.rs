@@ -9755,6 +9755,10 @@ async fn presence_and_order_aggregates_fold_histograms_natively() {
     for query in [
         "sum(some_metric)",
         "avg(some_metric)",
+        // `quantile` has no kernel in this runtime: the admission check lets it through and the
+        // runtime's own construction refuses it, which keeps the statement on the plan it had
+        // rather than making it count or skip histogram samples here.
+        "quantile(0.9, some_metric)",
         // A skipping or counting aggregate at the root does not excuse the payload-folding one
         // below it: `sum` still has no histogram state to fold into.
         "count(sum(some_metric))",
