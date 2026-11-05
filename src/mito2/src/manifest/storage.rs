@@ -846,4 +846,243 @@ mod tests {
             .unwrap();
         assert!(entries.is_empty());
     }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CacheSource {
+        WriteThrough,
+        RemoteFill,
+        LegacyDecoded,
+        Truncated,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum PayloadKind {
+        Delta,
+        Checkpoint { checksum: bool },
+    }
+
+    // Exercise both representations left by older versions, as well as new writes
+    // and remote fills. Truncation only applies to compression envelopes.
+    #[rstest::rstest]
+    #[case::write_through_uncompressed(CacheSource::WriteThrough, CompressionType::Uncompressed)]
+    #[case::write_through_gzip(CacheSource::WriteThrough, CompressionType::Gzip)]
+    #[case::write_through_zstd(CacheSource::WriteThrough, CompressionType::Zstd)]
+    #[case::write_through_xz(CacheSource::WriteThrough, CompressionType::Xz)]
+    #[case::write_through_bzip2(CacheSource::WriteThrough, CompressionType::Bzip2)]
+    #[case::remote_fill_uncompressed(CacheSource::RemoteFill, CompressionType::Uncompressed)]
+    #[case::remote_fill_gzip(CacheSource::RemoteFill, CompressionType::Gzip)]
+    #[case::remote_fill_zstd(CacheSource::RemoteFill, CompressionType::Zstd)]
+    #[case::remote_fill_xz(CacheSource::RemoteFill, CompressionType::Xz)]
+    #[case::remote_fill_bzip2(CacheSource::RemoteFill, CompressionType::Bzip2)]
+    #[case::legacy_decoded_uncompressed(CacheSource::LegacyDecoded, CompressionType::Uncompressed)]
+    #[case::legacy_decoded_gzip(CacheSource::LegacyDecoded, CompressionType::Gzip)]
+    #[case::legacy_decoded_zstd(CacheSource::LegacyDecoded, CompressionType::Zstd)]
+    #[case::legacy_decoded_xz(CacheSource::LegacyDecoded, CompressionType::Xz)]
+    #[case::legacy_decoded_bzip2(CacheSource::LegacyDecoded, CompressionType::Bzip2)]
+    #[case::truncated_gzip(CacheSource::Truncated, CompressionType::Gzip)]
+    #[case::truncated_zstd(CacheSource::Truncated, CompressionType::Zstd)]
+    #[case::truncated_xz(CacheSource::Truncated, CompressionType::Xz)]
+    #[case::truncated_bzip2(CacheSource::Truncated, CompressionType::Bzip2)]
+    #[tokio::test]
+    async fn test_manifest_cache_payload(
+        #[case] source: CacheSource,
+        #[case] compression: CompressionType,
+        #[values(PayloadKind::Delta, PayloadKind::Checkpoint { checksum: false }, PayloadKind::Checkpoint { checksum: true })]
+        payload: PayloadKind,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use common_base::readable_size::ReadableSize;
+        use object_store::layers::mock::MockLayerBuilder;
+
+        let remote_dir = create_temp_dir("manifest-cache-remote");
+        let cache_dir = create_temp_dir("manifest-cache-local");
+        let remote =
+            ObjectStore::new(Fs::default().root(remote_dir.path().to_str().unwrap())).unwrap();
+        let local =
+            ObjectStore::new(Fs::default().root(cache_dir.path().to_str().unwrap())).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let remote = remote.layer(
+            MockLayerBuilder::default()
+                .reader_factory(Arc::new(move |_, _, reader| {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    reader
+                }))
+                .build()
+                .unwrap(),
+        );
+        let mut cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
+        let mut store = ManifestObjectStore::new(
+            "region/manifest/",
+            remote.clone(),
+            compression,
+            Default::default(),
+            (source != CacheSource::RemoteFill).then(|| cache.clone()),
+        );
+        let data = br#"{"manifest":"persistent cache payload"}"#;
+        let key = gen_path(
+            "region/manifest/",
+            &if matches!(payload, PayloadKind::Checkpoint { .. }) {
+                checkpoint_file(3)
+            } else {
+                delta_file(3)
+            },
+            compression,
+        );
+        if matches!(payload, PayloadKind::Checkpoint { .. }) {
+            store.save_checkpoint(3, data).await.unwrap();
+        } else {
+            store.save(3, data, false).await.unwrap();
+        }
+        let encoded = remote.read(&key).await.unwrap().to_vec();
+        if source == CacheSource::LegacyDecoded {
+            cache.put_file(key.clone(), data.to_vec()).await;
+        } else if source == CacheSource::Truncated {
+            cache
+                .put_file(key.clone(), encoded[..encoded.len() / 2].to_vec())
+                .await;
+        }
+        drop(store);
+        for iteration in 0..2 {
+            drop(cache);
+            cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
+            if source != CacheSource::RemoteFill || iteration > 0 {
+                assert!(
+                    cache.get(&key).await.is_some(),
+                    "cache recovery missed {key}"
+                );
+            }
+            store = ManifestObjectStore::new(
+                "region/manifest/",
+                remote.clone(),
+                compression,
+                Default::default(),
+                Some(cache.clone()),
+            );
+            let before = reads.load(Ordering::Relaxed);
+            let actual = if let PayloadKind::Checkpoint { checksum } = payload {
+                let metadata = CheckpointMetadata {
+                    size: data.len(),
+                    version: 3,
+                    checksum: checksum.then(|| checkpoint_checksum(data)),
+                    extend_metadata: Default::default(),
+                };
+                store
+                    .checkpoint_storage
+                    .load_checkpoint(metadata)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            } else {
+                let mut deltas = store.fetch_manifests(3, 4).await.unwrap();
+                assert_eq!(1, deltas.len());
+                deltas.remove(0)
+            };
+            assert_eq!((3, data.to_vec()), actual);
+            // A successful roundtrip alone could hide a decoded refill that causes
+            // repeated cache misses. Check both the bytes and remote read count.
+            assert_eq!(encoded, cache.get_file(&key).await.unwrap());
+            let must_refill = iteration == 0
+                && (source == CacheSource::RemoteFill
+                    || (compression != CompressionType::Uncompressed
+                        && (source == CacheSource::LegacyDecoded
+                            || source == CacheSource::Truncated)));
+            assert_eq!(
+                usize::from(must_refill),
+                reads.load(Ordering::Relaxed) - before
+            );
+            drop(store);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::checksum(false)]
+    #[case::decompression(true)]
+    #[tokio::test]
+    async fn test_manifest_cache_corrupted_remote(#[case] invalid_encoding: bool) {
+        use crate::error::Error;
+        use common_base::readable_size::ReadableSize;
+
+        let remote_dir = create_temp_dir("manifest-cache-remote");
+        let cache_dir = create_temp_dir("manifest-cache-local");
+        let remote =
+            ObjectStore::new(Fs::default().root(remote_dir.path().to_str().unwrap())).unwrap();
+        let local =
+            ObjectStore::new(Fs::default().root(cache_dir.path().to_str().unwrap())).unwrap();
+        let cache = ManifestCache::new(local, ReadableSize::mb(32), None, true).await;
+        let mut store = ManifestObjectStore::new(
+            "region/",
+            remote.clone(),
+            CompressionType::Gzip,
+            Default::default(),
+            Some(cache.clone()),
+        );
+        store.save_checkpoint(3, b"checkpoint").await.unwrap();
+        let key = gen_path("region/", &checkpoint_file(3), CompressionType::Gzip);
+        let corrupted = if invalid_encoding {
+            b"invalid gzip".to_vec()
+        } else {
+            CompressionType::Gzip
+                .encode(b"other".as_slice())
+                .await
+                .unwrap()
+        };
+        remote.write(&key, corrupted).await.unwrap();
+        // A legacy decoded cache entry must not hide the remote error on refill.
+        cache.put_file(key.clone(), b"checkpoint".to_vec()).await;
+        let error = store.load_last_checkpoint().await.unwrap_err();
+        if invalid_encoding {
+            assert!(matches!(error, Error::DecompressObject { .. }), "{error}");
+        } else {
+            assert!(matches!(error, Error::ChecksumMismatch { .. }), "{error}");
+        }
+        assert!(cache.get(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_cache_uncompressed_fallback() {
+        use common_base::readable_size::ReadableSize;
+
+        let remote_dir = create_temp_dir("manifest-cache-remote");
+        let cache_dir = create_temp_dir("manifest-cache-local");
+        let remote =
+            ObjectStore::new(Fs::default().root(remote_dir.path().to_str().unwrap())).unwrap();
+        let local =
+            ObjectStore::new(Fs::default().root(cache_dir.path().to_str().unwrap())).unwrap();
+        let cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
+        let store = ManifestObjectStore::new(
+            "region/",
+            remote.clone(),
+            CompressionType::Uncompressed,
+            Default::default(),
+            Some(cache.clone()),
+        );
+        store.save_checkpoint(3, b"checkpoint").await.unwrap();
+        drop(store);
+        drop(cache);
+        let cache = ManifestCache::new(local, ReadableSize::mb(32), None, true).await;
+        assert!(
+            cache
+                .get("region/00000000000000000003.checkpoint")
+                .await
+                .is_some()
+        );
+        // Keep _last_checkpoint, but remove its payload to prove the fallback hit.
+        remote
+            .delete("region/00000000000000000003.checkpoint")
+            .await
+            .unwrap();
+        let mut store = ManifestObjectStore::new(
+            "region/",
+            remote,
+            CompressionType::Gzip,
+            Default::default(),
+            Some(cache),
+        );
+        assert_eq!(
+            Some((3, b"checkpoint".to_vec())),
+            store.load_last_checkpoint().await.unwrap()
+        );
+    }
 }
