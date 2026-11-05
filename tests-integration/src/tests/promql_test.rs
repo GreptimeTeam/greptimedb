@@ -3040,26 +3040,27 @@ fn canonical_merge_fixture_inserts(prefix: &str) -> String {
 }
 
 /// The rows a collapsing rewrite can only reject: the second series is two minutes after the first,
-/// inside the lookback, so both hold a value at the same evaluation point while a time partition puts
-/// them in different regions.
+/// inside the lookback, so both hold a value at the same evaluation point while the declared partition
+/// column stores the two hosts under values that place them in different regions.
 fn canonical_collision_fixture_inserts(prefix: &str) -> String {
     format!("INSERT INTO {prefix}_c (host, val, ts) VALUES ('early', 10, 0), ('late', 20, 120000)")
 }
 
-/// Real two-datanode TCP acceptance for a canonical merge over a time-partitioned metric table.
+/// Real two-datanode TCP acceptance for a canonical merge over a tag-partitioned metric table.
 ///
-/// A rewrite that writes a label its input carries can give two stored series one label set, and a
-/// time partition then puts the pieces of that label set in different regions. A region-local
-/// producer merges only the pieces its own region holds, so the boundary has to be placed above the
-/// regions: the frontend runs the producer over the reconciled raw sources, and the canonical router
-/// it inserts above itself collects each label set from every region.
+/// A rewrite that writes a label its input carries can give two stored series one label set. The two
+/// series are stored under different values of the declared partition column, so that partition puts
+/// the pieces of the one label set in different regions: no region holds the set whole. A
+/// region-local producer merges only the pieces its own region holds, so the boundary has to be
+/// placed above the regions: the frontend runs the producer over the reconciled raw sources, and the
+/// canonical router it inserts above itself collects each label set from every region.
 ///
 /// The test states that in the three ways it can be observed: the values (against the same rows in
 /// one unpartitioned table), the plan (the producer is a frontend node reading a merge scan, with its
 /// canonical router above it), and the error (a collision two different regions hold is reported,
 /// which no single region could see).
 #[tokio::test(flavor = "multi_thread")]
-async fn distributed_native_promql_canonical_merge_over_time_partitioned_table() {
+async fn distributed_native_promql_canonical_merge_over_partitioned_table() {
     common_telemetry::init_default_ut_logging();
     let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_canonical")
         .await
@@ -3075,7 +3076,7 @@ async fn distributed_native_promql_canonical_merge_over_time_partitioned_table()
     let instance = cluster.fe_instance().clone();
     execute_all(
         &instance,
-        "CREATE TABLE dist_native_canon_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:00', ts >= '1970-01-01 00:02:00' AND ts < '1970-01-01 00:04:00', ts >= '1970-01-01 00:04:00') ENGINE=metric WITH ('physical_metric_table'='true')",
+        "CREATE TABLE dist_native_canon_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (host) (host < 'first', host >= 'first' AND host < 'second', host >= 'second') ENGINE=metric WITH ('physical_metric_table'='true')",
         QueryContext::arc(),
     )
     .await;
@@ -3134,8 +3135,8 @@ async fn distributed_native_promql_canonical_merge_over_time_partitioned_table()
     .await;
 
     // Two stored series rewritten to one label set, holding their values at different evaluation
-    // points, are one series carrying both points - and the pieces they were made of are in the first
-    // and the last time partition.
+    // points, are one series carrying both points - and the hosts they are stored under land in
+    // different host ranges, so the two pieces are in different regions.
     let expression = r#"label_replace(dist_native_canon_b, "host", "same", "host", ".*")"#;
     let query = PromQuery {
         query: expression.to_string(),
@@ -3180,15 +3181,19 @@ async fn distributed_native_promql_canonical_merge_over_time_partitioned_table()
     assert_eq!(
         shape.regions_per_scan,
         vec![3],
-        "the selector reads all three time partitions: {expression}: {plan:?}"
+        "the selector reads all three host ranges: {expression}: {plan:?}"
     );
+    // Declaring a partition on a primary-key column that is not the time index proves the regions
+    // hold disjoint series, so the merge scan publishes them whole and the boundary above the
+    // regions only ever sees complete stored series.
     assert!(
         shape
             .scan_orderings
             .iter()
-            .all(|ordering| ordering.as_deref() == Some("interleaved")),
-        "the merge scan publishes raw fragments, which is the boundary the producer has to read \
-         above: {expression}: {:?}: {plan:?}",
+            .all(|ordering| ordering.as_deref() == Some("contiguous")),
+        "a declared partition on a primary-key column that excludes the time index proves the \
+         regions hold disjoint series (physical_regions_disjoint), so the merge scan publishes \
+         whole series, not fragments: {expression}: {:?}: {plan:?}",
         shape.scan_orderings
     );
     // The boundary's two halves are both frontend nodes: the producer merges what each execution
@@ -3208,8 +3213,8 @@ async fn distributed_native_promql_canonical_merge_over_time_partitioned_table()
                  own producer: {expression}: {plan:?}"
             )
         });
-    // What the producer reads is the reconciled raw source: a merge scan over every region, with the
-    // fragments of each series collected below the producer rather than by it.
+    // What the producer reads is every region's own stored series, each already whole: one merge
+    // scan over all three regions, with no raw-key repartition below it.
     let below_producer = native_plan_nodes(&producer);
     assert!(
         below_producer
@@ -3220,9 +3225,10 @@ async fn distributed_native_promql_canonical_merge_over_time_partitioned_table()
     assert!(
         below_producer
             .iter()
-            .any(|node| node.name() == "SeriesRepartitionExec"),
-        "the fragments of each series are reconciled below the producer, so each input partition \
-         holds whole series: {expression}: {plan:?}"
+            .all(|node| node.name() != "SeriesRepartitionExec"),
+        "no raw-key repartition sits below the producer: each input partition already holds whole \
+         stored series, since the partition covers the primary key and only the label set crosses \
+         regions: {expression}: {plan:?}"
     );
     // The router is the boundary's middle stage: it sits above the producer and collects each label
     // set from every partition the producer ran on, which is what a region-local boundary cannot do.
