@@ -52,7 +52,14 @@ use crate::worker::{RegionWorkerLoop, WorkerListener};
 
 pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
 
-/// A queue for region edit requests received while the region is already `Editing`.
+/// Outcome of admitting a region edit, independent of subsequent region role changes.
+pub(crate) enum RegionEditDispatch {
+    Started,
+    Queued,
+    Rejected,
+}
+
+/// A queue for region edits waiting behind an active edit or ALTER.
 ///
 /// Normal writes and bulk inserts that arrive during `Editing` use the stalled-write queue instead.
 /// When an edit completes, those writes are handled before the next queued edit starts, preserving
@@ -74,7 +81,7 @@ impl RegionEditQueue {
         }
     }
 
-    fn enqueue(&mut self, request: RegionEditRequest) {
+    fn enqueue(&mut self, request: RegionEditRequest) -> RegionEditDispatch {
         if self.requests.len() > Self::QUEUE_MAX_LEN {
             request.waiters.reply_with(|| {
                 RegionBusySnafu {
@@ -82,9 +89,10 @@ impl RegionEditQueue {
                 }
                 .fail()
             });
-            return;
+            return RegionEditDispatch::Rejected;
         };
         self.requests.push_back(request);
+        RegionEditDispatch::Queued
     }
 
     fn dequeue(&mut self) -> Option<RegionEditRequest> {
@@ -292,14 +300,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Handles region edit request.
-    pub(crate) fn handle_region_edit(&mut self, request: RegionEditRequest) {
+    /// Admits an edit and reports whether it started, queued, or failed synchronously.
+    pub(crate) fn handle_region_edit(&mut self, request: RegionEditRequest) -> RegionEditDispatch {
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
             request
                 .waiters
                 .reply_with(|| RegionNotFoundSnafu { region_id }.fail());
-            return;
+            return RegionEditDispatch::Rejected;
         };
 
         if !region.is_writable() || self.flush_scheduler.has_pending_alter(region_id) {
@@ -308,7 +316,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 RegionRoleState::Leader(RegionLeaderState::Editing | RegionLeaderState::Altering)
             ) || (region.is_writable() && self.flush_scheduler.has_pending_alter(region_id))
             {
-                self.region_edit_queues
+                return self
+                    .region_edit_queues
                     .entry(region_id)
                     .or_insert_with(|| RegionEditQueue::new(region_id))
                     .enqueue(request);
@@ -317,7 +326,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .waiters
                     .reply_with(|| RegionBusySnafu { region_id }.fail());
             }
-            return;
+            return RegionEditDispatch::Rejected;
         }
 
         let RegionEditRequest {
@@ -350,7 +359,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if let Err(e) = region.set_editing(expect_state) {
             let e = Arc::new(e);
             waiters.reply_with(|| Err(e.clone()).context(EditRegionSnafu { region_id }));
-            return;
+            return RegionEditDispatch::Rejected;
         }
         region.version_control.update_last_sequence(file_sequence);
 
@@ -394,6 +403,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 );
             }
         });
+        RegionEditDispatch::Started
     }
 
     /// Handles region edit result.
@@ -511,14 +521,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let Some(request) = next_request else {
                 return;
             };
-            self.handle_region_edit(request);
-            if self.regions.get_region(region_id).is_some_and(|region| {
-                region.state() == RegionRoleState::Leader(RegionLeaderState::Editing)
-            }) {
-                return;
+            // Start at most one edit batch per turn. Started and queued requests
+            // rely on a completion notification to resume dispatch. Only synchronous
+            // rejections continue: they produce no notification, so stopping would
+            // strand the remaining waiters. Use the admission outcome rather than
+            // rereading region state, which can race with a role change.
+            match self.handle_region_edit(request) {
+                RegionEditDispatch::Started | RegionEditDispatch::Queued => return,
+                RegionEditDispatch::Rejected => continue,
             }
-            // A role change can reject dispatch synchronously. Drain the remaining
-            // waiters rather than leaving them without a completion notification.
         }
     }
 
