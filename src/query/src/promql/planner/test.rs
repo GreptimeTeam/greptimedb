@@ -4875,9 +4875,10 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
     else {
         unreachable!()
     };
+    let query_engine_state = build_query_engine_state();
     for operand in [&binary.lhs, &binary.rhs] {
         let (_, context) = planner
-            .try_plan_native_operand(operand)
+            .try_plan_native_operand(operand, &query_engine_state)
             .await
             .unwrap()
             .expect("each histogram call is admitted as one native operand");
