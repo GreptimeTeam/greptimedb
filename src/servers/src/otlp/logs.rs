@@ -48,9 +48,8 @@ use crate::error::{
 };
 use crate::http::event::PipelineIngestRequest;
 use crate::otlp::coerce::{coerce_value_data, is_supported_signed_to_unsigned_coercion};
-use crate::otlp::trace::KEY_SERVICE_NAME;
 use crate::otlp::trace::attributes::OtlpAnyValue;
-use crate::otlp::utils::{bytes_to_hex_string, key_value_to_jsonb};
+use crate::otlp::utils::{bytes_to_hex_string, key_value_to_jsonb, resource_service_name};
 use crate::pipeline::run_pipeline;
 use crate::query_handler::PipelineHandlerRef;
 
@@ -546,19 +545,6 @@ fn extracted_service_name(attrs: &JsonbValue) -> Result<Option<String>> {
         .map(|value| scalar_attr_to_string(SERVICE_NAME_COLUMN, value))
         .transpose()
         .map(Option::flatten)
-}
-
-/// Reads the `service.name` resource attribute. A non-scalar value is left out
-/// of `service_name` rather than failing the write; it stays in
-/// `resource_attributes`.
-fn resource_service_name(resource_attr: &JsonbValue) -> Option<String> {
-    let JsonbValue::Object(attrs) = resource_attr else {
-        return None;
-    };
-    let value = attrs.get(KEY_SERVICE_NAME)?.clone();
-    scalar_attr_to_string(KEY_SERVICE_NAME, value)
-        .ok()
-        .flatten()
 }
 
 fn scalar_attr_to_string(name: &str, value: JsonbValue) -> Result<Option<String>> {
@@ -1065,10 +1051,16 @@ fn parse_resource(
     let mut results = Vec::with_capacity(total_len);
 
     for r in resource_logs_vec {
-        parse_ctx.resource_attr = r
-            .resource
-            .map(|resource| key_value_to_jsonb(resource.attributes))
-            .unwrap_or(JsonbValue::Null);
+        let mut resource_service = None;
+        parse_ctx.resource_attr = match r.resource {
+            Some(resource) => {
+                if parse_ctx.v1_schema {
+                    resource_service = resource_service_name(&resource.attributes);
+                }
+                key_value_to_jsonb(resource.attributes)
+            }
+            None => JsonbValue::Null,
+        };
 
         parse_ctx.resource_url = r.schema_url;
         if parse_ctx.v1_schema {
@@ -1077,8 +1069,7 @@ fn parse_resource(
             } else {
                 None
             };
-            parse_ctx.resource_service_name =
-                extracted.or_else(|| resource_service_name(&parse_ctx.resource_attr));
+            parse_ctx.resource_service_name = extracted.or(resource_service);
         }
 
         parse_ctx.resource_uplift_values = extract_field_from_attr_and_combine_schema(
@@ -1330,6 +1321,7 @@ mod tests {
     use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 
     use super::*;
+    use crate::otlp::trace::KEY_SERVICE_NAME;
 
     fn time_column(datatype: ConcreteDataType) -> DatatypesColumnSchema {
         DatatypesColumnSchema::new("timestamp", datatype, false).with_time_index(true)
@@ -1501,16 +1493,16 @@ mod tests {
             Some(ValueData::StringValue("checkout".to_string()))
         );
         assert_eq!(
-            value_at(&rows, 0, "event_name"),
+            value_at(&rows, 0, EVENT_NAME_COLUMN),
             Some(ValueData::StringValue("gen_ai.choice".to_string()))
         );
         assert_eq!(
-            value_at(&rows, 0, "observed_timestamp"),
+            value_at(&rows, 0, OBSERVED_TIMESTAMP_COLUMN),
             Some(ValueData::TimestampNanosecondValue(2_000))
         );
         // Empty event name and zero observed time mean "absent" in OTLP.
-        assert_eq!(value_at(&rows, 1, "event_name"), None);
-        assert_eq!(value_at(&rows, 1, "observed_timestamp"), None);
+        assert_eq!(value_at(&rows, 1, EVENT_NAME_COLUMN), None);
+        assert_eq!(value_at(&rows, 1, OBSERVED_TIMESTAMP_COLUMN), None);
     }
 
     #[test]
@@ -1840,7 +1832,11 @@ mod tests {
             SemanticType::Field as i32
         );
         // Unmarked existing tables keep the legacy columns.
-        for column in [SERVICE_NAME_COLUMN, "event_name", "observed_timestamp"] {
+        for column in [
+            SERVICE_NAME_COLUMN,
+            EVENT_NAME_COLUMN,
+            OBSERVED_TIMESTAMP_COLUMN,
+        ] {
             assert!(
                 rows.schema
                     .iter()

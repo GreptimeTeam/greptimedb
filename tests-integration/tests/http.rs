@@ -11302,20 +11302,27 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         // The built-in `service_name` comes from the resource `service.name`, and log
         // tables declare no entity.
         let table_name = "otlp_logs_semantic";
-        let mut req = make_log_request(vec![make_log_record(
+        let now_nanos = common_time::util::current_time_millis() * 1_000_000;
+        let mut record = make_log_record(
             "00000000000000000000000000000005",
             "0000000000000005",
-            common_time::util::current_time_millis() * 1_000_000,
+            now_nanos,
             "semantic layer",
             vec![],
-        )]);
+        );
+        record["eventName"] = json!("checkout.completed");
+        record["observedTimeUnixNano"] = json!((now_nanos + 1).to_string());
+        let mut req = make_log_request(vec![record]);
         req.resource_logs[0].resource.as_mut().unwrap().attributes =
             serde_json::from_value(json!([
                 {"key": "service.name", "value": {"stringValue": "checkout"}}
             ]))
             .unwrap();
-        let res = send_log_req(&client, table_name, None, req, false).await;
-        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+        // The first write creates the v1 table; the second reads its marker back.
+        for _ in 0..2 {
+            let res = send_log_req(&client, table_name, None, req.clone(), false).await;
+            assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+        }
 
         validate_data(
             "otlp_logs_semantic_table_semantics",
@@ -11326,11 +11333,12 @@ pub async fn test_otlp_logs(store_type: StorageType) {
             r#"[["log","opentelemetry","greptime_log_v1",null]]"#,
         )
         .await;
+        let row = format!(r#"["checkout","checkout.completed",{}]"#, now_nanos + 1);
         validate_data(
-            "otlp_logs_semantic_service_name",
+            "otlp_logs_semantic_v1_columns",
             &client,
-            &format!("select service_name from {table_name};"),
-            r#"[["checkout"]]"#,
+            &format!("select service_name, event_name, observed_timestamp from {table_name};"),
+            &format!("[{row},{row}]"),
         )
         .await;
     }
