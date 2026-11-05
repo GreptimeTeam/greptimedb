@@ -16,12 +16,14 @@ mod metadata;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::str::FromStr;
 
 use api::v1::ExpireAfter;
 use api::v1::flow::flow_request::Body as PbFlowRequest;
 use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use common_base::readable_size::ReadableSize;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
@@ -466,6 +468,14 @@ pub fn get_flow_type_from_options(flow_task: &CreateFlowTask) -> Result<FlowType
 /// The flow option key for creating pending flow metadata when source tables do not exist.
 pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 
+/// The flow option key for the maximum memory one Flow's query execution may use.
+///
+/// The value is a [`ReadableSize`] string such as `"512MB"` (binary units, so
+/// `512MB` == 536870912 bytes), interpreted as the memory budget of this Flow's
+/// query execution. The parsed byte budget is persisted with the flow options
+/// and carried with every query the flow executes.
+pub const FLOW_MAX_MEMORY_OPTION_KEY: &str = "max_memory";
+
 /// Internal transient key used to pass the typed `EVAL OFFSET` (whole seconds)
 /// from the operator to meta through `CreateFlowExpr.flow_options`. Inserted by
 /// the operator only after user option validation; parsed and stripped by
@@ -556,11 +566,12 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         match key.as_str() {
             DEFER_ON_MISSING_SOURCE_KEY
             | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY
+            | FLOW_MAX_MEMORY_OPTION_KEY
             | FlowType::FLOW_TYPE_KEY => {}
             unknown => {
                 return InvalidFlowOptionSnafu {
                     err_msg: format!(
-                        "unknown flow option '{unknown}', supported options: {DEFER_ON_MISSING_SOURCE_KEY}, {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}"
+                        "unknown flow option '{unknown}', supported options: {DEFER_ON_MISSING_SOURCE_KEY}, {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}, {FLOW_MAX_MEMORY_OPTION_KEY}"
                     ),
                 }
                 .fail();
@@ -583,8 +594,42 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         })?;
     }
 
+    if let Some(value) = flow_task.flow_options.get(FLOW_MAX_MEMORY_OPTION_KEY) {
+        let bytes = ReadableSize::from_str(value).map_err(|_| {
+            InvalidFlowOptionSnafu {
+                err_msg: format!(
+                    "Invalid flow option '{FLOW_MAX_MEMORY_OPTION_KEY}': {value}, expect a size like '512MB'"
+                ),
+            }
+            .build()
+        })?;
+        if bytes.as_bytes() == 0 {
+            return InvalidFlowOptionSnafu {
+                err_msg: format!(
+                    "Invalid flow option '{FLOW_MAX_MEMORY_OPTION_KEY}': {value}, the memory budget must be positive"
+                ),
+            }
+            .fail();
+        }
+    }
+
     defer_on_missing_source(flow_task)?;
-    get_flow_type_from_options(flow_task)?;
+    let flow_type = get_flow_type_from_options(flow_task)?;
+    // The memory budget is only enforced on the batching execution path, and
+    // streaming flows ignore `flow_options` entirely (see
+    // `src/flow/src/adapter.rs`), so accepting it there would be a silent no-op.
+    if flow_type == FlowType::Streaming
+        && flow_task
+            .flow_options
+            .contains_key(FLOW_MAX_MEMORY_OPTION_KEY)
+    {
+        return InvalidFlowOptionSnafu {
+            err_msg: format!(
+                "flow option '{FLOW_MAX_MEMORY_OPTION_KEY}' is only supported for batching flows"
+            ),
+        }
+        .fail();
+    }
     Ok(())
 }
 

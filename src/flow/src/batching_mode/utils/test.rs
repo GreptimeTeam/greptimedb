@@ -934,6 +934,7 @@ async fn test_validate_sink_table_schema_rejects_existing_sink_missing_flow_colu
         batch_opts: Arc::new(BatchingModeOptions::default()),
         flow_eval_interval: None,
         eval_schedule: None,
+        max_memory_bytes: None,
     })
     .unwrap();
 

@@ -163,6 +163,10 @@ pub struct TaskConfig {
     pub flow_eval_interval: Option<Duration>,
     /// Typed schedule configuration, pre-parsed at task creation time.
     pub eval_schedule: Option<EvalSchedule>,
+    /// Resolved per-flow memory budget in bytes, parsed from the flow's
+    /// `max_memory` option at creation time. Carried to the frontend as the
+    /// `flow.max_memory_bytes` extension with every query this task issues.
+    pub max_memory_bytes: Option<u64>,
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -316,6 +320,9 @@ pub struct TaskArgs<'a> {
     pub flow_eval_interval: Option<Duration>,
     /// Typed schedule configuration pre-parsed from `CreateFlowArgs`.
     pub eval_schedule: Option<EvalSchedule>,
+    /// Resolved per-flow memory budget in bytes, parsed from the `max_memory`
+    /// flow option by the engine.
+    pub max_memory_bytes: Option<u64>,
 }
 
 pub struct PlanInfo {
@@ -416,6 +423,7 @@ impl BatchingTask {
             batch_opts,
             flow_eval_interval,
             eval_schedule,
+            max_memory_bytes,
         }: TaskArgs<'_>,
         exact_sequence_range_required: bool,
     ) -> Result<Self, Error> {
@@ -446,6 +454,7 @@ impl BatchingTask {
                 batch_opts,
                 flow_eval_interval,
                 eval_schedule,
+                max_memory_bytes,
             }),
             state: Arc::new(RwLock::new(state)),
             execution_lock: Arc::new(Mutex::new(())),
@@ -476,7 +485,8 @@ impl BatchingTask {
     }
 
     /// Collect flow-related extensions from the task's query context that should be
-    /// forwarded to the frontend (e.g. scheduled time).
+    /// forwarded to the frontend (e.g. scheduled time), plus the fixed per-flow
+    /// memory budget resolved at creation time.
     fn frontend_extensions(&self) -> HashMap<String, String> {
         let ctx = self.state.read().unwrap();
         let all = ctx.query_ctx.extensions();
@@ -489,7 +499,40 @@ impl BatchingTask {
                 v.clone(),
             );
         }
+        flow_exts.extend(self.memory_budget_extensions());
         flow_exts
+    }
+
+    /// The per-flow memory budget extensions that every Flow-owned query
+    /// executed on a frontend must carry: `flow.max_memory_bytes` and the
+    /// `flow.flow_id` identity the budget is keyed on.
+    ///
+    /// The budget is part of the task config, not the mutable query context, so
+    /// the extensions are only returned when the flow was created with an
+    /// explicit `max_memory` option. The flow identity is returned together with
+    /// it so the execution side can key the budget on the flow, and is
+    /// deliberately absent otherwise: flows without the option keep sending
+    /// exactly the extensions they sent before.
+    ///
+    /// Every Flow-owned query path must merge these in (see
+    /// `frontend_extensions` and [`Self::capture_recovery_windows_since`], plus
+    /// flow-owned statements issued through `FrontendClient::sql`); a path that
+    /// drops them while a budget is configured escapes the budget and can run
+    /// unbounded.
+    pub fn memory_budget_extensions(&self) -> Vec<(String, String)> {
+        let Some(max_memory_bytes) = self.config.max_memory_bytes else {
+            return Vec::new();
+        };
+        vec![
+            (
+                query::options::FLOW_MAX_MEMORY_BYTES.to_string(),
+                max_memory_bytes.to_string(),
+            ),
+            (
+                query::options::FLOW_ID.to_string(),
+                self.config.flow_id.to_string(),
+            ),
+        ]
     }
 
     /// mark time window range (now - expire_after, now) as dirty (or (0, now) if expire_after not set)
@@ -848,11 +891,21 @@ impl BatchingTask {
             }
             .build()
         })?;
-        let extensions = [
+        let fixed_extensions = [
             (FLOW_RETURN_REGION_SEQ, "true"),
             (FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE),
             (FLOW_INCREMENTAL_AFTER_SEQS, lower_json.as_str()),
         ];
+        // This is a Flow-owned query too: it must carry the per-flow memory
+        // budget extensions, otherwise a bounded flow could read unbounded
+        // regions through recovery window capture.
+        let budget_extensions = self.memory_budget_extensions();
+        let mut extensions: Vec<(&str, &str)> = fixed_extensions.to_vec();
+        extensions.extend(
+            budget_extensions
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
         let mut peer_desc = None;
         let result = frontend_client
             .query_with_terminal_metrics(
