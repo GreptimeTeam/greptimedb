@@ -259,7 +259,7 @@ impl CompactionCoordinator {
         self.drained.notify_one();
     }
 
-    /// Keep service debt between batches, but not after the region is unloaded.
+    /// Keeps service debt between batches, but not after the region is unloaded.
     /// In-flight old work can drain before its accounting entry is reclaimed.
     pub(crate) fn forget_region(&self, region_id: RegionId) {
         let mut state = self.lock();
