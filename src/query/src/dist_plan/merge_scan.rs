@@ -1772,6 +1772,7 @@ mod tests {
                 plan_name: "higher region".to_string(),
                 level: 0,
                 metrics: Vec::new(),
+                native: None,
             }],
             ..Default::default()
         };
@@ -1781,6 +1782,7 @@ mod tests {
                 plan_name: "lower region".to_string(),
                 level: 0,
                 metrics: Vec::new(),
+                native: None,
             }],
             ..Default::default()
         };
@@ -4155,6 +4157,7 @@ mod tests {
                 plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 42)],
+                native: None,
             }],
             ..Default::default()
         };
@@ -4170,6 +4173,7 @@ mod tests {
                 plan_name: "ProjectionExec".to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 42)],
+                native: None,
             }],
             ..Default::default()
         };
@@ -4186,12 +4190,14 @@ mod tests {
                     plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                     level: 0,
                     metrics: vec![("output_bytes".to_string(), 42)],
+                    native: None,
                 },
                 PlanMetrics {
                     plan: "RegionScanExec: region=2".to_string(),
                     plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                     level: 0,
                     metrics: vec![("output_bytes".to_string(), 18)],
+                    native: None,
                 },
             ],
             ..Default::default()
@@ -4237,6 +4243,7 @@ mod tests {
                 plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 24)],
+                native: None,
             }],
             ..Default::default()
         };
@@ -4306,6 +4313,7 @@ mod tests {
                 plan_name: REGION_SCAN_EXEC_NAME.to_string(),
                 level: 0,
                 metrics: vec![("output_bytes".to_string(), 24)],
+                native: None,
             }],
             ..Default::default()
         };
