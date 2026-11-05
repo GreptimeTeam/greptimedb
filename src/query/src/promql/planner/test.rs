@@ -2288,6 +2288,140 @@ async fn native_metric_discovery_without_a_matching_metric_answers_absent_and_or
 /// The table is the one [`build_test_table_provider`] builds — one tag `tag_0`, the millisecond
 /// time index `timestamp`, one field `field_0` — which is the shape the selector context resolves
 /// to a raw series schema of one field.
+/// `absent_over_time` is answered natively, by `absent`'s own operation over a presence read of the
+/// window, and its labels come from the selector's matchers.
+///
+/// The existing plan answers the call with a per-series UDF, which needs a metric name to read a
+/// table from: a selector that names none - the shape `absent_over_time` is asked for when nothing
+/// matches - has no name to write, so this is the plan that has to answer it.
+#[tokio::test]
+async fn native_absent_over_time_plans_over_discovered_metrics() {
+    // Only one of the two metrics carries `no_such_label`, so the matcher that wants a value of it
+    // narrows the discovery to that one metric and the route plans. A selector that narrowed to
+    // both would decline: its presence read keeps the names, and one segment could not bind them.
+    let specs = ["alpha_total", "beta_total"]
+        .into_iter()
+        .map(|name| ((DEFAULT_SCHEMA_NAME.to_string(), name.to_string()), 2, 1))
+        .collect::<Vec<_>>();
+    let tags = vec![
+        vec!["tag_0".to_string(), "no_such_label".to_string()],
+        vec!["tag_0".to_string()],
+    ];
+    let provider = build_test_table_provider_with_tsid_tag_names(&specs, &tags, None).await;
+    let plan = build_native_fused_plan_with_provider(
+        r#"absent_over_time({no_such_label="x", tag_0="api"}[5m])"#,
+        true,
+        provider,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    assert!(display.contains("FusedSeries"), "{display}");
+    assert!(
+        !display.contains("prom_absent_over_time"),
+        "the answer must not be the existing per-series UDF: {display}"
+    );
+    let fused = find_fused_series(&plan).expect("fused plan");
+    let tree = fused.tree().to_string();
+    assert!(
+        tree.contains(r#"root Vector absent {no_such_label="x", tag_0="api"}"#),
+        "the labels are the selector's matchers: {tree}"
+    );
+    // A statement whose window runs where its samples are is planned as one tree per stage, so the
+    // presence read is asserted across the plan rather than under the root node the frontend holds.
+    let trees = fused_trees(&plan).join("\n");
+    assert!(
+        trees.contains("Window last_over_time [300000ms]"),
+        "the presence read folds the window: {trees}"
+    );
+    // The metric name is not a label of an `absent` answer, so the output has none.
+    let names: Vec<&str> = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect();
+    for expected in ["tag_0", "no_such_label", "timestamp"] {
+        assert!(
+            names.contains(&expected),
+            "{expected} missing from {names:?}"
+        );
+    }
+    assert!(!names.contains(&METRIC_NAME), "{names:?}");
+
+    // A selector that matches no metric table at all reads the typed empty input, and the route
+    // still answers: no candidate table carries `no_such_label`, so the presence read finds nothing
+    // and `absent` reports its matchers' labels at every point.
+    let plan = build_native_fused_plan_with_provider(
+        r#"absent_over_time({no_such_label="x", tag_0="api"}[5m])"#,
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    assert!(display.contains("FusedSeries"), "{display}");
+    let fused = find_fused_series(&plan).expect("fused plan");
+    let tree = fused.tree().to_string();
+    assert!(
+        tree.contains(r#"root Vector absent {no_such_label="x", tag_0="api"}"#),
+        "a selector that matched no table still answers its matchers: {tree}"
+    );
+
+    // The same selector over metrics that all carry the label narrows to several: the presence
+    // read keeps their names and one segment cannot bind them, so the route declines rather than
+    // planning a tree that cannot be built or one that would read two metrics as one series.
+    let specs = ["alpha_total", "beta_total"]
+        .into_iter()
+        .map(|name| ((DEFAULT_SCHEMA_NAME.to_string(), name.to_string()), 2, 1))
+        .collect::<Vec<_>>();
+    let tags = vec![
+        vec!["tag_0".to_string(), "no_such_label".to_string()],
+        vec!["tag_0".to_string(), "no_such_label".to_string()],
+    ];
+    let provider = build_test_table_provider_with_tsid_tag_names(&specs, &tags, None).await;
+    let error = PromPlanner::stmt_to_plan_with_annotations(
+        provider,
+        &build_eval_stmt(r#"absent_over_time({no_such_label="x", tag_0="api"}[5m])"#),
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await
+    .expect_err("a nameless selector over several metrics must decline");
+    assert!(
+        error.to_string().contains("metric matcher"),
+        "the decline keeps the existing plan's answer: {error}"
+    );
+
+    // A selector that names its metric answers with that metric's other equality matchers alone.
+    let plan =
+        build_native_fused_plan(r#"absent_over_time(some_metric{tag_0="x"}[5m])"#, true).await;
+    let display = plan.display_indent().to_string();
+    assert!(display.contains("FusedSeries"), "{display}");
+    let fused = find_fused_series(&plan).expect("fused plan");
+    let tree = fused.tree().to_string();
+    assert!(
+        tree.contains(r#"root Vector absent {tag_0="x"}"#),
+        "a named metric is not a label of the answer: {tree}"
+    );
+}
+
+/// Every native tree the plan carries, outermost first: one per stage the plan splits into.
+fn fused_trees(plan: &LogicalPlan) -> Vec<String> {
+    fn visit(plan: &LogicalPlan, trees: &mut Vec<String>) {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        {
+            trees.push(fused.tree().to_string());
+        }
+        for input in plan.inputs() {
+            visit(input, trees);
+        }
+    }
+    let mut trees = Vec::new();
+    visit(plan, &mut trees);
+    trees
+}
+
 async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan {
     let table_provider = build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
