@@ -185,6 +185,7 @@ loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "f6
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "f743c3a5fe8c1f57363eac5866c356b7d91f9b39" }
 mockall = "0.13"
 moka = "0.12"
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }
 nalgebra = "0.33"
 nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"

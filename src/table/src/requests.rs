@@ -58,17 +58,64 @@ pub const RELATIONAL_META_KEY: &str = "__private.relational_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";
 pub const FILE_TABLE_PATTERN_KEY: &str = "pattern";
 pub const FILE_TABLE_FORMAT_KEY: &str = "format";
+pub const RELATIONAL_CONNECTION_KEY: &str = "connection";
+pub const RELATIONAL_REMOTE_TABLE_KEY: &str = "remote_table";
 
 /// Options captured at `CREATE EXTERNAL TABLE ... ENGINE=relational WITH (...)` time
 /// and persisted in the region manifest.
 ///
 /// `connection` is persisted in **plaintext** so the datanode can reconnect to the
 /// remote database when serving queries on the region.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelationalOptions {
     /// Full DSN, e.g. `mysql://user:password@host:3306/db`.
     pub connection: String,
     pub remote_table: String,
+}
+
+impl RelationalOptions {
+    /// Returns a copy with the password in `connection` replaced by
+    /// `REDACTED`, safe to surface in error messages and logs. The persisted
+    /// manifest keeps the plaintext `connection` so the datanode can reconnect
+    /// to the remote database when serving queries.
+    pub fn redacted(&self) -> Self {
+        Self {
+            connection: redact_connection(&self.connection),
+            remote_table: self.remote_table.clone(),
+        }
+    }
+}
+
+/// Redacts the password of a connection DSN, preserving the other fields
+/// (scheme, host, port, user, database). On a parse failure the whole string is
+/// replaced with `REDACTED` (best-effort).
+pub fn redact_connection(connection: &str) -> String {
+    const REDACTED: &str = "REDACTED";
+    match url::Url::parse(connection) {
+        Ok(mut url) => {
+            if url.password().is_some() {
+                let _ = url.set_password(Some(REDACTED));
+            }
+            url.to_string()
+        }
+        Err(_) => REDACTED.to_string(),
+    }
+}
+
+fn redact_relational_options(encoded: &str) -> String {
+    serde_json::from_str::<RelationalOptions>(encoded)
+        .ok()
+        .and_then(|opts| serde_json::to_string(&opts.redacted()).ok())
+        .unwrap_or_else(|| "REDACTED".to_string())
+}
+
+impl std::fmt::Debug for RelationalOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelationalOptions")
+            .field("connection", &redact_connection(&self.connection))
+            .field("remote_table", &self.remote_table)
+            .finish()
+    }
 }
 
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
@@ -93,7 +140,7 @@ pub fn is_trace_table(table_info: &crate::metadata::TableInfo) -> bool {
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 
-pub const VALID_TABLE_OPTION_KEYS: [&str; 15] = [
+pub const VALID_TABLE_OPTION_KEYS: [&str; 17] = [
     // common keys:
     WRITE_BUFFER_SIZE_KEY,
     TTL_KEY,
@@ -105,6 +152,9 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 15] = [
     FILE_TABLE_LOCATION_KEY,
     FILE_TABLE_FORMAT_KEY,
     FILE_TABLE_PATTERN_KEY,
+    // relational engine keys:
+    RELATIONAL_CONNECTION_KEY,
+    RELATIONAL_REMOTE_TABLE_KEY,
     // metric engine keys:
     PHYSICAL_TABLE_METADATA_KEY,
     LOGICAL_TABLE_METADATA_KEY,
@@ -214,7 +264,7 @@ pub fn validate_table_option(key: &str) -> bool {
     VALID_TABLE_OPTION_KEYS.contains(&key) || VALID_DDL_OPTION_KEYS.contains(&key)
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TableOptions {
     /// Per-region write buffer stall threshold. Writes are rejected at twice this size.
@@ -332,10 +382,29 @@ impl fmt::Display for TableOptions {
         }
 
         for (k, v) in &self.extra_options {
-            key_vals.push(format!("{}={}", k, v));
+            if k == RELATIONAL_META_KEY {
+                key_vals.push(format!("{}={}", k, redact_relational_options(v)));
+            } else {
+                key_vals.push(format!("{}={}", k, v));
+            }
         }
 
         write!(f, "{}", key_vals.join(" "))
+    }
+}
+
+impl fmt::Debug for TableOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut extra_options = self.extra_options.clone();
+        if let Some(encoded) = extra_options.get_mut(RELATIONAL_META_KEY) {
+            *encoded = redact_relational_options(encoded);
+        }
+        f.debug_struct("TableOptions")
+            .field("write_buffer_size", &self.write_buffer_size)
+            .field("ttl", &self.ttl)
+            .field("skip_wal", &self.skip_wal)
+            .field("extra_options", &extra_options)
+            .finish()
     }
 }
 
@@ -878,6 +947,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_redact_connection() {
+        assert_eq!(
+            redact_connection("mysql://user:secret@127.0.0.1:3306/db"),
+            "mysql://user:REDACTED@127.0.0.1:3306/db"
+        );
+        // A DSN without a password is left unchanged.
+        assert_eq!(
+            redact_connection("mysql://user@127.0.0.1:3306/db"),
+            "mysql://user@127.0.0.1:3306/db"
+        );
+        // Unparsable input is fully redacted.
+        assert_eq!(redact_connection("not-a-url"), "REDACTED");
+    }
+
+    #[test]
+    fn test_relational_options_redacted() {
+        let options = RelationalOptions {
+            connection: "mysql://user:secret@127.0.0.1:3306/db".to_string(),
+            remote_table: "sample".to_string(),
+        };
+        let redacted = options.redacted();
+        assert_eq!(
+            redacted.connection,
+            "mysql://user:REDACTED@127.0.0.1:3306/db"
+        );
+        assert_eq!(redacted.remote_table, "sample");
+    }
+
+    #[test]
+    fn test_relational_options_debug_redacts_connection() {
+        let options = RelationalOptions {
+            connection: "mysql://user:secret@127.0.0.1:3306/db".to_string(),
+            remote_table: "sample".to_string(),
+        };
+        let debug = format!("{options:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("REDACTED"));
+        assert!(debug.contains("sample"));
+    }
+
+    #[test]
+    fn test_table_options_display_redacts_relational_meta() {
+        let options = TableOptions {
+            extra_options: HashMap::from([(
+                RELATIONAL_META_KEY.to_string(),
+                r#"{"connection":"mysql://user:secret@127.0.0.1:3306/db","remote_table":"sample"}"#
+                    .to_string(),
+            )]),
+            ..Default::default()
+        };
+        let rendered = options.to_string();
+        assert!(!rendered.contains("secret"));
+        assert!(rendered.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_table_options_debug_redacts_relational_meta() {
+        let options = TableOptions {
+            extra_options: HashMap::from([(
+                RELATIONAL_META_KEY.to_string(),
+                r#"{"connection":"mysql://user:secret@127.0.0.1:3306/db","remote_table":"sample"}"#
+                    .to_string(),
+            )]),
+            ..Default::default()
+        };
+        let rendered = format!("{options:?}");
+        assert!(!rendered.contains("secret"));
+        assert!(rendered.contains("REDACTED"));
+    }
+
+    #[test]
     fn test_validate_annotation_keys() {
         let column = REPARTITION_COLUMN_HINT_KEY;
         let count = REPARTITION_PARTITION_NUM_HINT_KEY;
@@ -925,6 +1065,8 @@ mod tests {
         assert!(validate_table_option(FILE_TABLE_LOCATION_KEY));
         assert!(validate_table_option(FILE_TABLE_FORMAT_KEY));
         assert!(validate_table_option(FILE_TABLE_PATTERN_KEY));
+        assert!(validate_table_option(RELATIONAL_CONNECTION_KEY));
+        assert!(validate_table_option(RELATIONAL_REMOTE_TABLE_KEY));
         assert!(validate_table_option(TTL_KEY));
         assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
         assert!(validate_table_option(STORAGE_KEY));

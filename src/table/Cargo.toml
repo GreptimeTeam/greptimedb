@@ -38,11 +38,12 @@ lazy_static.workspace = true
 once_cell.workspace = true
 paste.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 tokio.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
 parquet = { workspace = true, features = ["async"] }
-serde_json.workspace = true
