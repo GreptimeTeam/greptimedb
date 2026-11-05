@@ -317,7 +317,10 @@ jobs:
         path: greptimedb
         persist-credentials: false
     - name: Set up benchmark dependencies
-      uses: ./greptimedb/.github/actions/setup-benchmark
+      uses: ./greptimedb/.github/actions/setup-linux-runner
+      with:
+        tools: curl jq python3 rsync
+        expected-architecture: x86_64
     - name: Checkout matching benchmark tools
       uses: actions/checkout@v4
       with:
