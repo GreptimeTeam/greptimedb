@@ -22,7 +22,8 @@ use std::time::Instant;
 
 use api::helper::request_type;
 use api::v1::greptime_request::Request as QueryRequest;
-use api::v1::{GreptimeRequest, RequestHeader};
+use api::v1::query_request::Query;
+use api::v1::{GreptimeRequest, QueryRequest as ApiQueryRequest, RequestHeader};
 use auth::UserProviderRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -109,6 +110,13 @@ impl GreptimeRequestHandler {
     ) -> impl Future<Output = Result<Output>> + Send + 'static {
         let handler = self.handler.clone();
         let runtime = self.runtime.clone();
+        // SQL can contain writes or DDL; only explicit read-query variants are cancellable.
+        let cancel_on_drop = matches!(
+            &query,
+            QueryRequest::Query(ApiQueryRequest {
+                query: Some(Query::LogicalPlan(_) | Query::PromRangeQuery(_)),
+            })
+        );
         let request_type = request_type(&query).to_string();
         let db = query_ctx.get_db_string();
         let timer = RequestTimer::new(db.clone(), request_type);
@@ -135,12 +143,19 @@ impl GreptimeRequestHandler {
             };
 
             match runtime {
-                Some(runtime) => AbortOnDropHandle::new(runtime.spawn(result_future))
-                    .await
-                    .context(JoinTaskSnafu)
-                    .inspect_err(|e| {
+                Some(runtime) => {
+                    let task = runtime.spawn(result_future);
+                    let result = if cancel_on_drop {
+                        AbortOnDropHandle::new(task).await
+                    } else {
+                        // Writes must outlive the RPC to avoid cancellation between state updates.
+                        // https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
+                        task.await
+                    };
+                    result.context(JoinTaskSnafu).inspect_err(|e| {
                         timer.record(e.status_code());
-                    })?,
+                    })?
+                }
                 None => result_future.await,
             }
         }
@@ -309,12 +324,9 @@ impl Drop for RequestTimer {
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;
-    use std::future::pending;
     use std::result::Result as StdResult;
     use std::time::Duration;
 
-    use api::v1::QueryRequest as ApiQueryRequest;
-    use api::v1::query_request::Query;
     use async_trait::async_trait;
     use chrono::FixedOffset;
     use common_error::ext::BoxedError;
@@ -339,6 +351,8 @@ mod tests {
     struct BlockingQueryHandler {
         started: Arc<Notify>,
         finished: Arc<Notify>,
+        resume: Arc<Notify>,
+        completed: Arc<Notify>,
     }
 
     struct QueryFinished(Arc<Notify>);
@@ -354,7 +368,9 @@ mod tests {
         async fn do_query(&self, _: QueryRequest, _: QueryContextRef) -> Result<Output> {
             let _finished = QueryFinished(self.finished.clone());
             self.started.notify_one();
-            pending().await
+            self.resume.notified().await;
+            self.completed.notify_one();
+            Ok(Output::new_with_affected_rows(1))
         }
 
         fn handle_put_record_batch_stream(
@@ -366,41 +382,87 @@ mod tests {
         }
     }
 
+    async fn check_request_cancellation(
+        request: QueryRequest,
+        runtime: Option<Runtime>,
+        cancels: bool,
+    ) -> StdResult<(), Box<dyn StdError + Send + Sync>> {
+        let started = Arc::new(Notify::new());
+        let finished = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        let completed = Arc::new(Notify::new());
+        let handler = GreptimeRequestHandler::new(
+            Arc::new(BlockingQueryHandler {
+                started: started.clone(),
+                finished: finished.clone(),
+                resume: resume.clone(),
+                completed: completed.clone(),
+            }),
+            None,
+            runtime,
+            FlightCompression::default(),
+        );
+        let task = AbortOnDropHandle::new(tokio::spawn(
+            handler.handle_request_with_query_ctx(request, QueryContext::arc()),
+        ));
+        timeout(Duration::from_secs(5), started.notified()).await?;
+        task.abort();
+        assert!(task.await.is_err_and(|error| error.is_cancelled()));
+        if !cancels {
+            // Resuming after the caller is gone proves execution can still finish normally.
+            resume.notify_one();
+            timeout(Duration::from_secs(5), completed.notified()).await?;
+        }
+        timeout(Duration::from_secs(5), finished.notified()).await?;
+        Ok(())
+    }
+
     #[tokio::test]
-    async fn test_drop_request_cancels_execution() -> StdResult<(), Box<dyn StdError + Send + Sync>>
-    {
-        // Payloads are opaque here; this tests cancellation before do_query returns an Output.
+    async fn test_drop_read_request_cancels_execution()
+    -> StdResult<(), Box<dyn StdError + Send + Sync>> {
+        // Payloads are opaque here; cancellation is tested before do_query returns Output.
+        for query in [
+            Query::LogicalPlan(Vec::new()),
+            Query::PromRangeQuery(Default::default()),
+        ] {
+            let request = QueryRequest::Query(ApiQueryRequest { query: Some(query) });
+            for runtime in [None, Some(common_runtime::query_runtime())] {
+                check_request_cancellation(request.clone(), runtime, true).await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_drop_other_request_preserves_spawned_execution()
+    -> StdResult<(), Box<dyn StdError + Send + Sync>> {
         let requests = [
+            QueryRequest::Inserts(Default::default()),
+            QueryRequest::RowInserts(Default::default()),
+            QueryRequest::Deletes(Default::default()),
+            QueryRequest::RowDeletes(Default::default()),
+            QueryRequest::Ddl(Default::default()),
+            QueryRequest::Query(ApiQueryRequest {
+                query: Some(Query::InsertIntoPlan(Default::default())),
+            }),
+            QueryRequest::Query(ApiQueryRequest { query: None }),
             QueryRequest::Query(ApiQueryRequest {
                 query: Some(Query::Sql("SELECT * FROM numbers".into())),
             }),
-            QueryRequest::Inserts(Default::default()),
             QueryRequest::Query(ApiQueryRequest {
-                query: Some(Query::LogicalPlan(Vec::new())),
+                query: Some(Query::Sql("INSERT INTO t VALUES (1)".into())),
             }),
             QueryRequest::Query(ApiQueryRequest {
-                query: Some(Query::PromRangeQuery(Default::default())),
+                query: Some(Query::Sql(
+                    "CREATE TABLE t (ts TIMESTAMP TIME INDEX)".into(),
+                )),
             }),
         ];
         for request in requests {
             for runtime in [None, Some(common_runtime::query_runtime())] {
-                let started = Arc::new(Notify::new());
-                let finished = Arc::new(Notify::new());
-                let handler = GreptimeRequestHandler::new(
-                    Arc::new(BlockingQueryHandler {
-                        started: started.clone(),
-                        finished: finished.clone(),
-                    }),
-                    None,
-                    runtime,
-                    FlightCompression::default(),
-                );
-                let task = AbortOnDropHandle::new(tokio::spawn(
-                    handler.handle_request_with_query_ctx(request.clone(), QueryContext::arc()),
-                ));
-                timeout(Duration::from_secs(5), started.notified()).await?;
-                drop(task);
-                timeout(Duration::from_secs(5), finished.notified()).await?;
+                // Without a separate runtime, preserve the existing inline cancellation behavior.
+                let cancels = runtime.is_none();
+                check_request_cancellation(request.clone(), runtime, cancels).await?;
             }
         }
         Ok(())
