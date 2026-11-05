@@ -1022,6 +1022,14 @@ impl PromPlanner {
         // first batch might not fill.
         let root_kind = match statement_kind {
             Some(FieldKind::Histogram) => match root.output_field_kind(FieldKind::Histogram) {
+                // A histogram answer standing on a canonical merge would run through the
+                // canonical boundary carrying histogram frames, a pairing nothing exercises yet.
+                // The follow-up that teaches the aggregate state to hold histograms owns it, and
+                // until then the statement keeps the existing plan - its answer, not its
+                // semantics, is out of this route's reach.
+                Some(FieldKind::Histogram) if matches!(root.expr, NativeExpr::Merge { .. }) => {
+                    return Ok(None);
+                }
                 Some(root_kind) => root_kind,
                 None => return Ok(None),
             },

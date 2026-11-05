@@ -7747,6 +7747,51 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     );
 }
 
+/// A label rewrite does not make a float answer fall back.
+///
+/// The canonicalization pass wraps a collapsed rewrite in a merge, which the kind walk used to
+/// leave undescribed. "Cannot name it" then read as "possibly a histogram", so
+/// `label_replace(histogram_count(h), ...)` and its aggregated form kept the existing plan even
+/// though both answer floats. The walk now names a merge (it concatenates samples of one field)
+/// and a set operation (its sides agree on the kind), so those statements stay on the route while
+/// a histogram that really does enter an aggregate still keeps the existing plan.
+#[tokio::test]
+async fn a_label_rewrite_keeps_a_float_answer_on_the_route() {
+    for query in [
+        "label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\")",
+        "sum(label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query} left the route instead of answering: {display}"));
+        let field = fused
+            .schema()
+            .field_with_unqualified_name(greptime_native_histogram())
+            .unwrap_or_else(|_| panic!("{query} published no field column: {display}"));
+        assert_eq!(
+            &ArrowDataType::Float64,
+            field.data_type(),
+            "{query} declared a histogram column for a float answer: {display}"
+        );
+    }
+    // A histogram answer standing on a canonical merge is out of this route's reach for now: the
+    // canonical boundary carrying histogram frames is the follow-up's subject.
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")",
+        true,
+        table_provider,
+    )
+    .await;
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "the canonical boundary took a histogram answer: {}",
+        plan.display_indent_schema()
+    );
+}
+
 #[tokio::test]
 async fn a_segmented_parent_answers_the_kind_of_the_uncut_root() {
     for (query, histogram) in [

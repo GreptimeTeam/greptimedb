@@ -482,6 +482,16 @@ impl NativeNode {
             // entering one, so whatever a histogram statement aggregates answers floats. Naming it
             // here is what lets `sum(count_over_time(h[5m]))` - a float built from histograms -
             // declare a float column instead of keeping the existing plan.
+            // A canonical merge collects pieces of one label set: it assembles the samples it was
+            // given and never converts them, so the field keeps the kind it had.
+            NativeExpr::Merge { input } => kind_of(input),
+            // A set operation answers with the samples of one side, so the two operands must agree
+            // on the kind. Prometheus drops a position whose kinds disagree, and this walk cannot
+            // name a pair that disagrees.
+            NativeExpr::Set { left, right, .. } => {
+                let left_kind = kind_of(left)?;
+                (left_kind == kind_of(right)?).then_some(left_kind)
+            }
             NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
             _ => None,
         }
