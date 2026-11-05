@@ -123,6 +123,9 @@ pub struct MitoConfig {
     ///
     /// The limit applies to the whole engine, not to each region worker. SST compaction
     /// and background bulk memtable compaction each have their own budget of this size.
+    /// For SST compaction, the same limit bounds engine-wide admission of local compaction
+    /// units and the number of independent units one automatic per-region pick may prepare.
+    /// Manual compaction keeps using the request's `parallelism`.
     pub max_background_compactions: usize,
     /// Max number of running background purge jobs (default: number of cpu cores).
     pub max_background_purges: usize,

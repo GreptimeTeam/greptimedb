@@ -190,7 +190,7 @@
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
 | `region_engine.mito.experimental_series_index_bucket_width` | String | `5days` | Requested minimum series-index bucket width (default: 5 days), rounded up to<br/>an exact multiple of each region's compaction time window. |
 | `region_engine.mito.max_background_flushes` | Integer | Auto | Max number of running background flush jobs (default: 1/2 of cpu cores). |
-| `region_engine.mito.max_background_compactions` | Integer | Auto | Max number of running background compaction jobs (default: 1/4 of cpu cores). |
+| `region_engine.mito.max_background_compactions` | Integer | Auto | Max number of running background compaction jobs (default: 1/4 of cpu cores).<br/>The same limit bounds engine-wide admission of local compaction units and the<br/>number of independent units one automatic per-region pick may prepare.<br/>Manual compaction keeps using the request's parallelism. |
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
 | `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks.<br/>Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
@@ -671,7 +671,7 @@
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
 | `region_engine.mito.experimental_series_index_bucket_width` | String | `5days` | Requested minimum series-index bucket width (default: 5 days), rounded up to<br/>an exact multiple of each region's compaction time window. |
 | `region_engine.mito.max_background_flushes` | Integer | Auto | Max number of running background flush jobs (default: 1/2 of cpu cores). |
-| `region_engine.mito.max_background_compactions` | Integer | Auto | Max number of running background compaction jobs (default: 1/4 of cpu cores). |
+| `region_engine.mito.max_background_compactions` | Integer | Auto | Max number of running background compaction jobs (default: 1/4 of cpu cores).<br/>The same limit bounds engine-wide admission of local compaction units and the<br/>number of independent units one automatic per-region pick may prepare.<br/>Manual compaction keeps using the request's parallelism. |
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
 | `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks.<br/>Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
