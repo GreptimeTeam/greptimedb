@@ -7036,20 +7036,14 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         native_result_rows(native_tql_output(&instance, &different_matchers, false).await).await;
     assert_eq!(different_matcher_rows, different_matcher_legacy);
 
-    // Group matching drops the full series identity, and a subquery stays on the ordinary planner path.
+    // Group matching drops the full series identity, so it stays on the ordinary planner path.
     let fallback_expected = expected[..HOSTS].to_vec();
-    for (sql, expected_rows) in [
-        (
-            format!(
-                r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
-            ),
-            fallback_expected.clone(),
+    for (sql, expected_rows) in [(
+        format!(
+            r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
         ),
-        (
-            format!(r#"TQL EVAL (1, 1, '1s') rate({table}{{host="h000"}}[2s:1s])"#),
-            vec![(1_000, "h000".to_string(), 0.5)],
-        ),
-    ] {
+        fallback_expected.clone(),
+    )] {
         observer.clear();
         let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
         assert!(
@@ -7060,6 +7054,27 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(rows, legacy_rows, "{sql}");
     }
+
+    // A subquery is planned natively: `rate` over an evaluated input reads the grid the subquery
+    // produces, and the route compiles that window instead of sending the statement to the ordinary
+    // planner. The rows are what says the plan it runs answers the statement it was given, so the
+    // answer is pinned here and compared with the existing plan's on the same fixture.
+    let subquery_sql = format!(r#"TQL EVAL (1, 1, '1s') rate({table}{{host="h000"}}[2s:1s])"#);
+    observer.clear();
+    let subquery_rows =
+        native_result_rows(native_tql_output(&instance, &subquery_sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "a subquery is not a fallback shape: {subquery_sql}"
+    );
+    assert_eq!(
+        subquery_rows,
+        vec![(1_000, "h000".to_string(), 0.5)],
+        "{subquery_sql}"
+    );
+    let subquery_legacy =
+        native_result_rows(native_tql_output(&instance, &subquery_sql, false).await).await;
+    assert_eq!(subquery_rows, subquery_legacy, "{subquery_sql}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -8224,6 +8239,30 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
         assert!(
             observer.fused().is_none(),
             "`{query}`: the native route must decline a table that carries the temporality marker"
+        );
+    }
+
+    // A subquery recurses through the expression tree for the same delta-temporality guard.
+    // Compare against the existing route and assert that native execution declines both functions.
+    for query in [
+        format!("max_over_time(rate({TABLE}[2m])[2m:1m])"),
+        format!("max_over_time(increase({TABLE}[2m])[2m:1m])"),
+    ] {
+        let sql = format!("TQL EVAL (120, 120, '1m') {query}");
+        let legacy_rows = native_marker_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !legacy_rows.is_empty(),
+            "legacy subquery `{query}` must return rows"
+        );
+        observer.clear();
+        let native_rows = native_marker_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(
+            native_rows, legacy_rows,
+            "`{query}`: same rows on both routes"
+        );
+        assert!(
+            observer.fused().is_none(),
+            "`{query}`: delta temporality inside a subquery must decline native planning"
         );
     }
 
@@ -11408,5 +11447,57 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
             legacy_error.contains("cannot contain metrics with the same labelset"),
             "the existing plan reports the overlap too: {consumer}: {legacy_error}"
         );
+    }
+}
+
+/// A subquery evaluates its inner expression on its own grid, on the native route.
+///
+/// A window over an aggregate is the split's one admitted evaluated-input shape: the subquery's
+/// declared input grid equals the suffix's, so the split carries it rather than declining. Each
+/// answer is compared with the existing planner's, and the route is asserted through the observer.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_subqueries_match_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_subqueries").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_subq (host STRING, job STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host, job));
+         INSERT INTO native_subq (host, job, ts, val) VALUES
+         ('h0', 'a', 60000, 0), ('h0', 'a', 120000, 10), ('h0', 'a', 180000, 20),
+         ('h1', 'a', 60000, 0), ('h1', 'a', 120000, 30), ('h1', 'a', 180000, 60),
+         ('h0', 'b', 60000, 0), ('h0', 'b', 120000, 40), ('h0', 'b', 180000, 80),
+         ('h1', 'b', 60000, 0), ('h1', 'b', 120000, 50), ('h1', 'b', 180000, 100)"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    for sql in [
+        "TQL EVAL (180, 180, '1m') avg_over_time(native_subq[2m:1m])",
+        "TQL EVAL (180, 180, '1m') max_over_time(rate(native_subq[2m])[2m:1m])",
+        "TQL EVAL (180, 180, '1m') avg_over_time((sum by (job, host) (rate(native_subq[2m])))[2m:1m])",
+        "TQL EVAL (180, 180, '1m') avg_over_time((sum by (job, host) (rate(native_subq[2m])))[2m:1m] @ 180)",
+        "TQL EVAL (180, 180, '1m') max_over_time(max_over_time(native_subq[2m:1m])[2m:1m])",
+    ] {
+        observer.clear();
+        let mut native = native_result_rows(native_tql_output(&instance, sql, true).await).await;
+        assert!(
+            observer.fused().is_some(),
+            "{sql} did not execute a FusedSeriesExec: {:#?}",
+            observer.root_plan()
+        );
+        let mut legacy = native_result_rows(native_tql_output(&instance, sql, false).await).await;
+        // The two routes emit the same rows but not in the same order: the helper sorts within a
+        // batch, and a series' label is one column of that batch's own order.
+        native.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
+        legacy.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
+        assert_eq!(native, legacy, "{sql}");
     }
 }
