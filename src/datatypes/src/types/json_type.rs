@@ -389,35 +389,69 @@ impl Display for JsonType {
 
 /// Converts a json type value to string
 ///
-/// The binary jsonb is serialized directly with `serde_json`, so both object keys and
-/// string values are escaped by `serde_json`. `RawJsonb::to_string()` is deliberately
-/// avoided, since it falls back to the lossy raw bytes when serialization fails.
+/// `jsonb::from_slice` also accepts JSON text, which some write paths (e.g. `COPY FROM`
+/// files, or a JSON parameter bound as text through the MySQL protocol) store in place of
+/// binary jsonb.
 ///
-/// Some write paths (e.g. `COPY FROM` csv/json/parquet files, or a JSON parameter bound
-/// as text through the MySQL protocol) currently store the JSON *text* as the column
-/// bytes instead of binary jsonb, and such data may already be persisted. When the bytes
-/// are not valid jsonb but are valid JSON text, they are re-encoded as jsonb and then
-/// serialized the same way, so the output is still escaped by `serde_json`. Anything else
-/// is reported as an error.
+/// The value is written out here rather than through `Value`'s `Display`, which leaves
+/// object keys unescaped and escapes strings the Rust way. `RawJsonb`'s `Serialize` is
+/// not used either: it panics on JSON text such as `"abc"`.
 pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
     if val.is_empty() {
         return Ok("".to_string());
     }
-    match serde_json::to_string(&jsonb::RawJsonb::new(val)) {
-        Ok(s) => Ok(s),
-        Err(e) => match jsonb::parse_value_standard_mode(val) {
-            Ok(json) => serde_json::to_string(&jsonb::RawJsonb::new(&json.to_vec())).map_err(|e| {
-                InvalidJsonSnafu {
-                    value: e.to_string(),
+    let value = jsonb::from_slice(val).map_err(|error| InvalidJsonbSnafu { error }.build())?;
+    let mut buf = Vec::with_capacity(val.len());
+    write_jsonb_value(&value, &mut buf).map_err(|e| {
+        InvalidJsonSnafu {
+            value: e.to_string(),
+        }
+        .build()
+    })?;
+    String::from_utf8(buf).map_err(|e| {
+        InvalidJsonSnafu {
+            value: e.to_string(),
+        }
+        .build()
+    })
+}
+
+fn write_jsonb_value(value: &jsonb::Value, buf: &mut Vec<u8>) -> std::io::Result<()> {
+    use std::io::Write;
+
+    match value {
+        jsonb::Value::String(s) => serde_json::to_writer(&mut *buf, s.as_ref())?,
+        jsonb::Value::Array(items) => {
+            buf.push(b'[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    buf.push(b',');
                 }
-                .build()
-            }),
-            Err(_) => InvalidJsonSnafu {
-                value: e.to_string(),
+                write_jsonb_value(item, buf)?;
             }
-            .fail(),
-        },
+            buf.push(b']');
+        }
+        jsonb::Value::Object(entries) => {
+            buf.push(b'{');
+            for (i, (key, item)) in entries.iter().enumerate() {
+                if i > 0 {
+                    buf.push(b',');
+                }
+                serde_json::to_writer(&mut *buf, key)?;
+                buf.push(b':');
+                write_jsonb_value(item, buf)?;
+            }
+            buf.push(b'}');
+        }
+        // Same as `jsonb_to_serde_json`: JSON has no NaN or infinity.
+        jsonb::Value::Number(jsonb::Number::Float64(f)) if !f.is_finite() => {
+            buf.extend_from_slice(b"null")
+        }
+        // The remaining scalars display as JSON tokens; binary/date/time values are
+        // quoted hex or ASCII text.
+        _ => write!(buf, "{value}")?,
     }
+    Ok(())
 }
 
 /// Converts a json type value to serde_json::Value
@@ -514,6 +548,10 @@ mod tests {
     fn test_jsonb_to_string_rejects_invalid_jsonb() {
         assert!(jsonb_to_string(&[1, 2, 3, 4]).is_err());
         assert_eq!(jsonb_to_string(&[]).unwrap(), "");
+
+        let mut truncated = parse_string_to_jsonb(r#"{"k":"value"}"#).unwrap();
+        truncated.pop();
+        assert!(jsonb_to_string(&truncated).is_err());
     }
 
     #[test]
@@ -532,6 +570,14 @@ mod tests {
             jsonb_to_string(br#"{"a\"b":"c\u0000d"}"#).unwrap(),
             r#"{"a\"b":"c\u0000d"}"#
         );
+        // These start with bytes that also read as a jsonb scalar header.
+        assert_eq!(
+            jsonb_to_string(br#""hello world""#).unwrap(),
+            r#""hello world""#
+        );
+        assert_eq!(jsonb_to_string(b"        null").unwrap(), "null");
+        // Extended syntax is accepted, as text was read before.
+        assert_eq!(jsonb_to_string(b"[+1,,2]").unwrap(), "[1,null,2]");
         assert!(jsonb_to_string(b"{not json").is_err());
     }
 
