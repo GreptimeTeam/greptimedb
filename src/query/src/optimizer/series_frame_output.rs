@@ -329,8 +329,13 @@ mod tests {
         .expect("the child is a raw frame of these fields")
     }
 
-    /// A fused root running one sample selection over one per-series scan.
-    fn fused_root(partitions: usize) -> Arc<dyn ExecutionPlan> {
+    /// A fused root running one sample selection over `input`, as bound by `labels`.
+    ///
+    /// The input must be a contiguous raw frame, which both [`series_scan`] and [`raw_plan`] are.
+    fn fused_root_over(
+        input: Arc<dyn ExecutionPlan>,
+        labels: RawLabelSource,
+    ) -> Arc<dyn ExecutionPlan> {
         let grid = Arc::new(
             EvalGrid::try_new(GridSpec::try_new(0, 1_000, 2).expect("the grid is valid"))
                 .expect("the grid is materialized"),
@@ -387,12 +392,13 @@ mod tests {
         )
         .expect("the fused node is planned");
         fused
-            .to_execution_plan(vec![(
-                series_scan(partitions),
-                per_series_labels(),
-                SeriesOrdering::Contiguous,
-            )])
+            .to_execution_plan(vec![(input, labels, SeriesOrdering::Contiguous)])
             .expect("the fused node is physical")
+    }
+
+    /// A fused root running one sample selection over one per-series scan.
+    fn fused_root(partitions: usize) -> Arc<dyn ExecutionPlan> {
+        fused_root_over(series_scan(partitions), per_series_labels())
     }
 
     #[test]
@@ -511,6 +517,29 @@ mod tests {
             promql::extension_plan::IdentityCompletion::CompleteDisjoint,
             router.identity_completion(),
             "a fused chain over a per-series scan owns each identity in one partition"
+        );
+    }
+
+    #[test]
+    fn a_fused_root_without_disjoint_identities_selects_merge_inputs_router() {
+        let root = fused_root_over(raw_plan(2), RawLabelSource::Explicit);
+        assert!(
+            !root
+                .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+                .expect("the root is the fused node")
+                .has_partition_disjoint_identities(),
+            "explicit labels say nothing about where a source keeps its identities"
+        );
+        assert_eq!(2, root.properties().output_partitioning().partition_count());
+
+        let exec = optimized(root).unwrap();
+        let router = exec
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("the root is routed");
+        assert_eq!(
+            promql::extension_plan::IdentityCompletion::MergeInputs,
+            router.identity_completion(),
+            "a fused node without proven identity placement merges its inputs"
         );
     }
 
