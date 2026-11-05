@@ -539,6 +539,12 @@ mod tests {
             r#""hello world""#
         );
         assert_eq!(jsonb_to_string(b"        null").unwrap(), "null");
+        // Without the bounds check, these read back as `false`.
+        assert_eq!(
+            jsonb_to_string(br#""2026-11-05""#).unwrap(),
+            r#""2026-11-05""#
+        );
+        assert_eq!(jsonb_to_string(b"1730800000000").unwrap(), "1730800000000");
         // Extended syntax is accepted, as text was read before.
         assert_eq!(jsonb_to_string(b"[+1,,2]").unwrap(), "[1,null,2]");
         assert!(jsonb_to_string(b"{not json").is_err());
