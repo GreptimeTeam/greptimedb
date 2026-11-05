@@ -953,14 +953,8 @@ async fn test_alter_precedes_edit_backlog() {
         let guard = region.manifest_ctx.manifest_manager.write().await;
         let e = engine.clone();
         let first = tokio::spawn(async move {
-            e.edit_region(
-                region_id,
-                RegionEdit {
-                    files_to_add: Vec::new(),
-                    ..test_region_edit(region_id, FileId::random())
-                },
-            )
-            .await
+            e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+                .await
         });
         wait_until_region_is_in_editing(&region).await;
         drain_worker_recv_events(&mut rx);
@@ -1003,14 +997,8 @@ async fn test_alter_precedes_edit_backlog() {
             drain_worker_recv_events(&mut rx);
             let e = engine.clone();
             let task = tokio::spawn(async move {
-                e.edit_region(
-                    region_id,
-                    RegionEdit {
-                        files_to_add: Vec::new(),
-                        ..test_region_edit(region_id, FileId::random())
-                    },
-                )
-                .await
+                e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+                    .await
             });
             wait_worker_recv_event(&mut rx).await;
             listener.release_flush.notify_one();
