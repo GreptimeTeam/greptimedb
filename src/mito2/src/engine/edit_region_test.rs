@@ -1036,3 +1036,134 @@ async fn test_alter_precedes_edit_backlog() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_drop_rejects_alter_and_edit_queues_after_flush_commit() {
+    use store_api::region_request::{
+        AddColumn, AlterKind, RegionAlterRequest, RegionDropRequest, RegionFlushRequest,
+    };
+    use tokio::sync::Notify;
+
+    struct Listener {
+        tx: mpsc::UnboundedSender<usize>,
+        committing: Notify,
+        release: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl EventListener for Listener {
+        fn on_recv_requests(&self, count: usize) {
+            let _ = self.tx.send(count);
+        }
+
+        async fn on_flush_commit_begin(&self, _: RegionId) {
+            self.committing.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    let mut env = TestEnv::new().await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let listener = Arc::new(Listener {
+        tx,
+        committing: Notify::new(),
+        release: Notify::new(),
+    });
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    crate::test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 1),
+        },
+    )
+    .await;
+
+    let e = engine.clone();
+    let flush = tokio::spawn(async move {
+        e.handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), listener.committing.notified())
+        .await
+        .unwrap();
+    drain_worker_recv_events(&mut rx);
+
+    // DROP can no longer cancel the flush, so it waits for successful completion.
+    let e = engine.clone();
+    let drop = tokio::spawn(async move {
+        e.handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            }),
+        )
+        .await
+    });
+    wait_worker_recv_event(&mut rx).await;
+
+    // The first ALTER waits in the flush scheduler; the second uses pending_alters.
+    let mut alters = Vec::new();
+    for _ in 0..2 {
+        let e = engine.clone();
+        alters.push(tokio::spawn(async move {
+            e.handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::AddColumns {
+                        columns: vec![AddColumn {
+                            column_metadata: store_api::metadata::ColumnMetadata {
+                                column_schema: datatypes::schema::ColumnSchema::new(
+                                    "new_field",
+                                    datatypes::data_type::ConcreteDataType::float64_datatype(),
+                                    true,
+                                ),
+                                semantic_type: api::v1::SemanticType::Field,
+                                column_id: 100,
+                            },
+                            location: None,
+                        }],
+                    },
+                }),
+            )
+            .await
+        }));
+        wait_worker_recv_event(&mut rx).await;
+    }
+    let e = engine.clone();
+    let edit = tokio::spawn(async move {
+        e.edit_region(region_id, test_region_edit(region_id, FileId::random()))
+            .await
+    });
+    wait_worker_recv_event(&mut rx).await;
+    listener.release.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        flush.await.unwrap().unwrap();
+        drop.await.unwrap().unwrap();
+        assert!(engine.get_region(region_id).is_none());
+        for alter in alters {
+            let err = alter.await.unwrap().unwrap_err();
+            assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+        }
+        let err = edit.await.unwrap().unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+    })
+    .await
+    .expect("DROP left queued ALTER or edit requests unresolved");
+}

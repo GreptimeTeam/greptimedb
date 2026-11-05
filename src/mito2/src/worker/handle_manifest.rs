@@ -157,7 +157,7 @@ impl RegionEditQueue {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Rejects queued region edit requests as region not found.
+    /// Rejects queued ALTER and region edit requests as region not found.
     pub(crate) fn reject_region_edit_queue_as_not_found(&mut self, region_id: RegionId) {
         if let Some(queue) = self.pending_alters.remove(&region_id) {
             for (_, sender) in queue {
