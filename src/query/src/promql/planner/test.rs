@@ -7777,19 +7777,22 @@ async fn a_label_rewrite_keeps_a_float_answer_on_the_route() {
         );
     }
     // A histogram answer standing on a canonical merge is out of this route's reach for now: the
-    // canonical boundary carrying histogram frames is the follow-up's subject.
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
-    let plan = build_native_fused_plan_with_provider(
+    // canonical boundary carrying histogram frames is the follow-up's subject. Both orderings
+    // count - the merge at the root, and a merge below a map that answers floats - because a merge
+    // anywhere in the tree is a boundary that would carry histograms.
+    for query in [
         "label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")",
-        true,
-        table_provider,
-    )
-    .await;
-    assert!(
-        find_fused_series(&plan).is_none(),
-        "the canonical boundary took a histogram answer: {}",
-        plan.display_indent_schema()
-    );
+        "histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+        "sum(histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} took a histogram answer through the canonical boundary: {}",
+            plan.display_indent_schema()
+        );
+    }
 }
 
 #[tokio::test]

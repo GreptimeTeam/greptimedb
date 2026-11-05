@@ -485,9 +485,11 @@ impl NativeNode {
             // A canonical merge collects pieces of one label set: it assembles the samples it was
             // given and never converts them, so the field keeps the kind it had.
             NativeExpr::Merge { input } => kind_of(input),
-            // A set operation answers with the samples of one side, so the two operands must agree
-            // on the kind. Prometheus drops a position whose kinds disagree, and this walk cannot
-            // name a pair that disagrees.
+            // A set operation keeps the payloads it selects - `and` and `unless` keep the left
+            // samples, `or` keeps the left's and the right's unmatched ones - so a pair of
+            // different kinds would answer a field carrying both. This route declares one type per
+            // field, so it names the answer only when both sides agree. That is this planner's
+            // condition for a uniformly typed column, not a rule Prometheus states.
             NativeExpr::Set { left, right, .. } => {
                 let left_kind = kind_of(left)?;
                 (left_kind == kind_of(right)?).then_some(left_kind)

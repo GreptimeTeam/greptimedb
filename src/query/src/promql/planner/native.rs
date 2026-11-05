@@ -1021,18 +1021,21 @@ impl PromPlanner {
         // whose kind cannot be named keeps the existing plan rather than declaring a column the
         // first batch might not fill.
         let root_kind = match statement_kind {
-            Some(FieldKind::Histogram) => match root.output_field_kind(FieldKind::Histogram) {
-                // A histogram answer standing on a canonical merge would run through the
-                // canonical boundary carrying histogram frames, a pairing nothing exercises yet.
-                // The follow-up that teaches the aggregate state to hold histograms owns it, and
-                // until then the statement keeps the existing plan - its answer, not its
-                // semantics, is out of this route's reach.
-                Some(FieldKind::Histogram) if matches!(root.expr, NativeExpr::Merge { .. }) => {
+            Some(FieldKind::Histogram) => {
+                // A histogram answer standing on a canonical merge would run through the canonical
+                // boundary carrying histogram frames, a pairing nothing exercises yet. The
+                // follow-up that teaches the aggregate state to hold histograms owns it, and until
+                // then the statement keeps the existing plan - its answer, not its semantics, is
+                // out of this route's reach. Every merge counts, not only a root one: a merge below
+                // a float-producing map is still a boundary that would carry histograms.
+                if merge_answers_histogram(root, FieldKind::Histogram) {
                     return Ok(None);
                 }
-                Some(root_kind) => root_kind,
-                None => return Ok(None),
-            },
+                match root.output_field_kind(FieldKind::Histogram) {
+                    Some(root_kind) => root_kind,
+                    None => return Ok(None),
+                }
+            }
             Some(FieldKind::Float) | None => FieldKind::Float,
         };
         // The split is only ever a one-child plan: it exports each partition's leaf state and merges
@@ -1440,6 +1443,22 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
 }
 
 /// Whether the merge producer's entire prefix can run on each scan partition independently.
+/// Whether any canonical merge in `node` answers with histogram samples, given the kind its input
+/// carries.
+///
+/// A merge collects the pieces of one label set and hands on the samples it was given, so its answer
+/// kind is its child's. A histogram answer standing on a merge would travel through the canonical
+/// boundary carrying histogram frames, a pairing no execution exercises yet: the planner keeps such
+/// a statement on the existing plan until that pairing is covered, and it has to look at every
+/// merge, not only a root one.
+fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
+    (matches!(node.expr, NativeExpr::Merge { .. })
+        && node.output_field_kind(input_kind) == Some(FieldKind::Histogram))
+        || node_children(&node.expr)
+            .into_iter()
+            .any(|child| merge_answers_histogram(child, input_kind))
+}
+
 fn canonical_local_prefix(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) => true,
