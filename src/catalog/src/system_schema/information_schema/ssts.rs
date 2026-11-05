@@ -19,12 +19,8 @@ use common_catalog::consts::{
     INFORMATION_SCHEMA_SSTS_STORAGE_TABLE_ID,
 };
 use common_error::ext::BoxedError;
-use common_query::logical_plan::is_lossless_substrait_type;
 use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
-use datafusion::common::DFSchema;
-use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::logical_expr::ExprSchemable;
 use datafusion::physical_plan::ExecutionPlan;
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
@@ -32,64 +28,13 @@ use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEnt
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
-use crate::error::{ProjectSchemaSnafu, Result};
+use crate::error::Result;
 use crate::information_schema::{
-    DatanodeInspectKind, DatanodeInspectRequest, InformationSchemaTableScope, InformationTable,
-    SSTS_INDEX_META, SSTS_MANIFEST, SSTS_STORAGE,
+    DatanodeInspectKind, InformationSchemaTableScope, InformationTable, SSTS_INDEX_META,
+    SSTS_MANIFEST, SSTS_STORAGE,
 };
 use crate::system_schema::SystemTable;
 use crate::system_schema::utils;
-
-fn projected_schema(schema: &SchemaRef, request: &ScanRequest) -> Result<SchemaRef> {
-    if let Some(p) = request.projection.as_deref() {
-        Ok(Arc::new(schema.try_project(p).context(ProjectSchemaSnafu)?))
-    } else {
-        Ok(schema.clone())
-    }
-}
-
-fn inspect_plan(
-    catalog_manager: &Weak<dyn CatalogManager>,
-    kind: DatanodeInspectKind,
-    schema: &SchemaRef,
-    request: ScanRequest,
-) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-    let projected_schema = projected_schema(schema, &request)?;
-    let info_ext = utils::information_extension(catalog_manager)?;
-    let req = inspect_request(kind, schema, request)?;
-
-    info_ext.inspect_datanode_plan(req, projected_schema)
-}
-
-// System table predicates are inexact: the frontend keeps a residual filter. Dropping
-// an unsafe remote filter preserves correctness only if no remote limit truncates it.
-fn inspect_request(
-    kind: DatanodeInspectKind,
-    schema: &SchemaRef,
-    mut scan: ScanRequest,
-) -> Result<DatanodeInspectRequest> {
-    let schema =
-        DFSchema::try_from(schema.arrow_schema().clone()).context(crate::error::DatafusionSnafu)?;
-    let filter_count = scan.filters.len();
-    scan.filters.retain(|filter| {
-        let mut supported = true;
-        let visited = filter.apply(|expr| {
-            if !expr
-                .get_type(&schema)
-                .is_ok_and(|data_type| is_lossless_substrait_type(&data_type))
-            {
-                supported = false;
-                return Ok(TreeNodeRecursion::Stop);
-            }
-            Ok(TreeNodeRecursion::Continue)
-        });
-        visited.is_ok() && supported
-    });
-    if scan.filters.len() != filter_count {
-        scan.limit = None;
-    }
-    Ok(DatanodeInspectRequest { kind, scan })
-}
 
 /// Information schema table for sst manifest.
 pub struct InformationSchemaSstsManifest {
@@ -126,9 +71,9 @@ impl SystemTable for InformationSchemaSstsManifest {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = projected_schema(&self.schema, &request)?;
+        let schema = utils::projected_schema(&self.schema, &request)?;
         let info_ext = utils::information_extension(&self.catalog_manager)?;
-        let req = inspect_request(DatanodeInspectKind::SstManifest, &self.schema, request)?;
+        let req = utils::inspect_request(DatanodeInspectKind::SstManifest, &self.schema, request)?;
 
         let future = async move {
             info_ext
@@ -144,7 +89,7 @@ impl SystemTable for InformationSchemaSstsManifest {
     }
 
     fn scan_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        inspect_plan(
+        utils::inspect_plan(
             &self.catalog_manager,
             DatanodeInspectKind::SstManifest,
             &self.schema,
@@ -188,10 +133,10 @@ impl SystemTable for InformationSchemaSstsStorage {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = projected_schema(&self.schema, &request)?;
+        let schema = utils::projected_schema(&self.schema, &request)?;
 
         let info_ext = utils::information_extension(&self.catalog_manager)?;
-        let req = inspect_request(DatanodeInspectKind::SstStorage, &self.schema, request)?;
+        let req = utils::inspect_request(DatanodeInspectKind::SstStorage, &self.schema, request)?;
 
         let future = async move {
             info_ext
@@ -207,7 +152,7 @@ impl SystemTable for InformationSchemaSstsStorage {
     }
 
     fn scan_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        inspect_plan(
+        utils::inspect_plan(
             &self.catalog_manager,
             DatanodeInspectKind::SstStorage,
             &self.schema,
@@ -251,10 +196,10 @@ impl SystemTable for InformationSchemaSstsIndexMeta {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = projected_schema(&self.schema, &request)?;
+        let schema = utils::projected_schema(&self.schema, &request)?;
 
         let info_ext = utils::information_extension(&self.catalog_manager)?;
-        let req = inspect_request(DatanodeInspectKind::SstIndexMeta, &self.schema, request)?;
+        let req = utils::inspect_request(DatanodeInspectKind::SstIndexMeta, &self.schema, request)?;
 
         let future = async move {
             info_ext
@@ -270,7 +215,7 @@ impl SystemTable for InformationSchemaSstsIndexMeta {
     }
 
     fn scan_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        inspect_plan(
+        utils::inspect_plan(
             &self.catalog_manager,
             DatanodeInspectKind::SstIndexMeta,
             &self.schema,
@@ -281,6 +226,7 @@ impl SystemTable for InformationSchemaSstsIndexMeta {
 
 #[cfg(test)]
 mod tests {
+    use crate::information_schema::DatanodeInspectRequest;
     use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
     use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -346,6 +292,10 @@ mod tests {
         use datafusion::logical_expr::{Expr, col, lit};
 
         for (kind, schema) in [
+            (
+                DatanodeInspectKind::CompactionTasks,
+                store_api::compaction_task::CompactionTaskEntry::schema(),
+            ),
             (DatanodeInspectKind::SstManifest, ManifestSstEntry::schema()),
             (DatanodeInspectKind::SstStorage, StorageSstEntry::schema()),
             (
@@ -361,7 +311,7 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(
-                inspect_request(kind, &schema, scan.clone()).unwrap(),
+                utils::inspect_request(kind, &schema, scan.clone()).unwrap(),
                 DatanodeInspectRequest {
                     kind,
                     scan: scan.clone()
@@ -382,7 +332,7 @@ mod tests {
                 let mut expected = scan.clone();
                 expected.limit = None;
                 assert_eq!(
-                    inspect_request(kind, &schema, input).unwrap(),
+                    utils::inspect_request(kind, &schema, input).unwrap(),
                     DatanodeInspectRequest {
                         kind,
                         scan: expected
