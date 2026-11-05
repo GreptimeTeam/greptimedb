@@ -2345,6 +2345,19 @@ impl NativeFusedObserver {
         );
         captured.remove(0)
     }
+
+    /// Every fused node the request just executed.
+    ///
+    /// A statement the route answers with one node yields one; a split aggregate yields the
+    /// partial producer and the final consumer, which are two separate executions.
+    fn take_all(&self, context: &str) -> Vec<Arc<dyn ExecutionPlan>> {
+        let captured = std::mem::take(&mut *self.0.lock().unwrap());
+        assert!(
+            !captured.is_empty(),
+            "`{context}`: the request executed no fused node, so it left the native route"
+        );
+        captured
+    }
 }
 
 impl PhysicalPlanWrapper for NativeFusedObserver {
@@ -5958,8 +5971,11 @@ pub async fn test_remote_write_v2_histogram_float_prefix_native_route(store_type
             Some(expected),
             "{query}: {native}"
         );
-        let fused = observer.take(query);
-        assert_eq!(fused.name(), "FusedSeriesExec", "{query} left the route");
+        let fused = observer.take_all(query);
+        assert!(
+            fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+            "{query} executed a node that is not the fused producer: {fused:?}"
+        );
     }
 }
 
