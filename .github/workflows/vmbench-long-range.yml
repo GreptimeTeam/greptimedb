@@ -12,6 +12,11 @@ on:
         type: boolean
         default: false
         required: false
+      run_prometheus:
+        description: Run Prometheus (requires a runtime image with managed Prometheus support)
+        type: boolean
+        default: false
+        required: false
       range_preset:
         description: Long-range query window (fixed dataset per preset)
         type: choice
@@ -39,6 +44,11 @@ on:
         description: Docker Hub victoriametrics/victoria-metrics tag or tag@sha256 digest
         type: string
         default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
+        required: true
+      prometheus_tag:
+        description: Docker Hub prom/prometheus tag or tag@sha256 digest
+        type: string
+        default: v3.2.1@sha256:6927e0919a144aa7616fd0137d4816816d42f6b816de3af269ab065250859a62
         required: true
       runtime_image:
         description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
@@ -95,7 +105,8 @@ env:
   RANGE_PRESET: ${{ inputs.range_preset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' }}
+  PROMETHEUS_TAG: ${{ inputs.prometheus_tag }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:768964ec-prometheus@sha256:b96bdf7135ae49725d2cfd2bb4f159c11c68b4b61a1bcbd026112f2776a245cb' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:768964ec-prometheus@sha256:b96bdf7135ae49725d2cfd2bb4f159c11c68b4b61a1bcbd026112f2776a245cb' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -149,6 +160,7 @@ jobs:
       env:
         RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
         RUN_VICTORIAMETRICS: ${{ inputs.run_victoriametrics }}
+        RUN_PROMETHEUS: ${{ inputs.run_prometheus }}
       run: |
         set -euo pipefail
         [[ "$BENCHMARK_ROOT" == /* && "$BENCHMARK_ROOT" != / && "$BENCHMARK_ROOT" != */ ]]
@@ -180,10 +192,11 @@ jobs:
           args+=(--target "greptimedb:name=greptimedb-baseline,image=greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG,url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range")
         fi
         # Tags become target-spec fields; reject separators before passing them to the planner.
-        for target in greptimedb victoriametrics; do
+        for target in greptimedb victoriametrics prometheus; do
           case "$target" in
             greptimedb) enabled=$RUN_GREPTIMEDB; tag=$GREPTIMEDB_TAG; repo=greptime/greptimedb; url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range ;;
             victoriametrics) enabled=$RUN_VICTORIAMETRICS; tag=$VICTORIAMETRICS_TAG; repo=victoriametrics/victoria-metrics; url=http://127.0.0.1:18428/api/v1/query_range ;;
+            prometheus) enabled=$RUN_PROMETHEUS; tag=$PROMETHEUS_TAG; repo=prom/prometheus; url=http://127.0.0.1:19090/api/v1/query_range ;;
           esac
           [[ "$enabled" == true ]] || continue
           [[ "$tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?$ ]]
