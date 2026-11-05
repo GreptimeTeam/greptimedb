@@ -43,6 +43,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics::COMPACTION_MEMORY_REJECTED;
 use crate::region::ManifestContext;
 use crate::request::{BackgroundNotify, CompactionUnitNotification, OutputTx, WorkerRequest};
+use crate::schedule::CancellableTaskState;
 use crate::schedule::remote_job_scheduler::{RemoteJob, RemoteJobSchedulerRef};
 use crate::schedule::scheduler::{Job, Scheduler};
 use crate::sst::FormatType;
@@ -1443,7 +1444,14 @@ async fn test_execution_finished_drains_until_no_plan() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    // This harness never runs the submitted units, so the first batch keeps
+    // occupying one admission slot. Leave a spare slot so the chained follow-up
+    // still reaches the executor regardless of the host's CPU-derived capacity.
+    let config = MitoConfig {
+        max_background_compactions: 2,
+        ..Default::default()
+    };
+    let mut scheduler = env.mock_compaction_scheduler_with_config(tx, config);
     let mut builder = VersionControlBuilder::new();
     let purger = builder.file_purger();
     let region_id = builder.region_id();
@@ -1626,7 +1634,13 @@ async fn test_time_range_compaction_when_compaction_in_progress() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    // The first batch is never run here and keeps one admission slot occupied,
+    // so the pending manual request needs a second slot to reach the executor.
+    let config = MitoConfig {
+        max_background_compactions: 2,
+        ..Default::default()
+    };
+    let mut scheduler = env.mock_compaction_scheduler_with_config(tx, config);
     let mut builder = VersionControlBuilder::new();
     let purger = builder.file_purger();
     let region_id = builder.region_id();
@@ -1854,7 +1868,13 @@ async fn test_ranged_compaction_stops_without_followup() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    // The ranged execution's units are never run here and keep one admission
+    // slot occupied, so the follow-up pick needs a second slot to be submitted.
+    let config = MitoConfig {
+        max_background_compactions: 2,
+        ..Default::default()
+    };
+    let mut scheduler = env.mock_compaction_scheduler_with_config(tx, config);
 
     let mut builder = VersionControlBuilder::new();
     for offset in [0, 10, 20, 30] {
@@ -2100,29 +2120,87 @@ async fn test_automatic_planning_prepares_independent_windows_up_to_global_capac
     assert_eq!(std::collections::HashSet::from([0, 2]), windows);
 }
 
+#[rstest::rstest]
+#[case::single_runner(1)]
+#[case::multiple_runners(4)]
 #[tokio::test]
-async fn test_scheduler_env_compaction_executor_matches_configured_capacity() {
+async fn test_scheduler_env_runs_compactions_up_to_configured_capacity(#[case] capacity: usize) {
     let env = SchedulerEnv::new().await;
     let (tx, _rx) = mpsc::channel(4);
     let config = MitoConfig {
-        max_background_compactions: 4,
+        max_background_compactions: capacity,
         ..Default::default()
     };
     let scheduler = env.mock_compaction_scheduler_with_config(tx, config);
+    let (started, mut starts) = mpsc::unbounded_channel();
+    // Dropping the senders also unblocks jobs if an assertion fails.
+    let mut resumes = Vec::new();
+    for id in 0..=capacity {
+        let (resume, paused) = oneshot::channel();
+        resumes.push(resume);
+        let started = started.clone();
+        scheduler
+            .coordinator
+            .schedule(
+                RegionId::from_u64(1),
+                ReadyUnit::new(
+                    CancellableTaskState::new(),
+                    1,
+                    Box::pin(async move {
+                        let _ = started.send(id);
+                        let _ = paused.await;
+                    }),
+                    Box::pin(async {}),
+                ),
+            )
+            .unwrap();
+    }
 
-    // The default harness derives the coordinator and its executor from the
-    // same value, so admitted units cannot queue behind a smaller runner set.
-    assert_eq!(4, scheduler.coordinator.capacity());
+    let mut first_starts = Vec::new();
+    for _ in 0..capacity {
+        first_starts.push(
+            tokio::time::timeout(Duration::from_secs(5), starts.recv())
+                .await
+                .expect("configured compaction runner did not start")
+                .unwrap(),
+        );
+    }
+    first_starts.sort_unstable();
+    assert_eq!((0..capacity).collect::<Vec<_>>(), first_starts);
+    assert!(starts.try_recv().is_err());
 
+    resumes.remove(0).send(()).unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(capacity, next);
+    drop(resumes);
+    tokio::time::timeout(Duration::from_secs(5), scheduler.coordinator.stop())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_env_submits_compactions_to_injected_executor() {
     let injected = Arc::new(VecScheduler::default());
-    let env = SchedulerEnv::new().await.scheduler(injected);
+    let env = SchedulerEnv::new().await.scheduler(injected.clone());
     let (tx, _rx) = mpsc::channel(4);
-    let config = MitoConfig {
-        max_background_compactions: 2,
-        ..Default::default()
-    };
-    let scheduler = env.mock_compaction_scheduler_with_config(tx, config);
-    assert_eq!(2, scheduler.coordinator.capacity());
+    let scheduler = env.mock_compaction_scheduler(tx);
+    scheduler
+        .coordinator
+        .schedule(
+            RegionId::from_u64(1),
+            ReadyUnit::new(
+                CancellableTaskState::new(),
+                1,
+                Box::pin(async {}),
+                Box::pin(async {}),
+            ),
+        )
+        .unwrap();
+    assert_eq!(1, injected.num_jobs());
 }
 
 #[tokio::test]

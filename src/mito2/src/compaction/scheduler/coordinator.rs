@@ -183,12 +183,6 @@ impl CompactionCoordinator {
         Self::new(Arc::new(LocalScheduler::new(concurrency)), concurrency)
     }
 
-    /// Returns how many units may hold capacity at once.
-    #[cfg(test)]
-    pub(crate) fn capacity(&self) -> usize {
-        self.capacity
-    }
-
     fn lock(&self) -> MutexGuard<'_, CoordinatorState> {
         self.state
             .lock()
