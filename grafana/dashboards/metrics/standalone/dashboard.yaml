@@ -1962,10 +1962,17 @@ groups:
               legendFormat: '{{result}}'
         - title: Auto Repartition Gate Stops
           type: timeseries
-          description: Repartition gate stop increments. Baseline failures are expanded into bounded reasons; the aggregate invalid_baseline series is excluded to avoid double counting. Detailed table/region decisions remain available in Logs.
+          description: Repartition gate stop increments. Baseline failures show detailed reasons when available; otherwise the aggregate invalid_baseline series is retained. Fallback is matched per source before aggregation to avoid double counting across mixed versions.
           unit: short
           queries:
-            - expr: sum by (gate, reason) (increase(greptime_auto_repartition_gate_stop_total{reason!="invalid_baseline"}[$__rate_interval]))
+            - expr: |-
+                sum by (gate, reason) (
+                  increase(greptime_auto_repartition_gate_stop_total{reason!="invalid_baseline"}[$__rate_interval])
+                  or
+                  (increase(greptime_auto_repartition_gate_stop_total{reason="invalid_baseline"}[$__rate_interval])
+                    unless ignoring (gate, reason)
+                    increase(greptime_auto_repartition_invalid_baseline_total[$__rate_interval]))
+                )
               datasource:
                 type: prometheus
                 uid: ${metrics}
