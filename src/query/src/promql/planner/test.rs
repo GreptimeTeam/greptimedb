@@ -7938,6 +7938,10 @@ async fn count_and_group_fold_histograms_natively() {
         "avg(some_metric)",
         "min(some_metric)",
         "max(some_metric)",
+        // Presence-only at the root does not excuse the aggregate below it: the inner one reads a
+        // value, and a histogram entering it is what the gate refuses.
+        "count(sum(some_metric))",
+        "group(avg(some_metric))",
     ] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;

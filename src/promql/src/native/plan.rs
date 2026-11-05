@@ -490,10 +490,11 @@ impl NativeNode {
                 let left_kind = kind_of(left)?;
                 (left_kind == kind_of(right)?).then_some(left_kind)
             }
-            // An aggregate folds float state only: the admission gate keeps a histogram from
-            // entering one, so whatever a histogram statement aggregates answers floats. Naming it
-            // here is what lets `sum(count_over_time(h[5m]))` - a float built from histograms -
-            // declare a float column instead of keeping the existing plan.
+            // Every aggregate answers floats: the ones that read a value fold float state and keep
+            // a histogram out at admission, and `count`/`group` answer a count or a `1` whatever
+            // the samples they counted. Naming it here is what lets `sum(count_over_time(h[5m]))` -
+            // a float built from histograms - declare a float column instead of keeping the
+            // existing plan.
             NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
             _ => None,
         }

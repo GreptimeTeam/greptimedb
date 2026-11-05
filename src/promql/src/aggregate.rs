@@ -70,8 +70,10 @@ pub enum Grouping<'a> {
 /// Groups are returned in the order their first input appears, as in Prometheus: a nested
 /// aggregation folds them in that order.
 ///
-/// Only float evaluated inputs on the shared schema/grid are admitted. `by` on a value field
-/// needs per-point labels and an output schema adapter, and is rejected. There is no fallback.
+/// Evaluated inputs on the shared schema/grid are admitted. An operation that reads a value takes
+/// float samples only; `count` and `group` ask whether a sample is present, so they also accept a
+/// histogram. `by` on a value field needs per-point labels and an output schema adapter, and is
+/// rejected. There is no fallback.
 pub fn aggregate_float(
     schema: &Arc<SeriesSchema>,
     input: &[Series],
