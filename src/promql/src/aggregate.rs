@@ -29,13 +29,15 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::arrow::array::Float64Array;
+use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::series::SeriesLabels;
-use datatypes::series::samples::{SampleRef, Samples, Series, SeriesSchema};
+use datatypes::series::histogram::{CounterResetHint, HistogramBatchBuilder, HistogramView};
+use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{GridSpan, TimeAxis};
 
 use crate::go_format::format_float_f;
 use crate::grid_series::{GridSeriesBuilder, external};
+use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::histogram_eval::histogram_string;
 use crate::map::{drop_empty_labels, validate_float_series, validate_grid_series, validate_scalar};
 use crate::range_eval::quantile;
@@ -112,8 +114,11 @@ pub(crate) enum HistogramSamples {
     /// Ignores it and reports that it did: `min`, `max`, `stddev`, `stdvar` and `quantile` read a
     /// float value, and Prometheus skips the histogram samples instead of refusing the statement.
     Ignored,
-    /// Refuses it: `sum` and `avg` would have to fold the payload, and this route has no
-    /// histogram aggregate state yet.
+    /// Folds the payload and answers a histogram: `sum` adds native histograms bucket by bucket,
+    /// as Prometheus' `sum` does, so one group's result is a native histogram.
+    Folded,
+    /// Refuses it: `avg` would have to fold the payload into a mean, and this route folds no
+    /// histogram average yet.
     Refused,
 }
 
@@ -124,7 +129,8 @@ pub(crate) fn histogram_samples(op: AggregateOp) -> HistogramSamples {
         AggregateOp::Min | AggregateOp::Max | AggregateOp::Stddev | AggregateOp::Stdvar => {
             HistogramSamples::Ignored
         }
-        AggregateOp::Sum | AggregateOp::Avg => HistogramSamples::Refused,
+        AggregateOp::Sum => HistogramSamples::Folded,
+        AggregateOp::Avg => HistogramSamples::Refused,
     }
 }
 
@@ -139,9 +145,9 @@ pub(crate) fn validate_aggregate_series<'a>(
     op: AggregateOp,
 ) -> Result<&'a TimeAxis> {
     match histogram_samples(op) {
-        // A histogram is either counted or skipped by the fold, so either way it is a series this
-        // aggregate can take; only the payload-folding operations refuse it.
-        HistogramSamples::Presence | HistogramSamples::Ignored => {
+        // A histogram is counted, skipped or folded by the fold itself, so either way it is a
+        // series this aggregate can take; only the operation with no histogram state refuses it.
+        HistogramSamples::Presence | HistogramSamples::Ignored | HistogramSamples::Folded => {
             validate_grid_series(schema, series)
         }
         HistogramSamples::Refused => validate_float_series(schema, series),
@@ -294,6 +300,7 @@ impl FloatAggregator {
                 self.groups.push(Group {
                     metric: metric.clone(),
                     blocks: BTreeMap::new(),
+                    histograms: BTreeMap::new(),
                 });
                 let index = self.groups.len() - 1;
                 entry.insert(index);
@@ -338,6 +345,23 @@ impl FloatAggregator {
         self.retained
     }
 
+    /// The evidence the histogram fold recorded for one position, for a fold test.
+    ///
+    /// It is the state the fold keeps beside its payload, so a test reads the bits where the state
+    /// export would read them rather than from a value the answer happens to imply.
+    #[cfg(test)]
+    pub(crate) fn histogram_evidence(
+        &self,
+        group: usize,
+        position: usize,
+        field: usize,
+    ) -> Option<HistogramEvidence> {
+        self.groups
+            .get(group)
+            .and_then(|group| group.histograms.get(&(position, field)))
+            .map(|accumulator| accumulator.evidence)
+    }
+
     #[cfg(test)]
     pub(crate) fn recounted_state_bytes(&self) -> usize {
         let groups = self.groups.iter().fold(0usize, |total, group| {
@@ -352,6 +376,15 @@ impl FloatAggregator {
                         .saturating_mul(std::mem::size_of::<FloatState>()),
                 )
                 .saturating_add(btree_backing_bytes(group.blocks.len()))
+                .saturating_add(histogram_backing_bytes(group.histograms.len()))
+                .saturating_add(
+                    group
+                        .histograms
+                        .values()
+                        .fold(0usize, |bytes, accumulator| {
+                            bytes.saturating_add(accumulator_bytes(accumulator))
+                        }),
+                )
         });
         groups
             .saturating_add(
@@ -407,6 +440,7 @@ fn finish_groups_budgeted(
         return Ok(Vec::new());
     }
     let groups = groups.into_iter();
+    let schema_arc = Arc::clone(&schema);
     let mut builder = GridSeriesBuilder::try_new(schema)?;
     let output_capacity_bytes = group_count.saturating_mul(std::mem::size_of::<Series>());
     let row_capacity_bytes = width.saturating_mul(std::mem::size_of::<Option<f64>>());
@@ -424,6 +458,31 @@ fn finish_groups_budgeted(
     })?;
     let mut completed_output_bytes = 0usize;
     for group in groups {
+        // A group that folded histogram samples answers histogram columns; one that folded floats
+        // keeps the float path below, so a group without a single histogram payload is built
+        // exactly as before.
+        if !group.histograms.is_empty() {
+            let finish_bytes = histogram_finish_bytes(&group, width);
+            budget(
+                state
+                    .saturating_add(output_capacity_bytes)
+                    .saturating_add(row_capacity_bytes)
+                    .saturating_add(completed_output_bytes)
+                    .saturating_add(finish_bytes),
+            )?;
+            if let Some(finished) = finish_histogram_group(&schema_arc, group, width)? {
+                completed_output_bytes = completed_output_bytes
+                    .saturating_add(crate::grid_series::series_bytes(&finished));
+                output.push(finished);
+            }
+            budget(
+                state
+                    .saturating_add(output_capacity_bytes)
+                    .saturating_add(row_capacity_bytes)
+                    .saturating_add(completed_output_bytes),
+            )?;
+            continue;
+        }
         // One builder serves every group, so each result series starts explicitly.
         builder.begin_series();
         let (rows, runs) = group_rows_runs(&group, width);
@@ -463,6 +522,134 @@ fn finish_groups_budgeted(
         )?;
     }
     Ok(output)
+}
+
+/// Builds one group's histogram result, or `None` when it has nothing left to answer.
+///
+/// A position's answer is its live sum plus the compensation paired with it -- what the kernel's own
+/// `sum` does at the end of its fold -- with the start timestamp cleared and the empty buckets
+/// dropped. A poisoned position was removed, so it contributes no value; a position that is
+/// poisoned in one field and answered in another still carries the row.
+fn finish_histogram_group(
+    schema: &Arc<SeriesSchema>,
+    group: Group,
+    width: usize,
+) -> Result<Option<Series>> {
+    // A field's column is one type. The fold already refuses a histogram where it had folded a
+    // float at that position; a float folded after a histogram is caught here, where the column
+    // type is chosen for the whole group.
+    if group
+        .blocks
+        .values()
+        .any(|states| states.iter().any(|state| state.seen))
+    {
+        return Err(DataFusionError::Execution(
+            "a native `sum` cannot mix float and histogram samples in one field".into(),
+        ));
+    }
+    let grid = schema.eval_grid.clone().ok_or_else(|| {
+        DataFusionError::Execution("histogram aggregation requires an evaluation grid".into())
+    })?;
+    let mut positions: Vec<usize> = group
+        .histograms
+        .keys()
+        .map(|&(position, _)| position)
+        .collect();
+    positions.dedup();
+    let mut builders: Vec<HistogramBatchBuilder> =
+        (0..width).map(|_| HistogramBatchBuilder::new()).collect();
+    let mut indices: Vec<Vec<Option<u32>>> = vec![Vec::new(); width];
+    let mut spans: Vec<GridSpan> = Vec::new();
+    let mut row: Vec<Option<FloatHistogram>> = vec![None; width];
+    for position in positions {
+        // A poisoned position has no answer, so the row it would have made is dropped whole: every
+        // column is written once per *answered* position, or the columns and the axis would drift.
+        let mut answered = false;
+        for (field, value) in row.iter_mut().enumerate() {
+            *value = match group.histograms.get(&(position, field)) {
+                Some(accumulator) => {
+                    let value = finished_histogram(accumulator)?;
+                    answered |= value.is_some();
+                    value
+                }
+                None => None,
+            };
+        }
+        if !answered {
+            continue;
+        }
+        // A gap between two answered positions ends a run, and a row belongs to the run it opens.
+        match spans.last_mut() {
+            Some(span) if span.start() + span.len() == position => {
+                *span = GridSpan::new(span.start(), span.len() + 1);
+            }
+            _ => spans.push(GridSpan::new(position, 1)),
+        }
+        for ((builder, indices), value) in builders.iter_mut().zip(&mut indices).zip(&row) {
+            indices.push(match value {
+                Some(value) => Some(value.push_to(builder)?),
+                None => None,
+            });
+        }
+    }
+    if spans.is_empty() {
+        return Ok(None);
+    }
+    let mut samples = Vec::with_capacity(width);
+    for (builder, indices) in builders.into_iter().zip(indices) {
+        let batch = builder.finish().map_err(external)?;
+        samples.push(
+            Samples::try_from_histogram(UInt32Array::from(indices), batch).map_err(external)?,
+        );
+    }
+    // The result is addressed by the runs that carry a histogram, not by the span between the first
+    // and the last one: the nulls padding them stay inside a run, never between two.
+    let time = TimeAxis::from_grid_spans(grid, spans).map_err(external)?;
+    Series::try_new(
+        schema,
+        group.metric,
+        time,
+        SeriesFields::try_from_vec(samples).map_err(external)?,
+    )
+    .map(Some)
+    .map_err(external)
+}
+
+/// One position's answer: the live sum with its compensation folded in, compacted.
+fn finished_histogram(accumulator: &HistogramAccumulator) -> Result<Option<FloatHistogram>> {
+    if accumulator.evidence.poisoned {
+        return Ok(None);
+    }
+    let mut value = accumulator.value.clone();
+    if let Some(compensation) = accumulator.compensation.as_ref() {
+        value.add(compensation)?;
+    }
+    // Both parts are a result this fold derived, so it carries no start timestamp of its own, and
+    // its empty buckets are dropped the way the kernel's own sum drops them.
+    value.start_timestamp = None;
+    value.compact();
+    Ok(Some(value))
+}
+
+/// Bytes [`finish_histogram_group`] works in while it builds one group's result.
+fn histogram_finish_bytes(group: &Group, width: usize) -> usize {
+    let payload = group
+        .histograms
+        .values()
+        .fold(0usize, |bytes, accumulator| {
+            bytes.saturating_add(accumulator_bytes(accumulator))
+        });
+    let rows = group.histograms.len();
+    let fields = width.saturating_mul(
+        size_of::<HistogramBatchBuilder>()
+            .saturating_add(size_of::<Vec<Option<u32>>>())
+            .saturating_add(size_of::<Samples>()),
+    );
+    payload
+        .saturating_add(rows.saturating_mul(size_of::<Option<u32>>()))
+        .saturating_add(rows.saturating_mul(size_of::<GridSpan>()))
+        .saturating_add(fields)
+        .saturating_add(size_of::<Series>().saturating_add(size_of::<TimeAxis>()))
 }
 
 /// The result of every group, without a budget: the entry the partial-state merger takes, which
@@ -935,6 +1122,49 @@ struct Group {
     /// Keyed by absolute grid index / `BLOCK_POINTS`; each block holds one state per field for
     /// each of its points, point by point.
     blocks: BTreeMap<usize, Box<[FloatState]>>,
+    /// The histogram states of this group, keyed by absolute grid position and field.
+    ///
+    /// Only an aggregate that folds a payload allocates one, and only where it saw a histogram
+    /// sample, so a float fold never touches this map and its state stays the blocks alone.
+    histograms: BTreeMap<(usize, usize), HistogramAccumulator>,
+}
+
+/// One position's histogram fold: the live sum, the compensation paired with it, and the evidence
+/// the fold recorded beside them.
+///
+/// The payload here is the kernel's own owned histogram rather than the state frame's row
+/// representation: a fold adds bucket by bucket, and rebuilding a frame row per sample would
+/// re-encode the layout it just added into. The state export builds that row from this.
+struct HistogramAccumulator {
+    /// The live sum, in the layout the fold has reduced it to.
+    value: FloatHistogram,
+    /// The compensation paired with `value`, carrying `value`'s bucket layout.
+    ///
+    /// It is `None` only while a [`FloatHistogram::kahan_add`] call owns it, and stays `None` once
+    /// the position is poisoned: a poisoned point folds nothing more, so there is nothing left to
+    /// compensate.
+    compensation: Option<FloatHistogram>,
+    evidence: HistogramEvidence,
+}
+
+/// The evidence bits a histogram fold records beside its payload.
+///
+/// These are the Boolean components of the histogram state layout: the fold records them per point
+/// so a merge of two partitions can report what the inputs disagreed about. Only `poisoned` steers
+/// the fold's own output today -- a poisoned point is removed -- and the rest are carried for that
+/// merge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HistogramEvidence {
+    /// The point cannot be answered because its samples disagreed on their bucket layout.
+    pub(crate) poisoned: bool,
+    /// The disagreement was exponential buckets meeting custom buckets.
+    pub(crate) incompatible_layout: bool,
+    /// Two custom-bucket samples were reconciled into the intersection of their bounds.
+    pub(crate) custom_bounds_reconciled: bool,
+    /// Some sample reported a counter reset.
+    pub(crate) counter_reset_seen: bool,
+    /// Some sample reported that no counter reset happened.
+    pub(crate) not_counter_reset_seen: bool,
 }
 
 /// Which field of which layout a fold is writing, and how it folds it.
@@ -985,7 +1215,7 @@ impl Group {
                 match sample {
                     SampleRef::Missing => {}
                     SampleRef::Float(sample) => pending.push((index % BLOCK_POINTS, sample)),
-                    SampleRef::Histogram(_) => match histogram_samples(op) {
+                    SampleRef::Histogram(view) => match histogram_samples(op) {
                         // `count` and `group` ask whether a sample is present, not which payload
                         // it carries, so a histogram is one contribution. The value is a
                         // placeholder: `FloatState` counts the contributions for `count` and only
@@ -994,10 +1224,28 @@ impl Group {
                         // Prometheus skips a histogram sample where the aggregate reads a float
                         // value; the runtime reports that it did.
                         HistogramSamples::Ignored => {}
-                        // A payload-folding aggregate is validated as float-only before it folds,
-                        // so a histogram reaching one of them is a defect, not a query.
+                        // `sum` folds the payload itself, into the position's own histogram state.
+                        // The sample is addressed by its absolute grid position, so it does not go
+                        // through the block buffer the float samples share.
+                        HistogramSamples::Folded => {
+                            retained = self.fold_histogram(
+                                FieldFold {
+                                    width,
+                                    field_index,
+                                    op,
+                                },
+                                index,
+                                &view,
+                                budget,
+                                retained,
+                            )?;
+                        }
+                        // An aggregate with no histogram average is validated as float-only before
+                        // it folds, so a histogram reaching one is a defect, not a query.
                         HistogramSamples::Refused => {
-                            unreachable!("a payload-folding aggregate refuses histogram samples")
+                            unreachable!(
+                                "an aggregate without histogram state refuses histogram samples"
+                            )
                         }
                     },
                 }
@@ -1061,6 +1309,131 @@ impl Group {
             .saturating_add(backing_delta)
             .saturating_add(block_bytes))
     }
+}
+
+impl Group {
+    /// Folds one histogram sample into its position's state, admitting what the fold allocates.
+    ///
+    /// The first sample of a position establishes the state: it is the live value, and its
+    /// compensation is the layout-carrying zero `new_compensation` builds -- never an `empty_like`
+    /// histogram, which has no bucket indices for the compensated add to index. Every later sample
+    /// is one [`FloatHistogram::kahan_add`] into the live value, carrying the compensation this
+    /// position already holds.
+    ///
+    /// Two samples whose bucket layouts cannot be added (exponential meeting custom buckets) poison
+    /// the position instead of failing the statement, and a poisoned position folds nothing more:
+    /// Prometheus drops the point, so the evidence is what survives. Numeric overflow is not a reason
+    /// to poison a point -- a saturated sum answers `Inf`, as the kernel's own sum does.
+    fn fold_histogram(
+        &mut self,
+        fold: FieldFold,
+        position: usize,
+        view: &HistogramView<'_>,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+        retained: usize,
+    ) -> Result<usize> {
+        // A field's column is either float or histogram, so a position that already folded a float
+        // cannot also fold a histogram. The other order is caught when the fold is finished, which
+        // is where the column type is chosen.
+        if let Some(states) = self.blocks.get(&(position / BLOCK_POINTS))
+            && states[(position % BLOCK_POINTS) * fold.width + fold.field_index].seen
+        {
+            return Err(DataFusionError::Execution(
+                "a native `sum` cannot mix float and histogram samples in one field".into(),
+            ));
+        }
+        let sample = FloatHistogram::try_from_view(view)?;
+        let key = (position, fold.field_index);
+        let vacant = !self.histograms.contains_key(&key);
+        let backing = if vacant {
+            histogram_backing_bytes(self.histograms.len() + 1)
+                .saturating_sub(histogram_backing_bytes(self.histograms.len()))
+        } else {
+            0
+        };
+        if vacant {
+            // Admit the new position before allocating it: a live value, the compensation that
+            // starts beside it, and the map node holding both.
+            budget(
+                retained
+                    .saturating_add(size_of::<HistogramAccumulator>())
+                    .saturating_add(sample.heap_bytes().saturating_mul(2))
+                    .saturating_add(backing),
+            )?;
+        }
+        let accumulator = self.histograms.entry(key).or_insert_with(|| {
+            let compensation = sample.new_compensation();
+            HistogramAccumulator {
+                value: sample.clone(),
+                compensation: Some(compensation),
+                evidence: HistogramEvidence::default(),
+            }
+        });
+        // The evidence follows the sample's own reset hint, whether or not the point still folds.
+        match sample.reset_hint {
+            CounterResetHint::CounterReset => accumulator.evidence.counter_reset_seen = true,
+            CounterResetHint::NotCounterReset => accumulator.evidence.not_counter_reset_seen = true,
+            _ => {}
+        }
+        if accumulator.evidence.poisoned {
+            return Ok(retained);
+        }
+        if vacant {
+            // The admitted estimate is an upper bound; what the fold keeps is the real figure.
+            return Ok(retained
+                .saturating_add(accumulator_bytes(accumulator))
+                .saturating_add(backing));
+        }
+        // An add can grow both bucket lists, so the incoming sample's payload on top of what the
+        // position already holds is what is admitted; the figure kept afterwards is the real one.
+        let before = accumulator_bytes(accumulator);
+        budget(
+            retained
+                .saturating_add(before)
+                .saturating_add(sample.heap_bytes()),
+        )?;
+        if accumulator.value.uses_custom_buckets() != sample.uses_custom_buckets() {
+            // Exponential buckets cannot be added to custom ones: the point is removed rather than
+            // answered, and the evidence says why.
+            accumulator.evidence.poisoned = true;
+            accumulator.evidence.incompatible_layout = true;
+            accumulator.compensation = None;
+            return Ok(retained);
+        }
+        let (compensation, outcome) = accumulator
+            .value
+            .kahan_add(&sample, accumulator.compensation.take())?;
+        accumulator.compensation = Some(compensation);
+        accumulator.evidence.custom_bounds_reconciled |= outcome.custom_bounds_reconciled;
+        Ok(retained
+            .saturating_sub(before)
+            .saturating_add(accumulator_bytes(accumulator)))
+    }
+}
+
+/// Bytes one histogram position holds: its two histograms' buckets, bounds and span layout.
+fn accumulator_bytes(accumulator: &HistogramAccumulator) -> usize {
+    size_of::<HistogramAccumulator>()
+        .saturating_add(accumulator.value.heap_bytes())
+        .saturating_add(
+            accumulator
+                .compensation
+                .as_ref()
+                .map_or(0, FloatHistogram::heap_bytes),
+        )
+}
+
+/// An upper bound on the bytes one node of a group's histogram map holds.
+fn histogram_node_bytes() -> usize {
+    11 * size_of::<((usize, usize), HistogramAccumulator)>() + 16 * size_of::<usize>()
+}
+
+/// An upper bound on the bytes a histogram map of `entries` holds, like [`btree_backing_bytes`].
+fn histogram_backing_bytes(entries: usize) -> usize {
+    if entries == 0 {
+        return 0;
+    }
+    entries.div_ceil(5).saturating_mul(histogram_node_bytes())
 }
 
 /// The float part of Prometheus' `groupedAggregation`.

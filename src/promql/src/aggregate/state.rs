@@ -151,6 +151,14 @@ impl FloatAggregator {
         let grid_len = grid.spec().len as usize;
         let mut groups: Vec<StateSeries> = Vec::with_capacity(self.groups.len());
         for group in self.groups {
+            // The exported state carries numeric components only. A fold that kept histogram
+            // payloads has no state to hand over yet, and exporting the (empty) numeric state of
+            // such a group would silently drop them.
+            if !group.histograms.is_empty() {
+                return Err(DataFusionError::NotImplemented(
+                    "native histogram aggregate state cannot be exported yet".into(),
+                ));
+            }
             let points = seen_points(&group, width);
             let mut spans: Vec<GridSpan> = Vec::with_capacity(points.min(1));
             let mut states: Vec<Vec<Option<StatePayload>>> =
@@ -514,6 +522,7 @@ impl FloatMerger {
         self.groups.push(Group {
             metric,
             blocks: BTreeMap::new(),
+            histograms: BTreeMap::new(),
         });
         let index = self.groups.len() - 1;
         self.group_index.insert(key, index);
