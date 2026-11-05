@@ -1072,3 +1072,72 @@ impl oio::List for ZeroSizeLister {
         Ok(Some(oio::Entry::new(&path, builder.build())))
     }
 }
+
+#[rstest::rstest]
+#[case(CompressionType::Uncompressed)]
+#[case(CompressionType::Gzip)]
+#[case(CompressionType::Zstd)]
+#[tokio::test]
+async fn manifest_cache_write_through_survives_reopen(#[case] compression: CompressionType) {
+    use common_base::readable_size::ReadableSize;
+    use common_test_util::temp_dir::create_temp_dir;
+    use object_store::ObjectStore;
+    use object_store::services::Fs;
+
+    use crate::cache::manifest_cache::ManifestCache;
+    use crate::manifest::manager::RegionManifestOptions;
+    use crate::sst::FormatType;
+
+    let remote_dir = create_temp_dir("manifest-manager-remote");
+    let cache_dir = create_temp_dir("manifest-manager-cache");
+    let remote = ObjectStore::new(Fs::default().root(remote_dir.path().to_str().unwrap())).unwrap();
+    let local = ObjectStore::new(Fs::default().root(cache_dir.path().to_str().unwrap())).unwrap();
+    let cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
+    // Use a relative prefix, matching production keys and the recovered index.
+    let options = RegionManifestOptions {
+        manifest_dir: "region/".to_string(),
+        object_store: remote,
+        compress_type: compression,
+        checkpoint_distance: 3,
+        remove_file_options: Default::default(),
+        manifest_cache: Some(cache.clone()),
+    };
+    let mut writer = RegionManifestManager::new(
+        Arc::new(basic_region_metadata()),
+        0,
+        options.clone(),
+        FormatType::PrimaryKey,
+        false,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    for _ in 0..7 {
+        writer.update(nop_action(), false).await.unwrap();
+        wait_for_manifest_checkpoint(&writer).await;
+    }
+    let key = gen_path(
+        "region/",
+        &checkpoint_file(writer.checkpointer().last_checkpoint_version()),
+        compression,
+    );
+    assert!(cache.get(&key).await.is_some());
+    let version = writer.manifest().manifest_version;
+    let usage = writer.manifest_usage();
+    drop(writer);
+    drop(cache);
+    let mut options = options;
+    options.manifest_cache = None;
+    let cache = ManifestCache::new(local, ReadableSize::mb(32), None, true).await;
+    assert!(
+        cache.get(&key).await.is_some(),
+        "cache recovery missed {key}"
+    );
+    options.manifest_cache = Some(cache);
+    let reopened = RegionManifestManager::open(options, &Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(version, reopened.manifest().manifest_version);
+    assert_eq!(usage, reopened.manifest_usage());
+}
