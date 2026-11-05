@@ -27,7 +27,7 @@ use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
 };
 use crate::manifest::storage::size_tracker::Tracker;
-use crate::manifest::storage::utils::{get_from_cache, put_to_cache, write_and_put_cache};
+use crate::manifest::storage::utils::{get_from_cache_decoded, put_to_cache, write_and_put_cache};
 use crate::manifest::storage::{
     FALL_BACK_COMPRESS_TYPE, LAST_CHECKPOINT_FILE, checkpoint_checksum, checkpoint_file, gen_path,
     verify_checksum,
@@ -102,7 +102,9 @@ impl<T: Tracker> CheckpointStorage<T> {
         let path = self.checkpoint_file_path(version);
 
         // Try to get from cache first
-        if let Some(data) = get_from_cache(self.manifest_cache.as_ref(), &path).await {
+        if let Some(data) =
+            get_from_cache_decoded(self.manifest_cache.as_ref(), &path, self.compress_type).await
+        {
             verify_checksum(&data, metadata.checksum)?;
             self.record_cached_checkpoint_size(version, &path).await;
             return Ok(Some((version, data)));
@@ -113,19 +115,19 @@ impl<T: Tracker> CheckpointStorage<T> {
         let checkpoint_data = match self.object_store.read(&path).await {
             Ok(checkpoint) => {
                 let checkpoint_size = checkpoint.len();
-                let decompress_data =
-                    self.compress_type
-                        .decode(checkpoint)
-                        .await
-                        .with_context(|_| DecompressObjectSnafu {
-                            compress_type: self.compress_type,
-                            path: path.clone(),
-                        })?;
+                let decompress_data = self
+                    .compress_type
+                    .decode(checkpoint.clone())
+                    .await
+                    .with_context(|_| DecompressObjectSnafu {
+                        compress_type: self.compress_type,
+                        path: path.clone(),
+                    })?;
                 verify_checksum(&decompress_data, metadata.checksum)?;
                 // set the checkpoint size
                 self.size_tracker.record(version, checkpoint_size as u64);
                 // Add to cache
-                put_to_cache(self.manifest_cache.as_ref(), path, &decompress_data).await;
+                put_to_cache(self.manifest_cache.as_ref(), path, checkpoint).await;
                 Ok(Some(decompress_data))
             }
             Err(e) => {
@@ -142,8 +144,12 @@ impl<T: Tracker> CheckpointStorage<T> {
                         );
 
                         // Try to get fallback from cache first
-                        if let Some(data) =
-                            get_from_cache(self.manifest_cache.as_ref(), &fall_back_path).await
+                        if let Some(data) = get_from_cache_decoded(
+                            self.manifest_cache.as_ref(),
+                            &fall_back_path,
+                            FALL_BACK_COMPRESS_TYPE,
+                        )
+                        .await
                         {
                             verify_checksum(&data, metadata.checksum)?;
                             self.record_cached_checkpoint_size(version, &fall_back_path)
@@ -155,7 +161,7 @@ impl<T: Tracker> CheckpointStorage<T> {
                             Ok(checkpoint) => {
                                 let checkpoint_size = checkpoint.len();
                                 let decompress_data = FALL_BACK_COMPRESS_TYPE
-                                    .decode(checkpoint)
+                                    .decode(checkpoint.clone())
                                     .await
                                     .with_context(|_| DecompressObjectSnafu {
                                         compress_type: FALL_BACK_COMPRESS_TYPE,
@@ -167,7 +173,7 @@ impl<T: Tracker> CheckpointStorage<T> {
                                 put_to_cache(
                                     self.manifest_cache.as_ref(),
                                     fall_back_path,
-                                    &decompress_data,
+                                    checkpoint,
                                 )
                                 .await;
                                 Ok(Some(decompress_data))
@@ -220,7 +226,7 @@ impl<T: Tracker> CheckpointStorage<T> {
         Ok(Some(checkpoint_metadata))
     }
 
-    /// A cache hit contains decoded bytes; accounting failures must not prevent recovery.
+    /// Records the remote object size; accounting failures must not prevent recovery.
     async fn record_cached_checkpoint_size(&self, version: ManifestVersion, path: &str) {
         match self.object_store.stat(path).await {
             Ok(metadata) => self.size_tracker.record(version, metadata.content_length()),
