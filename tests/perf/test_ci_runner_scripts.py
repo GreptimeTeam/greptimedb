@@ -625,7 +625,7 @@ class BenchmarkImagePullTest(unittest.TestCase):
         for reference in ("RUNTIME_IMAGE", "RESOLVED_RUNTIME_IMAGE", "reference"):
             self.assertIn(f'pull-benchmark-image.sh "${reference}"', long_range)
         self.assertLess(long_range.index('pull-benchmark-image.sh "$reference"'),
-                        long_range.index('- name: Warm serial and concurrent benchmarks'))
+                        long_range.index('- name: Generate shared dataset and split target plans'))
         self.assertIn('pull-benchmark-image.sh "$reference"', agent)
         self.assertLess(agent.index('resolve_image runtime'), agent.index('- name: Generate dataset once'))
         self.assertIn('pull-benchmark-image.sh "$RUNTIME_IMAGE"', traces)
