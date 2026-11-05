@@ -114,8 +114,8 @@ Compute and storage are disaggregated: object storage holds the data, while memo
 ## Benchmarks
 
 * [Agent RCA Bench](https://rca-bench.greptime.com/): LLM agents doing root cause analysis
-  over GreptimeDB versus Prometheus + Loki + Tempo, six models and 168 investigations per
-  interface. 40% fewer wrong diagnoses, about 48% fewer input tokens, about 45% lower
+  over GreptimeDB versus Prometheus + Loki + Tempo, 168 investigations per interface across
+  six models. 40% fewer wrong diagnoses, about 48% fewer input tokens, about 45% lower
   estimated cost
   ([write-up](https://greptime.com/blogs/2026-09-08-agent-rca-bench-interface-semantic-layer))
 * [JSONBench billion-record cold run: first place as of March 2025](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)
@@ -136,16 +136,16 @@ Compatibility is per protocol, and query-side coverage is narrower than ingestio
 
 Cluster deployment, object storage, the Flow engine, and every ingestion protocol listed above are in the Apache-2.0 build. Repartitioning and region migration are manual operations there.
 
-Read replicas, workload isolation, and automated repartitioning are **GreptimeDB Enterprise** features, along with enterprise security and governance. The [Enterprise overview](https://docs.greptime.com/enterprise/overview/) has the current list, and [pricing](https://www.greptime.com/pricing#differences) has the edition comparison. For Enterprise support, [contact us](https://greptime.com/contactus).
+Read replicas, workload isolation, and automated repartitioning are **GreptimeDB Enterprise** features, along with enterprise security and governance. The [Enterprise overview](https://docs.greptime.com/enterprise/overview/) has the current list, and [pricing](https://www.greptime.com/pricing#differences) has the edition comparison. For GreptimeDB Enterprise inquiries, [contact us](https://greptime.com/contactus).
 
 ## Architecture
 
 GreptimeDB can run in two modes:
 * **Standalone** — single binary for development and small deployments.
 * **Distributed** — four components, each independently scalable:
-  - **Frontend** — protocol entry and the distributed query engine. Stateless, scales horizontally.
+  - **Frontend** — protocol endpoints and the distributed query engine. Stateless, scales horizontally.
   - **Datanode** — region engine with WAL, memtable, SST, cache, compaction, and indexes. Persists data to object storage.
-  - **Metasrv** — metadata, region routing, and cluster coordination (DDL, failover, region migration, repartitioning). Backed by a pluggable KV layer (etcd or RDS).
+  - **Metasrv** — metadata, region routing, and cluster coordination (DDL procedures, failover, region migration, repartitioning). Backed by a pluggable KV layer (etcd or RDS).
   - **Flownode** (optional) — continuous flow computation (streaming and materialized views).
 
 For deeper coverage, see the [architecture doc](https://docs.greptime.com/contributor-guide/overview/#architecture) or [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview).
