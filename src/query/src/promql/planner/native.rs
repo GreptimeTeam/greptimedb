@@ -3180,18 +3180,18 @@ fn scan_operand(node: &NativeNode) -> bool {
 /// `count_over_time` over a histogram stays eligible.
 fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
     match &node.expr {
-        // `count` and `group` ask whether a sample is present, so a histogram is one contribution
-        // and the fold never reads a value: they accept whatever kind enters them, and only a
-        // nested aggregate under them can still carry a histogram into a fold that reads values.
-        //
-        // Every other aggregate folds float state, so it is refused unless the kind entering it is
-        // provably a float. "Cannot name it" is not "not a histogram": a canonical merge
+        // An aggregate that folds the payload - `sum`, `avg` - is refused unless the kind entering
+        // it is provably a float. "Cannot name it" is not "not a histogram": a canonical merge
         // (`label_replace` collapsing a label) and a set operation both hand on the samples they
         // were given without the walk describing them, and reading that silence as float is what
         // admitted `sum(label_replace(h, ...))` to a native fold over histograms.
         NativeExpr::Aggregate { input, op } => {
-            let presence_only = matches!(op.kind, AggregateKind::Count | AggregateKind::Group);
-            (!presence_only
+            // Three kinds take a histogram and still run here: `count` and `group` count it as one
+            // present sample, and `min`/`max`/`stddev`/`stdvar`/`quantile` skip it the way
+            // Prometheus does. Only `sum` and `avg` would have to fold the payload, and this route
+            // has no histogram aggregate state yet, so only they refuse the kind entering them.
+            let folds_payload = matches!(op.kind, AggregateKind::Sum | AggregateKind::Avg);
+            (folds_payload
                 && !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float)))
                 || aggregate_reads_histogram(input, input_kind)
         }

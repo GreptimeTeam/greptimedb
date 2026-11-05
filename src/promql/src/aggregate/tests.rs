@@ -1064,12 +1064,11 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
             Grouping::By(&[]),
         );
         match op {
-            AggregateOp::Count | AggregateOp::Group => {
-                assert!(
-                    answer.is_ok(),
-                    "{op:?} counts a present histogram: {answer:?}"
-                );
+            // `count`/`group` count the sample, `min`/`max` skip it the way Prometheus does.
+            AggregateOp::Count | AggregateOp::Group | AggregateOp::Min | AggregateOp::Max => {
+                assert!(answer.is_ok(), "{op:?} takes a histogram: {answer:?}");
             }
+            // `sum`/`avg` fold the payload, which this route has no state for.
             _ => assert!(
                 matches!(answer, Err(DataFusionError::NotImplemented(_))),
                 "{op:?} must refuse a histogram: {answer:?}"
@@ -2083,19 +2082,68 @@ fn count_and_group_count_histogram_samples() {
     );
 
     // An aggregate that reads the value still refuses the histogram instead of counting it.
-    for op in [
-        AggregateOp::Sum,
-        AggregateOp::Avg,
-        AggregateOp::Min,
-        AggregateOp::Max,
-    ] {
+    for op in [AggregateOp::Sum, AggregateOp::Avg] {
         let error = aggregate_float(
             &schema,
             &[series("a", Some(native()), None)],
             op,
             Grouping::By(&[]),
         )
-        .expect_err("a value-reading aggregate refuses a histogram");
+        .expect_err("a payload-folding aggregate refuses a histogram");
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{op:?} answered {error:?}"
+        );
+    }
+}
+
+/// `min`, `max`, `stddev`, `stdvar` and `quantile` read a float value, so a histogram sample is
+/// skipped rather than refused - and a group holding only histograms has no answer at all.
+#[test]
+fn value_reading_aggregates_skip_histogram_samples() {
+    use crate::grid_series::reference::OwnedHistogram;
+    use crate::grid_series::{GridSample, GridSeriesBuilder};
+    use crate::histogram_eval::float_histogram::FloatHistogram;
+
+    let schema = schema_with_grid_len(&["value"], 2);
+    let histogram =
+        OwnedHistogram::parse("0/0/0/4000000000000000/3ff0000000000000/0/1_1/4000000000000000///");
+    let series = |job: &str, first: Option<GridSample>, second: Option<GridSample>| {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder.push_samples(0, &[first]).unwrap();
+        builder.push_samples(1, &[second]).unwrap();
+        builder
+            .finish(metric("m", &[("job", job)]))
+            .unwrap()
+            .unwrap()
+    };
+    let native = || {
+        GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+        ))
+    };
+    // Two float series and a histogram series: the histogram is skipped, so the answer is the
+    // floats' - and the second position, where only the histogram is present, has no value.
+    let input = [
+        series("a", Some(GridSample::Float(3.0)), None),
+        series("b", Some(GridSample::Float(7.0)), None),
+        series("c", Some(native()), Some(native())),
+    ];
+    for (op, expected) in [(AggregateOp::Min, 3.0), (AggregateOp::Max, 7.0)] {
+        let answer = aggregate_float(&schema, &input, op, Grouping::By(&[])).unwrap();
+        let SampleRef::Float(first) = answer[0].fields.as_slice()[0].sample(0) else {
+            panic!("{op:?} answers a float");
+        };
+        assert_eq!(first, expected, "{op:?} answered over the histogram sample");
+        assert!(
+            matches!(answer[0].fields.as_slice()[0].sample(1), SampleRef::Missing),
+            "{op:?} answered a group holding only histograms"
+        );
+    }
+    // `sum` and `avg` fold the payload, which this route has no state for: they still refuse it.
+    for op in [AggregateOp::Sum, AggregateOp::Avg] {
+        let error = aggregate_float(&schema, &input, op, Grouping::By(&[]))
+            .expect_err("a payload-folding aggregate refuses a histogram");
         assert!(
             matches!(error, DataFusionError::NotImplemented(_)),
             "{op:?} answered {error:?}"

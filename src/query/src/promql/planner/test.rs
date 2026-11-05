@@ -9721,14 +9721,22 @@ async fn a_float_prefix_over_histograms_aggregates_natively() {
 /// function that answers histograms and scalar arithmetic over them all run here, while an
 /// aggregate that would fold them keeps the existing plan. `rate` is in the histogram-answering
 /// set, so `sum(rate(h[5m]))` is refused by the same rule as `sum(h)`.
-/// `count` and `group` ask only whether a sample is present, so they fold histograms natively.
+/// A histogram is counted by `count`/`group` and skipped by `min`/`max`/`stddev`/`stdvar`, so all
+/// of them fold it natively; only `sum` and `avg` fold the payload and keep the existing plan.
 ///
-/// Prometheus counts every present sample whatever its type is, and answers `1` for a non-empty
-/// group, so neither aggregate reads a value. Every aggregate that does read one keeps the
-/// existing plan, which is what the second half pins.
+/// Prometheus counts every present sample whatever its type is, answers `1` for a non-empty group,
+/// and ignores a histogram where it would have to order or average the values. The second half
+/// pins the aggregates this route still cannot fold.
 #[tokio::test]
-async fn count_and_group_fold_histograms_natively() {
-    for query in ["count(some_metric)", "group(some_metric)"] {
+async fn presence_and_order_aggregates_fold_histograms_natively() {
+    for query in [
+        "count(some_metric)",
+        "group(some_metric)",
+        "min(some_metric)",
+        "max(some_metric)",
+        "stddev(some_metric)",
+        "stdvar(some_metric)",
+    ] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
@@ -9747,12 +9755,10 @@ async fn count_and_group_fold_histograms_natively() {
     for query in [
         "sum(some_metric)",
         "avg(some_metric)",
-        "min(some_metric)",
-        "max(some_metric)",
-        // Presence-only at the root does not excuse the aggregate below it: the inner one reads a
-        // value, and a histogram entering it is what the gate refuses.
+        // A skipping or counting aggregate at the root does not excuse the payload-folding one
+        // below it: `sum` still has no histogram state to fold into.
         "count(sum(some_metric))",
-        "group(avg(some_metric))",
+        "min(sum(some_metric))",
     ] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
