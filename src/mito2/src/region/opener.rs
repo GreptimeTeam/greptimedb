@@ -201,7 +201,7 @@ impl RegionOpener {
             puffin_manager_factory,
             intermediate_manager,
             time_provider,
-            stats: Default::default(),
+            stats: ManifestStats::with_region_metrics(region_id),
             wal_entry_reader: None,
             replay_checkpoint: None,
             file_ref_manager,

@@ -45,6 +45,7 @@ use crate::manifest::storage::delta::DeltaStorage;
 use crate::manifest::storage::size_tracker::{CheckpointTracker, DeltaTracker, SizeTracker};
 use crate::manifest::storage::staging::StagingStorage;
 use crate::manifest::storage::utils::remove_from_cache;
+use crate::metrics::manifest_size::RegionManifestSizeMetric;
 
 lazy_static! {
     static ref DELTA_RE: Regex = Regex::new("^\\d+\\.json").unwrap();
@@ -176,10 +177,29 @@ impl ManifestObjectStore {
         total_manifest_size: Arc<AtomicU64>,
         manifest_cache: Option<ManifestCache>,
     ) -> Self {
+        Self::new_with_metric(
+            path,
+            object_store,
+            compress_type,
+            total_manifest_size,
+            None,
+            manifest_cache,
+        )
+    }
+
+    /// Constructs a store sharing the region instance's publication state.
+    pub(crate) fn new_with_metric(
+        path: &str,
+        object_store: ObjectStore,
+        compress_type: CompressionType,
+        total_manifest_size: Arc<AtomicU64>,
+        metric: Option<RegionManifestSizeMetric>,
+        manifest_cache: Option<ManifestCache>,
+    ) -> Self {
         common_telemetry::info!("Create manifest store, cache: {}", manifest_cache.is_some());
 
         let path = util::normalize_dir(path);
-        let size_tracker = SizeTracker::new(total_manifest_size);
+        let size_tracker = SizeTracker::new(total_manifest_size, metric);
         let checkpoint_tracker = Arc::new(size_tracker.checkpoint_tracker());
         let delta_tracker = Arc::new(size_tracker.manifest_tracker());
         let checkpoint_storage = CheckpointStorage::new(

@@ -114,6 +114,7 @@ where
         region.stop().await;
         // Removes this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
+        region.deactivate_region_manifest_size_metric();
         self.dropping_regions.insert_region(region.clone());
         // The region is no longer served once it leaves the map, so unregister its
         // runtime state before the fallible WAL cleanup below. Otherwise a WAL

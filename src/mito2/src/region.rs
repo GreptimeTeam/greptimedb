@@ -64,6 +64,7 @@ use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
+use crate::metrics::manifest_size::RegionManifestSizeMetric;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
@@ -254,6 +255,28 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
+    /// Publishes the current size when this instance enters the live map.
+    pub(crate) fn activate_region_manifest_size_metric(&self) {
+        if let Some(metric) = self.stats.metric() {
+            metric.activate(&self.stats.total_manifest_size);
+        }
+    }
+
+    /// Injects a metric threshold for lifecycle tests without changing process env.
+    #[cfg(test)]
+    pub(crate) fn set_manifest_size_metric_threshold(&self, threshold: u64) {
+        let metric = self.stats.metric().unwrap();
+        metric.set_test_threshold(threshold);
+        metric.publish(self.stats.total_manifest_size());
+    }
+
+    /// Revokes publication before removal or replacement of this instance.
+    pub(crate) fn deactivate_region_manifest_size_metric(&self) {
+        if let Some(metric) = self.stats.metric() {
+            metric.deactivate();
+        }
+    }
+
     /// Returns the current immutable series-index snapshot.
     pub(crate) fn series_index_version(&self) -> Arc<SeriesIndexVersion> {
         self.series_index_version_control.current()
@@ -711,6 +734,11 @@ impl MitoRegion {
         }
     }
 
+    /// Returns the current manifest byte count without computing other region statistics.
+    pub(crate) fn manifest_size(&self) -> u64 {
+        self.stats.total_manifest_size()
+    }
+
     /// Returns the region statistic.
     pub(crate) fn region_statistic(&self) -> RegionStatistic {
         let version = self.version();
@@ -722,7 +750,7 @@ impl MitoRegion {
         let flushed_entry_id = version.flushed_entry_id;
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
-        let manifest_usage = self.stats.total_manifest_size();
+        let manifest_usage = self.manifest_size();
         let num_rows = version.ssts.owned_num_rows(self.region_id) + version.memtables.num_rows();
         let num_files = version.ssts.owned_num_files(self.region_id);
         let manifest_version = self.stats.manifest_version();
@@ -2058,12 +2086,25 @@ pub(crate) type CatchupRegionsRef = Arc<CatchupRegions>;
 /// Manifest stats.
 #[derive(Default, Debug, Clone)]
 pub struct ManifestStats {
+    metric: Option<RegionManifestSizeMetric>,
     pub(crate) total_manifest_size: Arc<AtomicU64>,
     pub(crate) manifest_version: Arc<AtomicU64>,
     pub(crate) file_removed_cnt: Arc<AtomicU64>,
 }
 
 impl ManifestStats {
+    /// Creates an inactive descriptor; opening a region does not publish a series.
+    pub(crate) fn with_region_metrics(region_id: RegionId) -> Self {
+        Self {
+            metric: Some(RegionManifestSizeMetric::new(region_id)),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn metric(&self) -> Option<&RegionManifestSizeMetric> {
+        self.metric.as_ref()
+    }
+
     fn total_manifest_size(&self) -> u64 {
         self.total_manifest_size.load(Ordering::Relaxed)
     }

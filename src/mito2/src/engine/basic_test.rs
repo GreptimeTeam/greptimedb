@@ -2291,3 +2291,143 @@ async fn test_manifest_scan_table_filter() {
     );
     drop(guard);
 }
+
+#[tokio::test]
+async fn test_region_manifest_size_metrics_lifecycle() {
+    use crate::metrics::manifest_size::remove_region_manifest_size;
+    use crate::metrics::manifest_size::tests::manifest_metric_sample;
+    use store_api::region_request::{RegionCloseRequest, RegionDropRequest};
+
+    let mut env = TestEnv::with_prefix("manifest-size-metrics").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(u32::MAX, 7);
+    remove_region_manifest_size(region_id);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    engine
+        .get_region(region_id)
+        .unwrap()
+        .set_manifest_size_metric_threshold(0);
+    let assert_sample = || {
+        let expected = engine
+            .get_region(region_id)
+            .unwrap()
+            .region_statistic()
+            .manifest_size;
+        assert!(expected > 0);
+        assert_eq!(manifest_metric_sample(region_id), Some(expected as i64));
+        expected
+    };
+    let initial = assert_sample();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    assert_ne!(assert_sample(), initial);
+    let old_region = engine.get_region(region_id).unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manifest_metric_sample(region_id), None);
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    engine
+        .get_region(region_id)
+        .unwrap()
+        .set_manifest_size_metric_threshold(0);
+    assert_sample();
+    drop(old_region);
+    assert_sample();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manifest_metric_sample(region_id), None);
+    let stop_id = RegionId::new(u32::MAX, 9);
+    remove_region_manifest_size(stop_id);
+    engine
+        .handle_request(stop_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(stop_id).unwrap();
+    region.set_manifest_size_metric_threshold(0);
+    assert!(manifest_metric_sample(stop_id).is_some());
+    engine.stop().await.unwrap();
+    assert_eq!(manifest_metric_sample(stop_id), None);
+}
+
+#[tokio::test]
+async fn test_region_manifest_size_metrics_failed_open() {
+    use crate::metrics::manifest_size::remove_region_manifest_size;
+    use crate::metrics::manifest_size::tests::manifest_metric_sample;
+    use store_api::region_request::RegionCloseRequest;
+
+    let id = RegionId::new(u32::MAX, 10);
+    remove_region_manifest_size(id);
+    let mut env = TestEnv::with_prefix("manifest-metric-failed-open").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(id).unwrap();
+    region.set_manifest_size_metric_threshold(0);
+    assert!(manifest_metric_sample(id).is_some());
+    let store = region.access_layer.object_store().clone();
+    let dir = crate::manifest::storage::manifest_dir(&region.access_layer.build_region_dir(id));
+    engine
+        .handle_request(id, RegionRequest::Close(RegionCloseRequest::default()))
+        .await
+        .unwrap();
+    assert_eq!(manifest_metric_sample(id), None);
+    let entries = store.list(&dir).await.unwrap();
+    let mut corrupted = 0;
+    for entry in entries {
+        if entry.metadata().is_file() {
+            store.write(entry.path(), "invalid manifest").await.unwrap();
+            corrupted += 1;
+        }
+    }
+    assert!(corrupted > 0);
+    assert!(
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    table_dir,
+                    options: HashMap::new(),
+                    skip_wal_replay: true,
+                    path_type: PathType::Bare,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                })
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(manifest_metric_sample(id), None);
+    engine.stop().await.unwrap();
+}

@@ -1105,9 +1105,14 @@ struct RegionWorkerLoop<S> {
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Publishes a loaded region together with its resident compaction state.
     fn register_region(&mut self, region: MitoRegionRef) {
+        if let Some(old) = self.regions.get_region(region.region_id) {
+            old.deactivate_region_manifest_size_metric();
+        }
+
         self.compaction_scheduler
             .register_region(&region.version_control, &region.access_layer);
-        self.regions.insert_region(region);
+        self.regions.insert_region(region.clone());
+        region.activate_region_manifest_size_metric();
     }
 
     /// Starts the worker loop.
@@ -1565,6 +1570,7 @@ impl<S> RegionWorkerLoop<S> {
         // Closes remaining regions.
         let regions = self.regions.list_regions();
         for region in regions {
+            region.deactivate_region_manifest_size_metric();
             region.stop().await;
         }
 

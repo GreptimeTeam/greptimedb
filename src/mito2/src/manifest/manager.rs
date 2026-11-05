@@ -174,11 +174,12 @@ impl RegionManifestManager {
         stats: &ManifestStats,
     ) -> Result<Self> {
         // construct storage
-        let mut store = ManifestObjectStore::new(
+        let mut store = ManifestObjectStore::new_with_metric(
             &options.manifest_dir,
             options.object_store.clone(),
             options.compress_type,
             stats.total_manifest_size.clone(),
+            stats.metric().cloned(),
             options.manifest_cache.clone(),
         );
         let manifest_version = stats.manifest_version.clone();
@@ -261,11 +262,12 @@ impl RegionManifestManager {
         let open_start = Instant::now();
 
         // construct storage
-        let mut store = ManifestObjectStore::new(
+        let mut store = ManifestObjectStore::new_with_metric(
             &options.manifest_dir,
             options.object_store.clone(),
             options.compress_type,
             stats.total_manifest_size.clone(),
+            stats.metric().cloned(),
             options.manifest_cache.clone(),
         );
         let manifest_version = stats.manifest_version.clone();

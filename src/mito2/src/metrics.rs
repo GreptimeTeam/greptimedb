@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod manifest_size;
+
 use std::time::Duration;
 
 use lazy_static::lazy_static;
@@ -853,6 +855,7 @@ pub(crate) fn cache_page_fetch_metrics(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use common_cache::paged::{PageEvent, PageFetchStats};
 
