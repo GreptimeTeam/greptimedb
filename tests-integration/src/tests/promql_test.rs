@@ -31,7 +31,7 @@ use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::compute::cast;
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::{DataType, TimeUnit};
 use frontend::instance::Instance;
 use query::datafusion::{QUERY_FALLBACK_HINT, QUERY_PARALLELISM_HINT};
 use query::dist_plan::MergeScanExec;
@@ -2164,6 +2164,55 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
             );
         }
     }
+}
+
+/// [`native_result_rows`] for a statement whose output carries no series labels, such as the
+/// data-free `vector(time())`: the evaluation timestamp and the one value, sorted by time.
+///
+/// The timestamp is found by type rather than by name: the native route names the time index of a
+/// statement that reads nothing `time`, while the existing planner names it `ts`.
+async fn native_timestamp_rows(output: Output) -> Vec<(i64, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let timestamps = batch
+                .columns()
+                .iter()
+                .find(|column| {
+                    matches!(
+                        column.data_type(),
+                        DataType::Timestamp(TimeUnit::Millisecond, _)
+                    )
+                })
+                .expect("a timestamp column");
+            let timestamps = timestamps
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let value_columns = batch
+                .columns()
+                .iter()
+                .filter(|column| column.data_type() == &DataType::Float64)
+                .collect::<Vec<_>>();
+            assert_eq!(value_columns.len(), 1, "expected one Float64 value column");
+            let values = value_columns[0]
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(timestamps.null_count(), 0);
+            assert_eq!(values.null_count(), 0);
+            (0..batch.num_rows())
+                .map(|row| (timestamps.value(row), values.value(row)))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.0);
+    rows
 }
 
 /// [`native_result_rows`] plus each row's OTLP temporality marker, sorted by label then time.
@@ -11661,4 +11710,237 @@ async fn native_promql_aggregate_subquery_operands_keep_the_existing_plan() {
         legacy.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.total_cmp(&b.2)));
         assert_eq!(native, legacy, "{sql}");
     }
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_matrix_root_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_matrix_root").with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_matrix_root (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host))",
+        QueryContext::arc(),
+    )
+    .await;
+    let mut values = Vec::new();
+    for host in 0..4 {
+        for minute in 0..=10 {
+            values.push(format!(
+                "('h{host}', {}, {})",
+                minute * 60_000,
+                host * 1000 + minute
+            ));
+        }
+    }
+    execute_all(
+        &instance,
+        &format!(
+            "INSERT INTO native_matrix_root (host, ts, val) VALUES {}",
+            values.join(",")
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    async fn run(
+        instance: &Arc<Instance>,
+        observer: &NativePlanObserver,
+        sql: &str,
+        native: bool,
+    ) -> Vec<(i64, String, f64)> {
+        observer.clear();
+        native_result_rows(native_tql_output(instance, sql, native).await).await
+    }
+
+    let sql = "TQL EVAL (600, 600, '1m') native_matrix_root[5m:1m]";
+    let native = run(&instance, &observer, sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "subquery root did not run natively: {sql}"
+    );
+    let legacy = run(&instance, &observer, sql, false).await;
+    assert_eq!(native, legacy);
+    assert_eq!(
+        native
+            .iter()
+            .map(|row| row.0)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [360_000, 420_000, 480_000, 540_000, 600_000].into()
+    );
+
+    let sql = "TQL EVAL (600, 600, '1m') native_matrix_root[5m:1m] offset 1m";
+    let native = run(&instance, &observer, sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "offset subquery root did not run natively: {sql}"
+    );
+    let legacy = run(&instance, &observer, sql, false).await;
+    assert_eq!(native, legacy);
+    assert_eq!(
+        native
+            .iter()
+            .map(|row| row.0)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [300_000, 360_000, 420_000, 480_000, 540_000].into()
+    );
+
+    // PromQL's `@ 420` is seconds, so this anchor is 420,000ms on the stored timestamp grid.
+    let anchor_sql = "TQL EVAL (600, 600, '1m') native_matrix_root[5m:1m] @ 420";
+    let anchored = run(&instance, &observer, anchor_sql, true).await;
+    let other_instant = "TQL EVAL (540, 540, '1m') native_matrix_root[5m:1m] @ 420";
+    let anchored_other = run(&instance, &observer, other_instant, true).await;
+    assert_eq!(
+        anchored, anchored_other,
+        "@ anchor must ignore query instant"
+    );
+    assert_eq!(
+        anchored
+            .iter()
+            .map(|row| row.0)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [180_000, 240_000, 300_000, 360_000, 420_000].into()
+    );
+    let mut expected_values = (0..4)
+        .flat_map(|host| {
+            (3..=7).map(move |minute| {
+                (
+                    minute * 60_000,
+                    format!("h{host}"),
+                    (host * 1000 + minute) as f64,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    expected_values.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    assert_eq!(anchored, expected_values);
+
+    for (expr, grid) in [
+        (
+            "(native_matrix_root @ start())[5m:1m]",
+            [360_000, 420_000, 480_000, 540_000, 600_000],
+        ),
+        (
+            "(native_matrix_root @ end())[5m:1m]",
+            [360_000, 420_000, 480_000, 540_000, 600_000],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (600, 600, '1m') {expr}");
+        let native = run(&instance, &observer, &sql, true).await;
+        assert!(observer.fused().is_some(), "{expr} did not run natively");
+        let legacy = run(&instance, &observer, &sql, false).await;
+        assert_eq!(native, legacy, "{expr}");
+        assert_eq!(
+            native
+                .iter()
+                .map(|row| row.0)
+                .collect::<std::collections::BTreeSet<_>>(),
+            grid.into()
+        );
+    }
+
+    let sql = "TQL EVAL (60, 60, '1m') native_matrix_root[5m:1m]";
+    let native = run(&instance, &observer, sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "negative child grid did not run natively"
+    );
+    let legacy = run(&instance, &observer, sql, false).await;
+    assert_eq!(native, legacy, "negative child grid");
+
+    // A statement before the Unix epoch is valid PromQL, and the subquery root rebuilds the
+    // statement from the planner's own bounds. -60s has to stay 60 seconds *before* the epoch: read
+    // as a magnitude it lands hundreds of millions of years in the future, which is not a grid this
+    // route can build, and an error there would replace the answer the existing planner gives.
+    // The bounds are quoted because `TQL EVAL` only accepts a pre-epoch time as a string: an
+    // unquoted `-60` is a negation, which the TQL parser rejects before planning.
+    async fn run_timestamps(
+        instance: &Arc<Instance>,
+        observer: &NativePlanObserver,
+        sql: &str,
+        native: bool,
+    ) -> Vec<(i64, f64)> {
+        observer.clear();
+        native_timestamp_rows(native_tql_output(instance, sql, native).await).await
+    }
+    // `vector(time())` is the shape the pre-epoch grid is read on: it reads no data, so its rows are
+    // the subquery's child grid, and every one of them is before the epoch. Only the native route
+    // can be asked for it — the existing planner's `vector()` takes a literal only — so this case
+    // asserts the answer itself, five negative timestamps 60s apart ending at the instant.
+    let pre_epoch_time = "TQL EVAL ('-60', '-60', '1m') vector(time())[5m:1m]";
+    let native = run_timestamps(&instance, &observer, pre_epoch_time, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "pre-epoch subquery root did not run natively: {pre_epoch_time}"
+    );
+    assert_eq!(
+        native,
+        [
+            (-300_000, -300.0),
+            (-240_000, -240.0),
+            (-180_000, -180.0),
+            (-120_000, -120.0),
+            (-60_000, -60.0),
+        ],
+        "the pre-epoch grid keeps its negative milliseconds"
+    );
+
+    // A constant is the same pre-epoch statement on a shape both routes plan, so the answer can be
+    // compared: the native grid has to be the one the existing planner works on.
+    let pre_epoch_constant = "TQL EVAL ('-60', '-60', '1m') vector(1)[5m:1m]";
+    let native = run_timestamps(&instance, &observer, pre_epoch_constant, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "pre-epoch constant subquery root did not run natively: {pre_epoch_constant}"
+    );
+    assert_eq!(
+        native,
+        [
+            (-300_000, 1.0),
+            (-240_000, 1.0),
+            (-180_000, 1.0),
+            (-120_000, 1.0),
+            (-60_000, 1.0),
+        ],
+        "the pre-epoch constant grid keeps its negative milliseconds"
+    );
+    let legacy = run_timestamps(&instance, &observer, pre_epoch_constant, false).await;
+    assert_eq!(native, legacy, "pre-epoch subquery root");
+
+    // The same pre-epoch statement anchored at 420s: the anchor decides the child grid.
+    let pre_epoch_anchored = "TQL EVAL ('-60', '-60', '1m') vector(1)[5m:1m] @ 420";
+    let native = run_timestamps(&instance, &observer, pre_epoch_anchored, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "anchored pre-epoch subquery root did not run natively: {pre_epoch_anchored}"
+    );
+    let legacy = run_timestamps(&instance, &observer, pre_epoch_anchored, false).await;
+    assert_eq!(native, legacy, "anchored pre-epoch subquery root");
+
+    let range_query = "TQL EVAL (600, 1200, '1m') native_matrix_root[5m:1m]";
+    let err = instance
+        .do_query(range_query, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("invalid expression type \"range vector\" for range query"),
+        "{err:?}"
+    );
+
+    // This remains on the existing planner: a raw-sample matrix has no evaluation grid to bind.
+    let sql = "TQL EVAL (600, 600, '1m') native_matrix_root[5m]";
+    let native = run(&instance, &observer, sql, true).await;
+    assert!(
+        observer.fused().is_none(),
+        "raw matrix roots must use existing planning"
+    );
+    let legacy = run(&instance, &observer, sql, false).await;
+    assert_eq!(native, legacy);
 }

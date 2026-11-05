@@ -35,7 +35,7 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::native_histogram::native_histogram_value_type;
@@ -66,12 +66,13 @@ use promql::native::plan::{
     NativeExpr, NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series,
     uniform_field_kind,
 };
+use promql::range_eval::{RangeWindow, subquery_grid};
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
-    VectorMatchCardinality, VectorSelector, token,
+    SubqueryExpr, VectorMatchCardinality, VectorSelector, token,
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::ResultExt;
@@ -80,7 +81,8 @@ use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
-    InfoInput, compile_selectors, compile_statement, info_input, statement_grid,
+    InfoInput, compile_selectors_with_grid, compile_statement, compile_statement_with_grid,
+    info_input, statement_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
@@ -503,24 +505,65 @@ impl PromPlanner {
         if !self.native_fused {
             return Ok(None);
         }
-        // Over the wire this route plans the whole statement as one fused node over raw sources:
-        // each region answers the series it holds, and the node reconciles them before evaluating.
-        // In process a region can also run a split or a segmented tree over its own scan, so those
-        // shapes stay there. This is a planning choice, not a limit of what the node can encode.
         let self_contained = plans_over_remote_regions(query_engine_state);
-        // Only the statement root is offered: the tree is compiled against the statement's grid,
-        // and a subquery's expression is evaluated on its own, smaller one. A range-vector root is
-        // the instant query's raw sample result, which the existing path reports as a matrix rather
-        // than as one point per grid position.
-        if prom_expr.value_type() == ValueType::Matrix {
+        // A range selector returns raw samples, which have no evaluation grid to bind. A subquery
+        // root instead returns its inner expression on the subquery's child grid, and a range
+        // query has no grid to bind a matrix root to at all.
+        let subquery_root = root_subquery(prom_expr);
+        if prom_expr.value_type() == ValueType::Matrix
+            && (subquery_root.is_none() || self.ctx.start != self.ctx.end)
+        {
             return Ok(None);
         }
 
         let Some(stmt) = self.native_statement(prom_expr) else {
             return Ok(None);
         };
+        // The subquery root's inner expression is compiled on the child grid, with the statement
+        // left untouched: `@ start()` and `@ end()` inside it resolve against the statement's own
+        // bounds, not against the child's. A statement whose grid cannot be built is not one this
+        // route can evaluate, so it keeps the existing plan.
+        let mut explicit_grid = None;
+        let effective_expr = if let Some(subquery) = subquery_root {
+            let Ok(outer) = statement_grid(&stmt) else {
+                return Ok(None);
+            };
+            let anchor_ms = self.at_ref_time(&subquery.at, &None)?;
+            let offset_ms = subquery
+                .offset
+                .as_ref()
+                .map(|offset| match offset {
+                    promql_parser::parser::Offset::Pos(duration) => duration.as_millis() as i64,
+                    promql_parser::parser::Offset::Neg(duration) => -(duration.as_millis() as i64),
+                })
+                .unwrap_or(0);
+            let window = RangeWindow {
+                range_ms: subquery.range.as_millis() as i64,
+                offset_ms,
+                anchor_ms,
+                modifier: None,
+            };
+            let step_ms = subquery
+                .step
+                .as_ref()
+                .map(|step| step.as_millis() as i64)
+                .unwrap_or(DEFAULT_SUBQUERY_STEP_MS);
+            let spec =
+                subquery_grid(outer.spec(), window, step_ms).context(DataFusionPlanningSnafu)?;
+            let Some(spec) = spec else {
+                return Ok(None);
+            };
+            explicit_grid = Some(Arc::new(
+                EvalGrid::try_deferred(spec)
+                    .map_err(|error| DataFusionError::Plan(error.to_string()))
+                    .context(DataFusionPlanningSnafu)?,
+            ));
+            subquery.expr.as_ref()
+        } else {
+            &stmt.expr
+        };
         let mut selectors = Vec::new();
-        if !collect_selectors(&stmt, prom_expr, &mut selectors) {
+        if !collect_selectors(&stmt, effective_expr, &mut selectors) {
             return Ok(None);
         }
         // The compiler decides which calls and shapes this route answers: a name it has no kernel
@@ -531,7 +574,12 @@ impl PromPlanner {
             return Ok(None);
         };
         if selectors.is_empty() {
-            let tree = match compile_statement(&stmt) {
+            let mut compile_stmt = stmt.clone();
+            compile_stmt.expr = effective_expr.clone();
+            let tree = match match &explicit_grid {
+                Some(grid) => compile_statement_with_grid(&compile_stmt, Arc::clone(grid)),
+                None => compile_statement(&compile_stmt),
+            } {
                 Ok(tree) => tree,
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
@@ -564,11 +612,14 @@ impl PromPlanner {
             // A data-free tree reads no input, so every field it answers is a float.
             let output_schema =
                 fused_output_schema(&values, &output_tags, &time_index, FieldKind::Float)?;
+            let output_schema = fused_output_schema(&values, &output_tags, &time_index)?;
+            // A subquery root is compiled on its child grid, and that is the grid its rows carry.
+            let publish_grid = explicit_grid.clone().unwrap_or_else(|| Arc::clone(&grid));
             let node = FusedSeries::try_new(
                 Arc::from(prom_expr.to_string()),
                 tree,
                 FusedSeriesBinding {
-                    grid,
+                    grid: publish_grid,
                     time_index,
                     tags: Vec::new(),
                     metric_name: None,
@@ -912,8 +963,10 @@ impl PromPlanner {
             })
             .collect::<Result<Vec<_>>>()?;
         let bind_index = std::cell::Cell::new(0usize);
-        let compiled = match compile_selectors(
-            &stmt,
+        let mut compile_stmt = stmt.clone();
+        compile_stmt.expr = effective_expr.clone();
+        let compiled = match compile_selectors_with_grid(
+            &compile_stmt,
             &|req| {
                 let i = bind_index.get();
                 bind_index.set(i + 1);
@@ -938,6 +991,7 @@ impl PromPlanner {
                 Ok(Arc::clone(schema))
             },
             NATIVE_ORDERING,
+            explicit_grid.clone().unwrap_or_else(|| grid.clone()),
         ) {
             Ok(v) => v,
             // The compiler refusing a shape is this route declining it.
@@ -1394,7 +1448,11 @@ impl PromPlanner {
         } else {
             (tags, metric)
         };
-        let publish_grid = fused_publish_grid(tree.root(), &grid);
+        // A subquery root is compiled on its child grid, which is the grid its rows carry, so the
+        // binding follows that grid rather than the statement's.
+        let publish_grid = explicit_grid
+            .clone()
+            .unwrap_or_else(|| fused_publish_grid(tree.root(), &grid));
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
             tree,
@@ -1461,8 +1519,8 @@ impl PromPlanner {
     /// `None` means the bounds are not representable as a [`SystemTime`], which is not a grid a
     /// tree can be evaluated on either.
     fn native_statement(&self, prom_expr: &PromExpr) -> Option<EvalStmt> {
-        let start = UNIX_EPOCH.checked_add(Duration::from_millis(self.ctx.stmt_start as u64))?;
-        let end = UNIX_EPOCH.checked_add(Duration::from_millis(self.ctx.stmt_end as u64))?;
+        let start = epoch_millis(self.ctx.stmt_start)?;
+        let end = epoch_millis(self.ctx.stmt_end)?;
         Some(EvalStmt {
             expr: prom_expr.clone(),
             start,
@@ -2556,6 +2614,31 @@ async fn segment_tree(
     Ok(Some(LogicalPlan::Extension(Extension {
         node: Arc::new(plan),
     })))
+}
+
+/// The step a subquery without one takes, as `subquery_window` in the compiler defaults it.
+const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
+
+/// The moment `millis` milliseconds from the Unix epoch, on whichever side of it that lands.
+///
+/// A pre-epoch statement (`TQL EVAL ('-60', '-60', '1m')`) reaches the planner as a negative
+/// millisecond, which `PromPlannerContext::from_eval_stmt` keeps on purpose. `None` means the bound
+/// is outside what a [`SystemTime`] represents.
+fn epoch_millis(millis: i64) -> Option<SystemTime> {
+    if millis.is_negative() {
+        UNIX_EPOCH.checked_sub(Duration::from_millis(millis.unsigned_abs()))
+    } else {
+        UNIX_EPOCH.checked_add(Duration::from_millis(millis as u64))
+    }
+}
+
+/// Finds a subquery at the statement root, treating parentheses as transparent.
+fn root_subquery(expr: &PromExpr) -> Option<&SubqueryExpr> {
+    match expr {
+        PromExpr::Subquery(subquery) => Some(subquery),
+        PromExpr::Paren(paren) => root_subquery(&paren.expr),
+        _ => None,
+    }
 }
 
 /// The native root's value columns, named from the compiled tree rather than legacy expressions.

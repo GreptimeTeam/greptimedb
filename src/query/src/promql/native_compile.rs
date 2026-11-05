@@ -368,6 +368,9 @@ fn data_free_value_field(stmt: &EvalStmt) -> Arc<str> {
 /// A statement that reads a selector is refused: its scan is the caller's to bind, through
 /// [`compile_selectors`].
 pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
+    // The grid is derived inside the compiler, after it has decided the statement is a shape it
+    // compiles at all: a statement with no grid still reports the reason it has no tree, which is
+    // what the callers' decline paths were written against.
     let output_field = data_free_value_field(stmt);
     let compiled = compile_selectors_with_value_field(
         stmt,
@@ -379,6 +382,30 @@ pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
         },
         SeriesOrdering::Contiguous,
         output_field,
+    )?;
+    Ok(compiled.tree)
+}
+
+/// Compiles `stmt` with an explicit evaluation grid, instead of the one its bounds derive.
+///
+/// A subquery root's inner expression is evaluated on the subquery's child grid, while the
+/// statement's own bounds stay where `@ start()` and `@ end()` resolve against them.
+pub(crate) fn compile_statement_with_grid(
+    stmt: &EvalStmt,
+    grid: Arc<EvalGrid>,
+) -> Result<NativeTree> {
+    let output_field = data_free_value_field(stmt);
+    let compiled = compile_selectors_with_grid_and_value_field(
+        stmt,
+        &|_| {
+            Err(not_implemented(&format!(
+                "a selector in `{}`, which is compiled as a statement that reads no data",
+                stmt.expr
+            )))
+        },
+        SeriesOrdering::Contiguous,
+        output_field,
+        Some(grid),
     )?;
     Ok(compiled.tree)
 }
@@ -395,11 +422,37 @@ pub fn compile_selectors(
     compile_selectors_with_value_field(stmt, bindings, ordering, Arc::from(VECTOR_FIELD))
 }
 
+/// Compiles `stmt` with an explicit evaluation grid. See [`compile_statement_with_grid`].
+pub(crate) fn compile_selectors_with_grid(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    grid: Arc<EvalGrid>,
+) -> Result<CompiledTree> {
+    compile_selectors_with_grid_and_value_field(
+        stmt,
+        bindings,
+        ordering,
+        Arc::from(VECTOR_FIELD),
+        Some(grid),
+    )
+}
+
 fn compile_selectors_with_value_field(
     stmt: &EvalStmt,
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
     ordering: SeriesOrdering,
     value_field: Arc<str>,
+) -> Result<CompiledTree> {
+    compile_selectors_with_grid_and_value_field(stmt, bindings, ordering, value_field, None)
+}
+
+fn compile_selectors_with_grid_and_value_field(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    value_field: Arc<str>,
+    grid: Option<Arc<EvalGrid>>,
 ) -> Result<CompiledTree> {
     if ordering == SeriesOrdering::Interleaved {
         return Err(not_implemented(
@@ -427,7 +480,12 @@ fn compile_selectors_with_value_field(
         bindings,
         ordering,
         inputs: &inputs,
-        grid: statement_grid(stmt)?,
+        // The grid is derived only once the statement is a shape this compiler answers, so an
+        // unsupported statement reports the reason it has no tree rather than a grid complaint.
+        grid: match grid {
+            Some(grid) => grid,
+            None => statement_grid(stmt)?,
+        },
         value_field,
     };
     let tree = NativeTree::try_new(compile_expr(&context, &stmt.expr)?)?;
