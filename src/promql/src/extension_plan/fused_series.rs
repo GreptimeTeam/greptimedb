@@ -1239,6 +1239,21 @@ pub enum InputLocality {
     SinglePartition,
 }
 
+/// Whether `node` answers its values without reading any source.
+///
+/// The set is the planner's `data_free` one: a constant, the evaluation time, a binary operation
+/// between those and `vector()` of one. It is what [`same_source`] needs on the scalar side of a
+/// broadcast: a scalar is not the same thing as a source-free value, because `scalar(a)` is a scalar
+/// that has read a whole vector to become one.
+fn reads_no_source(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
+        NativeExpr::Binary { left, right, .. } => reads_no_source(left) && reads_no_source(right),
+        NativeExpr::VectorOf { input } => reads_no_source(input),
+        _ => false,
+    }
+}
+
 /// The one source every leaf of `node` reads, when the tree keeps the matching key of that source.
 fn same_source(node: &NativeNode) -> Option<usize> {
     match &node.expr {
@@ -1253,8 +1268,7 @@ fn same_source(node: &NativeNode) -> Option<usize> {
         }
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::ScalarOf { input } => same_source(input),
+        | NativeExpr::Timestamp { input } => same_source(input),
         NativeExpr::Map { input, op }
             if !op
                 .ops
@@ -1274,31 +1288,11 @@ fn same_source(node: &NativeNode) -> Option<usize> {
         {
             same_source(input)
         }
-        NativeExpr::ParameterizedTopK {
-            input, parameter, ..
-        } if matches!(
-            parameter.expr,
-            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. }
-        ) =>
-        {
-            same_source(input)
-        }
-        NativeExpr::ParameterizedHistogram {
-            input, parameters, ..
-        } if parameters.iter().all(|parameter| {
-            matches!(
-                parameter.expr,
-                NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. }
-            )
-        }) =>
-        {
-            same_source(input)
-        }
         NativeExpr::Binary {
             left,
             right,
             matching,
-        } if matches!(left.output, NativeType::Scalar(_)) => {
+        } if matches!(left.output, NativeType::Scalar(_)) && reads_no_source(left) => {
             let _ = matching;
             same_source(right)
         }
@@ -1306,7 +1300,7 @@ fn same_source(node: &NativeNode) -> Option<usize> {
             left,
             right,
             matching,
-        } if matches!(right.output, NativeType::Scalar(_)) => {
+        } if matches!(right.output, NativeType::Scalar(_)) && reads_no_source(right) => {
             let _ = matching;
             same_source(left)
         }
@@ -1332,6 +1326,9 @@ fn same_source(node: &NativeNode) -> Option<usize> {
         | NativeExpr::EvalTime { .. }
         | NativeExpr::Map { .. }
         | NativeExpr::ParameterizedMap { .. }
+        // `scalar()`, `topk` and a histogram function read the whole vector at a point, so they
+        // answer one value (or a whole ranking) rather than one output series per input series.
+        | NativeExpr::ScalarOf { .. }
         | NativeExpr::ParameterizedTopK { .. }
         | NativeExpr::ParameterizedHistogram { .. } => None,
     }

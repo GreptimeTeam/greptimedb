@@ -2429,8 +2429,13 @@ async fn native_fused_supports_constant_roots_and_selector_broadcasts() {
     }
 }
 
-/// A statement that reads no data plans without a scan. `scalar(v)` has no native node, so a
-/// statement that calls it keeps the existing plan.
+/// A statement that reads no data plans without a scan, and one that reads a scan through a scalar
+/// keeps the native route.
+///
+/// `scalar(v)` binds `NativeExpr::ScalarOf`, and a tree that holds it reads the whole vector: it is
+/// classified `SinglePartition`, so it is not cut per series and the statement plans natively. It
+/// must not be mistaken for a tree that keeps its source's matching key — that reading used to send
+/// it, and `topk`/`histogram_quantile` with it, back to the previous planner.
 #[tokio::test]
 async fn native_fused_plans_dynamic_scalars() {
     for query in ["time() - 60", "vector(time())", "hour()"] {
@@ -2592,13 +2597,20 @@ async fn native_fused_plans_dynamic_scalars() {
     let (_, batches) = execute(plan, &build_query_engine_state()).await;
     assert!(!batches.is_empty(), "{query}");
 
-    for query in [
-        "scalar(some_metric)",
-        "some_metric > bool scalar(some_metric)",
-    ] {
-        let plan = build_native_fused_plan(query, true).await;
-        assert!(find_fused_series(&plan).is_none(), "{query}");
-    }
+    // `scalar(m)` reads the whole vector: which series carries the one value at a point decides the
+    // answer, so the tree runs where every series of `m` is gathered rather than per partition. That
+    // still plans natively, as one fused node over the scan.
+    let plan = build_native_fused_plan("scalar(some_metric)", true).await;
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("scalar() over a scan uses the native route: {plan}"));
+    assert!(
+        matches!(fused.tree().root().expr, NativeExpr::ScalarOf { .. }),
+        "scalar() binds its own node: {plan}"
+    );
+    // A broadcast whose scalar side reads the same scan keeps the previous planner: the tree is
+    // classified from the vector side, and the scalar side has to see that whole vector first.
+    let plan = build_native_fused_plan("some_metric > bool scalar(some_metric)", true).await;
+    assert!(find_fused_series(&plan).is_none(), "{plan}");
 }
 
 /// An aggregate's parameter is part of the tree a data-free statement names its value field from.
@@ -4450,6 +4462,34 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             expected_names,
             sorted_column_names(&plan).as_slice(),
             "exact native output columns for `{query}`"
+        );
+    }
+}
+
+/// A whole-vector node over a bare scan is native, whichever form writes it: it reads every series of
+/// its source, so it is classified `SinglePartition` and never cut per series.
+///
+/// This is the regression for a `same_source` arm that passed the node through when its parameter was
+/// a per-point constant: that claimed the tree keeps its source's matching key, so the planner asked
+/// for `PartitionLocal`, refused its own `reads_across_series` answer and fell back to the previous
+/// planner for the per-point form only — while a tree inside `multi_input` would instead have ranked
+/// per partition and answered the union.
+#[tokio::test]
+async fn native_fused_whole_vector_nodes_over_a_bare_scan_stay_native() {
+    for query in [
+        // The literal ranking, which never had a `same_source` arm to go wrong.
+        "topk(3, some_metric)",
+        // The per-point ranking and the scalar, whose parameters are per-point constants. `time()`
+        // is the bare constant a parameter-shaped `same_source` guard passes through; an arithmetic
+        // expression over it never matched that guard, so both forms are pinned here.
+        "topk(time() / 60 + 1, some_metric)",
+        "topk(time(), some_metric)",
+        "scalar(some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` reads whole series at a point, so it must stay native: {plan}"
         );
     }
 }

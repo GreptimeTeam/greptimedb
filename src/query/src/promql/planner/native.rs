@@ -3894,6 +3894,17 @@ mod tests {
             Some(vec!["host".to_string(), "job".to_string()]),
             native_output_tags(absent.root(), &sources)
         );
+        // A per-point `k` keeps the input's labels too: it selects the same series the bound form
+        // selects, so it reports the same set. Its parameter reads a source of its own, so this tree
+        // binds two.
+        assert_eq!(
+            Some(vec!["hostname".to_string()]),
+            native_output_tags(
+                compiled_test_tree("topk(scalar(x), sum by (hostname) (rate(x[5m])))").root(),
+                &[vec!["hostname".to_string()], vec!["hostname".to_string()]]
+            ),
+            "a per-point k reports its input's labels"
+        );
         let count_values =
             compiled_test_tree("count_values by (host) (\"sample\", sum by (host) (x))");
         assert_eq!(

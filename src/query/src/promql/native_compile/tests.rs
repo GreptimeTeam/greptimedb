@@ -2894,6 +2894,41 @@ fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
         panic!("expected parameterized topk")
     };
     assert!(matches!(parameter.expr, NativeExpr::ScalarOf { .. }));
+
+    // `limitk` has no policy for a `k` that changes per point, so it keeps the constant rejection
+    // and its message is the one that quotes the shapes this compiler accepts.
+    let error = compile(
+        &eval_stmt("limitk(scalar(x), x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("a run-time k compiled");
+    let message = error.to_string();
+    assert!(message.contains("first argument"), "{message}");
+    // That quote is the only description a reader of a rejection gets, so it has to name every
+    // aggregator this compiler takes: one stale word there makes every rejection lie about what it
+    // binds.
+    for aggregator in [
+        "sum",
+        "avg",
+        "count",
+        "min",
+        "max",
+        "group",
+        "stddev",
+        "stdvar",
+        "quantile",
+        "topk",
+        "bottomk",
+        "limitk",
+        "limit_ratio",
+        "count_values",
+    ] {
+        assert!(
+            message.contains(&format!("`{aggregator}")),
+            "the rejection does not quote `{aggregator}`: {message}"
+        );
+    }
 }
 
 /// The shared acceptance queries of this batch, compiled whole: each one combines the shapes the

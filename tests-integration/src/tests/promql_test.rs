@@ -10766,6 +10766,76 @@ async fn native_promql_dynamic_topk_matches_legacy() {
     // planner names after its own rewrite, so only the rows are comparable.
     assert_eq!(literal_native.1, literal_legacy.1);
 
+    // A bare per-point ranking over one plain scan: nothing splits, and the whole vector is ranked
+    // where every series of it is gathered rather than per partition.
+    let bare_dynamic_sql = "TQL EVAL (0, 120, '60s') topk(time() / 60 + 1, native_dyn_topk)";
+    observer.clear();
+    let bare_dynamic_native =
+        native_labelled_rows(native_tql_output(&instance, bare_dynamic_sql, true).await).await;
+    let bare_dynamic_answering = observer.answering_node();
+    assert_eq!(
+        bare_dynamic_answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "a bare per-point ranking must answer natively: {bare_dynamic_sql}"
+    );
+    assert!(
+        !bare_dynamic_native.1.is_empty(),
+        "a bare per-point ranking must produce rows: {bare_dynamic_sql}"
+    );
+    let mut bare_dynamic_expected = Vec::new();
+    for (timestamp_seconds, k) in [(0, 1), (60, 2), (120, 3)] {
+        let literal = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk({k}, native_dyn_topk)"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        bare_dynamic_expected.append(&mut rows);
+    }
+    let mut bare_dynamic_actual = bare_dynamic_native.1;
+    bare_dynamic_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    bare_dynamic_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(
+        bare_dynamic_actual, bare_dynamic_expected,
+        "{bare_dynamic_sql}"
+    );
+
+    // The same ranking with a parameter that is *only* `time()`: this is the shape a per-point
+    // `same_source` guard misclassifies, because the value it carries is a bare per-point constant
+    // rather than an arithmetic expression over one. `k` is 0, 60 and 120 at 0s, 60s and 120s, so
+    // the first point selects nothing and the other two select every series.
+    let bare_time_sql = "TQL EVAL (0, 120, '60s') topk(time(), native_dyn_topk)";
+    observer.clear();
+    let bare_time_native =
+        native_labelled_rows(native_tql_output(&instance, bare_time_sql, true).await).await;
+    let bare_time_answering = observer.answering_node();
+    assert_eq!(
+        bare_time_answering.as_deref(),
+        Some("FusedSeriesExec"),
+        "a bare topk whose k is `time()` must answer natively: {bare_time_sql}"
+    );
+    let mut bare_time_expected = Vec::new();
+    for (timestamp_seconds, k) in [(0, 0), (60, 60), (120, 120)] {
+        let literal = format!(
+            "TQL EVAL ({timestamp_seconds}, {timestamp_seconds}, '60s') topk({k}, native_dyn_topk)"
+        );
+        let (_, mut rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        bare_time_expected.append(&mut rows);
+    }
+    assert_eq!(
+        bare_time_native.1.len(),
+        bare_time_expected.len(),
+        "{bare_time_sql}"
+    );
+    assert!(
+        !bare_time_native.1.is_empty(),
+        "a bare topk at k = time() must produce rows: {bare_time_sql}"
+    );
+    let mut bare_time_actual = bare_time_native.1;
+    bare_time_actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    bare_time_expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    assert_eq!(bare_time_actual, bare_time_expected, "{bare_time_sql}");
+
     // A bare `topk` has no aggregate beneath it, so there is nothing for the split to cut: the
     // whole statement is one whole-vector node over the scan, and it must answer exactly what the
     // existing planner does.

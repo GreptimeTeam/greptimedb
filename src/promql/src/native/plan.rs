@@ -1070,8 +1070,14 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
         NativeExpr::Instant { input, .. }
         | NativeExpr::VectorOf { input }
         | NativeExpr::Map { input, .. }
-        | NativeExpr::ParameterizedMap { input, .. }
         | NativeExpr::Timestamp { input } => reads_across_series(input),
+        // A parameterized operation reads its parameters too, and one of them can read across series
+        // as well: `clamp_min(b, scalar(a))` bounds each series of `b` by a value that only exists
+        // once the whole of `a` is gathered, so the node reads across series wherever its parameter
+        // does.
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => reads_across_series(input) || parameters.iter().any(reads_across_series),
         // `scalar()` needs the whole vector: which series carries the one value at a point decides
         // the answer, so the node reads across series.
         NativeExpr::ScalarOf { .. } => true,

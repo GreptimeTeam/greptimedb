@@ -94,7 +94,7 @@ use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType,
+    NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -837,6 +837,126 @@ fn math_map_matching_key_preservation_controls_locality() {
         super::input_locality(host_tree.root()),
         super::InputLocality::MatchingLocal(_)
     ));
+}
+
+/// A node that reads the whole vector at a point answers one value (or a whole ranking) rather than
+/// one output series per input series, so it cannot keep a source's matching key: it needs every
+/// series of that source in one place.
+///
+/// Each of these shapes takes a per-point `time()` or a literal parameter, which is exactly the case
+/// a parameter-shaped `same_source` arm was tempted to pass through. Answering `PartitionLocal` here
+/// does not only cost parallelism: a `topk` or a histogram function run once per partition answers
+/// the union of the per-partition rankings.
+#[test]
+fn whole_vector_parameter_nodes_need_every_series_in_one_partition() {
+    let grid = grid();
+    let eval_time = || NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let single_partition = |tree: NativeTree| {
+        assert!(
+            matches!(
+                super::input_locality(tree.root()),
+                super::InputLocality::SinglePartition
+            ),
+            "a whole-vector node must read its source in one partition: {tree}"
+        );
+    };
+
+    // `scalar(m)`: which series carries the one value at a point decides the answer.
+    let instant = instant_of(0, &grid);
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::ScalarOf {
+                input: Box::new(instant),
+            },
+            output: NativeType::Scalar(Arc::clone(&grid)),
+        })
+        .expect("scalar() over a raw selection is a legal tree"),
+    );
+
+    // A per-point `k` decides which of the whole vector's series survive.
+    let instant = instant_of(0, &grid);
+    let output = instant.output.clone();
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(instant),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(eval_time()),
+            },
+            output,
+        })
+        .expect("topk with a per-point k over a raw selection is a legal tree"),
+    );
+
+    // The histogram function folds the bucket series of the whole vector into one.
+    let rate = rate_tree();
+    let output = rate.root().output.clone();
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::ParameterizedHistogram {
+                input: Box::new(rate.root().clone()),
+                op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+                parameters: vec![eval_time()],
+            },
+            output,
+        })
+        .expect("a histogram function over a raw rate window is a legal tree"),
+    );
+
+    // `b * scalar(a)`: the scalar side is not source-free, so its broadcast has to wait until the
+    // whole of its own vector is gathered.
+    let vector_side = instant_of(0, &grid);
+    let output = vector_side.output.clone();
+    let scalar_side = NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(instant_of(1, &grid)),
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(vector_side),
+                right: Box::new(scalar_side),
+                matching: BinaryMatching {
+                    op: BinaryOp::Mul,
+                    return_bool: false,
+                    labels: MatchingLabels::Ignoring(Vec::new()),
+                    cardinality: Cardinality::OneToOne,
+                    fill: FillValues::default(),
+                },
+            },
+            output,
+        })
+        .expect("a scalar broadcast over a raw selection is a legal tree"),
+    );
+
+    // `clamp_min(b, scalar(a))`: a parameterized map is only as local as its parameter.
+    let instant = instant_of(0, &grid);
+    let output = instant.output.clone();
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::ParameterizedMap {
+                input: Box::new(instant),
+                op: ParameterizedOp::ClampMin,
+                parameters: vec![NativeNode {
+                    expr: NativeExpr::ScalarOf {
+                        input: Box::new(instant_of(1, &grid)),
+                    },
+                    output: NativeType::Scalar(Arc::clone(&grid)),
+                }],
+            },
+            output,
+        })
+        .expect("a parameterized map over a scalar() parameter is a legal tree"),
+    );
 }
 
 /// `x - 2 * x`: one source read at both operands, with a scalar multiplier on the right.
