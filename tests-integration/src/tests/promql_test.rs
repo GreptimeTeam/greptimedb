@@ -2259,6 +2259,267 @@ fn output_values_per_partition(
     found_metric.then_some(values_by_partition)
 }
 
+/// Per-partition `OutputRows` of every unique `SeriesScanExec` the last native statement planned.
+///
+/// A `Some` entry is as wide as that scan's output partitioning, so a partition that was never
+/// executed shows up as a zero instead of disappearing. `None` is a scan whose metrics report no
+/// per-partition `OutputRows` at all, and an all-zero entry is a scan that ran without producing
+/// rows; neither is reported as a one-partition read, because both mean the scan is no evidence of
+/// how the series were distributed.
+fn observed_series_scan_partitions(observer: &NativePlanObserver) -> Vec<Option<Vec<u64>>> {
+    use datafusion::physical_plan::metrics::MetricValue;
+
+    observed_series_scans(observer)
+        .into_iter()
+        .map(|scan| {
+            let metrics = scan.metrics()?;
+            let mut rows_by_partition = vec![0_u64; scan.output_partitioning().partition_count()];
+            let mut found_metric = false;
+            for metric in metrics.iter() {
+                if let MetricValue::OutputRows(count) = metric.value()
+                    && let Some(partition) = metric.partition()
+                    && let Some(rows) = rows_by_partition.get_mut(partition)
+                {
+                    *rows += count.value() as u64;
+                    found_metric = true;
+                }
+            }
+            found_metric.then_some(rows_by_partition)
+        })
+        .collect()
+}
+
+/// One line per scan of [`observed_series_scan_partitions`]: the rows it read on each partition and
+/// how many of those partitions were nonempty.
+fn format_series_scan_partitions(vectors: &[Option<Vec<u64>>]) -> String {
+    if vectors.is_empty() {
+        return "no series scan observed".to_string();
+    }
+    vectors
+        .iter()
+        .map(|rows_by_partition| match rows_by_partition {
+            None => "no output rows metric".to_string(),
+            Some(rows) => {
+                let nonempty = rows.iter().filter(|rows| **rows > 0).count();
+                format!("{rows:?} ({nonempty}/{} nonempty)", rows.len())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The width every native statement in this module declares, and therefore the number of entries
+/// each per-partition vector must have.
+const DECLARED_PARTITIONS: usize = 4;
+
+/// Asserts every series scan the last native statement ran produced rows on all
+/// [`DECLARED_PARTITIONS`] of its scan partitions, and reports the per-partition row counts it
+/// found.
+///
+/// The declared width is not evidence on its own: what a scan actually did is the per-partition
+/// `OutputRows` it recorded, so every one of those partitions has to be nonempty here rather than
+/// most of them. This fixture offers four mutually exclusive time windows, each flushed into a
+/// range of its own, which is how a scan of it gets several range streams to read: under this
+/// fixture the earlier single-range observation read one of the four scan partitions, and the four
+/// range streams read all four. The check is the scan's own counter of where it produced rows; it
+/// does not claim that an output partition corresponds to one SST or to one of those windows, and
+/// a scan that reports no metric at all is refused, because it is no evidence either way.
+fn assert_series_scan_partitions(label: &str, observer: &NativePlanObserver) -> String {
+    let vectors = observed_series_scan_partitions(observer);
+    assert!(
+        !vectors.is_empty(),
+        "{label}: the native statement ran no series scan"
+    );
+    for rows_by_partition in &vectors {
+        let rows = rows_by_partition.as_ref().unwrap_or_else(|| {
+            panic!("{label}: a series scan reports no per-partition output rows: {vectors:?}")
+        });
+        assert_eq!(
+            DECLARED_PARTITIONS,
+            rows.len(),
+            "{label}: a series scan must carry the {DECLARED_PARTITIONS} partitions the statement \
+             runs at: {rows:?}"
+        );
+        let empty_partitions = rows.iter().filter(|rows| **rows == 0).count();
+        assert_eq!(
+            0, empty_partitions,
+            "{label}: every one of the {DECLARED_PARTITIONS} scan partitions must read rows, but \
+             {empty_partitions} of them read none: {rows:?} (all scan vectors: {vectors:?})"
+        );
+    }
+    format_series_scan_partitions(&vectors)
+}
+
+/// One native fused node of the last statement, with the vector it reported.
+struct FusedNodeVector {
+    /// Where the node was planned: `region[0]` for a node of a region-side tree, `root` for a node
+    /// of the frontend's own tree.
+    site: String,
+    /// The node's output partition count, which is the width its per-partition vector must have.
+    partitions: usize,
+    /// Its per-partition `native.root.output_values` counts, `None` when it reports no such metric.
+    counts: Option<Vec<u64>>,
+}
+
+impl FusedNodeVector {
+    /// `site=[counts] (nonempty/width)`, or `site=no-metric` when the node reported nothing.
+    fn report(&self) -> String {
+        match &self.counts {
+            None => format!("{}=no-metric", self.site),
+            Some(counts) => {
+                let nonempty = counts.iter().filter(|count| **count > 0).count();
+                format!("{}={counts:?} ({nonempty}/{})", self.site, counts.len())
+            }
+        }
+    }
+}
+
+/// Every native fused node of `plan`, labelled with `site` and appended to `found`.
+fn collect_fused_nodes(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    site: &str,
+    found: &mut Vec<FusedNodeVector>,
+) {
+    let mut stack = vec![plan.clone()];
+    let mut ordinal = 0;
+    while let Some(node) = stack.pop() {
+        if node.name() == "FusedSeriesExec" {
+            let site = if ordinal == 0 {
+                site.to_string()
+            } else {
+                format!("{site}#{ordinal}")
+            };
+            ordinal += 1;
+            found.push(FusedNodeVector {
+                site,
+                partitions: node.output_partitioning().partition_count(),
+                counts: output_values_per_partition(&node),
+            });
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+}
+
+/// One `site=vector (nonempty/width)` entry per node, for reports and failure messages.
+fn fused_vectors_report(nodes: &[FusedNodeVector]) -> String {
+    if nodes.is_empty() {
+        return "none".to_string();
+    }
+    nodes
+        .iter()
+        .map(FusedNodeVector::report)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Asserts the native work of the last statement reached every one of the
+/// [`DECLARED_PARTITIONS`] partitions it runs at, and reports the vectors it checked.
+///
+/// `native.root.output_values` counts what a fused node published on the partition it ran, so a
+/// zero in a node's vector is a partition where it published nothing. Both placements are read,
+/// and each is asserted node by node rather than by looking for one node that happens to span
+/// partitions:
+///
+/// - A statement that runs native work inside a region has one fused node per region-side tree.
+///   Every one of those must report the metric, be as wide as the statement, and have all counts
+///   positive, so a region prefix that collapsed onto one partition fails here even when another
+///   region's prefix is wide. The frontend's own node is the finalize over the region streams; its
+///   vector is reported but not asserted, because a final combine is not required to publish on
+///   every partition (it may even be a single partition, and the answer is assembled from the
+///   per-region streams above it).
+/// - A statement that only runs native work in the frontend (the frontend-raw routes, which run no
+///   native node inside a region) is read from [`NativePlanObserver::root_plan`] instead: its
+///   fused nodes must be found there, and every one of them that is as wide as the statement must
+///   report the metric with all counts positive. A narrower final merge is ignored, because it is
+///   the last combine rather than a partition-wide execution; a tree whose fused nodes are all
+///   narrow is refused, because nothing in it shows a partition-wide execution.
+///
+/// A width-4 node without the metric, or with an empty partition, is a failure wherever the metric
+/// is required, never an exemption. The failure messages name the label, the node's site and the
+/// vectors, so a regression that collapses one region or one width-4 node is reported as itself.
+fn assert_cross_partition_native_values(label: &str, observer: &NativePlanObserver) -> String {
+    let mut region_nodes = Vec::new();
+    for (index, plan) in observer.region_plans().iter().enumerate() {
+        collect_fused_nodes(plan, &format!("region[{index}]"), &mut region_nodes);
+    }
+    let mut root_nodes = Vec::new();
+    collect_fused_nodes(&observer.root_plan(), "root", &mut root_nodes);
+
+    if !region_nodes.is_empty() {
+        let region_report = fused_vectors_report(&region_nodes);
+        for node in &region_nodes {
+            let counts = match &node.counts {
+                Some(counts) => counts,
+                None => panic!(
+                    "{label}: the region-side fused node {} reports no \
+                     `native.root.output_values`, so nothing shows which partitions it executed; \
+                     region vectors: {region_report}",
+                    node.site
+                ),
+            };
+            assert_eq!(
+                DECLARED_PARTITIONS, node.partitions,
+                "{label}: the region-side fused node {} runs at {} partitions, not the \
+                 {DECLARED_PARTITIONS} partitions the statement declares, and its vector is \
+                 {counts:?}; region vectors: {region_report}",
+                node.site, node.partitions
+            );
+            let empty_partitions = counts.iter().filter(|count| **count == 0).count();
+            assert_eq!(
+                0, empty_partitions,
+                "{label}: the region-side fused node {} published nothing on {empty_partitions} \
+                 of {DECLARED_PARTITIONS} partitions: {counts:?}; region vectors: {region_report}",
+                node.site
+            );
+        }
+        return format!(
+            "regions: {region_report} | frontend finalize (reported, not asserted): {}",
+            fused_vectors_report(&root_nodes)
+        );
+    }
+
+    assert!(
+        !root_nodes.is_empty(),
+        "{label}: the statement ran no native node inside a region and the frontend tree holds no \
+         fused node either; root:\n{}",
+        display_plan_tree(&observer.root_plan())
+    );
+    let root_report = fused_vectors_report(&root_nodes);
+    let wide = root_nodes
+        .iter()
+        .filter(|node| node.partitions == DECLARED_PARTITIONS)
+        .collect::<Vec<_>>();
+    assert!(
+        !wide.is_empty(),
+        "{label}: the frontend tree's fused nodes are all narrower than the \
+         {DECLARED_PARTITIONS} partitions the statement declares, so none of them shows a \
+         partition-wide execution: {root_report}; root:\n{}",
+        display_plan_tree(&observer.root_plan())
+    );
+    for node in wide {
+        let counts = match &node.counts {
+            Some(counts) => counts,
+            None => panic!(
+                "{label}: the {}-partition frontend fused node {} reports no \
+                 `native.root.output_values`, so nothing shows which partitions it executed; root \
+                 vectors: {root_report}; root:\n{}",
+                node.partitions,
+                node.site,
+                display_plan_tree(&observer.root_plan())
+            ),
+        };
+        let empty_partitions = counts.iter().filter(|count| **count == 0).count();
+        assert_eq!(
+            0, empty_partitions,
+            "{label}: the {}-partition frontend fused node {} published nothing on \
+             {empty_partitions} of {DECLARED_PARTITIONS} partitions: {counts:?}; root vectors: \
+             {root_report}",
+            node.partitions, node.site
+        );
+    }
+    format!("frontend-raw root: {root_report}")
+}
+
 /// The partitions of `plan` that recorded a nonzero `metric` count, in ascending order.
 ///
 /// A native execution partition that was handed no series records nothing, so this is where the
@@ -8425,6 +8686,23 @@ fn debug_merge_scan_child(child: &Arc<dyn datafusion::physical_plan::ExecutionPl
     format!("{scan:?}")
 }
 
+/// The four disjoint time windows the metric fixtures write, one per flushed range.
+///
+/// A series is kept inside one window, so the samples of one series never span two windows. Each
+/// window goes in and is flushed on its own, which is how the fixture offers a scan several range
+/// streams to read; this is the arrangement under which the earlier single-range observation read
+/// one of the four scan partitions and the four range streams read all four. The windows sit inside
+/// the narrowest corpus window, the one-minute range starting at `241`, so every query reads all
+/// four: a window outside a query's time range is pruned, and a pruned window cannot contribute a
+/// row to any scan partition. What each scan actually did is then read from the per-partition
+/// `OutputRows` it recorded, not inferred from the window or range it was given.
+const CORPUS_WINDOWS: [(i64, i64); 4] = [
+    (242_000, 244_000),
+    (250_000, 252_000),
+    (258_000, 260_000),
+    (266_000, 268_000),
+];
+
 /// Reports native planning and labelled answers for the real Q07 aggregate pair.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_real_query_q07_throttled_periods() {
@@ -8432,10 +8710,15 @@ async fn native_promql_real_query_q07_throttled_periods() {
     let (standalone, observer) =
         native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_real_q07")).await;
     let instance = standalone.fe_instance().clone();
-    setup_real_query_metric_fixture(
-        &instance,
+    // The query fixes `pod` to `pod-0`, so the containers of that pod are the only series it can
+    // read. One container per window, each with its own flush, spreads them over the scan's
+    // partitions; each container keeps the first window's shape, so every container's ratio is the
+    // same exact half.
+    let mut fixture = String::from(
         r#"CREATE TABLE real_q_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
             ENGINE=metric WITH ("physical_metric_table" = "true");
+        ALTER TABLE real_q_phy SET 'compaction.twcs.trigger_file_num' = '100';
+        ALTER TABLE real_q_phy SET 'compaction.twcs.inactive_window.trigger_file_num' = '100';
         CREATE TABLE container_cpu_cfs_throttled_periods_total (
             "cluster" STRING, job STRING, metrics_path STRING, namespace STRING,
             pod STRING, container STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
@@ -8445,19 +8728,24 @@ async fn native_promql_real_query_q07_throttled_periods() {
             "cluster" STRING, job STRING, metrics_path STRING, namespace STRING,
             pod STRING, container STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
             PRIMARY KEY(cluster, job, metrics_path, namespace, pod, container)
-        ) ENGINE=metric WITH ("on_physical_table" = 'real_q_phy');
-        INSERT INTO container_cpu_cfs_throttled_periods_total ("cluster", job, metrics_path, namespace, pod, container, ts, val) VALUES
-            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',2000,0),
-            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',301000,60),
-            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',2000,0),
-            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',301000,30);
-        INSERT INTO container_cpu_cfs_periods_total ("cluster", job, metrics_path, namespace, pod, container, ts, val) VALUES
-            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',2000,0),
-            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',301000,120),
-            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',2000,0),
-            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',301000,60)"#,
-    )
-    .await;
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q_phy');"#,
+    );
+    for (window, &(first_ts, second_ts)) in CORPUS_WINDOWS.iter().enumerate() {
+        let container = ["main", "sidecar", "envoy", "metrics"][window];
+        let weight = (window + 1) * 30;
+        for (table, second_value) in [
+            ("container_cpu_cfs_throttled_periods_total", 2 * weight),
+            ("container_cpu_cfs_periods_total", 4 * weight),
+        ] {
+            fixture.push_str(&format!(
+                " INSERT INTO {table} (\"cluster\", job, metrics_path, namespace, pod, container, ts, val) VALUES \
+                 ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','{container}',{first_ts},0), \
+                 ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','{container}',{second_ts},{second_value});"
+            ));
+        }
+        fixture.push_str(" ADMIN FLUSH_TABLE('real_q_phy');");
+    }
+    setup_real_query_metric_fixture(&instance, &fixture).await;
     let query = r#"sum(increase(container_cpu_cfs_throttled_periods_total{job="kubelet",metrics_path="/metrics/cadvisor",namespace="app-0",pod="pod-0",container!="",cluster="eks-us-east-1-qa1"}[5m])) by (container) / sum(increase(container_cpu_cfs_periods_total{job="kubelet",metrics_path="/metrics/cadvisor",namespace="app-0",pod="pod-0",container!="",cluster="eks-us-east-1-qa1"}[5m])) by (container)"#;
     let sql = format!("TQL EVAL (301, 301, '1m') {query}");
     observer.clear();
@@ -8486,6 +8774,13 @@ async fn native_promql_real_query_q07_throttled_periods() {
         "Q07 root name={} fused_frontend={} child merge scans={child_debug:?} value columns legacy={legacy_columns:?} native={native_columns:?}, legacy_rows={legacy_rows:?} native_rows={native_rows:?}, root:\n{root_display}",
         root.name(),
         frontend_fused.len()
+    );
+    // The work must be partition-wide on both sides of the boundary: every scan read rows on all
+    // four of its partitions, and every region-side fused prefix published values on all four.
+    let scan_report = assert_series_scan_partitions("Q07", &observer);
+    let partitions_report = assert_cross_partition_native_values("Q07", &observer);
+    common_telemetry::info!(
+        "Q07 series scan partitions: {scan_report} native partition vectors: {partitions_report}"
     );
     assert_eq!(native_rows, legacy_rows, "Q07 labelled rows");
     assert_eq!(root.name(), "FusedSeriesExec");
@@ -8529,10 +8824,16 @@ async fn native_promql_real_query_q04_namespace_cpu_requests() {
     let (standalone, observer) =
         native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_real_q04")).await;
     let instance = standalone.fe_instance().clone();
-    setup_real_query_metric_fixture(
-        &instance,
+    // The right side has only `cluster` and `namespace`, so its namespaces are the series that can
+    // be spread over the windows: one namespace per window puts the requests of each namespace in a
+    // range of its own, while every namespace still holds a sample at both evaluation points. The
+    // usage series follow the same windows, so a namespace's two sides meet on one partition and
+    // the division keeps answering what the numbers say.
+    let mut fixture = String::from(
         r#"CREATE TABLE real_q04_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
             ENGINE=metric WITH ("physical_metric_table" = "true");
+        ALTER TABLE real_q04_phy SET 'compaction.twcs.trigger_file_num' = '100';
+        ALTER TABLE real_q04_phy SET 'compaction.twcs.inactive_window.trigger_file_num' = '100';
         CREATE TABLE "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m" (
             "cluster" STRING, namespace STRING, pod STRING, container STRING,
             ts TIMESTAMP TIME INDEX, val DOUBLE,
@@ -8541,17 +8842,29 @@ async fn native_promql_real_query_q04_namespace_cpu_requests() {
         CREATE TABLE "namespace_cpu:kube_pod_container_resource_requests:sum" (
             "cluster" STRING, namespace STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
             PRIMARY KEY(cluster, namespace)
-        ) ENGINE=metric WITH ("on_physical_table" = 'real_q04_phy');
-        INSERT INTO "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m" ("cluster", namespace, pod, container, ts, val) VALUES
-            ('eks-us-east-1-qa1','app-0','pod-0','main',2000,1),
-            ('eks-us-east-1-qa1','app-0','pod-0','main',301000,3),
-            ('eks-us-east-1-qa1','app-1','pod-1','main',2000,2),
-            ('eks-us-east-1-qa1','app-1','pod-1','main',301000,4);
-        INSERT INTO "namespace_cpu:kube_pod_container_resource_requests:sum" ("cluster", namespace, ts, val) VALUES
-            ('eks-us-east-1-qa1','app-0',2000,2), ('eks-us-east-1-qa1','app-0',301000,4),
-            ('eks-us-east-1-qa1','app-1',2000,4), ('eks-us-east-1-qa1','app-1',301000,8)"#,
-    )
-    .await;
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q04_phy');"#,
+    );
+    for (window, &(first_ts, second_ts)) in CORPUS_WINDOWS.iter().enumerate() {
+        let namespace = format!("app-{window}");
+        let weight = window + 1;
+        fixture.push_str(&format!(
+            " INSERT INTO \"node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m\" \
+             (\"cluster\", namespace, pod, container, ts, val) VALUES \
+             ('eks-us-east-1-qa1','{namespace}','pod-{window}','main',{first_ts},{weight}), \
+             ('eks-us-east-1-qa1','{namespace}','pod-{window}','main',{second_ts},{});",
+            3 * weight,
+        ));
+        fixture.push_str(&format!(
+            " INSERT INTO \"namespace_cpu:kube_pod_container_resource_requests:sum\" \
+             (\"cluster\", namespace, ts, val) VALUES \
+             ('eks-us-east-1-qa1','{namespace}',{first_ts},{}), \
+             ('eks-us-east-1-qa1','{namespace}',{second_ts},{});",
+            2 * weight,
+            4 * weight,
+        ));
+        fixture.push_str(" ADMIN FLUSH_TABLE('real_q04_phy');");
+    }
+    setup_real_query_metric_fixture(&instance, &fixture).await;
     let query = r#"sum(max by (cluster, namespace, pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m{cluster="eks-us-east-1-qa1"})) by (namespace) / sum(namespace_cpu:kube_pod_container_resource_requests:sum{cluster="eks-us-east-1-qa1"}) by (namespace)"#;
     let sql = format!("TQL EVAL (301, 301, '1m') {query}");
     observer.clear();
@@ -8580,6 +8893,13 @@ async fn native_promql_real_query_q04_namespace_cpu_requests() {
         "Q04 root name={} fused_frontend={} child merge scans={child_debug:?} value columns legacy={legacy_columns:?} native={native_columns:?}, legacy_rows={legacy_rows:?} native_rows={native_rows:?}, root:\n{root_display}",
         root.name(),
         frontend_fused.len()
+    );
+    // The work must be partition-wide on both sides of the boundary: every scan read rows on all
+    // four of its partitions, and every region-side fused prefix published values on all four.
+    let scan_report = assert_series_scan_partitions("Q04", &observer);
+    let partitions_report = assert_cross_partition_native_values("Q04", &observer);
+    common_telemetry::info!(
+        "Q04 series scan partitions: {scan_report} native partition vectors: {partitions_report}"
     );
     assert_eq!(native_rows, legacy_rows, "Q04 labelled rows");
     assert_eq!(root.name(), "FusedSeriesExec");
@@ -8843,8 +9163,15 @@ async fn native_promql_corpus_route_matrix() {
         .iter()
         .flat_map(|case| case.metrics.iter().copied())
         .collect::<std::collections::BTreeSet<_>>();
+    // Every metric holds its series in four disjoint time windows, one per flushed range, so a scan
+    // of this fixture is offered four range streams to read. That is the arrangement this table
+    // qualifies: under the earlier single-range fixture a scan read one of its four partitions, and
+    // these four range streams read all four. The flush thresholds keep the four flushed ranges
+    // from being merged back before the queries run, so the streams stay separate.
     let mut fixture = String::from(
-        r#"CREATE TABLE corpus_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ("physical_metric_table"="true");"#,
+        r#"CREATE TABLE corpus_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ("physical_metric_table"="true");
+        ALTER TABLE corpus_phy SET 'compaction.twcs.trigger_file_num'='100';
+        ALTER TABLE corpus_phy SET 'compaction.twcs.inactive_window.trigger_file_num'='100';"#,
     );
     for metric in &metrics {
         fixture.push_str(&format!(" CREATE TABLE \"{metric}\" ("));
@@ -8860,77 +9187,92 @@ async fn native_promql_corpus_route_matrix() {
                 .join(","),
         );
         fixture.push_str(")) ENGINE=metric WITH (\"on_physical_table\"='corpus_phy');");
-        // Histogram bucket samples need multiple `le` values at each timestamp; a single
-        // bucket would make Q10's histogram quantile degenerate.
-        let samples = if *metric == "kubelet_pleg_relist_duration_seconds_bucket" {
-            [
-                ("h0", "pod-0", "a0", 242000, 1.0),
-                ("h0", "pod-0", "a0", 300000, 301.0),
-                ("h1", "pod-1", "a1", 242000, 2.0),
-                ("h1", "pod-1", "a1", 300000, 602.0),
-            ]
-            .into_iter()
-            .flat_map(|(host, pod, az, ts, value)| {
-                ["0.5", "1", "5", "+Inf"]
-                    .into_iter()
-                    .enumerate()
-                    .map(move |(index, le)| (host, pod, az, ts, value * (index + 1) as f64, le))
-            })
-            .collect::<Vec<_>>()
-        } else {
-            [
-                ("h0", "pod-0", "a0", 242000, 1.0),
-                ("h0", "pod-0", "a0", 300000, 301.0),
-                ("h1", "pod-1", "a1", 242000, 2.0),
-                ("h1", "pod-1", "a1", 300000, 602.0),
-            ]
-            .into_iter()
-            .map(|(host, pod, az, ts, value)| (host, pod, az, ts, value, "+Inf"))
-            .collect()
-        };
-        for (host, pod, az, ts, value, le) in samples {
+    }
+    execute_all(&instance, &fixture, QueryContext::arc()).await;
+    // One window's rows go in together and are flushed together, so each window is its own range.
+    // The series of one window repeat the profile of the first one - the same `pod-0`/`pod-1`,
+    // `idle`/`user` and `az` split - and differ by host. `namespace_workload_pod:kube_pod_owner:relabel`
+    // is Q08's `group_left` right side, where two matches for one `(cluster, namespace, pod)` would be
+    // a semantic error rather than more data, so that one metric gives every window's series a pod of
+    // its own.
+    for (window, &(first_ts, second_ts)) in CORPUS_WINDOWS.iter().enumerate() {
+        let mut inserts = String::new();
+        for metric in &metrics {
             let columns = all_tags
                 .iter()
                 .map(|t| format!("\"{t}\""))
                 .chain(["ts".to_string(), "val".to_string()])
                 .collect::<Vec<_>>();
-            let values = all_tags
-                .iter()
-                .map(|tag| match *tag {
-                    "cluster" => "eks-us-east-1-qa1".to_string(),
-                    "namespace" => "app-0".to_string(),
-                    "pod" => pod.to_string(),
-                    "container" => "main".to_string(),
-                    "job" => "kubelet".to_string(),
-                    "metrics_path" => "/metrics/cadvisor".to_string(),
-                    "code" => "200".to_string(),
-                    "instance" => host.to_string(),
-                    "persistentvolumeclaim" => "persistentvolumeclaim0".to_string(),
-                    "node" => host.to_string(),
-                    "region" => "us-west-2".to_string(),
-                    "az" => az.to_string(),
-                    "hostname" => host.to_string(),
-                    "mode" => if host == "h0" { "idle" } else { "user" }.to_string(),
-                    "cpu" => if host == "h0" { "0" } else { "1" }.to_string(),
-                    "device" => "nvme0n1".to_string(),
-                    "fstype" => "ext4".to_string(),
-                    "workload" => format!("wl-{pod}"),
-                    "workload_type" => "deployment".to_string(),
-                    "le" => le.to_string(),
-                    "host_network" => "false".to_string(),
-                    _ => String::new(),
-                })
-                .map(|v| format!("'{v}'"))
-                .chain([ts.to_string(), value.to_string()])
-                .collect::<Vec<_>>();
-            fixture.push_str(&format!(
-                " INSERT INTO \"{metric}\" ({}) VALUES ({});",
+            // Histogram bucket samples need multiple `le` values at each timestamp; a single
+            // bucket would make Q10's histogram quantile degenerate.
+            let buckets: &[&str] = if *metric == "kubelet_pleg_relist_duration_seconds_bucket" {
+                &["0.5", "1", "5", "+Inf"]
+            } else {
+                &["+Inf"]
+            };
+            let mut rows = Vec::new();
+            for slot in 0..2 {
+                let host = format!("h{}", 2 * window + slot);
+                let (pod, az, mode, cpu, weight) = if slot == 0 {
+                    ("pod-0".to_string(), "a0", "idle", "0", 1.0)
+                } else {
+                    ("pod-1".to_string(), "a1", "user", "1", 2.0)
+                };
+                let pod = if *metric == "namespace_workload_pod:kube_pod_owner:relabel" {
+                    format!("pod-{}", 2 * window + slot)
+                } else {
+                    pod
+                };
+                // Scaling the first window's values keeps every window's series the same shape:
+                // a two-sample counter whose increase is the one Q04, Q07 and the rate queries
+                // derive from.
+                let base = weight * (window + 1) as f64;
+                for (ts, value) in [(first_ts, base), (second_ts, 301.0 * base)] {
+                    for (index, le) in buckets.iter().enumerate() {
+                        let values = all_tags
+                            .iter()
+                            .map(|tag| match *tag {
+                                "cluster" => "eks-us-east-1-qa1".to_string(),
+                                "namespace" => "app-0".to_string(),
+                                "pod" => pod.clone(),
+                                "container" => "main".to_string(),
+                                "job" => "kubelet".to_string(),
+                                "metrics_path" => "/metrics/cadvisor".to_string(),
+                                "code" => "200".to_string(),
+                                "instance" => host.clone(),
+                                "persistentvolumeclaim" => "persistentvolumeclaim0".to_string(),
+                                "node" => host.clone(),
+                                "region" => "us-west-2".to_string(),
+                                "az" => az.to_string(),
+                                "hostname" => host.clone(),
+                                "mode" => mode.to_string(),
+                                "cpu" => cpu.to_string(),
+                                "device" => "nvme0n1".to_string(),
+                                "fstype" => "ext4".to_string(),
+                                "workload" => format!("wl-{pod}"),
+                                "workload_type" => "deployment".to_string(),
+                                "le" => le.to_string(),
+                                "host_network" => "false".to_string(),
+                                _ => String::new(),
+                            })
+                            .map(|v| format!("'{v}'"))
+                            .chain([ts.to_string(), (value * (index + 1) as f64).to_string()])
+                            .collect::<Vec<_>>();
+                        rows.push(format!("({})", values.join(",")));
+                    }
+                }
+            }
+            inserts.push_str(&format!(
+                " INSERT INTO \"{metric}\" ({}) VALUES {};",
                 columns.join(","),
-                values.join(",")
+                rows.join(",")
             ));
         }
+        // The physical table owns the region the logical metrics share, so one flush per window
+        // seals every metric's rows of that window into a range of its own.
+        inserts.push_str(" ADMIN FLUSH_TABLE('corpus_phy');");
+        execute_all(&instance, &inserts, QueryContext::arc()).await;
     }
-    execute_all(&instance, &fixture, QueryContext::arc()).await;
     let mut table_rows = Vec::new();
     for case in CORPUS {
         let sql = format!("TQL EVAL (301, 361, '1m') {}", case.promql);
@@ -9021,45 +9363,25 @@ async fn native_promql_corpus_route_matrix() {
             "{} fell back to the existing plan; root:\n{root_display}\nregions: {region_displays:?}",
             case.label
         );
-        // For aggregate-split, counts are per-partition partial-state rows, not final query values.
-        let mut partition_vectors = Vec::new();
-        for plan in &regions {
-            let mut stack = vec![plan.clone()];
-            while let Some(node) = stack.pop() {
-                if node.name() == "FusedSeriesExec"
-                    && let Some(counts) = output_values_per_partition(&node)
-                {
-                    partition_vectors.push(counts);
-                }
-                stack.extend(node.children().into_iter().cloned());
-            }
-        }
-        // This is not a parallelism measurement: the matrix fixtures are not designed to
-        // distribute series across partition boundaries, so [4,0,0,0] means rows were read,
-        // not that the prefix is parallel. See native_aggregate_test.rs::check_two_source_segregation
-        // for the partition-filling fixture that asserts all four partitions are used.
+        // Every scan must read rows on all four partitions, and every region-side fused prefix must
+        // publish values on all four; a frontend finalize is reported but not asserted. For
+        // aggregate-split, the published counts are per-partition partial-state rows, not final
+        // query values.
+        let scan_report = assert_series_scan_partitions(case.label, &observer);
         let partitions_report = if route == "legacy" {
             "n/a".to_string()
-        } else if partition_vectors.is_empty() {
-            "no metric".to_string()
         } else {
-            for counts in &partition_vectors {
-                assert!(
-                    counts.iter().any(|count| *count > 0),
-                    "{} native execution produced no output values in any partition: {counts:?}; region plans: {region_displays:?}",
-                    case.label
-                );
-            }
-            partition_vectors
-                .iter()
-                .map(|counts| {
-                    let nonempty = counts.iter().filter(|count| **count > 0).count();
-                    format!("{counts:?} ({nonempty}/{})", counts.len())
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
+            assert_cross_partition_native_values(case.label, &observer)
         };
-        let rows_equal = native_rows == legacy_rows;
+        // Diagnostics only: the two answers compared as collected. This is not an acceptance
+        // condition and not a claim of exact equality for the corpus - acceptance is the row count,
+        // the exact labels/timestamps and the 1e-10 relative value tolerance asserted above - so a
+        // `false` here is reported in the table as a flag for a reader, never as a pass criterion.
+        let rows_bitwise_equal = native_rows == legacy_rows;
+        common_telemetry::info!(
+            "{} series scan partitions: {scan_report} native partition vectors: {partitions_report}",
+            case.label,
+        );
         if case.label == "L07" || case.label == "Q01" {
             let mut repeated_values = Vec::new();
             for enabled in [false, false, true] {
@@ -9121,7 +9443,7 @@ async fn native_promql_corpus_route_matrix() {
             case.label,
             route,
             if route == "legacy" { "unknown" } else { "—" },
-            rows_equal,
+            rows_bitwise_equal,
             max_rel_diff,
             value_column,
             partitions_report
@@ -9132,7 +9454,7 @@ async fn native_promql_corpus_route_matrix() {
         table_rows.push(row);
     }
     common_telemetry::info!(
-        "label | route | gate-if-legacy | rows==legacy | max rel diff | native value column | partitions used\n{}",
+        "label | route | gate-if-legacy | rows bitwise==legacy (diagnostic) | max rel diff | native value column | partitions used\n{}",
         table_rows.join("\n")
     );
 }
