@@ -39,7 +39,7 @@ use crate::schedule::scheduler::{Job, LocalScheduler, SchedulerRef};
 /// admission of the same unit. Its task owns the execution ID, cancellation state
 /// and input leases.
 pub(crate) struct ReadyUnit {
-    /// Time the unit became ready; feeds `COMPACTION_ADMISSION_WAIT`.
+    /// Time the unit became ready; feeds [`COMPACTION_ADMISSION_WAIT`].
     queued_at: Instant,
     /// Cancellation state shared with the unit's task and the region worker.
     state: CancellableTaskState,
