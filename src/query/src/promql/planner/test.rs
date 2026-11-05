@@ -5645,45 +5645,12 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             }
             _ => {}
         }
-        // The cut's grouping decides the shape: a cut that can need more than one owner folds the
-        // exported state once more before the merge, and one whose groups are a single group is
-        // finished by the merge over the producer's state directly. The question is the one the
-        // planner asks of the cut, so it is read off the final tree rather than restated here.
-        let grouped = promql::extension_plan::state_needs_several_owners(final_node.tree().root());
-        // The canonical shapes pin the rule from both sides: a bare `sum` is one group, a grouped
-        // cut is not.
-        for (query_cut, several_owners) in [
-            ("sum(some_metric)", false),
-            ("sum by (tag_0) (rate(some_metric[5m]))", true),
-        ] {
-            if query == query_cut {
-                assert_eq!(several_owners, grouped, "`{query}`");
-            }
-        }
-        let reducer = if grouped {
-            let reducer = partial_below(final_node).expect("the final node reads a reducer");
-            assert!(
-                matches!(
-                    &reducer.tree().root().expr,
-                    NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::PartialReduce
-                ),
-                "`{query}`: the split must fold state before the merge: {}",
-                reducer.tree()
-            );
-            Some(reducer)
-        } else {
-            None
-        };
-        let partial = match reducer {
-            Some(reducer) => partial_below(reducer).expect("the reducer reads a partial producer"),
-            None => partial_below(final_node).expect("the merge reads the partial producer"),
-        };
-        // The physical final must accept the state the node above the producer hands it and classify
-        // its own output fields.
-        let state_schema = match reducer {
-            Some(reducer) => Arc::clone(reducer.schema().inner()),
-            None => Arc::clone(partial.schema().inner()),
-        };
+        // The planner cuts one state hop whatever the cut's grouping is: the merge finishes the
+        // producer's state directly, with no reducer between the halves.
+        let partial = partial_below(final_node).expect("the merge reads the partial producer");
+        // The physical final must accept the state the producer hands it and classify its own
+        // output fields.
+        let state_schema = Arc::clone(partial.schema().inner());
         let input = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
             state_schema,
         ));
@@ -5845,19 +5812,18 @@ fn fused_count(plan: &LogicalPlan) -> usize {
             .sum::<usize>()
 }
 
-/// The split's second state hop follows the cut's ownership, and nothing else decides it.
+/// The planner cuts one state hop, whatever the cut's grouping is.
 ///
-/// A grouped cut (`sum by (tag_0) (...)`) can need more than one owner, so a `PartialReduce` sits
-/// between the `Partial` producer and the `Final` merge: each owner folds the state it is routed
-/// before any value is finished. A cut whose groups are one group (`sum(some_metric)`) is finished
-/// by the merge wherever the state lands, so it keeps the one-hop plan: a `Final` node over the
-/// `Partial` producer, with no reducer and no exchange between them.
+/// `sum(some_metric)` is one group and `sum by (tag_0) (some_metric)` can need several, but both
+/// keep the same shape: a `Final` merge over the `Partial` producer, with no reducer between the
+/// halves. A second hop - a `PartialReduce` folding state into state - stays the split's own API
+/// (`SplitDepth::Two`) rather than something this planner selects.
 ///
-/// Both routers of the two-hop plan carry the owner width and policy the `Final` derives from its
-/// own grouping, which is what says the hop folded state for the owners that finish it rather than
-/// for some other key.
+/// The grouping decides the merge's routing, not the hop count: a grouped cut puts a state router
+/// between the producer and the merge, carrying each group's rows to the owner that finalizes them,
+/// while one group needs none.
 #[tokio::test]
-async fn native_split_reduce_adds_a_reducer_between_the_split_halves() {
+async fn native_split_plans_one_state_hop_only() {
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::physical_plan::displayable;
     use datafusion::physical_plan::empty::EmptyExec;
@@ -5894,124 +5860,61 @@ async fn native_split_reduce_adds_a_reducer_between_the_split_halves() {
     }
 
     let width = 4;
-
-    // One group has one owner: the merge finalizes the producer's state directly, so the split
-    // keeps the one-hop plan it has always had.
-    let single = build_native_fused_plan("sum(some_metric)", true).await;
-    assert_eq!(
-        2,
-        fused_count(&single),
-        "`sum(some_metric)`: a producer and a merge, with no reducer: {single}"
-    );
-    let single_final = find_final_split(&single).expect("the merge is the outer node");
-    let single_partial = partial_below(single_final).expect("the merge reads the producer");
-    assert_eq!(
-        FusedOutputFormat::SeriesFrame,
-        single_partial.format(),
-        "`sum(some_metric)`: the producer publishes state frames"
-    );
-    assert!(
-        matches!(
-            &single_partial.tree().root().expr,
-            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
-        ),
-        "`sum(some_metric)`: the merge must read the Partial producer: {}",
-        single_partial.tree()
-    );
-    let producer = Arc::new(EmptyExec::new(Arc::clone(single_partial.schema().inner())))
-        as Arc<dyn ExecutionPlan>;
-    let single_merge = merge_plan(single_final, producer, width);
-    let explain = displayable(single_merge.as_ref()).indent(true).to_string();
-    assert!(
-        !explain.contains("partial_reduce"),
-        "`sum(some_metric)`: one group needs no reducer: {explain}"
-    );
-    assert!(
-        routers(&single_merge).is_empty(),
-        "`sum(some_metric)`: one group needs no state router: {explain}"
-    );
-
-    // A grouped cut can need more than one owner: the state is folded once more before the merge.
-    let query = "sum by (tag_0) (some_metric)";
-    let grouped = build_native_fused_plan(query, true).await;
-    assert_eq!(
-        3,
-        fused_count(&grouped),
-        "`{query}`: the split must run a producer, a reducer and a merge: {grouped}"
-    );
-    let final_node = find_final_split(&grouped).expect("the merge is the outer node");
-    let reduce = partial_below(final_node).expect("the merge reads the reducer");
-    assert_eq!(
-        FusedOutputFormat::SeriesFrame,
-        reduce.format(),
-        "`{query}`: the reducer publishes state frames"
-    );
-    let NativeExpr::Aggregate { op, .. } = &reduce.tree().root().expr else {
-        panic!(
-            "`{query}`: the reducer's root is an aggregate: {}",
-            reduce.tree()
+    for (query, grouped) in [
+        ("sum(some_metric)", false),
+        ("sum by (tag_0) (some_metric)", true),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert_eq!(
+            2,
+            fused_count(&plan),
+            "`{query}`: a producer and a merge, with no reducer: {plan}"
         );
-    };
-    assert_eq!(AggregateStage::PartialReduce, op.stage, "`{query}`");
-    assert!(
-        matches!(&reduce.tree().root().output, NativeType::AggregateState(_)),
-        "`{query}`: the reducer hands on state"
-    );
-    let partial = partial_below(reduce).expect("the reducer reads the producer");
-    assert!(matches!(
-        &partial.tree().root().expr,
-        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
-    ));
-    assert!(matches!(partial.children(), [LogicalPlan::TableScan(_)]));
-    // The two state links are one binding: the reducer folds the state the producer exported and
-    // hands on exactly what the merge finalizes.
-    assert_eq!(
-        partial.tree().root().output,
-        reduce.tree().root().output,
-        "`{query}`: the reducer must hand on the state it is handed"
-    );
-    assert_eq!(
-        partial.binding(),
-        reduce.binding(),
-        "`{query}`: the reducer runs over the producer's binding"
-    );
+        let final_node = find_final_split(&plan).expect("the merge is the outer node");
+        assert!(final_node.reads_aggregate_state(), "`{query}`: {plan}");
+        let partial = partial_below(final_node).expect("the merge reads the producer");
+        assert!(
+            matches!(partial.children(), [LogicalPlan::TableScan(_)]),
+            "`{query}`: the producer reads its own scan: {}",
+            partial.tree()
+        );
+        assert_eq!(
+            FusedOutputFormat::SeriesFrame,
+            partial.format(),
+            "`{query}`: the producer publishes state frames"
+        );
+        let NativeExpr::Aggregate { op, .. } = &partial.tree().root().expr else {
+            panic!(
+                "`{query}`: the producer is an aggregate: {}",
+                partial.tree()
+            );
+        };
+        assert_eq!(AggregateStage::Partial, op.stage, "`{query}`");
 
-    // The physical shape `EXPLAIN` prints, with the reducer's input as a stand-in producer.
-    let state =
-        Arc::new(EmptyExec::new(Arc::clone(reduce.schema().inner()))) as Arc<dyn ExecutionPlan>;
-    let reduce_exec = reduce
-        .to_execution_plan_with_parallelism(
-            vec![(state, RawLabelSource::Explicit, SeriesOrdering::Contiguous)],
-            width,
-        )
-        .unwrap();
-    let merge_exec = merge_plan(final_node, reduce_exec, width);
-    let explain = displayable(merge_exec.as_ref()).indent(true).to_string();
-    assert!(
-        explain.contains("partial_reduce"),
-        "`{query}`: EXPLAIN must show the reducer: {explain}"
-    );
-    // Outermost first: the merge's router, then the reducer's own. Both route by the group the
-    // merge finalizes by, so a state row folded by the reducer is finalized by the owner that
-    // receives it.
-    let found = routers(&merge_exec);
-    assert_eq!(
-        2,
-        found.len(),
-        "`{query}`: one router before the reducer and one before the merge: {explain}"
-    );
-    let (merge_owners, merge_policy) = found[0].clone();
-    let (reducer_owners, reducer_policy) = found[1].clone();
-    assert_eq!(
-        (width, SeriesRouting::CanonicalLabels),
-        (reducer_owners, reducer_policy.clone()),
-        "`{query}`: the reducer's input is routed by the cut's group: {explain}"
-    );
-    assert_eq!(
-        (reducer_owners, reducer_policy),
-        (merge_owners, merge_policy.clone()),
-        "`{query}`: the merge's owners are the reducer's: {explain}"
-    );
+        // The merge finalizes the producer's state directly, so the state it is handed is the one
+        // the merge's own binding routes.
+        let producer = Arc::new(EmptyExec::new(Arc::clone(partial.schema().inner())))
+            as Arc<dyn ExecutionPlan>;
+        let merge = merge_plan(final_node, producer, width);
+        let explain = displayable(merge.as_ref()).indent(true).to_string();
+        assert!(
+            !explain.contains("partial_reduce"),
+            "`{query}`: the planner must not fold state twice: {explain}"
+        );
+        let found = routers(&merge);
+        if grouped {
+            assert_eq!(
+                vec![(width, SeriesRouting::CanonicalLabels)],
+                found,
+                "`{query}`: the merge routes the state by the group it finalizes: {explain}"
+            );
+        } else {
+            assert!(
+                found.is_empty(),
+                "`{query}`: one group needs no state router: {explain}"
+            );
+        }
+    }
 }
 
 /// A data-free vector stays in the gathered parent while the data-bearing prefix is cut.
@@ -6192,8 +6095,7 @@ async fn native_split_and_complete_aggregate_produce_identical_values() {
         .await
         .unwrap();
     let final_node = find_final_split(&split).expect("the query must use a split aggregate");
-    let reducer = partial_below(final_node).expect("the merge reads the reducer");
-    let partial = partial_below(reducer).expect("the reducer reads the partial producer");
+    let partial = partial_below(final_node).expect("the merge reads the partial producer");
     let complete = FusedSeries::try_new(
         Arc::from(query),
         complete_tree,
@@ -6244,11 +6146,8 @@ async fn native_split_and_complete_aggregate_produce_identical_values() {
     };
     let input = |source| (source, RawLabelSource::Explicit, SeriesOrdering::Contiguous);
     let partial_exec = partial.to_execution_plan(vec![input(source())]).unwrap();
-    let reduce_exec = reducer
-        .to_execution_plan(vec![input(partial_exec)])
-        .unwrap();
     let split_exec = final_node
-        .to_execution_plan(vec![input(reduce_exec)])
+        .to_execution_plan(vec![input(partial_exec)])
         .unwrap();
     let complete_exec = complete.to_execution_plan(vec![input(source())]).unwrap();
     let split_batches =
@@ -6947,9 +6846,9 @@ async fn native_fused_split_declines_a_whole_vector_suffix() {
 /// A histogram suffix runs after the Final aggregate, with all of each histogram's buckets routed
 /// together rather than distributed by `le`.
 ///
-/// The cut's routing key also decides the split's depth: `by (le)` leaves nothing outside the
-/// routing set, so one owner finishes the state and the merge reads the producer directly, while
-/// `by (le, host)` keeps another label and needs the reducer between the halves.
+/// The cut's routing key decides how the state is routed, not how many hops it takes: `by (le)`
+/// leaves nothing outside the routing set, so one owner finishes the state, while `by (le, host)`
+/// keeps another label and routes the state by it. Both merge the producer's state directly.
 #[tokio::test]
 async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
     let query = "histogram_quantile(0.99, sum by (le) (rate(m[5m])))";
@@ -6994,8 +6893,8 @@ async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
         partial.tree()
     );
 
-    // The same suffix over a cut that keeps another label: more than one owner, so the state is
-    // folded once more before the merge finalizes it.
+    // The same suffix over a cut that keeps another label: the state is routed by that label and
+    // the merge still finalizes the producer's own state, one hop.
     let grouped = "histogram_quantile(0.99, sum by (le, host) (rate(m[5m])))";
     let plan = build_native_fused_plan_with_provider(
         grouped,
@@ -7006,18 +6905,15 @@ async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
     let display = plan.display_indent().to_string();
     let final_node = find_final_split(&plan)
         .unwrap_or_else(|| panic!("`{grouped}` must split into Partial and Final: {display}"));
-    let reducer = partial_below(final_node)
-        .unwrap_or_else(|| panic!("`{grouped}`: Final must read a reducer: {display}"));
-    assert!(
-        matches!(&reducer.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::PartialReduce),
-        "`{grouped}`: the reducer must fold state into state: {display}"
-    );
-    let partial = partial_below(reducer).unwrap_or_else(|| {
-        panic!("`{grouped}`: the reducer must read a Partial producer: {display}")
-    });
+    let partial = partial_below(final_node)
+        .unwrap_or_else(|| panic!("`{grouped}`: Final must read a Partial producer: {display}"));
     assert!(
         matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial),
         "`{grouped}`: producer must export Partial state: {display}"
+    );
+    assert!(
+        !display.contains("partial_reduce"),
+        "`{grouped}`: the planner must not fold state twice: {display}"
     );
 }
 
@@ -15163,19 +15059,10 @@ async fn native_composed_binary_admits_a_split_aggregate_frame_operand() {
             operand.reads_aggregate_state(),
             "{query}: the operand must be the Final half: {display}"
         );
-        // A grouped cut folds its exported state once more before the merge, so the producer can sit
-        // below a reducer rather than directly below the final half.
-        let below = partial_below(operand)
-            .unwrap_or_else(|| panic!("{query}: the Final half reads exported state: {display}"));
-        let partial = if matches!(
-            &below.tree().root().expr,
-            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::PartialReduce
-        ) {
-            partial_below(below)
-                .unwrap_or_else(|| panic!("{query}: the reducer reads the producer: {display}"))
-        } else {
-            below
-        };
+        // The planner cuts one state hop, so the Final half reads the producer directly.
+        let partial = partial_below(operand).unwrap_or_else(|| {
+            panic!("{query}: the Final half reads a Partial producer: {display}")
+        });
         assert!(
             matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial),
             "{query}: {display}"

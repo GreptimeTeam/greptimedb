@@ -20,10 +20,9 @@
 //! folds across series - an aggregate - is split instead: its per-series prefix and a `Partial`
 //! aggregate run in a `FusedSeries` producer, a `SeriesRepartitionExec` routes that state, and a
 //! second `FusedSeries` runs the `Final` aggregate over it, because a region holds only part of a
-//! group. A cut whose groups can need more than one owner folds that state once more before the
-//! merge: a router carries the producer's state to a reducer, the reducer folds state into state,
-//! and a second router carries that to the merge. A cut whose groups are one group is finished by
-//! the merge wherever the state lands, so it keeps the one-hop plan. Declining is the normal answer:
+//! group. The planner cuts one state hop, so the merge finalizes the producer's state; a second
+//! hop - a `PartialReduce` folding state into state - stays part of the split's own API but is not
+//! planned here. Declining is the normal answer:
 //! every shape the compiler does not accept, and every query this route cannot bind to a scan
 //! faithfully, keeps the plan the existing planner builds.
 //!
@@ -62,7 +61,7 @@ use futures::future::BoxFuture;
 use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
     RawSeriesSource, SplitDepth, SplitTrees, input_locality, matching_operands_drop_key,
-    state_needs_several_owners, tree_source_fields,
+    tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -1594,21 +1593,13 @@ impl PromPlanner {
             // without this route. Its producer reads whatever input the statement prepared: over
             // the wire that is the raw series source, and the partial/final halves stay on the
             // frontend above the regions, so per-series work keeps the scan width.
-            // How many state hops the split takes follows the cut's ownership, not a caller's
-            // choice: a cut that can need more than one owner puts a `PartialReduce` between the
-            // two halves, so each owner folds the state it is routed before the merge finalizes it,
-            // while a cut whose groups are one group is finished by that merge wherever the state
-            // lands and keeps the one-hop plan. The question is the one the state router asks of
-            // the same aggregate, so both hops route by the group the merge finalizes by, and it is
-            // asked of the canonical tree this route plans above the boundary — the tree the split
-            // itself is taken from, so the suffix it finalizes through is that tree's own.
+            // The split this route plans keeps one state hop: the producer exports the state each
+            // partition folded and the merge above them finalizes it. `SplitDepth::Two` stays the
+            // caller's choice - the reducer, the state routers and the suffix that finalizes through
+            // them are all built from the canonical tree this route splits - but nothing is folded
+            // twice behind the caller's back.
             let split = if selectors.len() == 1 {
-                let depth = if state_needs_several_owners(tree.root()) {
-                    SplitDepth::Two
-                } else {
-                    SplitDepth::One
-                };
-                FusedSeries::split_aggregate(&tree, &time, depth)
+                FusedSeries::split_aggregate(&tree, &time, SplitDepth::One)
                     .context(DataFusionPlanningSnafu)?
             } else {
                 None

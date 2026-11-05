@@ -1482,7 +1482,7 @@ fn split_reducer(capture: &NativeCapture) -> Option<&Arc<dyn ExecutionPlan>> {
 }
 
 /// Asserts the frontend Final node routes through the unified series repartitioner into the region
-/// boundary, through the reducer's own state router when the split folds state once more.
+/// boundary, or reads that boundary directly when the cut has one owner.
 fn assert_finalize_reads_region_state(
     finalize: &Arc<dyn ExecutionPlan>,
     producer: &Arc<dyn ExecutionPlan>,
@@ -1549,69 +1549,22 @@ fn assert_finalize_reads_region_state(
             routed.len(),
             "{context}: repartition must have one input:\n{plan}"
         );
-        // The merge reads the reducer, which folds the state it is routed into state again; the
-        // reducer's own router is what carries the region producers' state to it.
-        let reducer = through_cooperative(routed[0]);
-        assert!(
-            reducer.is::<FusedSeriesExec>(),
-            "{context}: grouped Final must read the reducer, got {}:\n{plan}",
-            reducer.name()
-        );
-        let reducer_plan = NodeDisplay(reducer.as_ref()).to_string();
-        assert!(
-            reducer_plan.contains("partial_reduce"),
-            "{context}: the node below the merge must fold state into state:\n{reducer_plan}"
-        );
-        let reducer_children = reducer.children();
-        assert_eq!(
-            1,
-            reducer_children.len(),
-            "{context}: the reducer must keep one input:\n{reducer_plan}"
-        );
-        let reducer_input = through_cooperative(reducer_children[0]);
-        assert!(
-            reducer_input.is::<SeriesRepartitionExec>(),
-            "{context}: the reducer must read a state router, got {}:\n{reducer_plan}",
-            reducer_input.name()
-        );
-        assert_eq!(
-            SCAN_PARTITIONS,
-            reducer_input
-                .properties()
-                .output_partitioning()
-                .partition_count(),
-            "{context}: the reducer's input router must have {SCAN_PARTITIONS} partitions:\n{reducer_plan}"
-        );
-        let reducer_routed = reducer_input.children();
-        assert_eq!(
-            1,
-            reducer_routed.len(),
-            "{context}: the reducer's router must have one input:\n{reducer_plan}"
-        );
-        let boundary = through_cooperative(reducer_routed[0]);
+        // The router carries the region producers' state straight to the merge: the split cuts one
+        // state hop, so the merge finalizes the state the region exported.
+        let boundary = through_cooperative(routed[0]);
         assert!(
             boundary.is::<MergeScanExec>(),
-            "{context}: the reducer's router must read the region MergeScanExec, got {}:\n{reducer_plan}",
+            "{context}: grouped Final's router must read the region MergeScanExec, got {}:\n{plan}",
             boundary.name()
         );
         assert!(
             boundary.children().is_empty(),
-            "{context}: MergeScanExec must be a leaf:\n{reducer_plan}"
+            "{context}: MergeScanExec must be a leaf:\n{plan}"
         );
         assert_eq!(
             producer.schema(),
             repartition.schema(),
             "{context}: frontend router must preserve the Partial state-frame schema:\n{plan}"
-        );
-        assert_eq!(
-            producer.schema(),
-            reducer.schema(),
-            "{context}: the reducer must hand on the state it is handed:\n{reducer_plan}"
-        );
-        assert_eq!(
-            producer.schema(),
-            reducer_input.schema(),
-            "{context}: the reducer's router must preserve the Partial state-frame schema:\n{reducer_plan}"
         );
     }
 
@@ -1917,13 +1870,12 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     assert_native_columns(&native, &legacy, &query, "v");
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
 
-    // The cut's ownership decides the split's shape: a cut whose groups can need more than one
-    // owner folds the exported state once more, so it runs a reducer beside its producer. A cut
-    // with one group is finished by the merge and has no second hop.
+    // The planner cuts one state hop whatever the cut's grouping is: one `Partial` producer and
+    // no reducer beside it, over which the single Final merge stands.
     assert_eq!(
-        if case.single_owner { 1 } else { 2 },
+        1,
         capture.fused.len(),
-        "`{query}`: a grouped cut runs a reducer beside its producer, a single-owner cut does not"
+        "`{query}`: the split runs one Partial producer and no reducer"
     );
     assert_eq!(
         1,
@@ -1931,24 +1883,10 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         "`{query}`: expected one outer Final node"
     );
     let producer = partial_producer(&capture, &format!("native `{query}`"));
-    let reducer = split_reducer(&capture);
-    assert_eq!(
-        case.single_owner,
-        reducer.is_none(),
-        "`{query}`: only a cut that can need more than one owner folds state twice"
+    assert!(
+        split_reducer(&capture).is_none(),
+        "`{query}`: the planner must not fold state twice"
     );
-    if let Some(reducer) = reducer {
-        let reducer_plan = NodeDisplay(reducer.as_ref()).to_string();
-        assert!(
-            reducer_plan.contains("partial_reduce"),
-            "`{query}`: the second state hop must be a `PartialReduce` root:\n{reducer_plan}"
-        );
-        assert_eq!(
-            producer.schema(),
-            reducer.schema(),
-            "`{query}`: the reducer must hand on the state it is handed:\n{reducer_plan}"
-        );
-    }
     let producer_plan = NodeDisplay(producer.as_ref()).to_string();
     assert_fused_reads_scan_directly(producer, &format!("native `{query}`"));
     let declaration =
@@ -2055,8 +1993,8 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         );
     }
 
-    // The per-partition fold counts belong to the producer: the reducer above it consumes state
-    // rows rather than series, so its own counters would count the fixture twice.
+    // The per-partition fold counts belong to the producer: the merge above it consumes state rows
+    // rather than series, so its own counters would count the fixture twice.
     let producer_only = NativeCapture {
         fused: vec![Arc::clone(producer)],
         finalize: Vec::new(),
@@ -2113,36 +2051,18 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         // contributions. Keep the per-partition activity check above; contribution totals belong
         // to the exact native root input_samples metric checked here.
     }
-    if let Some(reducer) = reducer {
-        // The reducer is what folds the state the producers exported, so it has to have consumed
-        // some: its own `input_samples` counts state rows rather than series.
-        let consumed = fused_root_metric_per_partition(
-            &NativeCapture {
-                fused: vec![Arc::clone(reducer)],
-                finalize: Vec::new(),
-            },
-            ROOT_INPUT_SAMPLES_METRIC,
-            &format!("native `{query}`"),
-        );
-        assert!(
-            consumed.iter().flatten().sum::<usize>() > 0,
-            "`{query}`: the reducer must consume the state the producers exported, got {consumed:?}"
-        );
-    }
 }
 
-/// A split's state hops follow the cut's ownership, and both shapes answer the same thing.
+/// A split cuts one state hop, and its grouped and single-group shapes answer the same thing.
 ///
-/// `sum(rate(...))` is one group, so one owner finishes it: the four producers export state and the
-/// merge finalizes it, with no reducer between them. `sum by (job) (rate(...))` has more than one
-/// group, so the split folds that state once more - per owner - before the merge: a `PartialReduce`
-/// sits between the four producers and the merge. The answers have to agree, because both fold the
-/// same states and only the hop that folds them differs, and the plans have to differ, because
-/// ownership is what decided the shape. Both runs are native, so the row comparison is between two
+/// `sum(rate(...))` is one group and `sum by (job) (rate(...))` has more than one, but the planner
+/// plans the same shape for both: the four producers export state and the merge finalizes it, with
+/// no reducer between them. The answers have to agree, because both fold the same states and only
+/// the grouping of the answers differs. Both runs are native, so the row comparison is between two
 /// state bridges rather than against the legacy plan, which the fixture's hand-derived answers
 /// cover separately.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_split_reduce_matches_the_one_level_split() {
+async fn native_split_uses_one_state_hop_for_grouped_and_single_group_cuts() {
     common_telemetry::init_default_ut_logging();
 
     let observer = Arc::new(NativePlanObserver::default());
@@ -2176,8 +2096,7 @@ async fn native_split_reduce_matches_the_one_level_split() {
         })
         .collect::<Vec<_>>();
 
-    // One group, one owner: the producers export state and the merge finishes it. There is no
-    // reducer, because one owner folds the whole group wherever the state lands.
+    // One group: the producers export state and the merge finishes it, with no reducer.
     let single_owner_promql = format!("sum(rate({COUNTER_TABLE}[5m]))");
     let single_owner_expected = vec![ResultRow {
         ts_millis: EVAL_MILLIS,
@@ -2203,26 +2122,25 @@ async fn native_split_reduce_matches_the_one_level_split() {
         "`{single_owner_promql}`: one owner must not fold state twice: {single_text}"
     );
 
-    // More than one group: the split folds the exported state once more before the merge, and the
-    // answer is the same one the states add up to.
+    // More than one group plans the same one-hop shape: the merge finalizes the producer's state.
     let (grouped, grouped_capture) = run_query(&instance, &grouped_promql, true, &observer).await;
     assert_rows(
         &grouped.rows,
         &grouped_expected,
-        &format!("two-hop `{grouped_promql}`"),
+        &format!("one-hop `{grouped_promql}`"),
     );
     assert_eq!(
-        2,
+        1,
         grouped_capture.fused.len(),
-        "`{grouped_promql}`: the grouped split adds the reducer to the producers"
+        "`{grouped_promql}`: the grouped cut keeps one producer and no reducer"
     );
     assert_eq!(1, grouped_capture.finalize.len(), "`{grouped_promql}`");
     let grouped_text = capture_text(&grouped_capture);
     assert!(
-        grouped_text.contains("partial_reduce"),
-        "`{grouped_promql}`: the grouped split must fold state into state: {grouped_text}"
+        !grouped_text.contains("partial_reduce"),
+        "`{grouped_promql}`: the planner must not fold state twice: {grouped_text}"
     );
-    // The two shapes answer the same thing: the same states, folded one hop or two.
+    // The two shapes answer the same thing: the same states, merged by the same `Final`.
     assert_eq!(
         15.0,
         grouped
@@ -2232,42 +2150,14 @@ async fn native_split_reduce_matches_the_one_level_split() {
             .sum::<f64>(),
         "`{grouped_promql}`: the grouped answers must add up to the single group's"
     );
-    // The reducer is the node that names the hop, and it hands on state rather than values.
-    let reducer = split_reducer(&grouped_capture)
-        .unwrap_or_else(|| panic!("`{grouped_promql}`: no reducer: {grouped_text}"));
+    // The producer hands on state rather than values, which is what the merge finishes.
+    let producer = partial_producer(&grouped_capture, &format!("`{grouped_promql}`"));
     assert_eq!(
         FrameContent::AggregateState,
-        SeriesFrameDeclaration::parse(reducer.schema().as_ref())
-            .unwrap_or_else(|error| panic!("`{grouped_promql}`: invalid reducer frame: {error}"))
+        SeriesFrameDeclaration::parse(producer.schema().as_ref())
+            .unwrap_or_else(|error| panic!("`{grouped_promql}`: invalid producer frame: {error}"))
             .content(),
-        "`{grouped_promql}`: the reducer exports aggregate state: {grouped_text}"
-    );
-    // The reducer folds the state the producers exported, so its input is the router that put each
-    // group's rows in one place rather than a producer directly.
-    let reducer_children = reducer.children();
-    assert_eq!(
-        1,
-        reducer_children.len(),
-        "`{grouped_promql}`: the reducer must keep one input: {grouped_text}"
-    );
-    let reducer_input = through_cooperative(reducer_children[0]);
-    assert!(
-        reducer_input.is::<SeriesRepartitionExec>(),
-        "`{grouped_promql}`: the reducer reads a state router's output, got {}: {grouped_text}",
-        reducer_input.name()
-    );
-    let consumed = reducer.metrics().is_some_and(|metrics| {
-        metrics.iter().any(|metric| {
-            matches!(
-                metric.value(),
-                MetricValue::Count { count, .. }
-                    if metric.value().name() == ROOT_INPUT_SAMPLES_METRIC && count.value() > 0
-            )
-        })
-    });
-    assert!(
-        consumed,
-        "`{grouped_promql}`: the reducer must consume aggregate state: {grouped_text}"
+        "`{grouped_promql}`: the producer exports aggregate state: {grouped_text}"
     );
 }
 
@@ -2927,13 +2817,11 @@ async fn native_histogram_over_the_cut_splits_and_matches_legacy() {
             "`{query}`: a histogram suffix must run above a Final aggregate"
         );
         let partial = partial_producer(&capture, &format!("native `{query}`"));
-        // A histogram cut whose routing key is complete after the split (`by (le)`) has one owner
-        // and keeps the one-hop plan; a key that keeps a label outside the routing set
-        // (`by (le, job)`) has more than one and folds the state once more.
-        assert_eq!(
-            *single_owner,
+        // The planner cuts one state hop whatever the cut's routing key is, so no capture here has
+        // a reducer beside its producer: `by (le)` needs it no more than `by (le, job)` does.
+        assert!(
             split_reducer(&capture).is_none(),
-            "`{query}`: only a cut that can need more than one owner folds state twice"
+            "`{query}`: the planner must not fold state twice"
         );
         assert_finalize_reads_region_state(
             &capture.finalize[0],
@@ -3228,12 +3116,11 @@ async fn native_bare_selector_aggregate_value_columns() {
         // Every case here is a shape the native route answers: one- and two-value-field bare
         // selectors, global and grouped. A silent fall back to legacy would therefore be a
         // regression, so the plan assertions below are unconditional.
-        // A grouped cut folds the exported state once more, so it runs a reducer beside its
-        // producer; a global aggregate has one group and keeps the one-hop plan.
+        // One state hop for every case here: one Partial producer and no reducer beside it.
         assert_eq!(
-            if single_owner { 1 } else { 2 },
+            1,
             capture.fused.len(),
-            "`{query}` must have one Partial producer, plus the reducer of a grouped cut"
+            "`{query}` must have one Partial producer and no reducer"
         );
         assert_eq!(
             1,
@@ -3241,10 +3128,9 @@ async fn native_bare_selector_aggregate_value_columns() {
             "`{query}` must have one Final merge"
         );
         let producer = partial_producer(&capture, &format!("native `{query}`"));
-        assert_eq!(
-            single_owner,
+        assert!(
             split_reducer(&capture).is_none(),
-            "`{query}`: only a cut that can need more than one owner folds state twice"
+            "`{query}`: the planner must not fold state twice"
         );
         assert_fused_reads_scan_directly(producer, &format!("native `{query}`"));
         assert_finalize_reads_region_state(

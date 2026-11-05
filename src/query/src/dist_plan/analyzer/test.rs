@@ -918,6 +918,14 @@ fn a_two_level_split_keeps_its_reducer_on_the_frontend() {
     use promql::native::plan::{AggregateStage, NativeExpr, NativeType};
 
     let split = split_aggregate_plan(test_table_scan("t"), SplitDepth::Two);
+    // The state-exporting and state-reading halves carry their frame layout, so the chain has a wire
+    // form: the transport is a placement question, not an encoding prerequisite.
+    assert!(
+        DFLogicalSubstraitConvertor
+            .encode(&split, DefaultSerializer)
+            .is_ok(),
+        "the split's state frames are encodable: {split}"
+    );
     for analyzer in [
         DistPlannerAnalyzer::default(),
         DistPlannerAnalyzer::new(true),

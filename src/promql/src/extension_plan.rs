@@ -45,7 +45,7 @@ pub use fused_series::is_canonical_producer_exec;
 pub use fused_series::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec,
     FusedSeriesStream, InputLocality, SplitDepth, SplitTrees, input_locality,
-    matching_operands_drop_key, state_is_finalized, state_needs_several_owners, tree_source_fields,
+    matching_operands_drop_key, state_is_finalized, tree_source_fields,
 };
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
