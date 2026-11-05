@@ -1395,9 +1395,10 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
     ])
     .unwrap();
     // `count` and `group` ask only whether a sample is present, so a histogram is one
-    // contribution for them, `min`/`max` skip it, and `sum` folds whatever payload it is handed --
-    // this column holds no sample at all, so there is nothing for it to fold. `avg`, which has no
-    // histogram average on this route, refuses the series outright.
+    // contribution for them, `min`/`max` skip it, and `sum`/`avg` fold whatever payload they are
+    // handed -- this column holds no sample at all, so there is nothing for them to fold. No
+    // operation this route folds refuses a histogram series any more; what it does with each sample
+    // is the fold's decision.
     for op in OPS {
         let answer = aggregate_float(
             &schema,
@@ -1405,19 +1406,7 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
             op,
             Grouping::By(&[]),
         );
-        match op {
-            AggregateOp::Count
-            | AggregateOp::Group
-            | AggregateOp::Min
-            | AggregateOp::Max
-            | AggregateOp::Sum => assert!(answer.is_ok(), "{op:?} takes a histogram: {answer:?}"),
-            AggregateOp::Avg => assert!(
-                matches!(answer, Err(DataFusionError::NotImplemented(_))),
-                "avg must refuse a histogram: {answer:?}"
-            ),
-            // Not in `OPS`; the arm only keeps the match exhaustive.
-            AggregateOp::Stddev | AggregateOp::Stdvar => unreachable!("not in OPS"),
-        }
+        assert!(answer.is_ok(), "{op:?} takes a histogram: {answer:?}");
     }
     let mut invalid = source.clone();
     invalid.fields = SeriesFields::one(source.fields.get(0).unwrap().clone());
@@ -2430,20 +2419,17 @@ fn count_and_group_count_histogram_samples() {
         2.0,
     );
 
-    // `avg` has no histogram average on this route, so it still refuses the payload rather than
-    // reading a float that is not there. `sum` folds it instead, which
-    // `sum_adds_histograms_of_two_exponential_resolutions` and its neighbors cover.
-    let error = aggregate_float(
-        &schema,
-        &[series("a", Some(native()), None)],
-        AggregateOp::Avg,
-        Grouping::By(&[]),
-    )
-    .expect_err("an aggregate without histogram state refuses a histogram");
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "avg answered {error:?}"
-    );
+    // `sum` and `avg` fold the payload instead of counting or skipping it, so a single histogram is
+    // one contributing sample for both; their own tests cover what they answer.
+    for op in [AggregateOp::Sum, AggregateOp::Avg] {
+        let answer = aggregate_float(
+            &schema,
+            &[series("a", Some(native()), None)],
+            op,
+            Grouping::By(&[]),
+        );
+        assert!(answer.is_ok(), "{op:?} folds a histogram: {answer:?}");
+    }
 }
 
 /// `min`, `max`, `stddev`, `stdvar` and `quantile` read a float value, so a histogram sample is
@@ -2489,21 +2475,16 @@ fn value_reading_aggregates_skip_histogram_samples() {
             "{op:?} answered a group holding only histograms"
         );
     }
-    // `avg` folds the payload into a mean, which this route has no state for, so it refuses it.
-    let error = aggregate_float(&schema, &input, AggregateOp::Avg, Grouping::By(&[]))
-        .expect_err("an aggregate without histogram state refuses a histogram");
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "avg answered {error:?}"
-    );
-    // `sum` folds the payload, but one field's column cannot be both float and histogram, so a group
-    // that holds both kinds in one field is refused rather than answered as one of them.
-    let error = aggregate_float(&schema, &input, AggregateOp::Sum, Grouping::By(&[]))
-        .expect_err("a field cannot carry both float and histogram samples");
-    assert!(
-        error.to_string().contains("cannot mix float and histogram"),
-        "sum answered {error:?}"
-    );
+    // `sum` and `avg` fold the payload, but one field's column cannot be both float and histogram,
+    // so a group that holds both kinds in one field is refused rather than answered as one of them.
+    for op in [AggregateOp::Sum, AggregateOp::Avg] {
+        let error = aggregate_float(&schema, &input, op, Grouping::By(&[]))
+            .expect_err("a field cannot carry both float and histogram samples");
+        assert!(
+            error.to_string().contains("cannot mix float and histogram"),
+            "{op:?} answered {error:?}"
+        );
+    }
 }
 
 /// Prometheus counts a histogram sample under the text `FloatHistogram.String` writes it as, so
@@ -2951,4 +2932,195 @@ fn sum_answers_a_single_histogram_unchanged() {
         value.start_timestamp.is_none(),
         "a derived result carries no start timestamp of its own"
     );
+}
+/// The histogram the aggregate answered at the first position of its single group.
+fn aggregate_answer(schema: &Arc<SeriesSchema>, input: &[Series], op: AggregateOp) -> Series {
+    let mut answer = aggregate_float(schema, input, op, Grouping::By(&[])).unwrap();
+    assert_eq!(answer.len(), 1, "one group");
+    answer.remove(0)
+}
+
+/// An average divides the folded sum -- and its bucket counts -- by the number of samples.
+#[test]
+fn avg_divides_the_sum_by_the_sample_count() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let sample = |count: f64, sum: f64| {
+        histogram_sample(0, &[(0, count)], &[], count, sum, CounterResetHint::Unknown)
+    };
+    let two = [
+        histogram_series(&schema, "a", vec![(0, sample(2.0, 3.0))]),
+        histogram_series(&schema, "b", vec![(0, sample(4.0, 5.0))]),
+    ];
+    let answer = aggregate_answer(&schema, &two, AggregateOp::Avg);
+    let value = answered_histogram(&answer, 0, 0);
+    assert_eq!(value.sum, 4.0, "(3 + 5) / 2");
+    assert_eq!(value.count, 3.0, "(2 + 4) / 2");
+    assert_eq!(side_buckets(&value.positive), vec![(0, 3.0)]);
+
+    let three = [
+        histogram_series(&schema, "a", vec![(0, sample(2.0, 3.0))]),
+        histogram_series(&schema, "b", vec![(0, sample(4.0, 5.0))]),
+        histogram_series(&schema, "c", vec![(0, sample(6.0, 10.0))]),
+    ];
+    let answer = aggregate_answer(&schema, &three, AggregateOp::Avg);
+    let value = answered_histogram(&answer, 0, 0);
+    assert_eq!(value.sum, 6.0, "(3 + 5 + 10) / 3");
+    assert_eq!(value.count, 4.0, "(2 + 4 + 6) / 3");
+    assert_eq!(side_buckets(&value.positive), vec![(0, 4.0)]);
+}
+
+/// The average keeps the compensated sum's correction, so three histograms that cancel average to
+/// `1/3` and not to the plain left-to-right `0`.
+#[test]
+fn avg_keeps_the_kahan_correction_across_cancellation() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let input: Vec<Series> = [1e16, 1.0, -1e16]
+        .into_iter()
+        .enumerate()
+        .map(|(index, sum)| {
+            histogram_series(
+                &schema,
+                &index.to_string(),
+                vec![(
+                    0,
+                    histogram_sample(0, &[(0, 1.0)], &[], 1.0, sum, CounterResetHint::Unknown),
+                )],
+            )
+        })
+        .collect();
+    let answer = aggregate_answer(&schema, &input, AggregateOp::Avg);
+    let value = answered_histogram(&answer, 0, 0);
+    assert_eq!(
+        value.sum,
+        1.0 / 3.0,
+        "the compensated average is 1/3, not the legacy 0"
+    );
+    assert_eq!(value.count, 1.0, "three samples of one observation each");
+    assert_eq!(side_buckets(&value.positive), vec![(0, 1.0)]);
+}
+
+/// Two histograms of `1e308` at one observation each average to a finite `1e308`: the sum overflows,
+/// so the fold discards the trial, starts a mean from the sum it had, and divides before adding.
+#[test]
+fn avg_switches_to_a_mean_where_the_sum_would_overflow() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let input = [
+        histogram_series(
+            &schema,
+            "a",
+            vec![(
+                0,
+                histogram_sample(0, &[(0, 1.0)], &[], 1.0, 1e308, CounterResetHint::Unknown),
+            )],
+        ),
+        histogram_series(
+            &schema,
+            "b",
+            vec![(
+                0,
+                histogram_sample(0, &[(0, 1.0)], &[], 1.0, 1e308, CounterResetHint::Unknown),
+            )],
+        ),
+    ];
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Avg, Grouping::By(&[])).unwrap();
+    for series in &input {
+        aggregator.update(series).unwrap();
+    }
+    // Overflow switches the mode; it neither poisons the point nor answers `Inf`.
+    let evidence = aggregator.histogram_evidence(0, 0, 0).expect("a state");
+    assert!(!evidence.poisoned, "{evidence:?}");
+    let answer = aggregator.finish().unwrap();
+    let value = answered_histogram(&answer[0], 0, 0);
+    assert!(value.sum.is_finite(), "an average of finite sums is finite");
+    assert_eq!(value.sum, 1e308, "(1e308 + 1e308) / 2");
+    assert_eq!(value.count, 1.0, "(1 + 1) / 2");
+    assert_eq!(side_buckets(&value.positive), vec![(0, 1.0)]);
+}
+
+/// One histogram averaged is itself, divided by the one sample that produced it.
+#[test]
+fn avg_answers_a_single_histogram_divided_by_one() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let input = [histogram_series(
+        &schema,
+        "a",
+        vec![(
+            0,
+            histogram_sample(
+                0,
+                &[(0, 1.5), (2, 2.5)],
+                &[],
+                4.0,
+                9.0,
+                CounterResetHint::Unknown,
+            ),
+        )],
+    )];
+    let answer = aggregate_answer(&schema, &input, AggregateOp::Avg);
+    let value = answered_histogram(&answer, 0, 0);
+    assert_eq!(value.sum, 9.0);
+    assert_eq!(value.count, 4.0);
+    assert_eq!(side_buckets(&value.positive), vec![(0, 1.5), (2, 2.5)]);
+    assert!(
+        value.start_timestamp.is_none(),
+        "a derived result carries no start timestamp of its own"
+    );
+}
+
+/// A histogram that observed nothing still counts in the average's divisor: the divisor is the
+/// number of samples, not the number of observations.
+#[test]
+fn avg_counts_a_zero_observation_histogram_in_its_divisor() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let empty = histogram_sample(0, &[], &[], 0.0, 0.0, CounterResetHint::Unknown);
+    let observed = histogram_sample(0, &[(0, 2.0)], &[], 2.0, 6.0, CounterResetHint::Unknown);
+    let input = [
+        histogram_series(&schema, "a", vec![(0, empty)]),
+        histogram_series(&schema, "b", vec![(0, observed)]),
+    ];
+    let answer = aggregate_answer(&schema, &input, AggregateOp::Avg);
+    let value = answered_histogram(&answer, 0, 0);
+    // Two samples, two observations: the empty one is half the divisor even though it observed
+    // nothing.
+    assert_eq!(value.count, 1.0);
+    assert_eq!(value.sum, 3.0);
+    assert_eq!(side_buckets(&value.positive), vec![(0, 1.0)]);
+}
+
+/// Once an average has switched, the mean keeps tracking the samples that follow: two histograms of
+/// `2^1023` force the switch, and two samples that observed nothing bring the mean down to half.
+#[test]
+fn avg_keeps_tracking_the_mean_after_the_switch() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let large = 2f64.powi(1023);
+    // `large + large` is `Inf`, so the second sample is what forces the switch.
+    assert!((large + large).is_infinite());
+    let observed = || histogram_sample(0, &[(0, 1.0)], &[], 1.0, large, CounterResetHint::Unknown);
+    let nothing = || histogram_sample(0, &[], &[], 0.0, 0.0, CounterResetHint::Unknown);
+    let input = [
+        histogram_series(&schema, "a", vec![(0, observed())]),
+        histogram_series(&schema, "b", vec![(0, observed())]),
+        histogram_series(&schema, "c", vec![(0, nothing())]),
+        histogram_series(&schema, "d", vec![(0, nothing())]),
+    ];
+    let answer = aggregate_answer(&schema, &input, AggregateOp::Avg);
+    let value = answered_histogram(&answer, 0, 0);
+    // Four samples, two observations of `large` each: the mean is `large / 2` to within the
+    // roundings of the weights `2/3` and `3/4` the mean path applies.
+    let expected = large / 2.0;
+    assert!(value.sum.is_finite());
+    assert!(
+        (value.sum - expected).abs() <= expected * 1e-14,
+        "the mean tracked the switch: {} vs {expected}",
+        value.sum
+    );
+    assert!(
+        (value.sum - large).abs() > expected / 2.0,
+        "the answer is not the sum the switch started from: {}",
+        value.sum
+    );
+    // The count is an average like any other component: two observations over four samples.
+    assert_eq!(value.count, 0.5, "(1 + 1 + 0 + 0) / 4");
+    assert_eq!(side_buckets(&value.positive), vec![(0, 0.5)]);
 }
