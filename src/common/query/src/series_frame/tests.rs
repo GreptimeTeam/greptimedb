@@ -14,6 +14,7 @@
 
 mod evaluated;
 mod lifecycle;
+mod state;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;

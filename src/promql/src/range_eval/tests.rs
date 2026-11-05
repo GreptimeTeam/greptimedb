@@ -39,8 +39,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::{
-    CounterReset, FloatWindow, RangeEvaluator, RangeFunction, RangeModifier, RangeWindow,
-    WindowKernel, subquery_grid,
+    CounterReset, FieldSamples, FloatWindow, POSITION_COMPARISONS, PendingBatch, RangeEvaluator,
+    RangeFunction, RangeModifier, RangeWindow, WindowKernel, accumulate, subquery_grid,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::functions::{
@@ -58,6 +58,30 @@ use crate::select::{LabelMatcher, MatchOp, absent, absent_labels};
 
 /// One raw row: source timestamp and a value per field, `None` when missing.
 type Row = (i64, Vec<Option<f64>>);
+
+#[test]
+fn accumulate_positioning_comparison_counts() {
+    fn count(samples: usize, points: usize, window_samples: usize, cadence: i64) -> u64 {
+        let field = FieldSamples {
+            timestamps: (0..samples as i64).map(|sample| sample * cadence).collect(),
+            ..Default::default()
+        };
+        let mut pending = PendingBatch::with_fields(1);
+        POSITION_COMPARISONS.store(0, std::sync::atomic::Ordering::Relaxed);
+        for point in 0..points {
+            let eval_ts = point as i64 + window_samples as i64 - 1;
+            accumulate(&mut pending, point, eval_ts, std::slice::from_ref(&field));
+            if pending.len() == super::EVALUATION_BATCH {
+                pending.clear_points();
+            }
+        }
+        POSITION_COMPARISONS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    assert_eq!(count(100_000, 100_000, 6, 1), 200_005);
+    assert_eq!(count(100_000, 1, 100_000, 1), 18);
+    assert_eq!(count(100_000, 600, 6, 1), 1_216);
+}
 
 fn stale() -> f64 {
     f64::from_bits(PROMETHEUS_STALE_NAN_BITS)
