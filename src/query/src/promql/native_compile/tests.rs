@@ -2902,6 +2902,7 @@ fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
         &eval_stmt("topk(scalar(x), x)"),
         &|_| Ok(raw_schema()),
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .expect("scalar(selector) is now compiled as a dynamic k");
     let NativeExpr::ParameterizedTopK { parameter, .. } = &compiled.tree.root().expr else {
