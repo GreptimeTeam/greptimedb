@@ -25,6 +25,9 @@ use datafusion_expr::{col, lit};
 use store_api::mito_engine_options::{
     COMPACTION_TYPE, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
 };
+use store_api::region_request::{
+    EnterStagingRequest, RegionTruncateRequest, StagingPartitionDirective,
+};
 use store_api::storage::FileId;
 use tokio::sync::{Barrier, mpsc, oneshot};
 
@@ -1254,6 +1257,104 @@ async fn test_pick_result_local_submission_failure_releases_and_notifies_once() 
     assert!(selected.iter().all(|file| !file.compacting()));
     assert!(scheduler.region_status.contains_key(&region_id));
     assert!(!scheduler.is_compacting(region_id));
+}
+
+#[rstest::rstest]
+#[case::truncate(DdlRequest::Truncate(RegionTruncateRequest::All))]
+#[case::enter_staging(DdlRequest::EnterStaging(EnterStagingRequest {
+    partition_directive: StagingPartitionDirective::RejectAllWrites,
+}))]
+#[tokio::test]
+async fn test_cancelled_queued_unit_releases_fenced_ddl(#[case] ddl_request: DdlRequest) {
+    let executor = Arc::new(VecScheduler::default());
+    let env = SchedulerEnv::new().await.scheduler(executor.clone());
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler_with_config(
+        tx,
+        MitoConfig {
+            max_background_compactions: 1,
+            ..Default::default()
+        },
+    );
+    // Another region holds the only slot without polling its job. The tested
+    // unit must be withdrawn from the coordinator, not cancelled during execution.
+    scheduler
+        .coordinator
+        .schedule(
+            RegionId::new(99, 1),
+            ReadyUnit::new(
+                CancellableTaskState::new(),
+                1,
+                Box::pin(async {}),
+                Box::pin(async {}),
+            ),
+        )
+        .unwrap();
+    let version = compactable_version();
+    let region_id = version.region_id();
+    let (finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let selected = selected_files(&finished);
+    let (waiter_tx, mut waiter_rx) = oneshot::channel();
+    scheduler
+        .region_status
+        .get_mut(&region_id)
+        .unwrap()
+        .merge_waiter(waiter_tx.into());
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
+        .await;
+    assert_eq!(1, executor.num_jobs());
+    assert!(!selected.is_empty());
+    assert!(selected.iter().all(FileHandle::compacting));
+
+    let expected_ddl = std::mem::discriminant(&ddl_request);
+    let (ddl_tx, mut ddl_rx) = oneshot::channel();
+    assert!(
+        scheduler
+            .try_cancel_and_add_ddl(region_id, ddl_tx.into(), ddl_request, |request| request)
+            .is_ok()
+    );
+    let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let WorkerRequest::Background {
+        region_id: released_region,
+        notify: BackgroundNotify::CompactionUnit(CompactionUnitNotification::Released { plan_id }),
+    } = request.request
+    else {
+        panic!("expected only Released for the withdrawn unit");
+    };
+    assert_eq!(region_id, released_region);
+    assert!(selected.iter().all(|file| !file.compacting()));
+
+    let transition = scheduler
+        .on_unit_released(region_id, plan_id, &manifest, schemas)
+        .await;
+    assert_matches!(
+        waiter_rx.try_recv().unwrap(),
+        Err(Error::CompactionCancelled { .. })
+    );
+    assert!(!scheduler.is_compacting(region_id));
+    assert_eq!(1, executor.num_jobs());
+    let CompactionTransition::DdlReady(mut ddls) = transition else {
+        panic!("cancelled queued work must hand off its fenced DDL");
+    };
+    assert_eq!(1, ddls.len());
+    let ddl = ddls.pop().unwrap();
+    assert_eq!(region_id, ddl.region_id);
+    assert_eq!(expected_ddl, std::mem::discriminant(&ddl.request));
+    assert_matches!(ddl_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    ddl.sender.send(Ok(0));
+    assert_eq!(
+        0,
+        tokio::time::timeout(Duration::from_secs(5), ddl_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
 }
 
 #[tokio::test]
