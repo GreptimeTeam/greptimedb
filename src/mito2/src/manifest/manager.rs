@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, info, warn};
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -236,7 +236,7 @@ impl RegionManifestManager {
         manifest
             .removed_files
             .update_file_removed_cnt_to_stats(stats);
-        Ok(Self {
+        let manager = Self {
             store,
             last_version: manifest_version,
             checkpointer,
@@ -244,7 +244,8 @@ impl RegionManifestManager {
             staging_manifest: None,
             stats: stats.clone(),
             stopped: false,
-        })
+        };
+        Ok(manager)
     }
 
     /// Opens an existing manifest.
@@ -276,9 +277,9 @@ impl RegionManifestManager {
         let checkpoint = Self::last_checkpoint(&mut store).await?;
         let last_checkpoint_version = checkpoint
             .as_ref()
-            .map(|(checkpoint, _)| checkpoint.last_version)
+            .map(|checkpoint| checkpoint.last_version)
             .unwrap_or(MIN_VERSION);
-        let mut manifest_builder = if let Some((checkpoint, _)) = checkpoint {
+        let mut manifest_builder = if let Some(checkpoint) = checkpoint {
             info!(
                 "Recover region manifest {} from checkpoint version {}",
                 options.manifest_dir, checkpoint.last_version
@@ -305,8 +306,6 @@ impl RegionManifestManager {
 
         for (manifest_version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
-            // set manifest size after last checkpoint
-            store.set_delta_file_size(manifest_version, raw_action_list.len() as u64);
             for action in action_list.actions {
                 match action {
                     RegionMetaAction::Change(action) => {
@@ -365,7 +364,7 @@ impl RegionManifestManager {
             version,
             open_start.elapsed(),
         );
-        Ok(Some(Self {
+        let manager = Self {
             store,
             last_version: manifest_version,
             checkpointer,
@@ -374,7 +373,8 @@ impl RegionManifestManager {
             staging_manifest: None,
             stats: stats.clone(),
             stopped: false,
-        }))
+        };
+        Ok(Some(manager))
     }
 
     /// Stops the manager.
@@ -396,18 +396,30 @@ impl RegionManifestManager {
         &mut self,
         target_version: ManifestVersion,
     ) -> Result<ManifestVersion> {
+        let (version, loaded_checkpoint) = self.install_manifest_to_inner(target_version).await?;
+        if !loaded_checkpoint && let Err(error) = self.store.update_manifest_size(version).await {
+            warn!(error; "Failed to update manifest size after sync for region {}", self.manifest.metadata.region_id);
+        }
+        Ok(version)
+    }
+
+    async fn install_manifest_to_inner(
+        &mut self,
+        target_version: ManifestVersion,
+    ) -> Result<(ManifestVersion, bool)> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["install_manifest_to"])
             .start_timer();
 
         let last_version = self.last_version();
+        let mut loaded_checkpoint = false;
         // Case 1: If the target version is less than the current version, return the current version.
         if last_version >= target_version {
             debug!(
                 "Target version {} is less than or equal to the current version {}, region: {}, skip install",
                 target_version, last_version, self.manifest.metadata.region_id
             );
-            return Ok(last_version);
+            return Ok((last_version, false));
         }
 
         ensure!(
@@ -437,9 +449,10 @@ impl RegionManifestManager {
                 last_version, self.manifest.metadata.region_id
             );
             let last_version = self.install_last_checkpoint().await?;
+            loaded_checkpoint = true;
             // Case 2.1: If the installed checkpoint version is greater than or equal to the target version, return the last version.
             if last_version >= target_version {
-                return Ok(last_version);
+                return Ok((last_version, true));
             }
 
             // Fetches manifests from the installed version strictly.
@@ -465,8 +478,6 @@ impl RegionManifestManager {
             RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
 
         for (manifest_version, raw_action_list) in manifests {
-            self.store
-                .set_delta_file_size(manifest_version, raw_action_list.len() as u64);
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
             for action in action_list.actions {
                 match action {
@@ -514,23 +525,19 @@ impl RegionManifestManager {
             version, last_version, self.manifest.metadata.region_id
         );
 
-        Ok(last_version)
+        Ok((last_version, loaded_checkpoint))
     }
 
     /// Installs the last checkpoint.
     pub(crate) async fn install_last_checkpoint(&mut self) -> Result<ManifestVersion> {
         let last_version = self.last_version();
-        let Some((checkpoint, checkpoint_size)) = Self::last_checkpoint(&mut self.store).await?
-        else {
+        let Some(checkpoint) = Self::last_checkpoint(&mut self.store).await? else {
             return NoCheckpointSnafu {
                 region_id: self.manifest.metadata.region_id,
                 last_version,
             }
             .fail();
         };
-        self.store.reset_manifest_size();
-        self.store
-            .set_checkpoint_file_size(checkpoint.last_version, checkpoint_size);
         let builder = RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint);
         let manifest = builder.try_build()?;
         let last_version = self.set_version(manifest.manifest_version);
@@ -736,15 +743,15 @@ impl RegionManifestManager {
     /// Fetches the last [RegionCheckpoint] from storage.
     ///
     /// If the checkpoint is not found, returns `None`.
-    /// Otherwise, returns the checkpoint and the size of the checkpoint.
+    /// Otherwise, returns the decoded checkpoint.
     pub(crate) async fn last_checkpoint(
         store: &mut ManifestObjectStore,
-    ) -> Result<Option<(RegionCheckpoint, u64)>> {
+    ) -> Result<Option<RegionCheckpoint>> {
         let last_checkpoint = store.load_last_checkpoint().await?;
 
         if let Some((_, bytes)) = last_checkpoint {
             let checkpoint = RegionCheckpoint::decode(&bytes)?;
-            Ok(Some((checkpoint, bytes.len() as u64)))
+            Ok(Some(checkpoint))
         } else {
             Ok(None)
         }
@@ -856,7 +863,7 @@ mod test {
 
     use super::*;
     use crate::manifest::action::{RegionChange, RegionEdit};
-    use crate::manifest::tests::utils::basic_region_metadata;
+    use crate::manifest::tests::utils::{basic_region_metadata, manifest_recovery_usage};
     use crate::test_util::TestEnv;
 
     #[tokio::test]
@@ -972,26 +979,6 @@ mod test {
         manager.validate_manifest(&new_metadata, 1);
     }
 
-    /// Just for test, refer to wal_dir_usage in src/store-api/src/logstore.rs.
-    async fn manifest_dir_usage(path: &str) -> u64 {
-        let mut size = 0;
-        let mut read_dir = tokio::fs::read_dir(path).await.unwrap();
-        while let Ok(dir_entry) = read_dir.next_entry().await {
-            let Some(entry) = dir_entry else {
-                break;
-            };
-            if entry.file_type().await.unwrap().is_file() {
-                let file_name = entry.file_name().into_string().unwrap();
-                if file_name.contains(".checkpoint") || file_name.contains(".json") {
-                    let file_size = entry.metadata().await.unwrap().len() as usize;
-                    debug!("File: {file_name:?}, size: {file_size}");
-                    size += file_size;
-                }
-            }
-        }
-        size as u64
-    }
-
     #[tokio::test]
     async fn test_manifest_size() {
         let metadata = Arc::new(basic_region_metadata());
@@ -1028,7 +1015,7 @@ mod test {
 
         // get manifest size
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
+        assert_eq!(manifest_size, manifest_recovery_usage(&manifest_dir).await);
 
         // update 10 times nop_action to trigger checkpoint
         for _ in 0..10 {
@@ -1055,10 +1042,9 @@ mod test {
 
         // check manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
+        assert_eq!(manifest_size, manifest_recovery_usage(&manifest_dir).await);
 
-        // Reopen the manager,
-        // we just calculate the size from the latest checkpoint file
+        // Reopening reconstructs the same logical recovery set from stored bytes.
         manager.stop().await;
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, None)
@@ -1068,7 +1054,9 @@ mod test {
         manager.validate_manifest(&new_metadata, 11);
 
         // get manifest size again
-        let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1398);
+        assert_eq!(
+            manager.manifest_usage(),
+            manifest_recovery_usage(&manifest_dir).await
+        );
     }
 }

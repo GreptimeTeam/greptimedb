@@ -35,7 +35,7 @@ use auth::user_provider_from_option;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use catalog::process_manager::{ProcessManager, ProcessManagerRef};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
-use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, MITO_ENGINE};
+use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, METRICS_EXEMPLARS_TABLE, MITO_ENGINE};
 use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc::channel_manager::ClientTlsOption;
@@ -58,7 +58,8 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::arrow::ipc::writer::StreamWriter;
 use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
-use meta_client::client::MetaClientBuilder;
+use frontend::frontend::FrontendOptions;
+use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::{self, MockInfo};
 use otel_arrow_rust::otlp::metrics::MetricType as ArrowMetricType;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_client::ArrowMetricsServiceClient;
@@ -70,7 +71,7 @@ use otel_arrow_rust::schema::consts as arrow_consts;
 use rstest_reuse::apply;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
 use servers::http::prometheus::{
     PromData, PromQueryResult, PromSampleValue, PromSeriesMatrix, PromSeriesVector,
     PrometheusJsonResponse, PrometheusResponse,
@@ -133,6 +134,7 @@ macro_rules! grpc_tests {
                 test_otel_arrow_auth,
                 test_otel_arrow_delta_histogram,
                 test_otel_arrow_exponential_histogram,
+                test_otel_arrow_exemplars_without_metric_engine,
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
@@ -548,6 +550,17 @@ pub async fn test_grpc_auth(store_type: StorageType) {
 }
 
 async fn start_process_rpc_server(process_manager: Option<ProcessManagerRef>) -> GrpcServer {
+    start_process_rpc_server_at(
+        process_manager,
+        "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    )
+    .await
+}
+
+async fn start_process_rpc_server_at(
+    process_manager: Option<ProcessManagerRef>,
+    addr: SocketAddr,
+) -> GrpcServer {
     let runtime: Runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("process-rpc-test")
@@ -558,16 +571,32 @@ async fn start_process_rpc_server(process_manager: Option<ProcessManagerRef>) ->
         builder = builder.frontend_grpc_handler(FrontendGrpcHandler::new(process_manager));
     }
     let mut server = builder.build();
-    server
-        .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
-        .await
-        .unwrap();
+    server.start(addr).await.unwrap();
     server
 }
 
-async fn register_process_rpc_peer(mock: &MockInfo, addr: String) {
+/// Reserves a loopback address for a test server.
+///
+/// A process manager must be created with the address it advertises before its
+/// gRPC listener starts, so pick a free port first and bind it right after.
+fn reserve_loopback_addr() -> SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+}
+
+async fn build_meta_client_for_mock(mock: &MockInfo) -> Arc<MetaClient> {
+    let mut meta_client = MetaClientBuilder::frontend_default_options()
+        .channel_manager(mock.channel_manager.clone())
+        .build();
+    meta_client.start(&[&mock.server_addr]).await.unwrap();
+    Arc::new(meta_client)
+}
+
+async fn register_process_rpc_peer(mock: &MockInfo, node_id: u64, addr: String) {
     let node_info = NodeInfo {
-        peer: Peer { id: 1, addr },
+        peer: Peer { id: node_id, addr },
         last_activity_ts: util::current_time_millis(),
         status: NodeStatus::Frontend(FrontendStatus::default()),
         version: String::new(),
@@ -587,7 +616,7 @@ async fn register_process_rpc_peer(mock: &MockInfo, addr: String) {
         .put(PutRequest {
             key: Vec::from(&NodeInfoKey {
                 role: Role::Frontend,
-                node_id: 1,
+                node_id,
             }),
             value: node_info.try_into().unwrap(),
             prev_kv: false,
@@ -600,15 +629,9 @@ async fn build_process_manager_with_remote_peer(
     mock: &MockInfo,
     remote_addr: String,
 ) -> ProcessManagerRef {
-    register_process_rpc_peer(mock, remote_addr).await;
-    let mut meta_client = MetaClientBuilder::frontend_default_options()
-        .channel_manager(mock.channel_manager.clone())
-        .build();
-    meta_client.start(&[&mock.server_addr]).await.unwrap();
-    Arc::new(ProcessManager::new(
-        "local".to_string(),
-        Some(Arc::new(meta_client)),
-    ))
+    register_process_rpc_peer(mock, 1, remote_addr).await;
+    let meta_client = build_meta_client_for_mock(mock).await;
+    Arc::new(ProcessManager::new("local".to_string(), Some(meta_client)))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -697,6 +720,166 @@ async fn test_list_all_processes_collects_remote_and_local_catalog() {
             .iter()
             .any(|process| process.query == "selected remote query")
     );
+}
+
+/// Regression test for frontends with separate public and internal gRPC
+/// addresses.
+///
+/// The local process manager must recognize itself by the peer address it
+/// advertises to metasrv (the internal gRPC address), not by its public gRPC
+/// address. Otherwise it queries its own management service as if it were a
+/// remote frontend and then appends the local registry a second time, so every
+/// local query is listed twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_all_processes_excludes_local_peer_with_internal_grpc() {
+    let mock = mocks::mock_with_memstore().await;
+    let local_peer_addr = reserve_loopback_addr();
+    let mut options = FrontendOptions::default();
+    options.grpc.bind_addr = "127.0.0.1:4001".to_string();
+    options.grpc.server_addr = "127.0.0.1:4001".to_string();
+    options.internal_grpc = Some(GrpcOptions {
+        bind_addr: local_peer_addr.to_string(),
+        server_addr: local_peer_addr.to_string(),
+        ..Default::default()
+    });
+    assert_ne!(options.grpc.server_addr, options.peer_addr());
+
+    let meta_client = build_meta_client_for_mock(&mock).await;
+    let local_manager = options.create_process_manager(Some(meta_client));
+    let local_peer_addr_str = local_peer_addr.to_string();
+    let _local_query = local_manager.register_query(
+        "greptime".to_string(),
+        vec!["public".to_string()],
+        "local query".to_string(),
+        String::new(),
+        None,
+        None,
+    );
+    // The internal gRPC listener of this frontend serves its process list.
+    let local_server =
+        start_process_rpc_server_at(Some(local_manager.clone()), local_peer_addr).await;
+
+    let remote_peer_addr = reserve_loopback_addr();
+    let remote_manager = Arc::new(ProcessManager::new(remote_peer_addr.to_string(), None));
+    let _remote_query = remote_manager.register_query(
+        "greptime".to_string(),
+        vec!["public".to_string()],
+        "remote query".to_string(),
+        String::new(),
+        None,
+        None,
+    );
+    let remote_server = start_process_rpc_server_at(Some(remote_manager), remote_peer_addr).await;
+
+    register_process_rpc_peer(&mock, 1, local_peer_addr_str.clone()).await;
+    register_process_rpc_peer(&mock, 2, remote_peer_addr.to_string()).await;
+
+    let processes = local_manager
+        .list_all_processes(Some("greptime"))
+        .await
+        .unwrap();
+    local_server.shutdown().await.unwrap();
+    remote_server.shutdown().await.unwrap();
+
+    assert_eq!(
+        processes
+            .iter()
+            .filter(|process| process.query == "local query")
+            .count(),
+        1,
+        "the local query must be listed exactly once: {processes:?}"
+    );
+    assert_eq!(
+        processes
+            .iter()
+            .filter(|process| process.query == "remote query")
+            .count(),
+        1,
+        "a remote frontend must still be listed exactly once: {processes:?}"
+    );
+    assert_eq!(processes.len(), 2, "{processes:?}");
+    assert!(
+        processes
+            .iter()
+            .filter(|process| process.query == "local query")
+            .all(|process| process.frontend == local_peer_addr_str)
+    );
+}
+
+/// `KILL` must route by the peer address that the process list displays and
+/// metasrv advertises, for both local and remote processes.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_kill_process_routes_by_advertised_peer_addr() {
+    let mock = mocks::mock_with_memstore().await;
+    let meta_client = build_meta_client_for_mock(&mock).await;
+
+    // Keep this listener bound for the whole test so the remote server cannot be
+    // assigned the same address; otherwise the remote kill would take the local
+    // branch and fail to find the remote process.
+    let local_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let local_peer_addr = local_listener.local_addr().unwrap();
+    let local_manager = Arc::new(ProcessManager::new(
+        local_peer_addr.to_string(),
+        Some(meta_client),
+    ));
+    let local_query_id = 7;
+    let _local_query = local_manager.register_query(
+        "greptime".to_string(),
+        vec!["public".to_string()],
+        "local query".to_string(),
+        String::new(),
+        Some(local_query_id),
+        None,
+    );
+
+    let remote_peer_addr = reserve_loopback_addr();
+    let remote_manager = Arc::new(ProcessManager::new(remote_peer_addr.to_string(), None));
+    let remote_query_id = 8;
+    let _remote_query = remote_manager.register_query(
+        "greptime".to_string(),
+        vec!["public".to_string()],
+        "remote query".to_string(),
+        String::new(),
+        Some(remote_query_id),
+        None,
+    );
+    let remote_server =
+        start_process_rpc_server_at(Some(remote_manager.clone()), remote_peer_addr).await;
+    register_process_rpc_peer(&mock, 1, remote_peer_addr.to_string()).await;
+
+    let local_killed = local_manager
+        .kill_process(
+            local_peer_addr.to_string(),
+            "greptime".to_string(),
+            local_query_id,
+        )
+        .await
+        .unwrap();
+    assert!(local_killed);
+    assert!(
+        local_manager
+            .local_processes(Some("greptime"))
+            .unwrap()
+            .is_empty()
+    );
+
+    let remote_killed = local_manager
+        .kill_process(
+            remote_peer_addr.to_string(),
+            "greptime".to_string(),
+            remote_query_id,
+        )
+        .await
+        .unwrap();
+    assert!(remote_killed);
+    assert!(
+        remote_manager
+            .local_processes(Some("greptime"))
+            .unwrap()
+            .is_empty()
+    );
+
+    remote_server.shutdown().await.unwrap();
 }
 
 pub async fn test_otel_arrow_auth(store_type: StorageType) {
@@ -1239,6 +1422,103 @@ pub async fn test_otel_arrow_delta_histogram(store_type: StorageType) {
     assert_eq!(ArrowStatusCode::Ok as i32, after_collision.status_code);
     assert!(after_collision.status_message.is_empty());
     let _ = server.shutdown().await;
+}
+
+pub async fn test_otel_arrow_exemplars_without_metric_engine(store_type: StorageType) {
+    use datatypes::arrow::array::BinaryArray;
+    use otel_arrow_rust::Consumer;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::metric;
+
+    let (_instance, server) = setup_grpc_server(
+        store_type,
+        "test_otel_arrow_exemplars_without_metric_engine",
+    )
+    .await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let db = Database::new_with_dbname(
+        format!("{DEFAULT_CATALOG_NAME}-{DEFAULT_SCHEMA_NAME}"),
+        Client::with_urls(vec![addr.clone()]),
+    );
+    let mut client = ArrowMetricsServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let mut batch = gauge_arrow_batch(20, false);
+    let exemplars = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt32Array::from(vec![0_u32])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![2_000_000_000])) as ArrayRef,
+        ),
+        (
+            arrow_consts::DOUBLE_VALUE,
+            Arc::new(Float64Array::from(vec![0.5])) as ArrayRef,
+        ),
+        (
+            arrow_consts::SPAN_ID,
+            Arc::new(BinaryArray::from_vec(vec![&[1_u8; 8]])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TRACE_ID,
+            Arc::new(BinaryArray::from_vec(vec![&[2_u8; 16]])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    batch.arrow_payloads.push(ArrowPayload {
+        schema_id: "exemplars-20".into(),
+        r#type: ArrowPayloadType::NumberDpExemplars as i32,
+        record: serialize_arrow_record_batch(&exemplars),
+    });
+    let decoded = Consumer::default()
+        .consume_metrics_batches(&mut batch.clone())
+        .unwrap();
+    let Some(metric::Data::Gauge(gauge)) =
+        &decoded.resource_metrics[0].scope_metrics[0].metrics[0].data
+    else {
+        panic!("expected a gauge")
+    };
+    assert_eq!(gauge.data_points[0].exemplars.len(), 1);
+
+    let request = Request::new(futures::stream::iter([
+        batch,
+        delta_histogram_arrow_batch(21, &[(3, &[1, 2], &[1.0])]),
+    ]));
+    let mut response = client.arrow_metrics(request).await.unwrap().into_inner();
+    for batch_id in [20, 21] {
+        let status = response.message().await.unwrap().unwrap();
+        assert_eq!(status.batch_id, batch_id);
+        assert_eq!(status.status_code, ArrowStatusCode::Ok as i32);
+        assert!(status.status_message.is_empty());
+    }
+    assert!(response.message().await.unwrap().is_none());
+    for (sql, count) in [
+        ("SELECT COUNT(*) AS c FROM otel_arrow_gauge", 1),
+        (
+            "SELECT COUNT(*) AS c FROM otel_arrow_delta_histogram_bucket",
+            2,
+        ),
+        (
+            &format!(
+                "SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_name='{METRICS_EXEMPLARS_TABLE}'"
+            ),
+            0,
+        ),
+    ] {
+        let OutputData::Stream(stream) = db.sql(sql).await.unwrap().data else {
+            panic!("expected a stream")
+        };
+        assert_eq!(
+            RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .pretty_print()
+                .unwrap(),
+            format!("+---+\n| c |\n+---+\n| {count} |\n+---+"),
+        );
+    }
+    server.shutdown().await.unwrap();
 }
 
 pub async fn test_otel_arrow_exponential_histogram(store_type: StorageType) {

@@ -31,9 +31,12 @@ swappiness 10, disables systemd-oomd and background automatic updates, and sets
 `OOMPolicy=continue` on the runner service. Explicit setup package installation
 remains enabled.
 
-Both benchmark jobs call `.github/actions/setup-benchmark` after checkout. It
-reuses existing tools, installs missing curl/jq/python3/rsync, installs Docker CE
-if absent, and checks Docker access. Missing packages require passwordless sudo;
+Benchmark jobs call `.github/actions/setup-linux-runner` after checkout with
+`tools: curl jq python3 rsync` and require x86_64. Linux artifact builds reuse
+the same action with `tools: make shasum` on either amd64 or arm64; the RISC-V
+cross-build calls it on amd64 too. The action reuses installed commands, maps
+`shasum` to Ubuntu package `libdigest-sha-perl`, installs Docker CE if absent,
+and checks Docker access. Missing packages require passwordless sudo;
 Aliyun's prepared image normally provides the tools and Docker already. Existing
 Docker installations are preserved, so exact versions need not match between
 providers. Provisioning must establish Docker permissions before starting the

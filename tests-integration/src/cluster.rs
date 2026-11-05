@@ -32,7 +32,6 @@ use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{
     CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, new_read_only_meta_kv_backend,
 };
-use catalog::process_manager::ProcessManager;
 use client::Client;
 use client::client_manager::NodeClients;
 use cmd::frontend::create_heartbeat_task;
@@ -484,6 +483,19 @@ impl GreptimeDbClusterBuilder {
 
                 opts
             };
+            // Shared object storage must not make datanodes share a local WAL.
+            if self.shared_home_dir.is_some()
+                && let DatanodeWalConfig::RaftEngine(config) = &mut opts.wal
+                && config.dir.is_none()
+            {
+                config.dir = Some(
+                    std::path::Path::new(&opts.storage.data_home)
+                        .join(format!("wal-{datanode_id}"))
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                );
+            }
             opts.node_id = Some(datanode_id);
             if self.real_datanode_grpc_addr {
                 // Give every datanode its own address, so that the other datanodes can
@@ -621,7 +633,7 @@ impl GreptimeDbClusterBuilder {
             catalog_manager,
             datanode_clients,
             meta_client.clone(),
-            Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
+            fe_opts.create_process_manager(None),
         )
         .with_local_file_access(self.local_file_access.clone())
         .with_local_cache_invalidator(cache_registry)

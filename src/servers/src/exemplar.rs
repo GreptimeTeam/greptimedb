@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, RowInsertRequests, Value};
+use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
 use common_grpc::precision::Precision;
 use common_query::prelude::{
-    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, METRICS_EXEMPLARS_TABLE, greptime_timestamp,
-    greptime_value,
+    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, greptime_timestamp, greptime_value,
 };
 use datatypes::json;
 use metric_engine::row_modifier::TsidGenerator;
@@ -50,8 +50,10 @@ pub struct Exemplar {
 pub type ExemplarRequests = BTreeMap<Option<String>, Vec<Exemplar>>;
 
 /// Bounds row capacity after each database's metrics share one exemplar schema.
-pub(crate) fn estimated_row_bytes(requests: &ExemplarRequests) -> Option<usize> {
-    requests.values().try_fold(0usize, |total, exemplars| {
+pub fn estimated_row_bytes<'a>(
+    requests: impl IntoIterator<Item = &'a [Exemplar]>,
+) -> Option<usize> {
+    requests.into_iter().try_fold(0usize, |total, exemplars| {
         let mut tags = BTreeSet::new();
         let mut payload = 0usize;
         // Shared series data is copied into each output row.

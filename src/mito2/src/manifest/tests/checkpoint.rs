@@ -33,8 +33,12 @@ use crate::manifest::action::{
 };
 use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::storage::checkpoint::CheckpointMetadata;
-use crate::manifest::storage::is_delta_file;
-use crate::manifest::tests::utils::basic_region_metadata;
+use crate::manifest::storage::{
+    checkpoint_file, delta_file, file_version, gen_path, is_delta_file,
+};
+use crate::manifest::tests::utils::{
+    basic_region_metadata, manifest_dir_usage, manifest_recovery_usage,
+};
 use crate::sst::file::FileMeta;
 use crate::test_util::{CheckpointTaskBlocker, TestEnv};
 
@@ -332,7 +336,6 @@ async fn generate_checkpoint_with_compression_types(
         .await
         .unwrap()
         .unwrap()
-        .0
 }
 
 fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>) {
@@ -480,7 +483,10 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     for file_id in files.iter() {
         assert!(another_manager.manifest().files.contains_key(file_id));
     }
-    assert!(another_manager.store().total_manifest_size() > 4000);
+    assert_eq!(
+        another_manager.manifest_usage(),
+        manifest_recovery_usage(env.data_home().join("manifest")).await
+    );
 }
 
 #[tokio::test]
@@ -525,20 +531,27 @@ async fn test_checkpoint_bypass_in_staging_mode() {
     assert_eq!(last_version, 16);
 }
 
-/// A deleter that fails on `close`, simulating the S3 batch-delete failure
-/// described in issue #7986.
+/// Simulates both a rejected delete and a close failure after eager deletion.
 struct FailingDeleter {
     inner: oio::Deleter,
-    close_calls: Arc<AtomicUsize>,
+    failure_calls: Arc<AtomicUsize>,
+    fail_delete: bool,
 }
 
 impl oio::Delete for FailingDeleter {
     async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        if self.fail_delete {
+            self.failure_calls.fetch_add(1, Ordering::Relaxed);
+            return Err(MockError::new(
+                ErrorKind::Unexpected,
+                "mock rejected delete",
+            ));
+        }
         self.inner.delete(path, args).await
     }
 
     async fn close(&mut self) -> MockResult<()> {
-        self.close_calls.fetch_add(1, Ordering::Relaxed);
+        self.failure_calls.fetch_add(1, Ordering::Relaxed);
         Err(MockError::new(
             ErrorKind::Unexpected,
             "mock manifest delete close failure",
@@ -546,17 +559,21 @@ impl oio::Delete for FailingDeleter {
     }
 }
 
+#[rstest::rstest]
+#[case::close_failure(false)]
+#[case::delete_failure(true)]
 #[tokio::test]
-async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
+async fn manifest_size_ignores_leftover_files_after_failed_delete(#[case] fail_delete: bool) {
     common_telemetry::init_default_ut_logging();
 
-    let close_calls = Arc::new(AtomicUsize::new(0));
-    let factory_close_calls = close_calls.clone();
+    let failure_calls = Arc::new(AtomicUsize::new(0));
+    let factory_failure_calls = failure_calls.clone();
     let mock_layer = MockLayerBuilder::default()
         .deleter_factory(Arc::new(move |inner| {
             Box::new(FailingDeleter {
                 inner,
-                close_calls: factory_close_calls.clone(),
+                failure_calls: factory_failure_calls.clone(),
+                fail_delete,
             })
         }))
         .build()
@@ -578,7 +595,7 @@ async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
     }
 
     // The checkpointer must have attempted to delete stale files at least once.
-    assert!(close_calls.load(Ordering::Relaxed) > 0);
+    assert!(failure_calls.load(Ordering::Relaxed) > 0);
 
     // Despite delete failures, the in-memory checkpoint marker advances so
     // subsequent `maybe_do_checkpoint` calls compute correct ranges.
@@ -593,22 +610,25 @@ async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
         .expect("checkpoint should be durable");
     assert_eq!(last_version, 10);
 
-    // Stale deltas below the checkpoint version must still be present because
-    // the mocked deleter refused them.
+    // A rejected delete preserves stale files; a close failure after eager FS
+    // deletion does not. Exclude the current delta from the stale-file count.
     let file_names: Vec<String> = manager
         .store()
         .delta_storage()
         .get_paths(None, |e| Some(e.name().to_string()))
         .await
         .unwrap();
-    let stale_delta_count = file_names.iter().filter(|name| is_delta_file(name)).count();
-    assert!(
-        stale_delta_count > 0,
-        "expected leftover delta files after failed delete, got {:?}",
-        file_names,
+    let stale_delta_count = file_names
+        .iter()
+        .filter(|name| is_delta_file(name) && file_version(name) < 10)
+        .count();
+    assert_eq!(stale_delta_count > 0, fail_delete, "{file_names:?}");
+    assert_eq!(
+        manager.manifest_usage(),
+        manifest_recovery_usage(env.data_home().join("manifest")).await
     );
 
-    // Recovery must succeed despite the leftover deltas.
+    // Recovery must succeed in both failure modes.
     manager.stop().await;
     let reopened = env
         .create_manifest_manager(CompressionType::Uncompressed, 1, None)
@@ -616,6 +636,15 @@ async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
         .unwrap()
         .expect("manifest should be recoverable");
     assert_eq!(reopened.manifest().manifest_version, 10);
+    assert_eq!(
+        manager.manifest_usage(),
+        manifest_recovery_usage(env.data_home().join("manifest")).await
+    );
+    assert_eq!(
+        reopened.manifest_usage(),
+        manifest_recovery_usage(env.data_home().join("manifest")).await
+    );
+    assert!(manifest_dir_usage(env.data_home().join("manifest")).await > reopened.manifest_usage());
 }
 
 #[tokio::test]
@@ -780,4 +809,266 @@ async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
     manager.wait_for_pending_checkpoint().await;
 
     assert_eq!(2, manager.checkpointer().last_checkpoint_version());
+}
+
+/// Retention runs inside the checkpoint task, so waiting for task completion also
+/// makes logical size accounting observable to the assertions below.
+async fn wait_for_manifest_checkpoint(manager: &RegionManifestManager) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn manifest_size_matches_recovery_bytes_after_open() {
+    for compress_type in [
+        CompressionType::Uncompressed,
+        CompressionType::Gzip,
+        CompressionType::Zstd,
+    ] {
+        for checkpoint_distance in [0, 3] {
+            let (env, mut manager) = build_manager(checkpoint_distance, compress_type).await;
+            for _ in 0..7 {
+                manager.update(nop_action(), false).await.unwrap();
+                wait_for_manifest_checkpoint(&manager).await;
+            }
+            let expected = manifest_recovery_usage(env.data_home().join("manifest")).await;
+            assert_eq!(manager.manifest_usage(), expected);
+            manager.stop().await;
+            let reopened = reopen_manager(&env, checkpoint_distance, compress_type).await;
+            assert_eq!(reopened.manifest_usage(), expected);
+        }
+    }
+}
+
+#[rstest::rstest]
+#[case::without_checkpoints(0)]
+#[case::with_checkpoints(3)]
+#[tokio::test]
+async fn manifest_size_follower_converges_after_sync(#[case] distance: u64) {
+    for compression in [
+        CompressionType::Uncompressed,
+        CompressionType::Gzip,
+        CompressionType::Zstd,
+    ] {
+        let (env, mut leader) = build_manager(distance, compression).await;
+        let mut follower = reopen_manager(&env, distance, compression).await;
+        for _ in 0..12 {
+            leader.update(nop_action(), false).await.unwrap();
+            leader.wait_for_pending_checkpoint().await;
+            let expected = manifest_recovery_usage(env.data_home().join("manifest")).await;
+            assert_eq!(leader.manifest_usage(), expected);
+            follower
+                .install_manifest_to(leader.last_version())
+                .await
+                .unwrap();
+            assert_eq!(follower.manifest_usage(), expected);
+        }
+        // Promotion requires no accounting hook. New leader writes and checkpoints
+        // continue from the same logical recovery set.
+        leader.stop().await;
+        for _ in 0..4 {
+            follower.update(nop_action(), false).await.unwrap();
+            follower.wait_for_pending_checkpoint().await;
+            assert_eq!(
+                follower.manifest_usage(),
+                manifest_recovery_usage(env.data_home().join("manifest")).await
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn noop_sync_accounts_for_new_checkpoint_without_listing() {
+    let lists = Arc::new(AtomicUsize::new(0));
+    let counter = lists.clone();
+    let layer = MockLayerBuilder::default()
+        .lister_factory(Arc::new(move |_, _, inner| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            inner
+        }))
+        .build()
+        .unwrap();
+    let env = TestEnv::new().await.with_mock_layer(layer);
+    let mut leader = build_manager_with_initial_metadata(&env, 0, CompressionType::Gzip).await;
+    for _ in 0..3 {
+        leader.update(nop_action(), false).await.unwrap();
+    }
+    let mut follower = reopen_manager(&env, 0, CompressionType::Gzip).await;
+    let version = leader.last_version();
+    let checkpoint = RegionCheckpoint {
+        last_version: version,
+        compacted_actions: 4,
+        checkpoint: Some(leader.manifest().as_ref().clone()),
+    };
+    leader
+        .store()
+        .save_checkpoint(version, &checkpoint.encode().unwrap())
+        .await
+        .unwrap();
+    let expected = manifest_recovery_usage(env.data_home().join("manifest")).await;
+    assert_ne!(follower.manifest_usage(), expected);
+    let before = lists.load(Ordering::Relaxed);
+    // Pointer decoding and checkpoint stat failures are diagnostic only. The
+    // next request must retry the missing accounting rather than prune blindly.
+    let previous = follower.manifest_usage();
+    let directory = env.data_home().join("manifest");
+    let pointer = directory.join("_last_checkpoint");
+    let bytes = tokio::fs::read(&pointer).await.unwrap();
+    tokio::fs::write(&pointer, b"invalid checkpoint metadata")
+        .await
+        .unwrap();
+    follower.install_manifest_to(version).await.unwrap();
+    assert_eq!(follower.manifest_usage(), previous);
+    tokio::fs::write(&pointer, bytes).await.unwrap();
+    let checkpoint_path = directory.join(gen_path(
+        "",
+        &checkpoint_file(version),
+        CompressionType::Gzip,
+    ));
+    let hidden = env.data_home().join("temporarily-hidden-checkpoint");
+    tokio::fs::rename(&checkpoint_path, &hidden).await.unwrap();
+    follower.install_manifest_to(version).await.unwrap();
+    assert_eq!(follower.manifest_usage(), previous);
+    tokio::fs::rename(&hidden, &checkpoint_path).await.unwrap();
+    for _ in 0..3 {
+        follower.install_manifest_to(version).await.unwrap();
+        assert_eq!(follower.manifest_usage(), expected);
+    }
+    assert_eq!(lists.load(Ordering::Relaxed), before);
+}
+
+#[rstest::rstest]
+#[case::listed_sizes(false, false, false)]
+#[case::unknown_sizes(true, false, false)]
+#[case::fallback_cache(false, true, false)]
+#[case::missing_checkpoint(false, false, true)]
+#[tokio::test]
+async fn manifest_size_warm_cache_matches_recovery_bytes(
+    #[case] unknown_sizes: bool,
+    #[case] fallback: bool,
+    #[case] missing_checkpoint: bool,
+) {
+    use common_base::readable_size::ReadableSize;
+    use object_store::ObjectStore;
+    use object_store::services::Fs;
+
+    use crate::cache::manifest_cache::ManifestCache;
+    use crate::manifest::manager::RegionManifestOptions;
+
+    for compress_type in [
+        CompressionType::Uncompressed,
+        CompressionType::Gzip,
+        CompressionType::Zstd,
+    ] {
+        let stored_compression = if fallback {
+            CompressionType::Uncompressed
+        } else {
+            compress_type
+        };
+        let (env, mut leader) = build_manager(3, stored_compression).await;
+        for _ in 0..7 {
+            leader.update(nop_action(), false).await.unwrap();
+            wait_for_manifest_checkpoint(&leader).await;
+        }
+        let object_store = ObjectStore::new(
+            Fs::default().root(env.data_home().join("manifest").to_str().unwrap()),
+        )
+        .unwrap();
+        let object_store = if unknown_sizes {
+            object_store.layer(
+                MockLayerBuilder::default()
+                    .lister_factory(Arc::new(|_, _, inner| Box::new(ZeroSizeLister(inner))))
+                    .build()
+                    .unwrap(),
+            )
+        } else {
+            object_store
+        };
+        let local_store =
+            ObjectStore::new(Fs::default().root(env.data_home().join("cache").to_str().unwrap()))
+                .unwrap();
+        let cache = ManifestCache::new(local_store, ReadableSize::mb(10), None, true).await;
+        let options = RegionManifestOptions {
+            manifest_dir: "/".to_string(),
+            object_store,
+            compress_type,
+            checkpoint_distance: 3,
+            remove_file_options: Default::default(),
+            manifest_cache: Some(cache.clone()),
+        };
+        let expected = manifest_recovery_usage(env.data_home().join("manifest")).await;
+        // First open fills the cache; the second reuses the cached checkpoint and deltas.
+        for iteration in 0..2 {
+            if iteration == 1 {
+                let checkpoint_version = leader.checkpointer().last_checkpoint_version();
+                let checkpoint_key = gen_path(
+                    "/",
+                    &checkpoint_file(checkpoint_version),
+                    stored_compression,
+                );
+                assert!(
+                    cache.get(&checkpoint_key).await.is_some(),
+                    "{checkpoint_key}"
+                );
+                for version in checkpoint_version + 1..=leader.manifest().manifest_version {
+                    let delta_key = gen_path("/", &delta_file(version), stored_compression);
+                    assert!(
+                        cache.get(delta_key.trim_start_matches('/')).await.is_some(),
+                        "{delta_key}"
+                    );
+                }
+            }
+            let checkpoint_path = env.data_home().join("manifest").join(gen_path(
+                "",
+                &checkpoint_file(leader.checkpointer().last_checkpoint_version()),
+                stored_compression,
+            ));
+            let hidden = env.data_home().join("temporarily-hidden-checkpoint");
+            let missing_size = if missing_checkpoint && iteration == 1 {
+                let size = tokio::fs::metadata(&checkpoint_path).await.unwrap().len();
+                tokio::fs::rename(&checkpoint_path, &hidden).await.unwrap();
+                size
+            } else {
+                0
+            };
+            let mut reopened = RegionManifestManager::open(options.clone(), &Default::default())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reopened.manifest_usage(), expected - missing_size);
+            if missing_size != 0 {
+                tokio::fs::rename(&hidden, &checkpoint_path).await.unwrap();
+                reopened
+                    .install_manifest_to(reopened.last_version())
+                    .await
+                    .unwrap();
+                assert_eq!(reopened.manifest_usage(), expected);
+            }
+            reopened.install_last_checkpoint().await.unwrap();
+            assert_eq!(reopened.manifest_usage(), expected);
+        }
+    }
+}
+
+/// Exercises cache-hit accounting on backends whose LIST omits object sizes.
+struct ZeroSizeLister(oio::Lister);
+
+impl oio::List for ZeroSizeLister {
+    async fn next(&mut self) -> MockResult<Option<oio::Entry>> {
+        let Some(entry) = self.0.next().await? else {
+            return Ok(None);
+        };
+        let (path, metadata) = entry.into_parts();
+        if !metadata.is_file() {
+            return Ok(Some(oio::Entry::new(&path, metadata)));
+        }
+        let mut builder = metadata.into_builder();
+        builder.set_file(0);
+        Ok(Some(oio::Entry::new(&path, builder.build())))
+    }
 }

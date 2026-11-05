@@ -130,7 +130,7 @@ lazy_static! {
     ).unwrap();
     pub static ref EXEMPLARS_DROPPED_TOTAL: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_exemplars_dropped_total",
-        "Exemplars dropped during input validation",
+        "Exemplars dropped during ingestion",
         &["protocol"]
     ).unwrap();
     /// The native histograms count of Prometheus remote write per protocol version.

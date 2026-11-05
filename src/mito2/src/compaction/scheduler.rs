@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod history;
 mod local;
 mod planning;
 mod state;
@@ -27,6 +28,8 @@ use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
+#[cfg(test)]
+pub(crate) use planning::pick_automatic_for_test;
 pub(crate) use state::CompactionExecution;
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
 use store_api::storage::RegionId;
@@ -561,6 +564,9 @@ impl CompactionScheduler {
         // Publish the picking phase before dispatching background planning.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking_with_trigger(plan_id, trigger);
+        let pick_history = (trigger == CompactionTrigger::Automatic
+            && matches!(compact_options, compact_request::Options::Regular(_)))
+        .then(|| status.pick_history.clone());
         let request = status.new_compaction_request(
             self.request_sender.clone(),
             self.engine_config.clone(),
@@ -569,6 +575,7 @@ impl CompactionScheduler {
             self.listener.clone(),
             schema_metadata_manager,
             max_parallelism,
+            pick_history,
         );
         status.merge_waiter(waiter);
         self.dispatch_compaction_planning(plan_id, request, compact_options, time_range, trigger);
@@ -610,6 +617,7 @@ impl CompactionScheduler {
             self.listener.clone(),
             schema_metadata_manager,
             max_parallelism,
+            None,
         );
         status.merge_waiter(waiter);
         // Bump the counter through a disjoint field borrow so the `status`
@@ -639,10 +647,6 @@ impl CompactionScheduler {
         schema_metadata_manager: SchemaMetadataManagerRef,
         made_progress: bool,
     ) -> CompactionTransition {
-        if !self.region_status.contains_key(&region_id) {
-            return CompactionTransition::NoAction;
-        }
-
         if let Some(ddls) = self.take_ready_ddls(region_id) {
             return CompactionTransition::DdlReady(ddls);
         }
@@ -698,6 +702,7 @@ impl CompactionScheduler {
             self.listener.clone(),
             schema_metadata_manager,
             MAX_PARALLEL_COMPACTION,
+            Some(status.pick_history.clone()),
         );
         // Bump the counter through a disjoint field borrow so the `status`
         // borrow stays alive; nothing could have removed the status since it

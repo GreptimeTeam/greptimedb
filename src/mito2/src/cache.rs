@@ -30,6 +30,7 @@ use std::{io, mem};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
+use common_cache::metrics::{CacheSizeMetric, CacheSizeRegistration};
 use common_datasource::compression::CompressionType;
 use common_runtime::Runtime;
 use common_runtime::runtime::RuntimeTrait;
@@ -1107,6 +1108,10 @@ impl CacheStrategy {
 pub struct CacheManager {
     /// Cache for compact, authoritative SST metadata.
     sst_meta_cache: Option<SstMetaCache>,
+    /// Unregisters compact metadata bytes when this manager is dropped.
+    _sst_meta_size_registration: Option<CacheSizeRegistration>,
+    /// Skips output metadata prewarming for caches used only by the current compaction.
+    disable_sst_meta_cache_on_write: bool,
     /// Cache for decoded SST metadata, used only as an acceleration tier.
     sst_decoded_meta_cache: Option<SstDecodedMetaCache>,
     /// Cache for vectors.
@@ -1292,9 +1297,6 @@ impl CacheManager {
     ) {
         let key = SstMetaKey(file_id.region_id(), file_id.file_id());
         if let Some(cache) = &self.sst_meta_cache {
-            CACHE_BYTES
-                .with_label_values(&[SST_META_TYPE])
-                .add(meta_cache_weight(&key, &metadata).into());
             cache.insert(key, metadata);
         }
     }
@@ -1409,6 +1411,11 @@ impl CacheManager {
     /// Returns true if the in-memory SST meta cache is enabled.
     pub(crate) fn sst_meta_cache_enabled(&self) -> bool {
         self.sst_meta_cache.is_some()
+    }
+
+    /// Whether newly written SST metadata should be prepared for later readers.
+    pub(crate) fn sst_meta_cache_on_write_enabled(&self) -> bool {
+        self.sst_meta_cache_enabled() && !self.disable_sst_meta_cache_on_write
     }
 
     /// Gets a vector with repeated value for specific `key`.
@@ -1578,6 +1585,7 @@ pub fn selector_result_cache_hit() {
 #[derive(Default)]
 pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
+    disable_sst_meta_cache_on_write: bool,
     vector_cache_size: u64,
     page_cache_size: u64,
     index_metadata_size: u64,
@@ -1595,6 +1603,12 @@ impl CacheManagerBuilder {
     /// Sets meta cache size.
     pub fn sst_meta_cache_size(mut self, bytes: u64) -> Self {
         self.sst_meta_cache_size = bytes;
+        self
+    }
+
+    /// Keeps read-side metadata caching without prewarming newly written SSTs.
+    pub(crate) fn disable_sst_meta_cache_on_write(mut self) -> Self {
+        self.disable_sst_meta_cache_on_write = true;
         self
     }
 
@@ -1666,6 +1680,13 @@ impl CacheManagerBuilder {
 
     /// Builds the [CacheManager].
     pub fn build(self) -> CacheManager {
+        self.build_with_sst_meta_size_metric(CACHE_BYTES.bind(&[SST_META_TYPE]))
+    }
+
+    fn build_with_sst_meta_size_metric(
+        self,
+        sst_meta_size_metric: CacheSizeMetric,
+    ) -> CacheManager {
         // Reserve half the configured capacity for the compact authoritative tier. This prevents
         // decoded acceleration entries from evicting metadata that would require storage I/O to
         // recover. Both reservations together equal the configured limit.
@@ -1675,17 +1696,16 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(compact_meta_capacity)
                 .weigher(meta_cache_weight)
-                .eviction_listener(|k, v, cause| {
-                    let size = meta_cache_weight(&k, &v);
-                    CACHE_BYTES
-                        .with_label_values(&[SST_META_TYPE])
-                        .sub(size.into());
+                .eviction_listener(|_k, _v, cause| {
                     CACHE_EVICTION
                         .with_label_values(&[SST_META_TYPE, removal_cause_str(cause)])
                         .inc();
                 })
                 .build()
         });
+        let sst_meta_size_registration = sst_meta_cache
+            .clone()
+            .map(|cache| sst_meta_size_metric.register(move || cache.weighted_size()));
         let sst_decoded_meta_cache = (decoded_meta_capacity != 0).then(|| {
             common_cache::Cache::new(
                 "sst_decoded_metadata",
@@ -1754,6 +1774,8 @@ impl CacheManagerBuilder {
             .then(|| range_cache::RangeResultCache::new(self.range_result_cache_size));
         CacheManager {
             sst_meta_cache,
+            _sst_meta_size_registration: sst_meta_size_registration,
+            disable_sst_meta_cache_on_write: self.disable_sst_meta_cache_on_write,
             sst_decoded_meta_cache,
             vector_cache,
             page_cache,
@@ -2415,6 +2437,65 @@ mod tests {
             ));
             assert!(futures::poll!(&mut independent).is_ready());
         }
+    }
+
+    #[test]
+    fn test_compact_sst_meta_bytes_follow_cache_lifetime() {
+        use common_cache::metrics::CacheSizeMetrics;
+        use prometheus::Opts;
+        use prometheus::core::Collector;
+
+        let metrics =
+            CacheSizeMetrics::new(Opts::new("test_compact_sst_meta_bytes", "test"), &["type"])
+                .unwrap();
+        let (metadata, region) = sst_parquet_meta();
+        let SstMetaPreparation::Prepared(prepared) = prepare_sst_meta_sync(
+            "test.parquet",
+            Arc::unwrap_or_clone(metadata),
+            None,
+            PageIndexPolicy::Skip,
+        )
+        .unwrap() else {
+            panic!("valid metadata should produce a compact entry");
+        };
+        let file_id = RegionFileId::new(region.region_id, FileId::random());
+        let expected_bytes = f64::from(meta_cache_weight(
+            &SstMetaKey(file_id.region_id(), file_id.file_id()),
+            &prepared.compact,
+        ));
+        let make_cache = || {
+            let manager = Arc::new(
+                CacheManager::builder()
+                    .sst_meta_cache_size(1024 * 1024)
+                    .build_with_sst_meta_size_metric(metrics.bind(&[SST_META_TYPE])),
+            );
+            manager.put_compact_sst_meta(file_id, prepared.compact.clone());
+            manager.sst_meta_cache.as_ref().unwrap().run_pending_tasks();
+            manager
+        };
+        let sample = || {
+            metrics.collect()[0].get_metric()[0]
+                .get_gauge()
+                .as_ref()
+                .unwrap()
+                .value()
+        };
+        let resident = make_cache();
+        assert!(expected_bytes > 0.0);
+        assert_eq!(expected_bytes, sample());
+
+        // Repeated remote compactions must not leave byte counts after releasing their caches.
+        for _ in 0..3 {
+            let transient = make_cache();
+            assert_eq!(2.0 * expected_bytes, sample());
+            let reader = transient.clone();
+            drop(transient);
+            assert_eq!(2.0 * expected_bytes, sample());
+            drop(reader);
+            assert_eq!(expected_bytes, sample());
+        }
+        drop(resident);
+        assert_eq!(0.0, sample());
     }
 
     #[test]
