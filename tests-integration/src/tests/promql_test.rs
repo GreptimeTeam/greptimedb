@@ -8344,36 +8344,44 @@ async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
     )
     .await;
 
-    let query = "native_order_left and on(host) limitk(1, native_order_right)";
-    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    for query in [
+        "native_order_left and on(host) limitk(1, native_order_right)",
+        // The same selection under a `vector(scalar(...))` wrapper. The wrapper answers one value
+        // from its input, so the order-dependent selection is still in the tree: a walk that read
+        // `vector()` as a leaf would admit this shape and answer `10` or `12` depending on which
+        // partition the gather handed over first.
+        "vector(scalar(limitk(1, native_order_left))) + on() native_order_right",
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
 
-    // The route declines, so the statement is planned by the one that was always its answer.
-    observer.clear();
-    let native = instance
-        .do_query(&sql, native_query_context(true, 4))
-        .await
-        .remove(0);
-    assert!(
-        observer.fused().is_none(),
-        "{query}: the route must decline a selection whose answer depends on arrival order"
-    );
-    let legacy = instance
-        .do_query(&sql, native_query_context(false, 4))
-        .await
-        .remove(0);
-    // Both routes report the same outcome: the decline leads to the plan this statement already had,
-    // not to an answer the schedule could change.
-    assert_eq!(
-        native.is_err(),
-        legacy.is_err(),
-        "{query}: the route must not change whether the statement is answerable"
-    );
-    if let (Err(native_error), Err(legacy_error)) = (native, legacy) {
-        assert_eq!(
-            native_error.to_string(),
-            legacy_error.to_string(),
-            "{query}: the decline must lead to the plan this statement already had"
+        // The route declines, so the statement is planned by the one that was always its answer.
+        observer.clear();
+        let native = instance
+            .do_query(&sql, native_query_context(true, 4))
+            .await
+            .remove(0);
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the route must decline a selection whose answer depends on arrival order"
         );
+        let legacy = instance
+            .do_query(&sql, native_query_context(false, 4))
+            .await
+            .remove(0);
+        // Both routes report the same outcome: the decline leads to the plan this statement already
+        // had, not to an answer the schedule could change.
+        assert_eq!(
+            native.is_err(),
+            legacy.is_err(),
+            "{query}: the route must not change whether the statement is answerable"
+        );
+        if let (Err(native_error), Err(legacy_error)) = (native, legacy) {
+            assert_eq!(
+                native_error.to_string(),
+                legacy_error.to_string(),
+                "{query}: the decline must lead to the plan this statement already had"
+            );
+        }
     }
 }
 

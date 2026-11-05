@@ -3113,16 +3113,17 @@ fn data_free(node: &NativeNode) -> bool {
 /// split declines `LimitK` for the same reason, and only a multi-input node repeats that refusal.
 fn depends_on_input_order(node: &NativeNode) -> bool {
     match &node.expr {
-        NativeExpr::Input(_)
-        | NativeExpr::Scalar(_)
-        | NativeExpr::EvalTime { .. }
-        | NativeExpr::VectorOf { .. } => false,
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Merge { input }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
+        // `vector()` and `scalar()` answer one series or one value from their input, and since
+        // `scalar()` exists their input can hold an order-dependent selection:
+        // `vector(scalar(limitk(1, a)))` keeps whichever `a` series the gather handed over first.
+        | NativeExpr::VectorOf { input }
         | NativeExpr::ScalarOf { input } => depends_on_input_order(input),
         NativeExpr::ParameterizedMap {
             input, parameters, ..

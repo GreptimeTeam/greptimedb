@@ -1483,7 +1483,11 @@ fn needs_vector_matching(node: &NativeNode) -> bool {
 /// The vector/vector match this tree performs, looking through the pointwise nodes wrapped on top.
 ///
 /// A match pairs series of two whole vectors, so where it sits — including under a scalar
-/// broadcast or a pointwise wrapper — is the place that needs matching-key co-location.
+/// broadcast or a pointwise wrapper — is the place that needs matching-key co-location. The scalar
+/// side has to be a value that reads no source for that to hold: a scalar-output side that read a
+/// whole vector (`scalar(c)`) only exists once every series of it is gathered, so a match under it is
+/// not the unit of locality and the tree needs one partition instead. Answering `None` here leaves
+/// that decision to [`reads_across_series`].
 fn matching_site(node: &NativeNode) -> Option<(&NativeNode, &NativeNode, &MatchingLabels)> {
     match &node.expr {
         NativeExpr::Binary {
@@ -1491,7 +1495,9 @@ fn matching_site(node: &NativeNode) -> Option<(&NativeNode, &NativeNode, &Matchi
             right,
             matching,
         } => {
-            let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
+            let scalar = |side: &NativeNode| {
+                matches!(side.output, NativeType::Scalar(_)) && reads_no_source(side)
+            };
             if scalar(left) {
                 matching_site(right)
             } else if scalar(right) {

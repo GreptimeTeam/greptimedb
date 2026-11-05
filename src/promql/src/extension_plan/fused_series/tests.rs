@@ -957,6 +957,35 @@ fn whole_vector_parameter_nodes_need_every_series_in_one_partition() {
         })
         .expect("a parameterized map over a scalar() parameter is a legal tree"),
     );
+
+    // `(a + on(job) b) * scalar(c)`: the match sits under a broadcast whose scalar side reads a
+    // third source, so the match's key is not the unit of locality. Routing by it would answer
+    // `scalar(c)` once per key class, and a statement whose global answer is NaN — two `c` series
+    // at one point — would answer one finite threshold per class instead.
+    let matched = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let output = matched.root().output.clone();
+    single_partition(
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(matched.root().clone()),
+                right: Box::new(NativeNode {
+                    expr: NativeExpr::ScalarOf {
+                        input: Box::new(instant_of(2, &grid)),
+                    },
+                    output: NativeType::Scalar(Arc::clone(&grid)),
+                }),
+                matching: BinaryMatching {
+                    op: BinaryOp::Mul,
+                    return_bool: false,
+                    labels: MatchingLabels::Ignoring(Vec::new()),
+                    cardinality: Cardinality::OneToOne,
+                    fill: FillValues::default(),
+                },
+            },
+            output,
+        })
+        .expect("a match under a scalar() broadcast is a legal tree"),
+    );
 }
 
 /// `x - 2 * x`: one source read at both operands, with a scalar multiplier on the right.
