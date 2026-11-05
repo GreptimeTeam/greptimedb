@@ -2859,6 +2859,177 @@ async fn distributed_native_promql_cross_region_targets_match_expected_values() 
     assert_eq!(control_rows, rows, "{expression}");
 }
 
+/// The rows of the repeated-selector fixture, inserted into the one logical table
+/// `{prefix}_b`. Both hosts are counters sampled every minute for ten minutes, longer than the
+/// widest window the test reads, so a 5m window and a 10m window over the same series cover
+/// different sample sets.
+fn repeated_selector_fixture_inserts(prefix: &str) -> String {
+    let host = |host: char, first: usize| {
+        (0..10)
+            .map(|step| format!("('{host}', {}.0, {})", first + step, (step + 1) * 60_000))
+            .collect::<Vec<_>>()
+    };
+    format!(
+        "INSERT INTO {prefix}_b (host, val, ts) VALUES {}",
+        host('x', 1)
+            .into_iter()
+            .chain(host('y', 2))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Real two-datanode TCP acceptance for a repeated selector over ONE partitioned metric table.
+/// Over the wire every prepared scan becomes its own raw source with its own time bounds, so two
+/// occurrences of the same fragmented table - a ratio of two windows, or a binary expression over
+/// two identical ones - stay independent instead of falling back. In process the same expression
+/// would place one node region-locally over both scans of the one table, which no region can serve,
+/// so this admission is remote-only.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_repeated_selector_over_partitioned_table() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_repeated")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_repeat_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:00', ts >= '1970-01-01 00:02:00' AND ts < '1970-01-01 00:04:00', ts >= '1970-01-01 00:04:00') ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_repeat_b (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_repeat_phy')",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &repeated_selector_fixture_inserts("dist_repeat"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The semantic reference: the same rows in one unpartitioned physical table. The engine's own
+    // evaluation over the complete series is the oracle, so a plan that reconciled the fragments
+    // wrongly cannot agree with it.
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_repeat_ctl_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_repeat_ctl_b (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_repeat_ctl_phy')",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &repeated_selector_fixture_inserts("dist_repeat_ctl"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    for expression in [
+        // The two occurrences read different windows of the one table, so a plan that bound both to
+        // one window would answer 1 at every step.
+        "increase(dist_repeat_b[5m]) / increase(dist_repeat_b[10m])",
+        // Two identical occurrences, which the per-series match must still keep apart.
+        "increase(dist_repeat_b[5m]) + increase(dist_repeat_b[5m])",
+    ] {
+        let query = PromQuery {
+            query: expression.to_string(),
+            start: "480".to_string(),
+            end: "600".to_string(),
+            step: "60s".to_string(),
+            ..PromQuery::default()
+        };
+        let control = expression.replace("dist_repeat_", "dist_repeat_ctl_");
+        let control_rows = native_result_rows(
+            instance
+                .do_promql_query(
+                    &PromQuery {
+                        query: control.clone(),
+                        ..query.clone()
+                    },
+                    native_query_context(false, 2),
+                )
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            control_rows.len(),
+            6,
+            "two hosts over three steps define every row: {control}"
+        );
+
+        cluster.reset_network_do_get_peak();
+        let output = instance
+            .do_promql_query(&query, native_query_context(true, 2))
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+        let shape = native_plan_shape(plan);
+        assert!(
+            shape.fused >= 1,
+            "a native plan keeps at least one fused producer: {expression}: {plan:?}"
+        );
+        assert_eq!(
+            shape.regions_per_scan,
+            vec![3, 3],
+            "one raw source per occurrence, each read through every time partition: \
+             {expression}: {plan:?}"
+        );
+        assert!(
+            shape.routers_below_fused >= shape.regions_per_scan.len(),
+            "every occurrence is a series split by time, so each one's fragments are reconciled \
+             before the fused node reads them: {expression}: {plan:?}"
+        );
+        assert!(
+            shape
+                .scan_orderings
+                .iter()
+                .all(|ordering| ordering.as_deref() == Some("interleaved")),
+            "the frontend cannot prove a series stays in one time partition, so neither scan may \
+             claim contiguous per-series order: {expression}: {:?}: {plan:?}",
+            shape.scan_orderings
+        );
+        let rows = native_result_rows(output).await;
+        assert_eq!(
+            cluster.network_do_get_active(),
+            0,
+            "every response body is finished: {expression}"
+        );
+        let peak = cluster.network_do_get_peak_active();
+        assert!(
+            (1..=2).contains(&peak),
+            "two occurrences still read within the target-partition bound: {expression}: {peak}"
+        );
+        if expression.contains(" / ") {
+            assert!(
+                rows.iter().all(|row| (row.2 - 1.0).abs() > 1e-9),
+                "a 5m window over a 10m one is not 1, so both occurrences were read: \
+                 {expression}: {rows:?}"
+            );
+        }
+        assert_eq!(control_rows, rows, "{expression}");
+    }
+}
+
 /// The rows of the disjoint fixture, inserted into the logical tables `{prefix}_a` and
 /// `{prefix}_b`. Both hosts carry the same shape and land in different partitions.
 fn disjoint_fixture_inserts(prefix: &str) -> String {
