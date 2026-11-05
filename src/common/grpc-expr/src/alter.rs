@@ -32,7 +32,8 @@ use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::{TableId, TableMeta};
 use table::requests::{
     AddColumnRequest, AlterKind, AlterTableRequest, AnnotationFamily, ModifyColumnTypeRequest,
-    SetDefaultRequest, SetIndexOption, SetJsonSettingsRequest, UnsetIndexOption,
+    SetColumnCompressionRequest, SetDefaultRequest, SetIndexOption, SetJsonSettingsRequest,
+    UnsetIndexOption,
 };
 
 use crate::error::{
@@ -238,6 +239,16 @@ pub fn alter_expr_to_request(
                 },
             }
         }
+        Kind::SetColumnCompression(x) => AlterKind::SetColumnCompression {
+            request: SetColumnCompressionRequest {
+                column_name: x.column_name,
+                options: if x.reset {
+                    None
+                } else {
+                    x.options.map(|o| o.options)
+                },
+            },
+        },
         Kind::DropColumns(DropColumns { drop_columns }) => AlterKind::DropColumns {
             names: drop_columns.into_iter().map(|c| c.name).collect(),
         },

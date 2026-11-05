@@ -93,6 +93,15 @@ pub enum AlterTableOperation {
         column_name: Ident,
         json2_options: Option<Json2Options>,
     },
+    /// `MODIFY COLUMN <column_name> COMPRESSION WITH (<options>)` or
+    /// `MODIFY COLUMN <column_name> UNSET COMPRESSION`
+    ///
+    /// `options` is a merge-on-set delta: only the named keys override the
+    /// column's current options. `None` clears every override.
+    SetColumnCompression {
+        column_name: Ident,
+        options: Option<OptionMap>,
+    },
     /// `SET <table attrs key> = <table attr value>`
     SetTableOptions {
         options: Vec<KeyValueOption>,
@@ -280,6 +289,17 @@ impl Display for AlterTableOperation {
                 }
                 Ok(())
             }
+            AlterTableOperation::SetColumnCompression {
+                column_name,
+                options,
+            } => match options {
+                Some(options) => write!(
+                    f,
+                    "MODIFY COLUMN {column_name} COMPRESSION WITH({})",
+                    options.kv_pairs().join(", ")
+                ),
+                None => write!(f, "MODIFY COLUMN {column_name} UNSET COMPRESSION"),
+            },
             AlterTableOperation::SetTableOptions { options } => {
                 let kvs = options
                     .iter()

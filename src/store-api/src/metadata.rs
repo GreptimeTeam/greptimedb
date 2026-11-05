@@ -689,6 +689,10 @@ impl RegionMetadataBuilder {
                 column_name,
                 settings,
             } => self.set_json_settings(column_name, settings)?,
+            AlterKind::SetColumnCompression {
+                column_name,
+                options,
+            } => self.set_column_compression(&column_name, options)?,
             AlterKind::SetIndexes { options } => self.set_indexes(options)?,
             AlterKind::UnsetIndexes { options } => self.unset_indexes(options)?,
             AlterKind::SetRegionOptions { options: _ } => {
@@ -885,6 +889,54 @@ impl RegionMetadataBuilder {
             })?;
 
         *col_meta.column_schema.mut_metadata() = new_metadata;
+        Ok(())
+    }
+
+    /// Applies a per-column compression alter to the column schema.
+    ///
+    /// `options` is a merge-on-set delta over the column's current options;
+    /// `None` removes the entry so the column falls back to SST defaults.
+    fn set_column_compression(
+        &mut self,
+        column_name: &str,
+        options: Option<HashMap<String, String>>,
+    ) -> Result<()> {
+        let region_id = self.region_id;
+        let Some(col_meta) = self
+            .column_metadatas
+            .iter_mut()
+            .find(|col| col.column_schema.name == column_name)
+        else {
+            return InvalidRegionRequestSnafu {
+                region_id,
+                err: format!("column {column_name} not found"),
+            }
+            .fail();
+        };
+
+        let invalid = |err: datatypes::error::Error| {
+            InvalidRegionRequestSnafu {
+                region_id,
+                err: err.to_string(),
+            }
+            .build()
+        };
+
+        col_meta.column_schema = match options {
+            Some(delta) => {
+                let merged = col_meta
+                    .column_schema
+                    .merge_compression_options(&delta)
+                    .map_err(invalid)?;
+                col_meta
+                    .column_schema
+                    .clone()
+                    .with_compression_options(merged)
+                    .map_err(invalid)?
+            }
+            None => col_meta.column_schema.clone().without_compression_options(),
+        };
+
         Ok(())
     }
 

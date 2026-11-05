@@ -341,7 +341,8 @@ fn build_new_table_info(
         | AlterKind::SetIndexes { .. }
         | AlterKind::UnsetIndexes { .. }
         | AlterKind::DropDefaults { .. }
-        | AlterKind::SetDefaults { .. } => {}
+        | AlterKind::SetDefaults { .. }
+        | AlterKind::SetColumnCompression { .. } => {}
     }
 
     info!(

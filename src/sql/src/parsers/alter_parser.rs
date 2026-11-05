@@ -31,8 +31,8 @@ use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnaf
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::{INVERTED, parse_json2_type_and_options};
 use crate::parsers::utils::{
-    parse_with_options, validate_column_fulltext_create_option,
-    validate_column_skipping_index_create_option,
+    parse_with_options, validate_column_compression_create_option,
+    validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
 };
 use crate::statements::OptionMap;
 use crate::statements::alter::{
@@ -404,6 +404,15 @@ impl ParserContext<'_> {
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
         let column = self.parse_column_def(true)?;
 
+        // COMPRESSION needs ALTER-specific execution support.
+        ensure!(
+            column.extensions.compression_options.is_none(),
+            InvalidColumnOptionSnafu {
+                name: column.name().to_string(),
+                msg: "ADD COLUMN does not support COMPRESSION",
+            }
+        );
+
         // These attributes need ALTER-specific execution support.
         ensure!(
             column.extensions.fulltext_index_options.is_none()
@@ -507,6 +516,10 @@ impl ParserContext<'_> {
                     } else {
                         self.parse_alter_column_set_index(column_name)
                     }
+                } else if w.keyword == Keyword::COMPRESSION {
+                    // consume the current token.
+                    self.parser.next_token();
+                    self.parse_alter_column_compression(column_name)
                 } else if w.keyword == Keyword::DROP {
                     // consume the current token.
                     self.parser.next_token();
@@ -576,6 +589,16 @@ impl ParserContext<'_> {
                     .context(error::SyntaxSnafu)?;
                 Ok(AlterTableOperation::UnsetIndex {
                     options: UnsetIndexOperation::Skipping { column_name },
+                })
+            }
+
+            TokenWithSpan {
+                token: Token::Word(w),
+                ..
+            } if w.keyword == Keyword::COMPRESSION => {
+                Ok(AlterTableOperation::SetColumnCompression {
+                    column_name,
+                    options: None,
                 })
             }
             _ => self.expected(
@@ -689,6 +712,53 @@ impl ParserContext<'_> {
                     .try_into()
                     .context(error::SetSkippingIndexOptionSnafu)?,
             },
+        })
+    }
+
+    /// Parses `MODIFY COLUMN <column_name> COMPRESSION WITH (...)`.
+    ///
+    /// The option keys are checked against the same allowlist CREATE uses, so
+    /// both statements reject an unknown key with the same message. The values
+    /// are only parsed here: they are validated, together with the keys the
+    /// delta retains, once the statement is applied.
+    fn parse_alter_column_compression(
+        &mut self,
+        column_name: Ident,
+    ) -> Result<AlterTableOperation> {
+        let options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(error::SyntaxSnafu)?
+            .into_iter()
+            .map(parse_option_string)
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            !options.is_empty(),
+            InvalidColumnOptionSnafu {
+                name: column_name.to_string(),
+                msg: "expect WITH (...) after COMPRESSION keyword",
+            }
+        );
+        for (key, value) in options.iter() {
+            ensure!(
+                value.as_string().is_some(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: format!("COMPRESSION option {key} requires a scalar value"),
+                }
+            );
+            ensure!(
+                validate_column_compression_create_option(key),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: format!("invalid COMPRESSION option: {key}"),
+                }
+            );
+        }
+
+        Ok(AlterTableOperation::SetColumnCompression {
+            column_name,
+            options: Some(OptionMap::new(options)),
         })
     }
 }
@@ -843,6 +913,90 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn test_parse_alter_column_compression() {
+        let parse = |sql: &str| {
+            let mut statements = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let Statement::AlterTable(alter) = statements.remove(0) else {
+                unreachable!()
+            };
+            alter
+        };
+
+        // A merge-on-set delta: only the named keys override.
+        let alter = parse(
+            "ALTER TABLE t MODIFY COLUMN payload COMPRESSION WITH (level = '22', page_size = '8MiB')",
+        );
+        let AlterTableOperation::SetColumnCompression {
+            column_name,
+            options: Some(options),
+        } = alter.alter_operation()
+        else {
+            unreachable!()
+        };
+        assert_eq!("payload", column_name.value);
+        assert_eq!(2, options.len());
+        assert_eq!(Some("22"), options.get("level"));
+        assert_eq!(Some("8MiB"), options.get("page_size"));
+        // kv_pairs sorts the keys, so Display is stable.
+        assert_eq!(
+            "ALTER TABLE t MODIFY COLUMN payload COMPRESSION WITH(level = '22', page_size = '8MiB')",
+            alter.to_string()
+        );
+        assert_eq!(alter, parse(&alter.to_string()));
+
+        // UNSET COMPRESSION clears every override.
+        let alter = parse("ALTER TABLE t MODIFY COLUMN payload UNSET COMPRESSION");
+        assert_eq!(
+            &AlterTableOperation::SetColumnCompression {
+                column_name: Ident::new("payload"),
+                options: None,
+            },
+            alter.alter_operation()
+        );
+        assert_eq!(
+            "ALTER TABLE t MODIFY COLUMN payload UNSET COMPRESSION",
+            alter.to_string()
+        );
+        assert_eq!(alter, parse(&alter.to_string()));
+    }
+
+    #[test]
+    fn test_add_column_rejects_compression() {
+        let err = ParserContext::create_with_dialect(
+            "ALTER TABLE t ADD COLUMN payload STRING COMPRESSION WITH (level = '3')",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("ADD COLUMN does not support COMPRESSION"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_alter_column_compression_rejects_unknown_option() {
+        // Same allowlist and wording as CREATE TABLE.
+        let err = ParserContext::create_with_dialect(
+            "ALTER TABLE t MODIFY COLUMN payload COMPRESSION WITH (bogus = '1')",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid COMPRESSION option: bogus"),
+            "{err}"
+        );
     }
 
     #[test]
