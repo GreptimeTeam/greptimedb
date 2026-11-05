@@ -700,17 +700,6 @@ impl FusedSeries {
             .any(|input| matches!(input.output, NativeType::AggregateState(_)))
     }
 
-    /// Whether this node's output carries the metric name its sources report.
-    ///
-    /// A nameless selector declares `__name__` without binding one name: the sources fill it in.
-    /// A `Final` half inherits that arrangement from the producer it reads, which is why the proof
-    /// has to cross the state boundary rather than stop at a scan.
-    fn publishes_source_metric_name(&self) -> bool {
-        self.binding.tags.iter().any(|tag| tag == METRIC_NAME)
-            && (self.binding.metric_name.is_some()
-                || self.children().iter().all(source_names_its_metric))
-    }
-
     /// The compiled tree this node runs.
     pub fn tree(&self) -> &NativeTree {
         &self.tree
@@ -1401,36 +1390,6 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
     }
 }
 
-/// Whether this input reports the metric each of its rows came from, by naming it itself.
-///
-/// A discovered selector binds one source per metric, so the name comes from the sources rather
-/// than from a single name on the node.
-fn source_names_its_metric(plan: &LogicalPlan) -> bool {
-    match plan {
-        LogicalPlan::Extension(extension) => {
-            if let Some(source) = extension
-                .node
-                .as_any()
-                .downcast_ref::<super::RawSeriesSource>()
-            {
-                return !source.metric_name().is_empty();
-            }
-            // A split's final half reads its producer's state, and the producer is the node that
-            // named the metric: it either bound one name or was itself built over sources that do.
-            extension
-                .node
-                .as_any()
-                .downcast_ref::<FusedSeries>()
-                .is_some_and(FusedSeries::publishes_source_metric_name)
-        }
-        LogicalPlan::Union(union) => union
-            .inputs
-            .iter()
-            .all(|input| source_names_its_metric(input)),
-        _ => false,
-    }
-}
-
 /// Whether matching operands can be segmented as independent single-source computations and
 /// at least one fails to preserve the requested key.
 ///
@@ -1671,15 +1630,6 @@ fn validate_binding(
     binding: &FusedSeriesBinding,
     children: &[LogicalPlan],
 ) -> DataFusionResult<()> {
-    // A `__name__` tag is filled either by one bound metric name or by the sources themselves.
-    if binding.tags.iter().any(|tag| tag == METRIC_NAME)
-        && binding.metric_name.is_none()
-        && !children.iter().all(source_names_its_metric)
-    {
-        return Err(DataFusionError::Plan(format!(
-            "FusedSeries declares {METRIC_NAME:?} but binds no metric name"
-        )));
-    }
     let schemas = collect_source_schemas(tree)?;
     // A tree built without its constructor carries no proof of its contracts, and one without an
     // input has no scan to refuse it later.

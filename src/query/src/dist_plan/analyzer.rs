@@ -37,7 +37,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::{FusedOutputFormat, FusedSeries, SeriesDivide};
+use promql::extension_plan::{FusedOutputFormat, FusedSeries, RawSeriesSource, SeriesDivide};
 use promql::native::plan::{AggregateStage, NativeExpr, NativeType};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -581,9 +581,17 @@ fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
 /// own scan. Every other plan keeps the ordinary encoding checks.
 ///
 /// The exception applies only when the outer node reads aggregate state, and its inner producer is
-/// a `SeriesFrame` over one table scan whose root is a `Partial` aggregate producing
+/// a `SeriesFrame` over one region-bound series input whose root is a `Partial` aggregate producing
 /// `AggregateState`. A `SeriesFrame` can also contain evaluated values, so its format and input
 /// shape alone do not establish that it exports state.
+///
+/// The producer's one input is the series a region answers with, so the exception admits the three
+/// shapes that are exactly that: a bare table scan, a discovered metric's `RawSeriesSource` over
+/// that scan, and the `Union` of those sources a selector that names no metric builds when it
+/// matches more than one metric. Each of them is placed by the ordinary rules, so widening this
+/// allow-set does not move a node above a region: it only stops the encoding gate from cutting
+/// between a `RawSeriesSource` and the scan it binds. Anything else - a source over a merge scan, a
+/// foreign extension, a projection or filter - keeps the encoding checks.
 ///
 /// One wrapper may sit above the root: the projection that publishes a statement's own column names
 /// over a node whose internal fields are the metric's. It counts only when every expression is a
@@ -622,9 +630,41 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
         return false;
     };
     partial.format() == FusedOutputFormat::SeriesFrame
-        && matches!(partial.children(), [LogicalPlan::TableScan(_)])
+        && matches!(partial.children(), [input] if is_region_series_input(input))
         && matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial)
         && matches!(&partial.tree().root().output, NativeType::AggregateState(_))
+}
+
+/// Whether `plan` is a series input a region answers on its own: a table scan, a `RawSeriesSource`
+/// bound to one, or a non-empty `Union` of those sources.
+///
+/// A `RawSeriesSource` names the metric its scan is read as and the region that serves it, so it is
+/// the same "one region reads these series" statement a bare scan makes. A selector that names no
+/// metric builds one source per discovered metric and unions them, and every branch of that union
+/// is again one region's series. Nothing is admitted below a source: a scan that has already been
+/// expanded into a merge scan is a region boundary, not a series input.
+fn is_region_series_input(plan: &LogicalPlan) -> bool {
+    fn raw_series_source_over_scan(plan: &LogicalPlan) -> bool {
+        let LogicalPlan::Extension(extension) = plan else {
+            return false;
+        };
+        extension.node.as_any().is::<RawSeriesSource>()
+            && matches!(
+                extension.node.inputs().as_slice(),
+                [LogicalPlan::TableScan(_)]
+            )
+    }
+    match plan {
+        LogicalPlan::TableScan(_) => true,
+        LogicalPlan::Union(union) => {
+            !union.inputs.is_empty()
+                && union
+                    .inputs
+                    .iter()
+                    .all(|input| raw_series_source_over_scan(input))
+        }
+        _ => raw_series_source_over_scan(plan),
+    }
 }
 
 impl PlanRewriter {

@@ -2973,6 +2973,191 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     }
 }
 
+/// A discovered selector under an aggregate is planned and executed by the real frontend and the
+/// real datanode.
+///
+/// `sum({job="api"})` names no metric, so the selector is answered by enumerating the schema's
+/// logical metric tables: one here, on its own physical metric table. The split aggregate's producer
+/// therefore reads a `RawSeriesSource` bound to the region scan it discovered, which is the shape the
+/// distributed planner has to keep in process - a boundary between that source and its scan leaves
+/// the physical planner with a `RawSeriesSource` over a `MergeScanExec`. The answer folds the one
+/// `api` series (2) and drops the row the matcher rejects.
+///
+/// The query goes through the Prometheus handler, which is the path that prepares the metric
+/// discovery scope: `TQL EVAL` over SQL never sets it, so the native route declines discovery there.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_discovery_under_an_aggregate_sums_the_discovered_metric() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_discovery_under_aggregate_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE discovery_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table' = 'true'); \
+         CREATE TABLE discovery_api (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table' = 'discovery_phy'); \
+         INSERT INTO discovery_api (job, ts, val) VALUES ('api', 0, 2), ('other', 0, 100)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let query = PromQuery {
+        query: "sum({job=\"api\"})".to_string(),
+        start: "0".to_string(),
+        end: "0".to_string(),
+        step: "1s".to_string(),
+        ..PromQuery::default()
+    };
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        other => panic!("a PromQL query returns record batches: {other:?}"),
+    };
+    let mut values = Vec::new();
+    for batch in batches.iter() {
+        let value_columns = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(1, value_columns.len(), "expected one value column");
+        let value_array = value_columns[0]
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            values.push(value_array.value(row));
+        }
+    }
+    assert_eq!(
+        vec![2.0],
+        values,
+        "sum over the discovered metric's `api` series"
+    );
+}
+
+/// A discovery over more than one metric is planned, placed and executed by the real frontend and
+/// the real datanodes.
+///
+/// `sum({job="api"})` names no metric, so the selector is answered by enumerating the schema's
+/// logical metric tables: two here, each on its own physical metric table. The split aggregate's
+/// producer reads one `RawSeriesSource` per discovered metric, and the distributed planner answers
+/// each with its own region, so the producer's `__name__` proof has to cross one region boundary per
+/// branch to see the sources that name their metric. The answer folds both `api` series (2 and 3)
+/// and drops the rows the matcher rejects.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_discovery_over_two_metrics_under_an_aggregate_sums_both() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_discovery_over_two_metrics_under_aggregate_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE discovery_two_api_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table' = 'true'); \
+         CREATE TABLE discovery_two_api (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table' = 'discovery_two_api_phy'); \
+         CREATE TABLE discovery_two_web_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table' = 'true'); \
+         CREATE TABLE discovery_two_web (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table' = 'discovery_two_web_phy'); \
+         INSERT INTO discovery_two_api (job, ts, val) VALUES ('api', 0, 2), ('other', 0, 100); \
+         INSERT INTO discovery_two_web (job, ts, val) VALUES ('api', 0, 3), ('other', 0, 200)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let query = PromQuery {
+        query: "sum({job=\"api\"})".to_string(),
+        start: "0".to_string(),
+        end: "0".to_string(),
+        step: "1s".to_string(),
+        ..PromQuery::default()
+    };
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        other => panic!("a PromQL query returns record batches: {other:?}"),
+    };
+    let mut values = Vec::new();
+    for batch in batches.iter() {
+        let value_columns = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(1, value_columns.len(), "expected one value column");
+        let value_array = value_columns[0]
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            values.push(value_array.value(row));
+        }
+    }
+    assert_eq!(
+        vec![5.0],
+        values,
+        "sum over both discovered metrics' `api` series"
+    );
+
+    // Grouping by the metric name must keep the two metrics apart even though their ordinary
+    // labels are identical: two groups, each named after its own metric.
+    let output = instance
+        .do_promql_query(
+            &PromQuery {
+                query: r#"sum by (__name__) ({job="api"})"#.to_string(),
+                ..query
+            },
+            native_query_context(true, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        other => panic!("a PromQL query returns record batches: {other:?}"),
+    };
+    let mut groups = Vec::new();
+    for batch in batches.iter() {
+        let names = batch
+            .column_by_name("__name__")
+            .expect("a grouping by the metric name reports that column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let values = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(1, values.len(), "expected one value column");
+        let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            groups.push((names.value(row).to_string(), values.value(row)));
+        }
+    }
+    groups.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        vec![
+            ("discovery_two_api".to_string(), 2.0),
+            ("discovery_two_web".to_string(), 3.0),
+        ],
+        groups,
+        "each discovered metric stays its own group"
+    );
+}
+
 /// Compare value and response ordering for native routes added for common PromQL shapes.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {

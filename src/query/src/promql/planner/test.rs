@@ -41,6 +41,7 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
+use datafusion_optimizer::analyzer::AnalyzerRule;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
@@ -2136,6 +2137,263 @@ async fn native_metric_discovery_prepares_one_source_per_metric() {
         1,
         "the sources live under one union input: {plan:?}"
     );
+}
+
+/// A discovered selector under an aggregate keeps the split aggregate's in-process plan.
+///
+/// The `Partial` producer of a split aggregate reads the selector's series where they are, and a
+/// selector that names no metric reads through a `RawSeriesSource` bound to the region scan it
+/// discovered. That source is the producer's own series input, so the distributed planner keeps the
+/// state exception for it. Without it the encoding gate cuts between the source and the scan it
+/// binds, and the physical planner then refuses a `RawSeriesSource` planned over a `MergeScanExec`.
+#[tokio::test]
+async fn native_metric_discovery_under_an_aggregate_keeps_the_split_in_process() {
+    let query = "sum({tag_0=\"x\"})";
+    let metrics = &["alpha_total"][..];
+    let plan = build_native_fused_plan_with_provider(
+        query,
+        true,
+        metric_discovery_provider(metrics).await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    let final_node = find_final_split(&plan)
+        .unwrap_or_else(|| panic!("`{query}` over {metrics:?} must split: {display}"));
+    let partial = partial_below(final_node).unwrap_or_else(|| {
+        panic!(
+            "`{query}` over {metrics:?}: the final half must read its partial producer: {display}"
+        )
+    });
+    let [input] = partial.children() else {
+        panic!("`{query}` over {metrics:?}: the producer reads one series input: {display}");
+    };
+    let source = as_raw_series_source(input).unwrap_or_else(|| {
+        panic!("`{query}` over {metrics:?}: the producer reads a discovered source: {display}")
+    });
+    assert_eq!(
+        vec![metrics[0].to_string()],
+        vec![source.metric_name().to_string()],
+        "the discovered metric names itself: {display}"
+    );
+
+    let analyzed = match crate::dist_plan::DistPlannerAnalyzer::new(true)
+        .analyze(plan, &datafusion_common::config::ConfigOptions::default())
+    {
+        Ok(analyzed) => analyzed,
+        Err(error) => panic!("`{query}` over {metrics:?}: analyze failed: {error}\n{display}"),
+    };
+    let analyzed_display = analyzed.display_indent().to_string();
+    let final_node = find_final_split(&analyzed).unwrap_or_else(|| {
+        panic!(
+            "`{query}` over {metrics:?}: the final half stays on the frontend: {analyzed_display}"
+        )
+    });
+    let partial = partial_below(final_node).unwrap_or_else(|| {
+        panic!("`{query}` over {metrics:?}: the final half keeps its partial producer: {analyzed_display}")
+    });
+    assert!(
+        !partial.reads_aggregate_state(),
+        "`{query}` over {metrics:?}: {analyzed_display}"
+    );
+    assert!(
+        partial.children().iter().any(has_merge_scan),
+        "`{query}` over {metrics:?}: the producer reads its series from a region boundary: {analyzed_display}"
+    );
+    assert_no_raw_source_above_merge_scan(&analyzed);
+
+    let region_inputs = remote_inputs(&analyzed);
+    assert_eq!(
+        1,
+        region_inputs.len(),
+        "`{query}` over {metrics:?}: one region input per discovered metric: {analyzed_display}"
+    );
+    let source = as_raw_series_source(&region_inputs[0]).unwrap_or_else(|| {
+        panic!("`{query}` over {metrics:?}: the region input is the discovered source: {analyzed_display}")
+    });
+    assert_eq!(
+        vec![metrics[0].to_string()],
+        vec![source.metric_name().to_string()],
+        "`{query}` over {metrics:?}: {analyzed_display}"
+    );
+    assert!(
+        matches!(
+            UserDefinedLogicalNodeCore::inputs(source).as_slice(),
+            [LogicalPlan::TableScan(_)]
+        ),
+        "`{query}` over {metrics:?}: the source binds its own scan: {analyzed_display}"
+    );
+}
+
+/// A selector that discovers more than one metric keeps the split aggregate's in-process plan, and
+/// its metric-name proof crosses the region boundaries that plan draws.
+///
+/// The producer reads one `RawSeriesSource` per discovered metric inside one `Union`, each naming its
+/// own metric - the shape the state exception admits. The distributed planner then answers each
+/// branch with its own region, so the union's children become merge scans that carry the sources to
+/// their regions and hide them: `MergeScanLogicalPlan::inputs` reports nothing, because a boundary
+/// that let an optimizer through would duplicate the region's work. A producer that declares
+/// `__name__` without binding one name has to keep children that name their own metric, so the proof
+/// asks each boundary what it runs - one boundary per branch, here the branch's own source - and the
+/// multi-metric discovery plans like the single-metric one.
+#[tokio::test]
+async fn native_metric_discovery_over_two_metrics_under_an_aggregate_keeps_the_split_in_process() {
+    let query = "sum({tag_0=\"x\"})";
+    let metrics = &["alpha_total", "beta_total"][..];
+    let plan = build_native_fused_plan_with_provider(
+        query,
+        true,
+        metric_discovery_provider(metrics).await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    let final_node = find_final_split(&plan)
+        .unwrap_or_else(|| panic!("`{query}` over {metrics:?} must split: {display}"));
+    let partial = partial_below(final_node).unwrap_or_else(|| {
+        panic!(
+            "`{query}` over {metrics:?}: the final half must read its partial producer: {display}"
+        )
+    });
+    let [input] = partial.children() else {
+        panic!("`{query}` over {metrics:?}: the producer reads one series input: {display}");
+    };
+    let LogicalPlan::Union(union) = input else {
+        panic!("`{query}` over {metrics:?}: the producer reads one union of sources: {display}");
+    };
+    let mut planned_sources = union
+        .inputs
+        .iter()
+        .map(|child| {
+            as_raw_series_source(child)
+                .unwrap_or_else(|| {
+                    panic!("`{query}` over {metrics:?}: every union child is a discovered source: {display}")
+                })
+                .metric_name()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    planned_sources.sort();
+    assert_eq!(
+        metrics
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>(),
+        planned_sources,
+        "each discovered metric names itself: {display}"
+    );
+
+    // The plan the planner builds: the producer reads one union of discovered sources.
+    let analyzed = match crate::dist_plan::DistPlannerAnalyzer::new(true)
+        .analyze(plan, &datafusion_common::config::ConfigOptions::default())
+    {
+        Ok(analyzed) => analyzed,
+        Err(error) => panic!("`{query}` over {metrics:?}: analyze failed: {error}\n{display}"),
+    };
+    let analyzed_display = analyzed.display_indent().to_string();
+    let final_node = find_final_split(&analyzed).unwrap_or_else(|| {
+        panic!(
+            "`{query}` over {metrics:?}: the final half stays on the frontend: {analyzed_display}"
+        )
+    });
+    let partial = partial_below(final_node).unwrap_or_else(|| {
+        panic!("`{query}` over {metrics:?}: the final half keeps its partial producer: {analyzed_display}")
+    });
+    assert!(
+        !partial.reads_aggregate_state(),
+        "`{query}` over {metrics:?}: {analyzed_display}"
+    );
+    assert_no_raw_source_above_merge_scan(&analyzed);
+
+    // Each branch of the discovery union is one region's answer, and each region input still names
+    // the metric it discovered, which is what the producer's proof reads through the boundary.
+    let region_inputs = remote_inputs(&analyzed);
+    assert_eq!(
+        metrics.len(),
+        region_inputs.len(),
+        "`{query}` over {metrics:?}: one region input per discovered metric: {analyzed_display}"
+    );
+    let mut region_metrics = region_inputs
+        .iter()
+        .map(|input| {
+            let source = as_raw_series_source(input).unwrap_or_else(|| {
+                panic!("`{query}` over {metrics:?}: the region input is the discovered source: {analyzed_display}")
+            });
+            assert!(
+                matches!(
+                    UserDefinedLogicalNodeCore::inputs(source).as_slice(),
+                    [LogicalPlan::TableScan(_)]
+                ),
+                "`{query}` over {metrics:?}: the source binds its own scan: {analyzed_display}"
+            );
+            source.metric_name().to_string()
+        })
+        .collect::<Vec<_>>();
+    region_metrics.sort();
+    assert_eq!(
+        metrics
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>(),
+        region_metrics,
+        "`{query}` over {metrics:?}: {analyzed_display}"
+    );
+}
+
+/// The `RawSeriesSource` `plan` is, if it is one.
+fn as_raw_series_source(plan: &LogicalPlan) -> Option<&RawSeriesSource> {
+    match plan {
+        LogicalPlan::Extension(Extension { node }) => {
+            node.as_any().downcast_ref::<RawSeriesSource>()
+        }
+        _ => None,
+    }
+}
+
+/// Whether a merge scan is visible in `plan`. A merge scan's remote input is not one of its
+/// children, so this does not look into one.
+fn has_merge_scan(plan: &LogicalPlan) -> bool {
+    if let LogicalPlan::Extension(Extension { node }) = plan
+        && node
+            .as_any()
+            .downcast_ref::<crate::dist_plan::MergeScanLogicalPlan>()
+            .is_some()
+    {
+        return true;
+    }
+    plan.inputs().into_iter().any(has_merge_scan)
+}
+
+/// No `RawSeriesSource` may sit above a merge scan: the physical planner refuses a source planned
+/// over a `MergeScanExec`, so the distributed boundary has to be at the source, not below it.
+fn assert_no_raw_source_above_merge_scan(plan: &LogicalPlan) {
+    if as_raw_series_source(plan).is_some() {
+        assert!(
+            !has_merge_scan(plan),
+            "a RawSeriesSource must not sit above a merge scan: {plan}"
+        );
+    }
+    for input in plan.inputs() {
+        assert_no_raw_source_above_merge_scan(input);
+    }
+}
+
+/// The remote input of every merge scan visible in `plan`.
+fn remote_inputs(plan: &LogicalPlan) -> Vec<LogicalPlan> {
+    let mut inputs = Vec::new();
+    fn collect(plan: &LogicalPlan, inputs: &mut Vec<LogicalPlan>) {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(merge_scan) = node
+                .as_any()
+                .downcast_ref::<crate::dist_plan::MergeScanLogicalPlan>()
+        {
+            inputs.push(merge_scan.input().clone());
+            return;
+        }
+        for input in plan.inputs() {
+            collect(input, inputs);
+        }
+    }
+    collect(plan, &mut inputs);
+    inputs
 }
 
 async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan {

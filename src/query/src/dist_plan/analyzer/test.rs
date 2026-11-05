@@ -37,7 +37,7 @@ use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, Extension, LogicalPlanBuilder, Operator, Subquery,
-    binary_expr, col, lit,
+    UserDefinedLogicalNodeCore, binary_expr, col, lit,
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
@@ -711,6 +711,408 @@ fn a_naming_projection_does_not_widen_the_in_process_exception() {
         !is_in_process_plan(&foreign),
         "a rename above an ordinary scan is not the exception"
     );
+}
+
+/// `sum(some_metric)`'s compiled tree and the binding it is planned against.
+fn sum_tree() -> (promql::native::plan::NativeTree, FusedSeriesBinding) {
+    let stmt = promql_parser::parser::EvalStmt {
+        expr: promql_parser::parser::parse("sum(some_metric)").unwrap(),
+        start: std::time::UNIX_EPOCH,
+        end: std::time::UNIX_EPOCH + std::time::Duration::from_secs(10),
+        interval: std::time::Duration::from_secs(1),
+        lookback_delta: std::time::Duration::from_secs(1),
+    };
+    let series = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec { name: "v0".into() }]),
+        eval_grid: None,
+    });
+    let tree = compile(&stmt, series, SeriesOrdering::KeyThenTime).unwrap();
+    let binding = FusedSeriesBinding {
+        grid: statement_grid(&stmt).unwrap(),
+        time_index: "ts".into(),
+        tags: vec![],
+        metric_name: Some(Arc::from("some_metric")),
+    };
+    (tree, binding)
+}
+
+/// `sum(some_metric)` split into the `Partial` producer and the `Final` consumer a query runs, with
+/// the binding both halves are planned against.
+fn split_trees() -> (
+    promql::native::plan::NativeTree,
+    promql::native::plan::NativeTree,
+    FusedSeriesBinding,
+) {
+    let (tree, binding) = sum_tree();
+    let (partial, final_tree) = FusedSeries::split_aggregate(&tree, "ts")
+        .unwrap()
+        .expect("`sum(some_metric)` is splittable");
+    (partial, final_tree, binding)
+}
+
+/// The `Final` half of `sum(some_metric)` over whatever `producer` the caller supplies, so a test
+/// can state which inner shapes the exception does and does not admit.
+fn final_over(producer: LogicalPlan) -> LogicalPlan {
+    let (_, final_tree, binding) = split_trees();
+    let output_schema = Arc::new(
+        datafusion_common::DFSchema::try_from(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            arrow::datatypes::Field::new("sum(v0)", DataType::Float64, true),
+        ]))
+        .unwrap(),
+    );
+    let fused = FusedSeries::try_new(
+        Arc::from("sum(some_metric)"),
+        final_tree,
+        binding,
+        vec![producer],
+        output_schema,
+    )
+    .unwrap();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(fused),
+    })
+}
+
+/// The whole split of `sum(some_metric)` with `input` as the producer's own series input.
+fn split_aggregate_over(input: LogicalPlan) -> LogicalPlan {
+    let (partial_tree, _, binding) = split_trees();
+    let partial = FusedSeries::try_new_state_export(
+        Arc::from("sum(some_metric)"),
+        partial_tree,
+        binding,
+        vec![input],
+    )
+    .unwrap();
+    final_over(LogicalPlan::Extension(Extension {
+        node: Arc::new(partial),
+    }))
+}
+
+/// The `Partial` producer of a nameless selector's split over `input`, as one region answers with it.
+///
+/// Its binding declares `__name__` without binding one name - the shape a selector that names no
+/// metric plans - so the metric each series came from has to come from the sources below `input`.
+fn discovery_producer_over(input: LogicalPlan) -> DfResult<FusedSeries> {
+    let (partial_tree, _, mut binding) = split_trees();
+    binding.metric_name = None;
+    binding.tags = vec!["__name__".to_string()];
+    FusedSeries::try_new_state_export(
+        Arc::from("sum({tag_0=\"x\"})"),
+        partial_tree,
+        binding,
+        vec![input],
+    )
+}
+
+/// A `SeriesFrame` producer that publishes values rather than aggregate state: its root is the
+/// whole `sum(some_metric)` fold, not the `Partial` stage of a split.
+fn values_producer_over(input: LogicalPlan) -> LogicalPlan {
+    let (tree, binding) = sum_tree();
+    let frame = FusedSeries::series_frame_schema(&tree).unwrap();
+    let output_schema = datafusion_common::DFSchema::try_from(frame.as_ref().clone()).unwrap();
+    let fused = FusedSeries::try_new_with_format(
+        Arc::from("sum(some_metric)"),
+        tree,
+        binding,
+        vec![input],
+        Arc::new(output_schema),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(fused),
+    })
+}
+
+fn scan_of(table: TableRef) -> LogicalPlan {
+    LogicalPlanBuilder::scan(
+        table.table_info().name.clone(),
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(table),
+        ))),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap()
+}
+
+fn merge_scan_over(input: LogicalPlan) -> LogicalPlan {
+    MergeScanLogicalPlan::new(input, false).into_logical_plan()
+}
+
+/// A discovered selector's source: one region scan read as one metric's raw series.
+fn raw_series_source(metric: &str, input: LogicalPlan) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(
+            RawSeriesSource::try_new(Arc::from(metric), vec![], vec!["v0".to_string()], input)
+                .unwrap(),
+        ),
+    })
+}
+
+/// An extension node the native route never builds. It stands in for the nodes whose input a
+/// `Partial` producer could hold without the region being able to run it.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct ForeignNode {
+    input: LogicalPlan,
+    schema: datafusion_common::DFSchemaRef,
+}
+
+impl PartialOrd for ForeignNode {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.input.partial_cmp(&other.input)
+    }
+}
+
+impl UserDefinedLogicalNodeCore for ForeignNode {
+    fn name(&self) -> &str {
+        "ForeignNode"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+
+    fn schema(&self) -> &datafusion_common::DFSchemaRef {
+        &self.schema
+    }
+
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ForeignNode")
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> DfResult<Self> {
+        let input = inputs.swap_remove(0);
+        Ok(Self {
+            schema: input.schema().clone(),
+            input,
+        })
+    }
+}
+
+fn foreign_over(input: LogicalPlan) -> LogicalPlan {
+    let schema = input.schema().clone();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(ForeignNode { input, schema }),
+    })
+}
+
+/// The state exception covers the producer's own series input, and nothing that is already a region
+/// boundary or a foreign node.
+///
+/// A discovered selector reads through a `RawSeriesSource` bound to one scan, and a selector that
+/// names no metric and matches several metrics unions those sources. Both state the same thing a
+/// bare scan states - one region reads these series - so both keep the exception. The shapes below
+/// do not: a source over an already-expanded scan has a merge scan in the position the producer
+/// reads from, a foreign extension is not a series input at all, and a producer that publishes
+/// values exports no state to fold.
+#[test]
+fn the_state_exception_admits_the_producer_series_input_only() {
+    let scan = || scan_of(TestTable::table_with_name(0, "t".to_string()));
+    let other = || scan_of(TestTable::table_with_name(1, "u".to_string()));
+
+    // The shape that was already admitted, unchanged.
+    assert!(
+        is_in_process_plan(&split_aggregate_over(scan())),
+        "a bare scan is the producer's series input"
+    );
+    // A discovered metric's source is that same scan, one node later.
+    assert!(
+        is_in_process_plan(&split_aggregate_over(raw_series_source(
+            "some_metric",
+            scan()
+        ))),
+        "a source over one scan is still one region's series"
+    );
+    // Several discovered metrics arrive as one union of those sources.
+    assert!(
+        is_in_process_plan(&split_aggregate_over(LogicalPlan::Union(
+            datafusion_expr::Union::try_new_with_loose_types(vec![
+                Arc::new(raw_series_source("some_metric", scan())),
+                Arc::new(raw_series_source("some_metric", other())),
+            ])
+            .unwrap()
+        ))),
+        "a union of sources is one series input per discovered metric"
+    );
+
+    // A source over an expanded scan is a region boundary, not a series input.
+    assert!(
+        !is_in_process_plan(&split_aggregate_over(raw_series_source(
+            "some_metric",
+            merge_scan_over(scan())
+        ))),
+        "the exception must not reach below a merge scan"
+    );
+    // An extension the route never builds gets no exception, whatever it holds.
+    assert!(
+        !is_in_process_plan(&split_aggregate_over(foreign_over(scan()))),
+        "a foreign extension is not a series input"
+    );
+    // A union whose children are not all sources is not the discovered shape either.
+    assert!(
+        !is_in_process_plan(&split_aggregate_over(LogicalPlan::Union(
+            datafusion_expr::Union::try_new_with_loose_types(vec![
+                Arc::new(raw_series_source("some_metric", scan())),
+                Arc::new(merge_scan_over(raw_series_source("some_metric", other()))),
+            ])
+            .unwrap()
+        ))),
+        "every union child must be a source over its own scan"
+    );
+    // A producer whose root publishes values exports no state, so the exception does not apply.
+    assert!(
+        !is_in_process_plan(&final_over(values_producer_over(scan()))),
+        "a values-producing producer exports no state"
+    );
+}
+
+/// A boundary names a metric only when the plan it hides does.
+///
+/// A producer that declares `__name__` without binding one name leans on its sources to name the
+/// metric each series came from, and a discovered selector's sources arrive behind one region
+/// boundary per branch. The proof therefore asks each boundary what its region runs and applies the
+/// same rules there: a source behind the boundary names its metric, a bare scan behind it does not,
+/// and a boundary behind a boundary is not a shape the planner produces.
+#[test]
+fn a_region_boundary_names_a_metric_only_when_the_plan_behind_it_does() {
+    let alpha = || {
+        raw_series_source(
+            "alpha_total",
+            scan_of(TestTable::table_with_name(0, "alpha_total".to_string())),
+        )
+    };
+    let beta = || {
+        raw_series_source(
+            "beta_total",
+            scan_of(TestTable::table_with_name(1, "beta_total".to_string())),
+        )
+    };
+
+    // One discovered metric: its source is what the region runs.
+    assert!(
+        discovery_producer_over(merge_scan_over(alpha())).is_ok(),
+        "a source behind one boundary names its metric"
+    );
+    // Several: one boundary per branch, each branch still its own source.
+    assert!(
+        discovery_producer_over(LogicalPlan::Union(
+            datafusion_expr::Union::try_new_with_loose_types(vec![
+                Arc::new(merge_scan_over(alpha())),
+                Arc::new(merge_scan_over(beta())),
+            ])
+            .unwrap()
+        ))
+        .is_ok(),
+        "every branch of a discovered union names its metric through its own boundary"
+    );
+}
+
+/// A discovered selector's union spans one region per branch, and each branch is placed on its own:
+/// the boundary is the branch's source over its scan, so the union and the aggregate that consumes
+/// it stay on the frontend.
+#[test]
+fn a_discovery_union_is_split_into_one_region_input_per_branch() {
+    let plan = split_aggregate_over(LogicalPlan::Union(
+        datafusion_expr::Union::try_new_with_loose_types(vec![
+            Arc::new(raw_series_source(
+                "alpha_total",
+                scan_of(TestTable::table_with_name(0, "alpha_total".to_string())),
+            )),
+            Arc::new(raw_series_source(
+                "beta_total",
+                scan_of(TestTable::table_with_name(1, "beta_total".to_string())),
+            )),
+        ])
+        .unwrap(),
+    ));
+    assert!(
+        is_in_process_plan(&plan),
+        "the discovered union is the producer's series input"
+    );
+
+    let analyzed = DistPlannerAnalyzer::new(true)
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    assert_eq!(
+        2,
+        count_merge_scans(&analyzed),
+        "each branch of the discovery union is its own region input: {analyzed}"
+    );
+
+    let mut branches = Vec::new();
+    collect_remote_inputs(&analyzed, &mut branches);
+    let mut metrics = branches
+        .iter()
+        .map(|branch| {
+            let LogicalPlan::Extension(extension) = branch else {
+                panic!("a branch's remote input is its raw series source: {branch}");
+            };
+            let source = extension
+                .node
+                .as_any()
+                .downcast_ref::<RawSeriesSource>()
+                .unwrap_or_else(|| {
+                    panic!("a branch's remote input is its raw series source: {branch}")
+                });
+            assert!(
+                matches!(
+                    UserDefinedLogicalNodeCore::inputs(source).as_slice(),
+                    [LogicalPlan::TableScan(_)]
+                ),
+                "the branch keeps its own scan: {branch}"
+            );
+            source.metric_name().to_string()
+        })
+        .collect::<Vec<_>>();
+    metrics.sort();
+    assert_eq!(vec!["alpha_total", "beta_total"], metrics);
+
+    // Neither the union nor the aggregate that consumes it may cross into a region.
+    for branch in &branches {
+        assert!(
+            !matches!(branch, LogicalPlan::Union(_)),
+            "the union stays on the frontend: {branch}"
+        );
+        assert!(
+            !holds_fused_series(branch),
+            "no aggregate consumer may cross into a region: {branch}"
+        );
+    }
+}
+
+fn holds_fused_series(plan: &LogicalPlan) -> bool {
+    is_fused_series_plan(plan) || plan.inputs().into_iter().any(holds_fused_series)
+}
+
+/// The remote input of every merge scan in `plan`, in the order they appear.
+fn collect_remote_inputs(plan: &LogicalPlan, inputs: &mut Vec<LogicalPlan>) {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+    {
+        inputs.push(merge_scan.input().clone());
+        return;
+    }
+    for input in plan.inputs() {
+        collect_remote_inputs(input, inputs);
+    }
 }
 
 #[test]
