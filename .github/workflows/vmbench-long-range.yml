@@ -2,6 +2,11 @@ name: VMBench Long Range
 on:
   workflow_dispatch:
     inputs:
+      greptimedb_storage:
+        description: 'GreptimeDB data storage (S3 requires AWS in the bucket region; WAL stays local)'
+        type: choice
+        options: [file, s3, both]
+        default: file
       run_greptimedb:
         description: Run GreptimeDB
         type: boolean
@@ -41,7 +46,7 @@ on:
         default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
         required: true
       runtime_image:
-        description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
+        description: 'Runtime image: auto = pinned S3 test runtime on ACR; explicit tag/digest overrides'
         type: string
         default: auto
         required: true
@@ -89,13 +94,18 @@ on:
 permissions:
   contents: read
 env:
+  GREPTIMEDB_STORAGE: ${{ inputs.greptimedb_storage || 'file' }}
+  S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+  S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+  RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
+  RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
   COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
   BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
   RANGE_PRESET: ${{ inputs.range_preset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:s3-test-b0cf5204d2fc@sha256:c2bf622db6056a2029842f4dc1cc1f37b82773bd45b134a0a83ffe2a8cd62214' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -119,6 +129,10 @@ jobs:
       with:
         path: greptimedb
         persist-credentials: false
+    - name: Validate GreptimeDB storage
+      run: |
+        python3 greptimedb/tests/perf/test_o11ybench_storage.py
+        python3 greptimedb/.github/scripts/o11ybench-storage.py validate
     - name: Validate version comparison
       env:
         RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
@@ -173,7 +187,7 @@ jobs:
         [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
         printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
         printf 'run_id=long-range-%s-%s\nplan_artifact=vmbench-plan-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-        args=(--workload vmbench-long-range --range-preset "$RANGE_PRESET"
+        args=(--workload vmbench-long-range --range-preset "$RANGE_PRESET" --greptimedb-storage "$GREPTIMEDB_STORAGE"
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
           --run-classification controlled_server_benchmark --no-open-browser)
         if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
@@ -192,7 +206,7 @@ jobs:
         # The packaged planner owns profile, target and resource-limit validation.
         mkdir -p "$RUNNER_TEMP/vmbench-plans"
         # Keep the original warm defaults: serial 5/1 and c1/c4 30s/5s.
-        docker run --rm "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
+        docker run --rm -e S3_BUCKET -e S3_REGION "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
           --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
           --output-root "$BENCHMARK_ROOT/o11ybench/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
           --cache-policy warm > "$RUNNER_TEMP/vmbench-plans/warm.json"
@@ -341,6 +355,9 @@ jobs:
           > "$METADATA_ROOT/warm-execution-plan.json"
         cat "$METADATA_ROOT/warm-execution-plan.json"
     - name: Warm serial and concurrent benchmarks
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
       run: |
         set -euo pipefail
         python3 -u o11ybench/scripts/run_benchmark_plan.py \
@@ -348,17 +365,31 @@ jobs:
           2>&1 | tee "$METADATA_ROOT/warm-execution.log"
         python3 o11ybench/scripts/check_run_benchmark_plan.py --artifacts "$ARTIFACT_ROOT-warm"
     - name: Clean up owned containers
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
       if: always()
       run: |
         docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-warm" | xargs -r docker rm -fv
+        if [[ -d "$ARTIFACT_ROOT-warm" ]]; then
+          for probe in "$ARTIFACT_ROOT-warm"/*/s3-probe.json; do
+            [[ -f "$probe" ]] || continue
+            python3 o11ybench/scripts/greptimedb_storage.py recover --runtime-image "$RESOLVED_RUNTIME_IMAGE" --output "${probe%/*}"
+          done
+        fi
     - name: GreptimeDB version comparison
       if: always() && inputs.compare_greptimedb
       run: |
         python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind long-range --root "$ARTIFACT_ROOT-warm" >> "$GITHUB_STEP_SUMMARY"
+    - name: Render storage comparison overview
+      run: |
+        python3 o11ybench/scripts/build_query_performance_report.py --metrics "$ARTIFACT_ROOT-warm" \
+          --output "$ARTIFACT_ROOT-warm-query-report.html" --json-output "$ARTIFACT_ROOT-warm-query-report.json"
     - name: Stage benchmark artifacts
       if: always()
       run: |
         mkdir -p "$RUNNER_TEMP/vmbench-artifacts"
+        cp "$ARTIFACT_ROOT-warm"-query-report.* "$RUNNER_TEMP/vmbench-artifacts/" 2>/dev/null || true
         if [[ -d "$METADATA_ROOT" ]]; then
           rsync -a --no-owner --no-group "$METADATA_ROOT" "$RUNNER_TEMP/vmbench-artifacts/"
         fi
