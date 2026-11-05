@@ -55,7 +55,8 @@ use datafusion::prelude::SessionContext;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::series::Label;
 use datatypes::series::aggregate_state::{
-    AggregateStateKind, AggregateStateSchema, AggregateStateValues, StateComponent, StateSeries,
+    AggregateStateKind, AggregateStateSchema, AggregateStateValues, StateComponent, StatePayload,
+    StateSeries,
 };
 use datatypes::series::frame::{
     FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeTag,
@@ -1155,7 +1156,10 @@ async fn aggregate_state_slice_wrappers_remain_charged_until_terminal_cleanup() 
                         vec![GridSpan::new(position, 1)],
                     )
                     .unwrap(),
-                    states: vec![vec![Some(AggregateStateValues::default())]; series.fields.len()],
+                    states: vec![
+                        vec![Some(StatePayload::Float(AggregateStateValues::default()))];
+                        series.fields.len()
+                    ],
                 },
                 true,
             ))
@@ -1298,11 +1302,11 @@ async fn chained_state_routers_share_parent_charge_for_multi_point_groups() {
         .map(|group| {
             let states = (0..POINTS)
                 .map(|point| {
-                    Some(AggregateStateValues {
+                    Some(StatePayload::Float(AggregateStateValues {
                         value: (group * POINTS + point) as f64,
                         compensation: -(point as f64),
                         ..Default::default()
-                    })
+                    }))
                 })
                 .collect();
             Ok((
@@ -1428,7 +1432,7 @@ async fn chained_state_routers_share_parent_charge_for_multi_point_groups() {
                 let row = row.to_state_series().unwrap();
                 assert_eq!(POINTS, row.time.len());
                 for (point, state) in row.states[0].iter().enumerate() {
-                    let state = state.unwrap();
+                    let state = state.as_ref().and_then(StatePayload::float).unwrap();
                     assert_eq!((group * POINTS + point) as f64, state.value);
                     assert_eq!(-(point as f64), state.compensation);
                 }

@@ -28,7 +28,7 @@ use datafusion::arrow::array::Array;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::MemoryReservation;
 use datatypes::series::aggregate_state::{
-    AggregateStateKind, AggregateStateValues, StateComponent, StateSeries,
+    AggregateStateKind, StateComponent, StatePayload, StateSeries,
 };
 use datatypes::series::frame::StateFrameRow;
 use datatypes::series::time::{GridSpan, TimeAxis};
@@ -158,9 +158,12 @@ pub(crate) fn state_row_from_frame_row(
     })
 }
 
-/// The kernel aggregate a state kind merges into.
-pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
-    match kind {
+/// The numeric kernel aggregate a state kind merges into.
+///
+/// A histogram state has no numeric accumulator, and no aggregate binds one through this route yet, so
+/// the conversion is fallible instead of mapping a histogram kind onto its numeric namesake.
+pub(crate) fn op_of_state(kind: AggregateStateKind) -> Result<AggregateOp> {
+    Ok(match kind {
         AggregateStateKind::Sum => AggregateOp::Sum,
         AggregateStateKind::Count => AggregateOp::Count,
         AggregateStateKind::Avg => AggregateOp::Avg,
@@ -169,7 +172,12 @@ pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
         AggregateStateKind::Group => AggregateOp::Group,
         AggregateStateKind::Stddev => AggregateOp::Stddev,
         AggregateStateKind::Stdvar => AggregateOp::Stdvar,
-    }
+        AggregateStateKind::HistogramSum | AggregateStateKind::HistogramAvg => {
+            return Err(DataFusionError::Execution(format!(
+                "{kind:?} state has no numeric aggregate to merge into"
+            )));
+        }
+    })
 }
 
 /// Transient bytes for the selected state array consumed by a decoded row.
@@ -256,13 +264,20 @@ pub(crate) fn state_bytes(chunk: &StateChunk) -> usize {
         let fields = series
             .states
             .capacity()
-            .saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>());
+            .saturating_mul(size_of::<Vec<Option<StatePayload>>>());
         let states = series.states.iter().fold(fields, |bytes, field| {
-            bytes.saturating_add(
-                field
-                    .capacity()
-                    .saturating_mul(size_of::<Option<AggregateStateValues>>()),
-            )
+            // The slot is sized for the payload family it holds; a histogram payload also owns its
+            // boxed state and both histograms' Arrow buffers, so its buckets are charged by width
+            // rather than estimated at a fixed size.
+            bytes
+                .saturating_add(
+                    field
+                        .capacity()
+                        .saturating_mul(size_of::<Option<StatePayload>>()),
+                )
+                .saturating_add(field.iter().flatten().fold(0usize, |heap, state| {
+                    heap.saturating_add(state.heap_bytes())
+                }))
         });
         total
             .saturating_add(size_of::<StateSeries>())
