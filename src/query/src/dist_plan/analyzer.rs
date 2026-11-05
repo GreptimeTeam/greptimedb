@@ -37,7 +37,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::{FusedOutputFormat, FusedSeries, SeriesDivide};
+use promql::extension_plan::{FusedOutputFormat, FusedSeries, SeriesDivide, state_is_finalized};
 use promql::native::plan::{AggregateStage, NativeExpr, NativeType};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -611,6 +611,14 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
         // A node reading its own scans is the route's whole plan by itself: one scan, or the
         // same-table one-to-one pair the route admits over two.
         return true;
+    }
+    // The outer link must finalize into values, not be another state exporter: a reducer above a
+    // reducer would satisfy "reads state" too, but only a `Final` is the consumer this exception
+    // exists for. The suffix the split moved above that aggregate - scalar arithmetic, a map, a
+    // histogram function - does not change which aggregate folds the state, so the question is
+    // asked of the tree rather than of its root.
+    if !state_is_finalized(fused.tree().root()) {
+        return false;
     }
     let [child] = fused.children() else {
         return false;

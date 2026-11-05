@@ -115,12 +115,6 @@ pub struct QueryOptions {
     /// and also requires the per-request `query.experimental_native_promql=true` extension.
     /// Default: `false`.
     pub experimental_native_promql: bool,
-    /// Enables a second state hop in the native PromQL aggregate split: the partitions export
-    /// aggregate state, a reducer folds state into state, and the merge above it finalizes. It only
-    /// affects queries the native path already handles, and also requires the per-request
-    /// `query.experimental_native_split_reduce=true` extension.
-    /// Default: `false`.
-    pub experimental_native_split_reduce: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -137,7 +131,6 @@ impl Default for QueryOptions {
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
             experimental_native_promql: false,
-            experimental_native_split_reduce: false,
         }
     }
 }

@@ -306,14 +306,6 @@ pub struct PromPlanner {
     /// The engine-wide `QueryOptions::experimental_native_promql` is applied while `QueryEngineState`
     /// is built; this planner reads the per-query request extension instead.
     native_fused: bool,
-    /// Whether a split aggregate puts a reducer between its two halves.
-    ///
-    /// Off unless the query asks for it: the engine-wide
-    /// `QueryOptions::experimental_native_split_reduce` and the per-query request extension
-    /// [`NATIVE_SPLIT_REDUCE_EXTENSION_KEY`](super::planner::native::NATIVE_SPLIT_REDUCE_EXTENSION_KEY)
-    /// both have to be on, exactly as the native route's own pair does. It is read only where the
-    /// native route splits an aggregate, so with the route off it changes nothing.
-    native_split_reduce: bool,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
@@ -329,15 +321,8 @@ impl PromPlanner {
         stmt: &EvalStmt,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
-        Self::stmt_to_plan_with_annotations(
-            table_provider,
-            stmt,
-            query_engine_state,
-            None,
-            false,
-            false,
-        )
-        .await
+        Self::stmt_to_plan_with_annotations(table_provider, stmt, query_engine_state, None, false)
+            .await
     }
 
     /// Plans a PromQL statement and passes the optional collector to histogram UDFs.
@@ -346,24 +331,18 @@ impl PromPlanner {
     /// [`compile`](crate::promql::native_compile::compile) first, and whatever that compiler does
     /// not accept is planned by the existing path, unchanged. See
     /// [`Self::try_plan_native_fused`].
-    ///
-    /// `native_split_reduce` asks a split aggregate for a second state hop, so the partitions export
-    /// state, a reducer folds state into state, and the merge above it finalizes. It is only read
-    /// where `native_fused` splits an aggregate.
     pub async fn stmt_to_plan_with_annotations(
         table_provider: DfTableSourceProvider,
         stmt: &EvalStmt,
         query_engine_state: &QueryEngineState,
         promql_annotations: Option<PromqlAnnotationCollector>,
         native_fused: bool,
-        native_split_reduce: bool,
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(stmt)?,
             promql_annotations,
             native_fused,
-            native_split_reduce,
         };
 
         // The whole statement is offered to the native compiler first, because that compiler folds

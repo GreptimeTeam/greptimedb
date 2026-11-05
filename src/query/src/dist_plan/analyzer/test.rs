@@ -875,6 +875,31 @@ fn the_two_level_split_is_admitted_in_process() {
     );
 }
 
+/// A state-exporting reducer is not a finalizing consumer, so it cannot take the exception even
+/// over a perfectly valid producer chain.
+#[test]
+fn a_reducer_above_the_producer_chain_is_not_an_in_process_final() {
+    let two = split_aggregate_plan(test_table_scan("t"), SplitDepth::Two);
+    // The reducer is the node below the merge: a valid state producer, not a finalizing consumer.
+    let LogicalPlan::Extension(extension) = &two else {
+        unreachable!()
+    };
+    let merge = extension
+        .node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .unwrap();
+    let [reducer_plan] = merge.children() else {
+        panic!("the merge has one input");
+    };
+    // The reducer standing where the merge was still folds state over a valid producer chain, but
+    // it loses the final half, so the exception must not fire.
+    assert!(
+        !is_in_process_plan(reducer_plan),
+        "a reducer above the producer chain is not a finalizing consumer"
+    );
+}
+
 /// A closed plan keeps the encoding checks for its state nodes: the exception is what admits them,
 /// so without in-process transport the plan is still refused as a whole.
 #[test]

@@ -20,11 +20,12 @@
 //! folds across series - an aggregate - is split instead: its per-series prefix and a `Partial`
 //! aggregate run in a `FusedSeries` producer, a `SeriesRepartitionExec` routes that state, and a
 //! second `FusedSeries` runs the `Final` aggregate over it, because a region holds only part of a
-//! group. Asking for the split's second state hop puts a `PartialReduce` between those two: the
-//! router carries the producer's state to a reducer, the reducer folds state into state, and a
-//! second router carries that to the merge. Declining is the normal answer: every shape the
-//! compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps the
-//! plan the existing planner builds.
+//! group. A cut whose groups can need more than one owner folds that state once more before the
+//! merge: a router carries the producer's state to a reducer, the reducer folds state into state,
+//! and a second router carries that to the merge. A cut whose groups are one group is finished by
+//! the merge wherever the state lands, so it keeps the one-hop plan. Declining is the normal answer:
+//! every shape the compiler does not accept, and every query this route cannot bind to a scan
+//! faithfully, keeps the plan the existing planner builds.
 //!
 //! What the node needs from here is the raw series schema the tree's input was compiled against
 //! (the selector's selected field columns), the statement's evaluation grid, and output tag names
@@ -61,7 +62,7 @@ use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
     RawSeriesSource, SplitDepth, SplitTrees, input_locality, matching_operands_drop_key,
-    tree_source_fields,
+    state_needs_several_owners, tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -100,26 +101,6 @@ use crate::query_engine::QueryEngineState;
 /// [`remote_dyn_filter_pushdown_enabled_from_extensions`]:
 ///     crate::options::remote_dyn_filter_pushdown_enabled_from_extensions
 pub const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
-
-/// The query-context key that asks for the second state hop of the native aggregate split.
-///
-/// It is read exactly like [`NATIVE_PROMQL_EXTENSION_KEY`], beside the engine-wide
-/// [`QueryOptions::experimental_native_split_reduce`], and it only decides a shape the native route
-/// was asked for anyway: without that route no split is planned, so this key changes no plan.
-///
-/// [`QueryOptions::experimental_native_split_reduce`]:
-///     crate::options::QueryOptions::experimental_native_split_reduce
-pub const NATIVE_SPLIT_REDUCE_EXTENSION_KEY: &str = "query.experimental_native_split_reduce";
-
-/// Whether `query_ctx` asks for a reducer between the two halves of a split aggregate.
-///
-/// Compared literally (`true` in any case), for the same reason the native route's own key is: an
-/// unrecognized value leaves the extra hop off, which is the plan the split has without it.
-pub(crate) fn native_split_reduce_requested(query_ctx: &QueryContextRef) -> bool {
-    query_ctx
-        .extension(NATIVE_SPLIT_REDUCE_EXTENSION_KEY)
-        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-}
 
 /// Whether `query_ctx` asks for the native fused-series route.
 ///
@@ -1285,17 +1266,21 @@ impl PromPlanner {
             // without this route. Its producer reads whatever input the statement prepared: over
             // the wire that is the raw series source, and the partial/final halves stay on the
             // frontend above the regions, so per-series work keeps the scan width.
+            //
+            // How many state hops the split takes follows the cut's ownership, not a caller's
+            // choice: a cut that can need more than one owner puts a `PartialReduce` between the
+            // two halves, so each owner folds the state it is routed before the merge finalizes it,
+            // while a cut whose groups are one group is finished by that merge wherever the state
+            // lands and keeps the one-hop plan. The question is the one the state router asks of
+            // the same aggregate, so both hops route by the group the merge finalizes by.
             let split = if !multi_input && selectors.len() == 1 {
-                FusedSeries::split_aggregate(
-                    &compiled.tree,
-                    &time,
-                    if self.native_split_reduce {
-                        SplitDepth::Two
-                    } else {
-                        SplitDepth::One
-                    },
-                )
-                .context(DataFusionPlanningSnafu)?
+                let depth = if state_needs_several_owners(compiled.tree.root()) {
+                    SplitDepth::Two
+                } else {
+                    SplitDepth::One
+                };
+                FusedSeries::split_aggregate(&compiled.tree, &time, depth)
+                    .context(DataFusionPlanningSnafu)?
             } else {
                 None
             };
@@ -3997,47 +3982,6 @@ mod tests {
             );
 
             assert!(!native_promql_requested(&query_ctx), "value: {value:?}");
-        }
-    }
-
-    /// The split's second hop is asked for with its own key, and nothing else turns it on.
-    #[test]
-    fn native_split_reduce_requested_reads_only_its_own_extension() {
-        let query_ctx = Arc::new(QueryContextBuilder::default().build());
-        assert!(!native_split_reduce_requested(&query_ctx));
-
-        // The native route's key does not ask for the hop.
-        let native_only = Arc::new(
-            QueryContextBuilder::default()
-                .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), "true".to_string())
-                .build(),
-        );
-        assert!(!native_split_reduce_requested(&native_only));
-
-        for value in ["true", "TRUE", "TrUe"] {
-            let query_ctx = Arc::new(
-                QueryContextBuilder::default()
-                    .set_extension(
-                        NATIVE_SPLIT_REDUCE_EXTENSION_KEY.to_string(),
-                        value.to_string(),
-                    )
-                    .build(),
-            );
-            assert!(native_split_reduce_requested(&query_ctx), "value: {value}");
-        }
-        for value in ["false", "FALSE", "yes", "1", " true ", ""] {
-            let query_ctx = Arc::new(
-                QueryContextBuilder::default()
-                    .set_extension(
-                        NATIVE_SPLIT_REDUCE_EXTENSION_KEY.to_string(),
-                        value.to_string(),
-                    )
-                    .build(),
-            );
-            assert!(
-                !native_split_reduce_requested(&query_ctx),
-                "value: {value:?}"
-            );
         }
     }
 }
