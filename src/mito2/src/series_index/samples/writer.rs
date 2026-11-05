@@ -575,6 +575,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn benchmark_small_sample_writes() {
+        common_telemetry::init_default_ut_logging();
         let capacity = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
         let fragment = vec![42; 100];
         let count = capacity / fragment.len() + 1;
@@ -592,7 +593,7 @@ mod tests {
             }
             buffer.flush(&mut outputs).await.unwrap();
             outputs.close().await.unwrap();
-            eprintln!(
+            common_telemetry::info!(
                 "buffered={buffered}, elapsed={:?}, submitted_fragments={}",
                 started.elapsed(),
                 if buffered { 2 } else { count }
