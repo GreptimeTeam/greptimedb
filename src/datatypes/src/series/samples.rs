@@ -664,12 +664,12 @@ impl SeriesFields {
 }
 
 /// Shared name and position of each output field.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct FieldSpec {
     pub name: Arc<str>,
 }
 /// Shared schema describing series fields.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct SeriesSchema {
     pub fields: Arc<[FieldSpec]>,
     /// Shared grid for regular series; its `GridSpec` must match each series grid axis. Explicit axes require `None`.

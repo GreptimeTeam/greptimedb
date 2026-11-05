@@ -44,7 +44,7 @@ pub enum Grouping {
 }
 
 /// The order `sort_instant` arranges an instant result in.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum SortOrder {
     /// `sort`: ascending values, NaN last.
     Asc,
@@ -371,7 +371,7 @@ pub struct LabelMatcher {
 }
 
 /// The operator of a [`LabelMatcher`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum MatchOp {
     Equal,
     NotEqual,

@@ -7,6 +7,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Lets the integration suite distinguish canonical routing from ordinary repartitioning.
+test-utils = []
+
 [dependencies]
 ahash.workspace = true
 async-trait.workspace = true
@@ -24,9 +28,11 @@ futures.workspace = true
 greptime-proto.workspace = true
 lazy_static.workspace = true
 mito-codec.workspace = true
+postcard.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 regex.workspace = true
+serde = { workspace = true, features = ["rc"] }
 snafu.workspace = true
 store-api.workspace = true
 table.workspace = true

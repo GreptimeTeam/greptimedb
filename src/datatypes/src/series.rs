@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod aggregate_state;
 pub mod frame;
 pub mod histogram;
 pub mod raw;
@@ -36,7 +37,7 @@ use crate::error::{InvalidSeriesSnafu, Result};
 /// evaluated streams use current name/label identity, not storage primary keys or object address/hash.
 /// This ordering
 /// is not a query-global ordering, partition-ownership rule, or finality guarantee.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum SeriesOrdering {
     /// Series chunks may interleave; positions within each series remain strictly increasing.
     Interleaved,
@@ -47,7 +48,7 @@ pub enum SeriesOrdering {
 }
 
 /// A label with shared UTF-8 name and value strings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub struct Label {
     /// Label name.
     pub name: Arc<str>,
@@ -61,10 +62,28 @@ pub struct Label {
 /// The metric name is only the `__name__` value (see [`Self::name`]); this type is
 /// the whole label set a PromQL series shows. It is neither a canonical
 /// matching/grouping identity nor a storage identity (read key / primary key).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SeriesLabels {
     name: Option<Arc<str>>,
     tags: Arc<[Label]>,
+}
+
+impl serde::Serialize for SeriesLabels {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        (&self.name, self.tags.as_ref()).serialize(serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for SeriesLabels {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let (name, tags): (Option<Arc<str>>, Vec<Label>) =
+            serde::Deserialize::deserialize(deserializer)?;
+        Self::try_new(name, tags).map_err(serde::de::Error::custom)
+    }
 }
 
 impl SeriesLabels {

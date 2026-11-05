@@ -22,9 +22,9 @@
 //!
 //! The frame names each series by its complete labels rather than by its storage key. The node's
 //! schema is fixed while the frontend plans it, where the region's key layout is unknown, and the
-//! receiver compares that schema exactly; an explicit frame depends only on the field names. The
-//! stream is one partition that reads every scan partition at once and interleaves them only where
-//! a series ends: a scan keeps each series in one partition, so every series stays contiguous.
+//! receiver compares that schema exactly; an explicit frame depends only on the field names. Each
+//! scan partition is re-labelled independently, keeping its place in the partition layout and
+//! each series contiguous within its scan partition.
 
 use std::fmt::{self, Formatter};
 use std::pin::Pin;
@@ -40,7 +40,6 @@ use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::MemoryConsumer;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -49,18 +48,21 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::Stream;
-use store_api::region_engine::{RawLabelSource, RawSeriesStream};
+use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
+use table::table::scan::SeriesScanExec;
 
-use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
 use crate::source::materialize_raw_labels;
 
 /// The ordering every frame of this node declares.
 ///
-/// Interleaving the scan partitions at series boundaries keeps each series contiguous but not the
-/// series in key order, and the schema has to be known before the region's scan declares its own.
+/// The frontend plans this node before the region's scan declares how it orders its keys, so the
+/// schema cannot carry the scan's own promise. The node therefore states the weakest one that its
+/// output always keeps: one scan partition emits one series after another, so each series stays
+/// contiguous, while the finer key-then-time order of the scan is not repeated here.
 const ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
 /// The logical node: one table scan bound to one metric's raw series.
@@ -109,14 +111,15 @@ impl RawSeriesSource {
     }
 
     /// The physical node over `series_scan`, the region's raw-series leaf for this binding.
-    pub fn to_execution_plan(
+    pub fn to_per_series_execution_plan(
         &self,
         series_scan: Arc<dyn ExecutionPlan>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(RawSeriesSourceExec::try_new(
+        Ok(Arc::new(RawSeriesSourceExec::try_new_with_provenance(
             series_scan,
             Arc::clone(&self.metric_name),
             self.fields.clone(),
+            true,
         )?))
     }
 }
@@ -201,22 +204,63 @@ impl UserDefinedLogicalNodeCore for RawSeriesSource {
     }
 }
 
-/// The physical node: the region's raw-series leaf, relabelled and read as one partition.
+/// One partition's relabelled frames, published under this node's declared ordering.
+///
+/// The scan states its own key order, which the node cannot repeat in a schema it fixed at plan
+/// time. Every other property is forwarded unchanged.
+struct DeclaredOrdering(SendableRawSeriesStream);
+
+impl Stream for DeclaredOrdering {
+    type Item = Result<RawSeriesChunk, BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.as_mut().poll_next(cx)
+    }
+}
+
+impl RawSeriesStream for DeclaredOrdering {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        self.0.schema()
+    }
+
+    fn label_source(&self) -> &RawLabelSource {
+        self.0.label_source()
+    }
+
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.0.label_decode_spec()
+    }
+
+    fn ordering(&self) -> SeriesOrdering {
+        ORDERING
+    }
+}
+
+/// The physical node: the region's raw-series leaf, re-labelling each scan partition in place.
 #[derive(Debug)]
 pub struct RawSeriesSourceExec {
     input: Arc<dyn ExecutionPlan>,
     metric_name: Arc<str>,
     series_schema: Arc<SeriesSchema>,
     properties: Arc<PlanProperties>,
+    per_series_scan: bool,
 }
 
 impl RawSeriesSourceExec {
-    fn try_new(
+    fn try_new_with_provenance(
         input: Arc<dyn ExecutionPlan>,
         metric_name: Arc<str>,
         fields: Vec<String>,
+        per_series_scan: bool,
     ) -> DataFusionResult<Self> {
+        let per_series_scan = per_series_scan && input.downcast_ref::<SeriesScanExec>().is_some();
         let series_schema = series_schema(&fields);
+        let partition_count = input.properties().partitioning.partition_count();
+        if partition_count == 0 {
+            return Err(DataFusionError::Plan(
+                "RawSeriesSourceExec child has zero partitions".to_string(),
+            ));
+        }
         // Rejects a child that is not a raw frame of these fields before the plan can run.
         unpack_raw_series(
             Box::pin(
@@ -229,7 +273,7 @@ impl RawSeriesSourceExec {
         )?;
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(frame_schema(&fields)?),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::UnknownPartitioning(partition_count),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -238,7 +282,17 @@ impl RawSeriesSourceExec {
             metric_name,
             series_schema,
             properties,
+            per_series_scan,
         })
+    }
+
+    /// Whether this node was built by a caller that declared its child a per-series scan, and that
+    /// child is one.
+    ///
+    /// A consumer may publish an identity as soon as its chain closes only under this property, so
+    /// it is answered from what the constructor established rather than from the node's type.
+    pub fn is_per_series_scan(&self) -> bool {
+        self.per_series_scan
     }
 }
 
@@ -299,10 +353,11 @@ impl ExecutionPlan for RawSeriesSourceExec {
             .iter()
             .map(|field| field.name.to_string())
             .collect();
-        Ok(Arc::new(Self::try_new(
+        Ok(Arc::new(Self::try_new_with_provenance(
             children.swap_remove(0),
             Arc::clone(&self.metric_name),
             fields,
+            self.per_series_scan,
         )?))
     }
 
@@ -311,61 +366,19 @@ impl ExecutionPlan for RawSeriesSourceExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        if partition != 0 {
+        let partition_count = self.properties.partitioning.partition_count();
+        if partition >= partition_count {
             return Err(DataFusionError::Execution(format!(
-                "RawSeriesSourceExec has one partition, got {partition}"
+                "RawSeriesSourceExec partition {partition} is out of bounds for {partition_count} partitions"
             )));
         }
-        let mut inputs = Vec::new();
-        for child_partition in 0..self.input.properties().partitioning.partition_count() {
-            let frames = self.input.execute(child_partition, Arc::clone(&context))?;
-            let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
-            inputs.push((
-                0,
-                materialize_raw_labels(raw)
-                    .map_err(|error| DataFusionError::External(Box::new(error)))?,
-            ));
-        }
-        let reservation = MemoryConsumer::new("RawSeriesSourceGather")
-            .register(&context.runtime_env().memory_pool);
-        pack_raw_series(Box::pin(GatheredRawSeries {
-            schema: Arc::clone(&self.series_schema),
-            label_source: RawLabelSource::Explicit,
-            inputs: SeriesGather::new(
-                spawn_partitions(inputs, &context.runtime_env().memory_pool),
-                reservation,
-            ),
-        }))
-    }
-}
-
-/// The partitions of one scan, read at once and interleaved where a series ends.
-struct GatheredRawSeries {
-    schema: Arc<SeriesSchema>,
-    label_source: RawLabelSource,
-    inputs: SeriesGather,
-}
-
-impl Stream for GatheredRawSeries {
-    type Item = Result<RawSeriesChunk, BoxedError>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().inputs)
-            .poll_next(cx)
-            .map(|item| item.map(|result| result.map(|(_, chunk)| chunk)))
-    }
-}
-
-impl RawSeriesStream for GatheredRawSeries {
-    fn schema(&self) -> &Arc<SeriesSchema> {
-        &self.schema
-    }
-
-    fn label_source(&self) -> &RawLabelSource {
-        &self.label_source
-    }
-
-    fn ordering(&self) -> SeriesOrdering {
-        ORDERING
+        let frames = self.input.execute(partition, context)?;
+        let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
+        let relabelled = materialize_raw_labels(raw)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        // The scan may promise a finer order than this node declares. Exchange the promise here so
+        // the published frame carries the schema the plan was built with, which is what the region
+        // and the frontend both compare.
+        pack_raw_series(Box::pin(DeclaredOrdering(relabelled)))
     }
 }

@@ -43,10 +43,11 @@ use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion_common::DataFusionError;
 use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use datatypes::error::InvalidSeriesSnafu;
+use datatypes::series::aggregate_state::{AggregateStateSchema, StateSeries};
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
     LabelDecodeSpec, LabelDecodeTag, SeriesFrameBuilder, SeriesFrameCursor, SeriesFrameDeclaration,
-    SeriesFrameDecoder, series_frame_label_decode, series_frame_schema,
+    SeriesFrameDecoder, StateFrameRow, series_frame_label_decode, series_frame_schema,
 };
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{Series, SeriesSchema};
@@ -70,6 +71,18 @@ const ORDERING_KEY: &str = "greptime.series.ordering";
 /// chunk has to carry besides it.
 pub type SendableEvaluatedSeriesStream =
     Pin<Box<dyn Stream<Item = Result<(Series, bool), BoxedError>> + Send>>;
+
+/// A stream of aggregate-state chunks and their producer-local finality.
+///
+/// Export accepts the existing field-major [`StateSeries`] representation and columnarises each
+/// chunk once. Import is intentionally asymmetric: [`SendableStateFrameStream`] retains typed Arrow
+/// handles so consumers do not rebuild a nested state tree.
+pub type SendableStateSeriesStream =
+    Pin<Box<dyn Stream<Item = Result<(StateSeries, bool), BoxedError>> + Send>>;
+
+/// A stream of decoded state rows retaining typed handles into their Arrow batch.
+pub type SendableStateFrameStream =
+    Pin<Box<dyn Stream<Item = Result<StateFrameRow, BoxedError>> + Send>>;
 
 /// Builds the canonical raw frame schema with the producer's label binding and ordering.
 ///
@@ -100,7 +113,9 @@ pub fn raw_series_frame_schema_with_ordering(
 ///
 /// The mode and description pair is checked by [`series_frame_schema`], so a key mode without a
 /// description and an explicit mode with one are both rejected here instead of reaching the wire.
-fn frame_schema_with(
+/// A node that re-declares its child's frame and publishes under that declaration uses this: the
+/// declaration has to survive the round trip, and this is the one place that decides what it is.
+pub fn frame_schema_with(
     schema: &SeriesSchema,
     mode: FrameLabelMode,
     decode: Option<&LabelDecodeSpec>,
@@ -280,6 +295,124 @@ pub fn pack_evaluated_series(
     }))
 }
 
+/// Packs aggregate-state chunks into bounded DataFusion record batches.
+///
+/// The producer supplies one [`StateSeries`] per group chunk; the cursor columnarises it into the
+/// frame once. Aggregate state requires a grid, explicit labels and contiguous ordering. The state
+/// schema is revalidated with its own constructor before any stream is returned.
+pub fn pack_aggregate_state(
+    source: SendableStateSeriesStream,
+    state: Arc<AggregateStateSchema>,
+    schema: Arc<SeriesSchema>,
+) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+    if schema.eval_grid.is_none() {
+        return Err(invalid("an aggregate state frame needs an evaluation grid"));
+    }
+    AggregateStateSchema::try_new(state.kind, state.components.to_vec()).map_err(codec_error)?;
+    let frame_schema = datatypes::series::frame::aggregate_state_frame_schema(
+        &state,
+        &schema,
+        FrameLabelMode::Explicit,
+    )
+    .map_err(codec_error)?;
+    let mut metadata = frame_schema.metadata().clone();
+    metadata.insert(ORDERING_KEY.to_string(), "contiguous".to_string());
+    let frame_schema = Arc::new(ArrowSchema::new_with_metadata(
+        frame_schema.fields().clone(),
+        metadata,
+    ));
+    let builder = SeriesFrameBuilder::try_new_aggregate_state(
+        &state,
+        &schema,
+        FrameLabelMode::Explicit,
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+    .map_err(codec_error)?;
+    let decoder =
+        SeriesFrameDecoder::try_new_aggregate_state(&state, &schema, FrameLabelMode::Explicit)
+            .map_err(codec_error)?;
+    // Decoding the empty batch validates the exact declared layout before publishing this stream.
+    decoder
+        .decode_aggregate_state(&DfRecordBatch::new_empty(frame_schema.clone()))
+        .map_err(codec_error)?;
+    Ok(Box::pin(PackStateStream {
+        source: Some(source),
+        state,
+        schema,
+        batches: PackBatches::new(builder, frame_schema),
+    }))
+}
+
+/// Unpacks aggregate-state frames while retaining Arrow-backed state rows.
+///
+/// Kind and ordered components must both agree: the kind describes the accumulator semantics while
+/// components describe its physical values. Expected fields and grid are checked independently.
+pub fn unpack_aggregate_state(
+    source: DfSendableRecordBatchStream,
+    expected_state: Option<Arc<AggregateStateSchema>>,
+    expected_series: Option<Arc<SeriesSchema>>,
+) -> datafusion_common::Result<SendableStateFrameStream> {
+    let frame_schema = source.schema();
+    let declaration = SeriesFrameDeclaration::parse(frame_schema.as_ref()).map_err(codec_error)?;
+    if declaration.content() != FrameContent::AggregateState {
+        return Err(invalid(format!(
+            "expected an aggregate state frame, found {}",
+            declaration.content().as_str()
+        )));
+    }
+    ensure_contiguous_ordering(series_frame_ordering(frame_schema.as_ref())?)?;
+    let state = declaration
+        .aggregate_state()
+        .ok_or_else(|| invalid("aggregate state declaration has no aggregate state"))?;
+    if let Some(expected) = expected_state {
+        if state.kind != expected.kind {
+            return Err(invalid(
+                "aggregate state kind does not match expected state",
+            ));
+        }
+        if state.components != expected.components {
+            return Err(invalid(
+                "aggregate state components do not match expected state",
+            ));
+        }
+    }
+    let schema = Arc::new(declaration.series().clone());
+    if let Some(expected) = expected_series {
+        if expected.fields.len() != schema.fields.len()
+            || expected
+                .fields
+                .iter()
+                .zip(schema.fields.iter())
+                .any(|(a, b)| a.name != b.name)
+        {
+            return Err(invalid(
+                "aggregate state fields do not match expected series",
+            ));
+        }
+        if expected.eval_grid.as_ref().map(|grid| grid.spec())
+            != schema.eval_grid.as_ref().map(|grid| grid.spec())
+        {
+            return Err(invalid(
+                "aggregate state grid does not match expected series",
+            ));
+        }
+    }
+    let decoder =
+        SeriesFrameDecoder::try_new_aggregate_state(state, &schema, FrameLabelMode::Explicit)
+            .map_err(codec_error)?;
+    // Validate even empty streams before returning them, rather than deferring declaration errors.
+    decoder
+        .decode_aggregate_state(&DfRecordBatch::new_empty(frame_schema.clone()))
+        .map_err(codec_error)?;
+    Ok(Box::pin(UnpackStateStream {
+        source: Some(source),
+        frame_schema,
+        pending: Vec::new().into_iter(),
+        decoder,
+    }))
+}
+
 /// Unpacks DataFusion batches declared by [`pack_raw_series`].
 ///
 /// The frame is the sole source of decode information: the payload fields, the label mode, the
@@ -355,7 +488,10 @@ pub fn unpack_evaluated_series(
     let frame_schema = source.schema();
     let declaration = SeriesFrameDeclaration::parse(frame_schema.as_ref()).map_err(codec_error)?;
     if declaration.content() != FrameContent::Evaluated {
-        return Err(invalid("expected an evaluated frame, found a raw one"));
+        return Err(invalid(format!(
+            "expected an evaluated frame, found {}",
+            declaration.content().as_str()
+        )));
     }
     ensure_contiguous_ordering(series_frame_ordering(frame_schema.as_ref())?)?;
     let schema = Arc::new(declaration.series().clone());
@@ -804,6 +940,166 @@ impl Stream for PackStream {
 impl datafusion::physical_plan::RecordBatchStream for PackStream {
     fn schema(&self) -> ArrowSchemaRef {
         self.batches.frame_schema.clone()
+    }
+}
+
+/// The pack stream of [`pack_aggregate_state`].
+struct PackStateStream {
+    source: Option<SendableStateSeriesStream>,
+    state: Arc<AggregateStateSchema>,
+    schema: Arc<SeriesSchema>,
+    batches: PackBatches,
+}
+
+impl PackStateStream {
+    fn finish(&mut self) {
+        self.source = None;
+        self.batches.release();
+    }
+}
+
+impl Stream for PackStateStream {
+    type Item = datafusion_common::Result<DfRecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        loop {
+            match this.batches.advance() {
+                Ok(Some(batch)) => return this.batches.declare(batch),
+                Ok(None) => {}
+                Err(error) => {
+                    this.finish();
+                    return Poll::Ready(Some(Err(codec_error(error))));
+                }
+            }
+            let polled = match this.source.as_mut() {
+                Some(source) => source.as_mut().poll_next(cx),
+                None => return Poll::Ready(None),
+            };
+            match polled {
+                Poll::Pending => {
+                    return match this.batches.flush() {
+                        Ok(Some(batch)) => this.batches.declare(batch),
+                        Ok(None) => Poll::Pending,
+                        Err(error) => {
+                            this.finish();
+                            Poll::Ready(Some(Err(codec_error(error))))
+                        }
+                    };
+                }
+                Poll::Ready(None) => {
+                    let flushed = this.batches.flush();
+                    let declared = this.batches.frame_schema.clone();
+                    this.finish();
+                    return match flushed {
+                        Ok(Some(batch)) => {
+                            match DfRecordBatch::try_new(declared, batch.columns().to_vec()) {
+                                Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                                Err(error) => Poll::Ready(Some(Err(DataFusionError::from(error)))),
+                            }
+                        }
+                        Ok(None) => Poll::Ready(None),
+                        Err(error) => Poll::Ready(Some(Err(codec_error(error)))),
+                    };
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    this.finish();
+                    return Poll::Ready(Some(Err(upstream_error(error))));
+                }
+                Poll::Ready(Some(Ok((series, is_last)))) => {
+                    match SeriesFrameCursor::try_new_aggregate_state(
+                        &this.state,
+                        &this.schema,
+                        series,
+                        is_last,
+                    ) {
+                        Ok(cursor) => this.batches.install(cursor),
+                        Err(error) => {
+                            this.finish();
+                            return Poll::Ready(Some(Err(codec_error(error))));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl datafusion::physical_plan::RecordBatchStream for PackStateStream {
+    fn schema(&self) -> ArrowSchemaRef {
+        self.batches.frame_schema.clone()
+    }
+}
+
+/// The unpack stream of [`unpack_aggregate_state`].
+struct UnpackStateStream {
+    source: Option<DfSendableRecordBatchStream>,
+    frame_schema: ArrowSchemaRef,
+    pending: std::vec::IntoIter<StateFrameRow>,
+    decoder: SeriesFrameDecoder,
+}
+
+impl UnpackStateStream {
+    fn finish(&mut self) {
+        self.source = None;
+        self.pending = Vec::new().into_iter();
+    }
+}
+
+impl Stream for UnpackStateStream {
+    type Item = Result<StateFrameRow, BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let mut empty_batches = 0;
+        loop {
+            if let Some(row) = this.pending.next() {
+                return Poll::Ready(Some(Ok(row)));
+            }
+            let polled = match this.source.as_mut() {
+                Some(source) => source.as_mut().poll_next(cx),
+                None => return Poll::Ready(None),
+            };
+            match polled {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    this.finish();
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    this.finish();
+                    return Poll::Ready(Some(Err(BoxedError::new(
+                        crate::error::Error::GeneralDataFusion {
+                            error,
+                            location: snafu::Location::default(),
+                        },
+                    ))));
+                }
+                Poll::Ready(Some(Ok(batch))) => {
+                    let result = if batch.schema() != this.frame_schema {
+                        Err(invalid("aggregate state frame schema mismatch"))
+                    } else {
+                        this.decoder
+                            .decode_aggregate_state(&batch)
+                            .map_err(codec_error)
+                    };
+                    match result {
+                        Ok(rows) if rows.is_empty() => {
+                            empty_batches += 1;
+                            if empty_batches == MAX_EMPTY_BATCHES_PER_POLL {
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
+                            }
+                        }
+                        Ok(rows) => this.pending = rows.into_iter(),
+                        Err(error) => {
+                            this.finish();
+                            return Poll::Ready(Some(Err(unpack_error(error))));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

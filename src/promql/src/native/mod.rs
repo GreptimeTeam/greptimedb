@@ -29,9 +29,11 @@
 
 mod aggregate;
 pub mod batch;
+pub mod canonicalize;
 mod display;
 pub mod execute;
 pub mod metrics;
 pub mod plan;
 pub(crate) mod runs;
-pub(crate) mod wire;
+pub(crate) mod split;
+pub(crate) mod state;

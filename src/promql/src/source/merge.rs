@@ -71,16 +71,6 @@ pub(crate) fn merge_raw_identity_charging(
         {
             return Err(invalid("raw identity chunk shape does not match schema"));
         }
-        if chunk
-            .time
-            .as_buffer()
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-        {
-            return Err(invalid(
-                "raw identity chunk timestamps are not strictly increasing",
-            ));
-        }
     }
 
     let mut row_count = 0usize;

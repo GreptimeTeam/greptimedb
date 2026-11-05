@@ -98,11 +98,11 @@ fn ordinary_encodable_plan_keeps_in_process_encodability_gate() {
 
     let in_process_rewriter = PlanRewriter::new(&plan, true);
     assert!(in_process_rewriter.whole_plan_encodable);
-    assert!(!in_process_rewriter.skip_encodability_gate);
+    assert!(!in_process_rewriter.skip_in_process_encodability);
 
     let wire_rewriter = PlanRewriter::new(&plan, false);
     assert!(wire_rewriter.whole_plan_encodable);
-    assert!(!wire_rewriter.skip_encodability_gate);
+    assert!(!wire_rewriter.skip_in_process_encodability);
 }
 
 struct MergeScanRemoteDynFilterProducerIdCollector<'a> {
@@ -630,6 +630,87 @@ fn unencodable_unnest_stays_above_merge_scan() {
             .encode(remote_input, DefaultSerializer)
             .unwrap();
     }
+}
+
+/// The naming projection over a native plan keeps the in-process exception, and nothing wider.
+///
+/// A split aggregate publishes the statement's own value names from a projection above the `Final`
+/// node, so the exception has to see through that one wrapper. It must not see through computed
+/// projections, stacked wrappers, or a projection over a shape that was never admitted.
+#[test]
+fn a_naming_projection_does_not_widen_the_in_process_exception() {
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let plan = hybrid_fused(
+        LogicalPlanBuilder::scan(
+            "t",
+            Arc::new(DefaultTableSource::new(Arc::new(
+                DfTableProviderAdapter::new(table),
+            ))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap(),
+        "t",
+    );
+    assert!(
+        is_in_process_plan(&plan),
+        "the bare native root is the exception"
+    );
+
+    // One column-or-alias projection is the naming layer the route builds.
+    let named = LogicalPlanBuilder::from(plan.clone())
+        .project(vec![col("v0").alias("sum(t.v0)")])
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        is_in_process_plan(&named),
+        "a column alias above the native root keeps the exception"
+    );
+
+    // Anything else loses it, because the exception is not a general wrapper allowance.
+    let computed = LogicalPlanBuilder::from(plan.clone())
+        .project(vec![(col("v0") + lit(1.0)).alias("sum(t.v0)")])
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        !is_in_process_plan(&computed),
+        "a computed projection is not a rename"
+    );
+
+    let stacked = LogicalPlanBuilder::from(named)
+        .project(vec![col("sum(t.v0)")])
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        !is_in_process_plan(&stacked),
+        "the exception admits one wrapper, not two"
+    );
+
+    // The same projection over a plan that is not the native route keeps the exception off too.
+    let foreign = LogicalPlanBuilder::from(
+        LogicalPlanBuilder::scan(
+            "t",
+            Arc::new(DefaultTableSource::new(Arc::new(
+                DfTableProviderAdapter::new(TestTable::table_with_name(0, "t".to_string())),
+            ))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap(),
+    )
+    .project(vec![col("number").alias("sum(t.number)")])
+    .unwrap()
+    .build()
+    .unwrap();
+    assert!(
+        !is_in_process_plan(&foreign),
+        "a rename above an ordinary scan is not the exception"
+    );
 }
 
 #[test]

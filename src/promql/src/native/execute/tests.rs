@@ -276,6 +276,134 @@ fn instant(
 }
 
 #[test]
+fn window_and_limitk_collect_only_unified_contributions() {
+    let grid = grid(0, 1_000, 2);
+
+    let build = |node: NativeNode| {
+        let tree = NativeTree::try_new(node).unwrap();
+        let mut inputs = Vec::new();
+        let mut binary_before = 0;
+        RuntimeNode::build(
+            tree.root(),
+            &pool(),
+            &mut inputs,
+            &mut binary_before,
+            "root".to_string(),
+            None,
+        )
+        .unwrap()
+        .0
+    };
+
+    let raw_window = build(window_with(
+        evaluated_input(Arc::clone(&grid)),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: raw_merge, ..
+    } = raw_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        raw_merge.is_none(),
+        "unknown input keeps the old no-merge behavior"
+    );
+
+    let fragmented_window = build(window_with(
+        map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: fragmented_merge,
+        ..
+    } = fragmented_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        fragmented_merge.is_some(),
+        "reported fragments must be collected"
+    );
+
+    let merged_window = build(window_with(
+        merge(evaluated_input(Arc::clone(&grid))),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: merged_input,
+        ..
+    } = merged_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        merged_input.is_none(),
+        "already-unified contributions need no collection"
+    );
+
+    let raw_limitk = build(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ));
+    let RuntimeOp::Vector {
+        vector: Some(vector),
+        ..
+    } = raw_limitk.op
+    else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "input with unknown grouping is not merged here"
+    );
+
+    let limitk = || BoundVectorOp::LimitK {
+        k: 1.0,
+        group: Grouping::By(Arc::from([])),
+    };
+    let fragmented = map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]);
+    let fragmented_limitk = build(vector_op(fragmented, limitk()));
+    let RuntimeOp::Vector {
+        vector: Some(vector),
+        ..
+    } = fragmented_limitk.op
+    else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        vector.merge_input,
+        "limitk must merge fragmented input series"
+    );
+
+    let unified = merge(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]));
+    let unified_limitk = build(vector_op(unified, limitk()));
+    let RuntimeOp::Vector {
+        vector: Some(vector),
+        ..
+    } = unified_limitk.op
+    else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "limitk must not re-merge unified input"
+    );
+}
+
+#[test]
 fn timestamp_instant_rejects_negative_lookback() {
     let output_grid = grid(500, 1_000, 1);
     let mut root = instant(input(), -1, 0, Arc::clone(&output_grid));
@@ -558,7 +686,7 @@ fn raw_shared_histogram_chunk(
 fn source_runtime(pool: &Arc<dyn MemoryPool>) -> InputSlot {
     InputSlot {
         source_index: 0,
-        schema: raw_schema(),
+        kind: super::LeafKind::Raw,
         open_source_series: false,
         state: NodeState::new(
             "native.input at root (source_index=0)",
@@ -586,6 +714,8 @@ fn binary_runtime(
         BinaryRuntime::new(
             PairKernel::Binary(Arc::new(binary_matching(BinaryOp::Add))),
             [Arc::clone(schema), Arc::clone(schema)],
+            0,
+            None,
         ),
     )
 }
@@ -749,7 +879,7 @@ fn bounded_pool(bytes: usize) -> Arc<dyn MemoryPool> {
 }
 
 fn executor(tree: &NativeTree, pool: Arc<dyn MemoryPool>) -> NativeExecutor {
-    NativeExecutor::new(NativeExecutionState::try_new(tree, pool).unwrap())
+    NativeExecutor::new(NativeExecutionState::try_new(tree, pool, None).unwrap())
 }
 
 /// Pulls until the tree has nothing settled, then closes it.
@@ -819,7 +949,7 @@ fn scalar_root_reserves_before_allocating_and_counts_its_output() {
 
     let pool = pool();
     let metrics = ExecutionPlanMetricsSet::new();
-    let state = NativeExecutionState::try_new(&tree, Arc::clone(&pool)).unwrap();
+    let state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
     state.register_metrics(&metrics, 0);
     let mut execution = NativeExecutor::new(state);
     execution.end_of_input().unwrap();
@@ -1753,7 +1883,7 @@ fn an_unimplemented_node_is_reported_not_panicked() {
     for (kind, reason, root) in cases {
         // Legality stays `validate`'s: the plan accepts these trees, the runtime does not run them.
         let tree = NativeTree::try_new(root).expect("the bound tree is legal");
-        let error = match NativeExecutionState::try_new(&tree, pool()) {
+        let error = match NativeExecutionState::try_new(&tree, pool(), None) {
             Ok(_) => panic!("the runtime accepted a {kind} node"),
             Err(error) => error,
         };
@@ -3547,7 +3677,7 @@ fn standalone_merge_keeps_queued_label_bytes_reserved_until_drain() {
     const SERIES: usize = 64;
     const LABEL_BYTES: usize = 4 * 1024;
 
-    let grid = grid(0, 1, 1);
+    let grid = grid(0, 1, 16);
     let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
     let schema = evaluated_schema(grid);
     let pool = pool();
@@ -4283,7 +4413,7 @@ fn a_window_over_an_interleaved_input_is_rejected() {
         Arc::clone(&outer_grid),
     ))
     .expect("the binding accepts a window over a map");
-    let error = match NativeExecutionState::try_new(&tree, pool()) {
+    let error = match NativeExecutionState::try_new(&tree, pool(), None) {
         Ok(_) => panic!("the runtime accepted an interleaved input under a window"),
         Err(error) => error,
     };
@@ -4311,7 +4441,7 @@ fn an_interleaved_input_is_refused_without_a_window() {
         vec![MathOp::Abs],
     ))
     .expect("the binding accepts a map over an interleaved input");
-    let error = match NativeExecutionState::try_new(&tree, pool()) {
+    let error = match NativeExecutionState::try_new(&tree, pool(), None) {
         Ok(_) => panic!("the runtime accepted an interleaved input with no window above it"),
         Err(error) => error,
     };
@@ -5811,6 +5941,42 @@ fn binary_of(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> N
             ),
         })),
     }
+}
+
+#[test]
+fn binary_runtime_indices_are_assigned_in_preorder() {
+    let grid = grid(0, 60_000, 2);
+    let inner = binary_of(
+        evaluated_input(Arc::clone(&grid)),
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let root = binary_of(
+        inner,
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Mul),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let execution = NativeExecutionState::try_new(&tree, pool(), None).unwrap();
+
+    let RuntimeOp::Binary {
+        left,
+        binary: Some(root_binary),
+        ..
+    } = &execution.root.op
+    else {
+        panic!("the root is not a binary runtime");
+    };
+    let RuntimeOp::Binary {
+        binary: Some(inner_binary),
+        ..
+    } = &left.op
+    else {
+        panic!("the left child is not a binary runtime");
+    };
+
+    assert_eq!(root_binary.node_index, 0);
+    assert_eq!(inner_binary.node_index, 1);
 }
 
 /// A source of evaluated chunks over `count` float fields.
@@ -9692,8 +9858,12 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
         .next_chunk()
         .expect_err("the output label set and occupied positions conflict");
     let message = error.to_string();
+    // The refusal names the defect the way Prometheus does: one label set holding two series. The
+    // scalar broadcast produced no label set of its own, so the rendering is empty and the two
+    // series are told apart only by what they produced.
     assert!(
-        message.contains("that both hold a value of field"),
+        message.contains("vector cannot contain metrics with the same labelset")
+            && message.contains("two series hold a value of field 0"),
         "expected the collision the node produces, got: {message:?}"
     );
     assert_eq!(
@@ -10019,9 +10189,9 @@ fn aggregate_fold_state_is_released_after_input() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// An aggregate kind or stage this runtime does not compute is refused, naming what was found.
+/// An aggregate kind this runtime does not compute is refused, naming what was found.
 #[test]
-fn an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named() {
+fn an_aggregate_kind_the_runtime_does_not_compute_is_named() {
     let grid = || grid(0, 60_000, 4);
     let kind_tree = NativeTree::try_new(aggregate(
         evaluated_input(grid()),
@@ -10032,44 +10202,45 @@ fn an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named() {
         },
     ))
     .unwrap();
-    let partial_tree = {
-        let out = grid();
-        let group = Grouping::By(Arc::new(["job".into()]));
-        let state = Arc::new(AggregateStateSchema {
-            group: group.clone(),
-            accumulators: fields(),
-            grid: Arc::clone(&out),
-        });
-        NativeTree::try_new(NativeNode {
-            expr: NativeExpr::Aggregate {
-                input: Box::new(evaluated_input(Arc::clone(&out))),
-                op: BoundAggregate {
-                    kind: AggregateKind::Sum,
-                    group,
-                    stage: AggregateStage::Partial,
-                },
-            },
-            output: NativeType::AggregateState(state),
-        })
-        .unwrap()
+    let error = match NativeExecutionState::try_new(&kind_tree, pool(), None) {
+        Ok(_) => panic!("the runtime accepted a Quantile aggregate"),
+        Err(error) => error,
     };
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "Quantile: {error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("Quantile"), "Quantile: {message}");
 
-    for (found, tree) in [("Quantile", kind_tree), ("Partial", partial_tree)] {
-        let error = match NativeExecutionState::try_new(&tree, pool()) {
-            Ok(_) => panic!("the runtime accepted a {found} aggregate"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "{found}: {error}"
-        );
-        let message = error.to_string();
-        assert!(message.contains(found), "{found}: {message}");
-        // A `Partial` rejection has to say why it is not computed: the stages it would need.
-        if found == "Partial" {
-            assert!(message.contains("Final"), "{message}");
-        }
-    }
+    let out = grid();
+    let group = Grouping::By(Arc::new(["job".into()]));
+    let state = Arc::new(AggregateStateSchema {
+        group: group.clone(),
+        kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+        components: Arc::from([
+            datatypes::series::aggregate_state::StateComponent::Value,
+            datatypes::series::aggregate_state::StateComponent::Compensation,
+        ]),
+        accumulators: fields(),
+        grid: Arc::clone(&out),
+    });
+    let partial_tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(evaluated_input(Arc::clone(&out))),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group,
+                stage: AggregateStage::Partial,
+            },
+        },
+        output: NativeType::AggregateState(state),
+    })
+    .unwrap();
+    assert!(
+        NativeExecutionState::try_new(&partial_tree, pool(), None).is_ok(),
+        "the runtime rejected a Partial aggregate"
+    );
 }
 
 /// An aggregate above a window that collects and merges its input waits for that merge.
@@ -10171,7 +10342,7 @@ fn count_values_runtime_rejects_grouping_by_another_value_field() {
         },
     ))
     .unwrap();
-    let error = NativeExecutionState::try_new(&tree, pool())
+    let error = NativeExecutionState::try_new(&tree, pool(), None)
         .err()
         .expect("grouping by another value field is unsupported");
     assert!(
@@ -10223,7 +10394,7 @@ fn topk_runtime_rejects_grouping_by_a_value_field() {
         },
     ))
     .unwrap();
-    let error = NativeExecutionState::try_new(&tree, pool())
+    let error = NativeExecutionState::try_new(&tree, pool(), None)
         .err()
         .expect("grouping by a value field is unsupported");
     assert!(
@@ -10251,7 +10422,7 @@ fn topk_runtime_accepts_grouping_by_a_label() {
         },
     ))
     .unwrap();
-    NativeExecutionState::try_new(&tree, pool()).expect("a label grouping stays supported");
+    NativeExecutionState::try_new(&tree, pool(), None).expect("a label grouping stays supported");
 }
 
 /// The positions a series decided, with their values.
@@ -10813,7 +10984,8 @@ fn a_label_rewrite_relabels_series_and_refuses_a_shared_point() {
         .unwrap();
     let error = execution.next_chunk().unwrap_err().to_string();
     assert!(
-        error.contains("both hold a value of field 0 at position 1"),
+        error.contains("vector cannot contain metrics with the same labelset")
+            && error.contains("two series hold a value of field 0 at position 1"),
         "{error}"
     );
 }
@@ -10942,14 +11114,11 @@ fn a_label_change_admits_the_label_it_writes_before_building_it() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// An ended execution keeps its tree and its registered counters, and nothing the input was read
-/// with: the schema the leaf was bound to and the grid that schema is addressed on go with it.
-///
-/// The leaf itself stays -- the root still says which routing slot it is, and the handles the caller
-/// registered before the run still read what the nodes recorded -- but the slot that fed it is
-/// taken, so an executor kept alive past the execution holds no input schema and no materialized
-/// grid. Both ways an execution ends are covered: the answer is drained, and a rejected push stops
-/// it first.
+/// An ended execution keeps its tree and its registered counters, but neither the input schema nor
+/// the grid it is addressed on. The leaf itself stays -- the root still says which routing slot it
+/// is, and the handles the caller registered before the run still read what the nodes recorded --
+/// but the slot that fed it is taken. Both ways an execution ends are covered: the answer is drained,
+/// and a rejected push stops it first.
 #[test]
 fn an_ended_execution_keeps_no_input_schema_or_grid() {
     for fails in [false, true] {
@@ -10973,16 +11142,6 @@ fn an_ended_execution_keeps_no_input_schema_or_grid() {
         drop(tree);
         drop(schema);
         drop(out_grid);
-        // A chunk addresses its grid but holds no schema, so what still holds either of them is the
-        // slot the input leaf reads through: that is what the terminal checks below ask about.
-        assert!(
-            schema_weak.upgrade().is_some(),
-            "the queued input is not what holds the schema it was bound to"
-        );
-        assert!(
-            grid_weak.upgrade().is_some(),
-            "the queued input is not what holds the grid it is addressed on"
-        );
         assert!(
             root_holds(&execution, holds_input),
             "the root is not the input leaf the tree built"
@@ -11017,6 +11176,15 @@ fn an_ended_execution_keeps_no_input_schema_or_grid() {
             drop(refused);
         }
 
+        // The chunks still queued on the execution must not retain either input allocation.
+        assert!(
+            schema_weak.upgrade().is_none(),
+            "queued chunks retained the schema they were built with"
+        );
+        assert!(
+            grid_weak.upgrade().is_none(),
+            "queued chunks retained the grid they are addressed on"
+        );
         // What the caller registered before the run sees is what the nodes recorded.
         assert!(
             schema_weak.upgrade().is_none(),
@@ -11250,4 +11418,452 @@ fn point_wise_nodes_reserve_the_series_their_kernel_builds() {
             assert_eq!(pool.reserved(), 0, "{node}");
         }
     }
+}
+
+fn aggregate_with_output(input: NativeNode, op: BoundAggregate, output: NativeType) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(input),
+            op,
+        },
+        output,
+    }
+}
+
+/// A state chunk the producer hands over stays charged until the consumer drops it.
+///
+/// The producer queues a chunk against its own reservation and gives that reservation back when the
+/// chunk leaves the queue. A consumer that keeps the batch - the state exporter packs rows from it
+/// across polls - must then be the one holding those bytes, or the pool admits memory nobody
+/// accounts for. The charge therefore moves with the chunk, and dropping the chunk returns exactly
+/// that figure.
+#[test]
+fn a_handed_over_state_chunk_keeps_its_charge_until_it_is_dropped() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let (state_kind, components) = crate::native::plan::aggregate_state_binding(AggregateKind::Sum)
+        .expect("sum keeps a mergeable state");
+    let state_schema = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([])),
+        kind: state_kind,
+        components: components.into(),
+        accumulators: schema.fields.clone(),
+        grid: Arc::clone(&grid),
+    });
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(evaluated_input(Arc::clone(&grid))),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Partial,
+            },
+        },
+        output: NativeType::AggregateState(Arc::clone(&state_schema)),
+    })
+    .unwrap();
+
+    let memory_pool = bounded_pool(1 << 20);
+    let mut exec = executor(&tree, Arc::clone(&memory_pool));
+    exec.push_evaluated(
+        InputId::new(0),
+        evaluated_chunk(&schema, 0, vec![1.0, 2.0], true),
+    )
+    .unwrap();
+    exec.end_of_input().unwrap();
+
+    let chunk = exec
+        .next_state()
+        .unwrap()
+        .expect("a partial sum exports one state chunk");
+    let crate::native::state::StateChunk::Series {
+        reservation,
+        state_schema: exported,
+        ..
+    } = &chunk
+    else {
+        panic!("a partial producer exports series state, not a decoded row");
+    };
+    assert_eq!(
+        state_kind, exported.kind,
+        "the exported state keeps its kind"
+    );
+    assert_eq!(
+        state_schema.components.as_ref(),
+        exported.components.as_ref(),
+        "the exported state keeps its components"
+    );
+    let carried = reservation
+        .as_ref()
+        .expect("the handed-over chunk carries the charge the queue released")
+        .size();
+    assert!(carried > 0, "a state chunk is worth more than no bytes");
+    assert_eq!(
+        crate::native::state::state_bytes(&chunk),
+        carried,
+        "the chunk carries exactly what the same chunk is worth, so nothing is left behind"
+    );
+    assert!(
+        memory_pool.reserved() >= carried,
+        "the pool still holds the handed-over bytes: reserved {}, carried {carried}",
+        memory_pool.reserved()
+    );
+
+    let held = memory_pool.reserved();
+    drop(chunk);
+    assert_eq!(
+        held - carried,
+        memory_pool.reserved(),
+        "dropping the chunk returns exactly the bytes it carried"
+    );
+    drop(exec);
+    assert_eq!(0, memory_pool.reserved(), "the execution released its own");
+}
+
+#[test]
+fn partial_final_matches_complete_over_concatenated_input() {
+    for kind in [
+        AggregateKind::Sum,
+        AggregateKind::Count,
+        AggregateKind::Group,
+    ] {
+        let grid = grid(0, 60_000, 2);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let (state_kind, components) = crate::native::plan::aggregate_state_binding(kind).unwrap();
+        let state_schema = Arc::new(AggregateStateSchema {
+            group: Grouping::By(Arc::new([])),
+            kind: state_kind,
+            components: components.into(),
+            accumulators: schema.fields.clone(),
+            grid: Arc::clone(&grid),
+        });
+        let aggregate_tree = |stage| {
+            let output = if stage == AggregateStage::Partial {
+                NativeType::AggregateState(Arc::clone(&state_schema))
+            } else {
+                evaluated(Arc::clone(&grid))
+            };
+            let input = if stage == AggregateStage::Final {
+                NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        output: NativeType::AggregateState(Arc::clone(&state_schema)),
+                        source_index: 0,
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: NativeType::AggregateState(Arc::clone(&state_schema)),
+                }
+            } else {
+                evaluated_input(Arc::clone(&grid))
+            };
+            NativeTree::try_new(aggregate_with_output(
+                input,
+                BoundAggregate {
+                    kind,
+                    group: Grouping::By(Arc::new([])),
+                    stage,
+                },
+                output,
+            ))
+            .unwrap()
+        };
+        let mut partial_states = Vec::new();
+        let mut backing_probe = None;
+        for vals in [vec![1.0, 2.0], vec![3.0, 4.0]] {
+            let tree = aggregate_tree(AggregateStage::Partial);
+            let mut exec = executor(&tree, pool());
+            exec.push_evaluated(InputId::new(0), evaluated_chunk(&schema, 0, vals, true))
+                .unwrap();
+            exec.end_of_input().unwrap();
+            let mut series = Vec::new();
+            while let Some(chunk) = exec.next_state().unwrap() {
+                let crate::native::state::StateChunk::Series {
+                    series: chunk_series,
+                    ..
+                } = chunk
+                else {
+                    panic!("Partial executor returned row state");
+                };
+                series.extend(chunk_series.into_iter().map(|series| (series, true)));
+            }
+            let source = Box::pin(futures::stream::iter(series.into_iter().map(Ok)));
+            let frame_state_schema = Arc::new(
+                datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                    state_kind,
+                    state_schema.components.to_vec(),
+                )
+                .unwrap(),
+            );
+            let frames = common_query::series_frame::pack_aggregate_state(
+                source,
+                frame_state_schema.clone(),
+                Arc::clone(&schema),
+            )
+            .unwrap();
+            let decoded = common_query::series_frame::unpack_aggregate_state(
+                frames,
+                Some(frame_state_schema),
+                Some(Arc::clone(&schema)),
+            )
+            .unwrap();
+            use futures::StreamExt;
+            for row in futures::executor::block_on(decoded.collect::<Vec<_>>()) {
+                let row = row.unwrap();
+                let row =
+                    crate::native::state::state_row_from_frame_row(row, &state_schema).unwrap();
+                if kind == AggregateKind::Sum && backing_probe.is_none() {
+                    let mut row = row.clone();
+                    let field = row.fields.field(0).unwrap();
+                    let value_len = field
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .len();
+                    let retained_len = 4096;
+                    let values = Float64Array::from(vec![7.0; retained_len]);
+                    let compensations = Float64Array::from(vec![0.0; retained_len]);
+                    let value_slice = values.slice(0, value_len);
+                    let compensation_slice = compensations.slice(0, value_len);
+                    let item_fields = field.fields().clone();
+                    let sliced = datatypes::arrow::array::StructArray::try_new(
+                        item_fields,
+                        vec![Arc::new(value_slice), Arc::new(compensation_slice)],
+                        None,
+                    )
+                    .unwrap();
+                    let list_field = Arc::new(datatypes::arrow::datatypes::Field::new(
+                        "item",
+                        sliced.data_type().clone(),
+                        false,
+                    ));
+                    let list = datatypes::arrow::array::ListArray::new(
+                        list_field.clone(),
+                        datatypes::arrow::buffer::OffsetBuffer::new(
+                            vec![0_i32, value_len as i32].into(),
+                        ),
+                        Arc::new(sliced),
+                        None,
+                    );
+                    let fields = datatypes::arrow::array::StructArray::try_new(
+                        vec![Arc::new(datatypes::arrow::datatypes::Field::new(
+                            "v0",
+                            list.data_type().clone(),
+                            false,
+                        ))]
+                        .into(),
+                        vec![Arc::new(list)],
+                        None,
+                    )
+                    .unwrap();
+                    row.fields =
+                        datatypes::series::aggregate_state::StateFieldsBatch::try_from_arrow(
+                            fields,
+                            &datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                                state_kind,
+                                state_schema.components.to_vec(),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    assert_eq!(row.fields.field(0).unwrap().len(), value_len);
+                    assert!(values.values().inner().capacity() > value_len * 100);
+                    assert!(compensations.values().inner().capacity() > value_len * 100);
+                    let retained_value = row
+                        .fields
+                        .field(0)
+                        .unwrap()
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+                    assert_eq!(
+                        retained_value.values().inner().as_ptr(),
+                        values.values().inner().as_ptr()
+                    );
+                    backing_probe = Some(crate::native::state::StateChunk::Row(row));
+                }
+                partial_states.push(crate::native::state::StateChunk::Row(row));
+            }
+        }
+        let tree_final = aggregate_tree(AggregateStage::Final);
+        if let Some(state) = backing_probe {
+            let crate::native::state::StateChunk::Row(row) = &state else {
+                unreachable!("decoded final input is a row");
+            };
+            let item = row.fields.field(0).unwrap();
+            let visible_len = item.len();
+            let value = item
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let compensation = item
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            // Each slice shares a primitive backing vector allocated at `retained_len` above.
+            let backing_bytes = 2 * 4096 * std::mem::size_of::<f64>();
+            assert_eq!(
+                visible_len, 2,
+                "the state row remains the fixture's two points"
+            );
+            assert!(value.values().inner().capacity() > visible_len * 100);
+            assert!(compensation.values().inner().capacity() > visible_len * 100);
+
+            // The charge is the row's own extent, not the 4096-element buffers it borrows: a
+            // Final row is a one-row slice of the frame's list values, and charging the parent per
+            // row is what multiplied a chained router's figure.
+            let own = crate::native::state::state_row_bytes(row);
+            assert!(
+                own < backing_bytes,
+                "a row must not be charged the backing it borrows: own {own}, backing {backing_bytes}"
+            );
+            assert!(
+                own >= 2 * visible_len * std::mem::size_of::<f64>(),
+                "the charge still covers the values the row carries: {own}"
+            );
+            let mut constrained = executor(&tree_final, bounded_pool(own - 1));
+            let error = constrained
+                .push_state(
+                    InputId::new(0),
+                    crate::native::state::StateChunk::Row(row.clone()),
+                )
+                .expect_err("admission must account for the row it queues");
+            assert!(is_resources_exhausted(&error), "{error}");
+            assert_eq!(constrained.state().reserved_bytes(), 0);
+
+            let sufficient_pool = bounded_pool(own + 64 * 1024);
+            let mut sufficient = executor(&tree_final, Arc::clone(&sufficient_pool));
+            sufficient
+                .push_state(InputId::new(0), state)
+                .expect("the budget covers the row and its bookkeeping");
+            assert!(sufficient.state().reserved_bytes() >= own);
+            assert!(sufficient_pool.reserved() >= own);
+            drop(sufficient);
+            assert_eq!(sufficient_pool.reserved(), 0);
+        }
+        let mut final_exec = executor(&tree_final, pool());
+        let mut first_row_cost = None;
+        for state in partial_states {
+            // The cost the input queue charges is `state_bytes`, so that is what the assertion
+            // pins: a row reported as zero bytes would be held unaccounted while it waits.
+            if first_row_cost.is_none() {
+                first_row_cost = Some(crate::native::state::state_bytes(&state));
+            }
+            final_exec.push_state(InputId::new(0), state).unwrap();
+        }
+        assert!(
+            first_row_cost.unwrap() >= 2 * std::mem::size_of::<f64>(),
+            "a queued state row must include retained Arrow component buffers"
+        );
+        assert!(
+            final_exec.state().reserved_bytes() > 0,
+            "the executor must reserve what its input queue holds"
+        );
+        final_exec.end_of_input().unwrap();
+        let mut merged = Vec::new();
+        while let Some(chunk) = final_exec.next_chunk().unwrap() {
+            merged.push(chunk);
+        }
+        assert_eq!(final_exec.state().reserved_bytes(), 0);
+        let mut complete = executor(&aggregate_tree(AggregateStage::Complete), pool());
+        for vals in [vec![1.0, 2.0], vec![3.0, 4.0]] {
+            complete
+                .push_evaluated(InputId::new(0), evaluated_chunk(&schema, 0, vals, true))
+                .unwrap();
+        }
+        complete.end_of_input().unwrap();
+        let mut serial = Vec::new();
+        while let Some(chunk) = complete.next_chunk().unwrap() {
+            serial.push(chunk);
+        }
+        let (merged, serial) = (groups_of(&merged), groups_of(&serial));
+        assert_eq!(
+            merged
+                .iter()
+                .map(|g| (&g.0, &g.1, g.2.iter().map(|p| p.0).collect::<Vec<_>>()))
+                .collect::<Vec<_>>(),
+            serial
+                .iter()
+                .map(|g| (&g.0, &g.1, g.2.iter().map(|p| p.0).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        );
+        // The 1e-10 tolerance follows `partials_merge_to_the_serial_result` in
+        // `aggregate/tests.rs`; reassociation may change finite sum rounding, so use both
+        // absolute and relative bounds (with a unit floor for values near zero).
+        for (actual, expected) in merged
+            .iter()
+            .flat_map(|g| &g.2)
+            .zip(serial.iter().flat_map(|g| &g.2))
+        {
+            if kind != AggregateKind::Sum {
+                assert_eq!(actual.1, expected.1);
+            } else {
+                let (a, e) = (actual.1.unwrap(), expected.1.unwrap());
+                assert!((a - e).abs() <= 1e-10 * e.abs().max(1.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn exporting_a_partial_charges_the_fold_and_the_groups_it_builds() {
+    use crate::aggregate::{AggregateOp, FloatAggregator};
+
+    let grid = grid(0, 1, 16);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let series = datatypes::series::samples::Series::try_new(
+        &schema,
+        metric(),
+        TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 16).unwrap()),
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(1.0); 16]))),
+    )
+    .unwrap();
+    let mut aggregator = FloatAggregator::try_new(
+        &schema,
+        AggregateOp::Sum,
+        crate::aggregate::Grouping::By(&[]),
+    )
+    .unwrap();
+    aggregator.update(&series).unwrap();
+    let fold_bytes = aggregator.state_bytes();
+
+    let mut charges = Vec::new();
+    let partial = aggregator
+        .finish_partial_budgeted(|bytes| {
+            charges.push(bytes);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        1,
+        charges.len(),
+        "the export is admitted once, before it runs"
+    );
+
+    // The groups it built, measured as the chunk that carries them is measured.
+    let (kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum).unwrap();
+    let chunk_bytes =
+        crate::native::state::state_bytes(&crate::native::state::StateChunk::Series {
+            series: partial.groups,
+            state_schema: Arc::new(AggregateStateSchema {
+                group: Grouping::By(Arc::new([])),
+                kind,
+                components: components.into(),
+                accumulators: schema.fields.clone(),
+                grid,
+            }),
+            reservation: None,
+        });
+    assert!(fold_bytes > 0, "the fold holds its blocks");
+    assert!(chunk_bytes > 0, "the export builds groups");
+    // The admitted figure covers what the export still reads *and* what it produced, because both
+    // are live while it runs. Charging only the output would leave the fold's blocks unaccounted.
+    assert!(
+        charges[0] >= fold_bytes.saturating_add(chunk_bytes).saturating_sub(2048),
+        "the admitted figure covers the fold ({fold_bytes}) and the exported groups ({chunk_bytes}): {}",
+        charges[0]
+    );
 }

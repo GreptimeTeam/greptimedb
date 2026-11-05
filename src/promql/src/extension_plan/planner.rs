@@ -24,14 +24,13 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::{FrameContent, FrameLabelMode, SeriesFrameDeclaration};
+use datatypes::series::frame::{FrameLabelMode, SeriesFrameDeclaration};
 use store_api::region_engine::RawLabelSource;
 use table::table::scan::{RegionScanExec, SeriesScanExec};
 
 use crate::extension_plan::{
-    Absent, AggregateFinalize, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate,
-    RangeManipulate, RawSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize,
-    UnionDistinctOn,
+    Absent, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate, RangeManipulate,
+    RawSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 
 pub struct PromExtensionPlanner;
@@ -85,13 +84,6 @@ impl ExtensionPlanner for PromExtensionPlanner {
                 session.config_options().execution.target_partitions,
             )
             .map(Some)
-        } else if let Some(node) = node.as_any().downcast_ref::<AggregateFinalize>() {
-            // The merge runs where every partition's state arrives, so its own input is the plan
-            // that exports them.
-            let Some(input) = physical_inputs.first() else {
-                return Ok(None);
-            };
-            Ok(Some(node.to_execution_plan(Arc::clone(input))?))
         } else {
             Ok(None)
         }
@@ -104,8 +96,8 @@ const METRIC_NAME: &str = "__name__";
 
 /// Builds the physical node of a [`FusedSeries`] over the raw series its inputs can provide.
 ///
-/// The node reads raw series frames. Below it is either the region scan itself, when the node runs
-/// in the region it reads, or an input that already produces explicit-label raw frames, when the
+/// The node reads series frames. Below it is either the region scan itself, when the node runs
+/// in the region it reads, or an input that already produces explicit-label frames, when the
 /// node runs above the regions of several tables and each [`RawSeriesSource`] answered for its own.
 /// Anything else in between - a filter, a projection that drops the frame, an exchange - produces a
 /// different frame, or no frame at all, and this layer cannot look under it.
@@ -126,17 +118,21 @@ fn plan_fused_series(
         ));
     }
     if physical_inputs.is_empty() {
-        return fused.to_execution_plan(Vec::new()).map(Some);
+        return fused
+            .to_execution_plan_with_parallelism(Vec::new(), target_partitions)
+            .map(Some);
     }
     if let Some(inputs) = physical_inputs
         .iter()
         .map(|input| {
-            explicit_raw_frame_ordering(input.schema().as_ref())
+            explicit_label_frame_ordering(input.schema().as_ref())
                 .map(|ordering| (Arc::clone(input), RawLabelSource::Explicit, ordering))
         })
         .collect::<Option<Vec<_>>>()
     {
-        return fused.to_execution_plan(inputs).map(Some);
+        return fused
+            .to_execution_plan_with_parallelism(inputs, target_partitions)
+            .map(Some);
     }
     if physical_inputs
         .iter()
@@ -177,7 +173,9 @@ fn plan_fused_series(
             series_scan.raw_series_ordering(),
         ));
     }
-    fused.to_execution_plan(series_inputs).map(Some)
+    fused
+        .to_execution_plan_with_parallelism(series_inputs, target_partitions)
+        .map(Some)
 }
 
 /// Builds the region half of a [`RawSeriesSource`]: the region's raw-series leaf for its binding.
@@ -208,7 +206,7 @@ fn plan_raw_series_source(
         source.fields(),
         target_partitions,
     )?;
-    source.to_execution_plan(series_scan)
+    source.to_per_series_execution_plan(series_scan)
 }
 
 /// The raw-series leaf of a region scan bound to one metric.
@@ -252,11 +250,9 @@ fn series_scan(
 }
 
 /// The ordering an input declares when it produces raw frames that carry their own labels.
-fn explicit_raw_frame_ordering(schema: &Schema) -> Option<SeriesOrdering> {
+fn explicit_label_frame_ordering(schema: &Schema) -> Option<SeriesOrdering> {
     let declaration = SeriesFrameDeclaration::parse(schema).ok()?;
-    if declaration.content() != FrameContent::Raw
-        || declaration.labels() != FrameLabelMode::Explicit
-    {
+    if declaration.labels() != FrameLabelMode::Explicit {
         return None;
     }
     series_frame_ordering(schema).ok()

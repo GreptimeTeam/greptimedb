@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datatypes::series::histogram::{CounterResetHint, HistogramBatchBuilder, HistogramView};
 use datatypes::series::samples::{
     DenseSamplesRef, FieldSpec, RowCursor, SampleRef, Series, SeriesSchema,
@@ -67,7 +68,7 @@ pub(crate) fn visited_pairs() -> usize {
 }
 
 /// A PromQL binary operator between two instant vectors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -113,7 +114,7 @@ impl BinaryOp {
 }
 
 /// The labels two series are matched by.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum MatchingLabels {
     /// `on(...)`: only these labels, `__name__` included when listed.
     On(Vec<Arc<str>>),
@@ -123,7 +124,7 @@ pub enum MatchingLabels {
 }
 
 /// How many series of each side may share a match group.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum Cardinality {
     OneToOne,
     /// `group_left(...)`: the right side is the "one" side; the listed labels are copied from it.
@@ -133,7 +134,7 @@ pub enum Cardinality {
 }
 
 /// A vector–vector binary operation with its modifiers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub struct BinaryMatching {
     pub op: BinaryOp,
     /// `bool`: comparisons return 1 or 0 instead of filtering.
@@ -146,7 +147,7 @@ pub struct BinaryMatching {
 /// The values of `fill`, `fill_left` and `fill_right`, which stand in for a sample that has no
 /// match on the other side: `lhs` for a missing left-hand sample and `rhs` for a missing
 /// right-hand one, as the query writes them, `group_right` included (prometheus/prometheus#19939).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct FillValues {
     pub lhs: Option<f64>,
     pub rhs: Option<f64>,
@@ -161,9 +162,15 @@ impl PartialEq for FillValues {
 }
 
 impl Eq for FillValues {}
+impl std::hash::Hash for FillValues {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::hash::Hash::hash(&self.lhs.map(f64::to_bits), h);
+        std::hash::Hash::hash(&self.rhs.map(f64::to_bits), h);
+    }
+}
 
 /// A PromQL set operator between two instant vectors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum SetOp {
     And,
     Or,
@@ -194,7 +201,7 @@ pub fn binary_vectors(
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
 ) -> Result<Vec<Series>> {
-    binary_vectors_inner(matching, lhs_schema, lhs, rhs_schema, rhs, None)
+    binary_vectors_inner(matching, lhs_schema, lhs, rhs_schema, rhs, None, None)
 }
 
 /// [`binary_vectors`], handing the live workspace it holds to `reserve` as it allocates.
@@ -206,12 +213,25 @@ pub fn binary_vectors(
 /// once per phase, and in the blocks a growing result buffer is reserved in. It is never asked per
 /// grid point or per row. A total `reserve` refuses ends the operation with that error, and what it
 /// admitted stays the caller's to release.
+#[derive(Clone, Copy)]
+pub(crate) struct NodeEvidence<'a> {
+    pub(crate) node: usize,
+    pub(crate) evidence: &'a DuplicateEvidence,
+}
+
+struct FieldEvidence<'a> {
+    node: usize,
+    field: usize,
+    evidence: &'a DuplicateEvidence,
+}
+
 pub(crate) fn binary_vectors_with_reservation(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
     lhs: &[Series],
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
+    evidence: Option<NodeEvidence<'_>>,
     reserve: &mut dyn FnMut(usize) -> Result<()>,
 ) -> Result<Vec<Series>> {
     let mut budget = Budget::new(reserve);
@@ -221,6 +241,7 @@ pub(crate) fn binary_vectors_with_reservation(
         lhs,
         rhs_schema,
         rhs,
+        evidence,
         Some(&mut budget),
     )
 }
@@ -233,6 +254,7 @@ fn binary_vectors_inner(
     lhs: &[Series],
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
+    evidence: Option<NodeEvidence<'_>>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Vec<Series>> {
     // The grid both operands are evaluated on, checked before anything is reserved for them.
@@ -250,12 +272,18 @@ fn binary_vectors_inner(
     for field in 0..width {
         let lhs = Operand::try_new(lhs_schema, lhs, field)?;
         let rhs = Operand::try_new(rhs_schema, rhs, field)?;
+        let field_evidence = evidence.map(|evidence| FieldEvidence {
+            node: evidence.node,
+            field,
+            evidence: evidence.evidence,
+        });
         let results = binary_field(
             matching,
             &grid,
             &lhs,
             &rhs,
             &mut errors,
+            field_evidence,
             budget.as_deref_mut(),
         )?;
         // The field's flags, tables and sort are destroyed with its frame, so its phase ends here:
@@ -712,6 +740,7 @@ fn binary_field(
     lhs: &Operand<'_>,
     rhs: &Operand<'_>,
     errors: &mut Vec<(usize, u8, String)>,
+    evidence: Option<FieldEvidence<'_>>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Results> {
     let (many, one, include, one_is_left) = match &matching.cardinality {
@@ -748,10 +777,21 @@ fn binary_field(
     // Prometheus short-circuits a point where either side is empty, before any check; with a fill
     // value only a point where both are empty.
     let filling = fill.lhs.is_some() || fill.rhs.is_some();
-    let evaluated: Vec<bool> = lhs
-        .presence(points)
-        .into_iter()
-        .zip(rhs.presence(points))
+    let lhs_present = lhs.presence(points);
+    let rhs_present = rhs.presence(points);
+    if let Some(evidence) = &evidence {
+        evidence.evidence.publish(
+            evidence.node,
+            evidence.field,
+            &lhs_present,
+            &rhs_present,
+            filling,
+        )?;
+    }
+    let evaluated: Vec<bool> = lhs_present
+        .iter()
+        .copied()
+        .zip(rhs_present.iter().copied())
         .map(|(lhs, rhs)| if filling { lhs || rhs } else { lhs && rhs })
         .collect();
 
@@ -761,14 +801,39 @@ fn binary_field(
         // Scanning one group is its own phase: the list of its present points is the only thing it
         // allocates, it is charged by the block it takes as it grows, and it is dropped with the
         // scan, so the next group's list replaces it.
-        let duplicate = overlap(
+        let mut duplicate_at: Option<usize> = None;
+        let mut group_key: Option<Arc<GroupKey>> = None;
+        overlap(
             one,
             members,
-            |point| evaluated[point],
+            |point| {
+                if evaluated[point] {
+                    // This partition's own presence already decides the point: the duplicate below
+                    // aborts the execution from here, so recording it for the other partitions
+                    // would only take their lock to store a verdict nobody will ask for.
+                    if duplicate_at.is_none_or(|first| point < first) {
+                        duplicate_at = Some(point);
+                    }
+                } else if let Some(evidence) = &evidence {
+                    // The gate is false here only because this partition holds one side of the
+                    // match. Whether the point is eligible is a property of the whole execution,
+                    // so the finding is recorded and judged once every partition has reported.
+                    let side = if one_is_left { "left" } else { "right" };
+                    evidence.evidence.record_candidate(
+                        evidence.node,
+                        evidence.field,
+                        point,
+                        Arc::clone(group_key.get_or_insert_with(|| Arc::new(key.clone()))),
+                        side,
+                        timestamp_at(point),
+                    )?;
+                }
+                Ok(())
+            },
             metadata.tables.saturating_add(metadata.pairing),
             budget.as_deref_mut(),
         )?;
-        if let Some(point) = duplicate
+        if let Some(point) = duplicate_at
             && one_duplicate.is_none_or(|(first, _)| point < first)
         {
             one_duplicate = Some((point, key));
@@ -962,17 +1027,7 @@ fn binary_field(
     // matches, and only after the operator checks that result label sets are unique.
     if let Some((point, key)) = one_duplicate {
         let side = if one_is_left { "left" } else { "right" };
-        errors.push((
-            point,
-            0,
-            format!(
-                "found duplicate series for the match group {} on the {side} hand-side of the \
-                 operation at {} ms; many-to-many matching not allowed: matching labels must be \
-                 unique on one side",
-                render(key),
-                timestamp_at(point)
-            ),
-        ));
+        errors.push((point, 0, duplicate_message(key, side, timestamp_at(point))));
     }
     if let Some((point, group)) = implicit_many_to_one {
         let key = &group_keys[group];
@@ -1526,9 +1581,305 @@ fn same_grid(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Arc<EvalGrid>> {
     }
 }
 
+fn duplicate_message(key: &GroupKey, side: &str, timestamp: i64) -> String {
+    format!(
+        "found duplicate series for the match group {} on the {side} hand-side of the \
+         operation at {timestamp} ms; many-to-many matching not allowed: matching labels must be \
+         unique on one side",
+        render(key),
+    )
+}
+
 /// Label pairs identifying a match group or a result; empty values are absent, as in
 /// Prometheus.
-pub(crate) type GroupKey = Vec<(Arc<str>, Arc<str>)>;
+pub type GroupKey = Vec<(Arc<str>, Arc<str>)>;
+
+/// A per-node, per-field reduction of duplicate evidence across output partitions.
+pub struct DuplicateEvidence {
+    slots: std::sync::Mutex<HashMap<(usize, usize), DuplicateSlot>>,
+    reservation: std::sync::Mutex<MemoryReservation>,
+    remaining: std::sync::atomic::AtomicUsize,
+    aborted: std::sync::atomic::AtomicBool,
+    final_verdict: std::sync::Mutex<Option<DuplicateCandidate>>,
+}
+
+#[derive(Default)]
+struct DuplicateSlot {
+    grid_len: Option<usize>,
+    lhs_present: Vec<bool>,
+    rhs_present: Vec<bool>,
+    candidates: HashMap<usize, DuplicateCandidate>,
+    filling: Option<bool>,
+}
+
+/// The best duplicate candidate retained for one grid point.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DuplicateCandidate {
+    pub point: usize,
+    pub group: Arc<GroupKey>,
+    /// `"left"` or `"right"`: the side that carried the duplicate.
+    pub side: &'static str,
+    pub timestamp: i64,
+}
+
+impl DuplicateCandidate {
+    /// The error text, built only when the verdict is reported.
+    pub fn message(&self) -> String {
+        duplicate_message(&self.group, self.side, self.timestamp)
+    }
+}
+
+fn candidate_owned_bytes(group: &GroupKey) -> usize {
+    // Charge label bytes for every retained candidate, conservatively over-counting shared groups.
+    group
+        .iter()
+        .map(|(name, value)| name.len().saturating_add(value.len()))
+        .sum::<usize>()
+        .saturating_add(
+            group
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(Arc<str>, Arc<str>)>()),
+        )
+        .saturating_add(std::mem::size_of::<DuplicateCandidate>())
+}
+
+impl DuplicateEvidence {
+    /// Creates evidence storage for each output partition; slots grow to their binary's grid.
+    pub fn new(pool: &Arc<dyn MemoryPool>, partitions: usize) -> Self {
+        Self {
+            slots: std::sync::Mutex::new(HashMap::new()),
+            reservation: std::sync::Mutex::new(
+                MemoryConsumer::new("DuplicateEvidence").register(pool),
+            ),
+            remaining: std::sync::atomic::AtomicUsize::new(partitions),
+            aborted: std::sync::atomic::AtomicBool::new(false),
+            final_verdict: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// ORs one partition's operand presence into the node/field slot.
+    pub fn complete(&self) -> bool {
+        self.exit_claim(false)
+    }
+
+    /// Whether every output partition has completed or aborted this evidence generation.
+    pub fn finished(&self) -> bool {
+        self.remaining.load(std::sync::atomic::Ordering::Acquire) == 0
+    }
+
+    /// Whether any claim in this generation was aborted.
+    pub fn aborted(&self) -> bool {
+        self.aborted.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn slot_count(&self) -> usize {
+        self.slots.lock().unwrap().len()
+    }
+
+    pub fn abort(&self) {
+        self.exit_claim(true);
+    }
+
+    fn clear_slots(&self) {
+        let mut final_verdict = self.final_verdict.lock().unwrap();
+        let mut slots = self.slots.lock().unwrap();
+        final_verdict.take();
+        slots.clear();
+        let reservation = self.reservation.lock().unwrap();
+        let size = reservation.size();
+        reservation.shrink(size);
+    }
+
+    fn exit_claim(&self, aborted: bool) -> bool {
+        if aborted {
+            self.aborted
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.clear_slots();
+        }
+        let last = loop {
+            let current = self.remaining.load(std::sync::atomic::Ordering::Acquire);
+            if current == 0 {
+                return false;
+            }
+            if self
+                .remaining
+                .compare_exchange(
+                    current,
+                    current - 1,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                break current == 1;
+            }
+        };
+        if last {
+            let mut final_verdict = self.final_verdict.lock().unwrap();
+            if !self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+                *final_verdict = self.current_verdict();
+            }
+            let retained_bytes = final_verdict
+                .as_ref()
+                .map(|candidate| candidate_owned_bytes(&candidate.group))
+                .unwrap_or(0);
+            self.slots.lock().unwrap().clear();
+            let reservation = self.reservation.lock().unwrap();
+            let release = reservation.size().saturating_sub(retained_bytes);
+            reservation.shrink(release);
+        }
+        last && !self.aborted.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn verdict(&self) -> Option<DuplicateCandidate> {
+        if self.remaining.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return self.final_verdict.lock().unwrap().clone();
+        }
+        self.current_verdict()
+    }
+
+    /// Takes the completed verdict and releases the memory retained for its candidate.
+    pub fn take_verdict(&self) -> Option<DuplicateCandidate> {
+        if self.remaining.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            return None;
+        }
+        let mut final_verdict = self.final_verdict.lock().unwrap();
+        let candidate = final_verdict.take()?;
+        let reservation = self.reservation.lock().unwrap();
+        let size = reservation.size();
+        reservation.shrink(size);
+        Some(candidate)
+    }
+
+    fn current_verdict(&self) -> Option<DuplicateCandidate> {
+        if self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        let slots = self.slots.lock().unwrap();
+        slots
+            .iter()
+            .filter_map(|(&(node, field), slot)| {
+                let filling = slot.filling?;
+                slot.candidates
+                    .iter()
+                    .filter_map(|(&point, candidate)| {
+                        let lhs = slot.lhs_present.get(point).copied().unwrap_or(false);
+                        let rhs = slot.rhs_present.get(point).copied().unwrap_or(false);
+                        (if filling { lhs || rhs } else { lhs && rhs }).then(|| candidate.clone())
+                    })
+                    .min_by_key(|candidate| candidate.point)
+                    .map(|candidate| ((candidate.point, node, field), candidate))
+            })
+            .min_by_key(|(key, _)| *key)
+            .map(|(_, candidate)| candidate)
+    }
+
+    pub fn publish(
+        &self,
+        node_index: usize,
+        field: usize,
+        lhs_present: &[bool],
+        rhs_present: &[bool],
+        filling: bool,
+    ) -> Result<()> {
+        let mut slots = self.slots.lock().unwrap();
+        if self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        let slot = slots.entry((node_index, field)).or_default();
+        if let Some(existing_len) = slot.grid_len {
+            if existing_len != lhs_present.len() || existing_len != rhs_present.len() {
+                return Err(DataFusionError::Internal(
+                    "binary match grid length differs across partitions".into(),
+                ));
+            }
+        } else {
+            if lhs_present.len() != rhs_present.len() {
+                return Err(DataFusionError::Internal(
+                    "binary match operand grid lengths differ".into(),
+                ));
+            }
+            if slot
+                .candidates
+                .keys()
+                .any(|point| *point >= lhs_present.len())
+            {
+                return Err(DataFusionError::Internal(
+                    "duplicate candidate is outside its binary grid".into(),
+                ));
+            }
+            slot.grid_len = Some(lhs_present.len());
+        }
+        if let Some(existing) = slot.filling {
+            if existing != filling {
+                return Err(DataFusionError::Internal(
+                    "binary match filling differs across partitions".into(),
+                ));
+            }
+        } else {
+            slot.filling = Some(filling);
+        }
+        let len = lhs_present.len();
+        if len > slot.lhs_present.len() {
+            let additional = (len - slot.lhs_present.len())
+                .saturating_mul(2)
+                .saturating_mul(std::mem::size_of::<bool>());
+            self.reservation.lock().unwrap().try_grow(additional)?;
+            slot.lhs_present.resize(len, false);
+            slot.rhs_present.resize(len, false);
+        }
+        for (dst, src) in slot.lhs_present.iter_mut().zip(lhs_present) {
+            *dst |= *src;
+        }
+        for (dst, src) in slot.rhs_present.iter_mut().zip(rhs_present) {
+            *dst |= *src;
+        }
+        Ok(())
+    }
+
+    /// Retains the first candidate for this point; presence decides whether it is reportable.
+    pub fn record_candidate(
+        &self,
+        node_index: usize,
+        field: usize,
+        point: usize,
+        group: Arc<GroupKey>,
+        side: &'static str,
+        timestamp: i64,
+    ) -> Result<()> {
+        let mut slots = self.slots.lock().unwrap();
+        if self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        let slot = slots.entry((node_index, field)).or_default();
+        if slot.grid_len.is_some_and(|len| point >= len) {
+            return Err(DataFusionError::Internal(
+                "duplicate candidate is outside its binary grid".into(),
+            ));
+        }
+        if slot.candidates.contains_key(&point) {
+            return Ok(());
+        }
+        let entry_bytes = candidate_owned_bytes(&group)
+            .saturating_add(std::mem::size_of::<(usize, DuplicateCandidate)>());
+        self.reservation.lock().unwrap().try_grow(entry_bytes)?;
+        if let Err(error) = slot.candidates.try_reserve(1) {
+            self.reservation.lock().unwrap().shrink(entry_bytes);
+            return Err(DataFusionError::Execution(error.to_string()));
+        }
+        slot.candidates.insert(
+            point,
+            DuplicateCandidate {
+                point,
+                group,
+                side,
+                timestamp,
+            },
+        );
+        Ok(())
+    }
+}
 
 pub(crate) fn group_key(metric: &SeriesLabels, labels: &MatchingLabels) -> GroupKey {
     let mut key: GroupKey = match labels {
@@ -1579,7 +1930,7 @@ fn group(operand: &Operand<'_>, labels: &MatchingLabels) -> HashMap<GroupKey, Ve
     groups
 }
 
-/// The first point where two `members` are present and `relevant` holds.
+/// Reports every point where two or more `members` are present.
 ///
 /// The group's list of present points is the only thing this scan allocates, and scanning one group
 /// is its own phase: the block the list takes is charged when it outgrows what it holds, and the next
@@ -1588,12 +1939,12 @@ fn group(operand: &Operand<'_>, labels: &MatchingLabels) -> HashMap<GroupKey, Ve
 fn overlap(
     operand: &Operand<'_>,
     members: &[usize],
-    relevant: impl Fn(usize) -> bool,
+    mut on_duplicate: impl FnMut(usize) -> Result<()>,
     base: usize,
     mut budget: Option<&mut Budget<'_>>,
-) -> Result<Option<usize>> {
+) -> Result<()> {
     if members.len() < 2 {
-        return Ok(None);
+        return Ok(());
     }
     // Sorting the present points keeps the cost proportional to them, not to the span.
     let mut points = Vec::new();
@@ -1617,15 +1968,16 @@ fn overlap(
         }
     }
     points.sort_unstable();
-    let duplicate = points
-        .windows(2)
-        .find(|pair| pair[0] == pair[1] && relevant(pair[0]))
-        .map(|pair| pair[0]);
+    for (index, pair) in points.windows(2).enumerate() {
+        if pair[0] == pair[1] && (index == 0 || points[index - 1] != pair[0]) {
+            on_duplicate(pair[0])?;
+        }
+    }
     // The list is dropped with this scan, so the field's own phase figure is live from here on.
     if let Some(budget) = budget {
         budget.phase(base)?;
     }
-    Ok(duplicate)
+    Ok(())
 }
 
 fn result_metric(

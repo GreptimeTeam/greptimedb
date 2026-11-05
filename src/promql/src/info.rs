@@ -43,7 +43,7 @@ use crate::vector_match::{Budget, HISTOGRAM_ROW_BYTES, owned_histogram_bytes};
 const IDENTIFYING_LABELS: [&str; 2] = ["instance", "job"];
 
 /// The second argument of `info`, split the way Prometheus uses it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct InfoSelector {
     /// The `__name__` matchers, which choose the info metrics; none means `target_info`.
     pub name_matchers: Vec<(MatchOp, Arc<str>)>,

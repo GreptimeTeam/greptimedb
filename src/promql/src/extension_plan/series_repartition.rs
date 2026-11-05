@@ -22,8 +22,8 @@
 //! Chains are transported intact to owners with their input-partition ID, followed by one charged
 //! normal-EOF message per live output from each completed input. Owners group exact identities and
 //! may publish an identity as soon as every input has contributed its final chain or normal EOF. The
-//! frame is the child's own: evaluated chunks are decoded only to read routing labels, and outputs
-//! publish the child's declared layout.
+//! frame is the child's own: evaluated chunks are decoded only to read routing labels; aggregate-state
+//! batches are schema-checked and read only for routing labels. Outputs publish the child's layout.
 //!
 //! # Routing
 //!
@@ -97,11 +97,9 @@
 //! records the read outcome, then sender closure lets outputs detect missing EOF or report failure. If the child errors, the failing task records it before cancelling its peers; sender closure makes
 //! every output report that recorded error instead of a clean end.
 //!
-//! A queue closing is not by itself that end: it also closes when the read is stopped - aborted, or
-//! panicked - and a stopped read is missing exactly what it did not route. The read therefore records
-//! how it ended, and an output whose queue has closed reads that record, so only a read that ended on
-//! its own terms ends an output and anything else is an error saying the producer stopped
-//! unexpectedly.
+//! Shared execution records the read outcome before producer senders close, so queue closure together
+//! with that shared outcome distinguishes normal completion from a stopped or failed read. A stopped
+//! read is missing exactly what it did not route and is reported as an error rather than a clean end.
 //!
 //! An output stream owns the read, not the plan it was executed from: DataFusion's
 //! `execute_stream_partitioned` takes the plan by value and keeps only the streams, so a read tied to
@@ -121,8 +119,8 @@ use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
-    SendableEvaluatedSeriesStream, pack_evaluated_series, pack_raw_series, unpack_evaluated_series,
-    unpack_raw_series,
+    SendableEvaluatedSeriesStream, pack_evaluated_series, pack_raw_series,
+    raw_series_frame_schema_with_ordering, unpack_evaluated_series, unpack_raw_series,
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -136,14 +134,15 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
+use datatypes::series::aggregate_state::AggregateStateSchema;
 use datatypes::series::frame::{
-    FrameContent, FrameLabelMode, LabelDecodeSpec, SeriesFrameDeclaration,
+    FrameContent, FrameLabelMode, LabelDecodeSpec, SeriesFrameDeclaration, SeriesFrameDecoder,
 };
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{Series, SeriesSchema};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt};
-use store_api::region_engine::{NO_BOUND_LABEL_SOURCE, RawSeriesStream, SendableRawSeriesStream};
+use store_api::region_engine::{RawSeriesStream, SendableRawSeriesStream};
 use tokio::sync::mpsc;
 use twox_hash::XxHash64;
 
@@ -157,41 +156,12 @@ use datatypes::series::samples::DenseSamplesRef;
 pub enum SeriesRouting {
     /// Hash the canonical label set.
     CanonicalLabels,
+    /// Hash the canonical label set without these labels, including an excluded metric name.
+    CanonicalLabelsExcept(Arc<[Arc<str>]>),
     /// Hash the exact PromQL matching key, so both sides of a vector operation meet.
     Matching(crate::vector_match::MatchingLabels),
     /// Route raw frames by their complete stored primary key.
     RawPrimaryKey,
-}
-
-struct EmptyRawStream {
-    schema: Arc<SeriesSchema>,
-    ordering: SeriesOrdering,
-}
-
-impl Stream for EmptyRawStream {
-    type Item = Result<RawSeriesChunk, BoxedError>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(None)
-    }
-}
-
-impl RawSeriesStream for EmptyRawStream {
-    fn schema(&self) -> &Arc<SeriesSchema> {
-        &self.schema
-    }
-
-    fn label_source(&self) -> &store_api::region_engine::RawLabelSource {
-        &NO_BOUND_LABEL_SOURCE
-    }
-
-    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
-        None
-    }
-
-    fn ordering(&self) -> SeriesOrdering {
-        self.ordering
-    }
 }
 
 /// The seed behind every routing decision.
@@ -200,6 +170,22 @@ impl RawSeriesStream for EmptyRawStream {
 /// the label set and the output count alone: an execution's own decisions have to agree with each
 /// other, and a seeded router can be reasoned about - and tested - without one.
 const ROUTING_SEED: u64 = 0x517c_c1b7_2722_0a95;
+
+/// Whether a series identity is complete on a single chain, or has to be merged across inputs.
+///
+/// A router can publish an identity as soon as its chain closes only when that chain is the whole
+/// identity for the execution. Whether that holds is a property of the producer, not of the router,
+/// so it is declared explicitly and defaults to the conservative merge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IdentityCompletion {
+    /// An identity may be split across inputs: every input has to contribute it or end first.
+    #[default]
+    MergeInputs,
+    /// The producer guarantees each identity appears as one complete chain on one input partition.
+    /// The router may publish a closed chain immediately and does not retain history to validate
+    /// that guarantee after publication.
+    CompleteDisjoint,
+}
 
 /// The Repartition stage: one child's partitions, redistributed by canonical label set.
 ///
@@ -213,7 +199,9 @@ pub struct SeriesRepartitionExec {
     /// The one hash configuration of this node's execution.
     routing: Routing,
     routing_policy: SeriesRouting,
+    identity_completion: IdentityCompletion,
     content: FrameContent,
+    state: Option<Arc<AggregateStateSchema>>,
     ordering: SeriesOrdering,
     /// Started by the first `execute` call, since the output partitions share one read of the child.
     shared: Mutex<Option<Arc<SharedExecution>>>,
@@ -243,8 +231,35 @@ impl SeriesRepartitionExec {
         let policy = match declaration.content() {
             FrameContent::Evaluated => SeriesRouting::CanonicalLabels,
             FrameContent::Raw => SeriesRouting::RawPrimaryKey,
+            FrameContent::AggregateState => SeriesRouting::CanonicalLabels,
         };
         Self::try_new_with_routing(input, outputs, policy)
+    }
+
+    /// Creates a node for an input whose producer guarantees each identity is one complete chain
+    /// on one input partition. Closed identities are published immediately; later duplicate chains
+    /// are not detected, so callers must uphold the producer guarantee.
+    pub fn try_new_complete_disjoint(
+        input: Arc<dyn ExecutionPlan>,
+        outputs: usize,
+    ) -> DataFusionResult<Self> {
+        let declaration =
+            SeriesFrameDeclaration::parse(input.schema().as_ref()).map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "SeriesRepartition input is not a series frame: {error}"
+                ))
+            })?;
+        let policy = match declaration.content() {
+            FrameContent::Evaluated => SeriesRouting::CanonicalLabels,
+            FrameContent::Raw => SeriesRouting::RawPrimaryKey,
+            FrameContent::AggregateState => {
+                return Err(DataFusionError::NotImplemented(
+                    "SeriesRepartition does not route aggregate state; use StateRepartitionExec"
+                        .into(),
+                ));
+            }
+        };
+        Self::try_new_with_completion(input, outputs, policy, IdentityCompletion::CompleteDisjoint)
     }
 
     /// Creates the node with an explicit content-compatible routing policy.
@@ -252,6 +267,20 @@ impl SeriesRepartitionExec {
         input: Arc<dyn ExecutionPlan>,
         outputs: usize,
         routing_policy: SeriesRouting,
+    ) -> DataFusionResult<Self> {
+        Self::try_new_with_completion(
+            input,
+            outputs,
+            routing_policy,
+            IdentityCompletion::MergeInputs,
+        )
+    }
+
+    fn try_new_with_completion(
+        input: Arc<dyn ExecutionPlan>,
+        outputs: usize,
+        routing_policy: SeriesRouting,
+        identity_completion: IdentityCompletion,
     ) -> DataFusionResult<Self> {
         if outputs == 0 {
             return Err(DataFusionError::Plan(
@@ -276,17 +305,24 @@ impl SeriesRepartitionExec {
                     "SeriesRepartition evaluated frames cannot use RawPrimaryKey routing".into(),
                 ));
             }
-            (FrameContent::Raw, SeriesRouting::CanonicalLabels) => {
+            (
+                FrameContent::Raw,
+                SeriesRouting::CanonicalLabels | SeriesRouting::CanonicalLabelsExcept(_),
+            ) => {
                 return Err(DataFusionError::Plan(
                     "SeriesRepartition raw frames cannot use CanonicalLabels routing".into(),
                 ));
             }
+            (
+                FrameContent::AggregateState,
+                SeriesRouting::RawPrimaryKey | SeriesRouting::Matching(_),
+            ) => {
+                return Err(DataFusionError::Plan(
+                    "SeriesRepartition aggregate-state frames require canonical-label routing"
+                        .into(),
+                ));
+            }
             _ => {}
-        }
-        if content == FrameContent::Raw && declaration.labels() != FrameLabelMode::Explicit {
-            return Err(DataFusionError::Plan(
-                "SeriesRepartition raw frames require explicit labels".into(),
-            ));
         }
         let series_schema = Arc::new(declaration.series().clone());
         let ordering = if content == FrameContent::Raw {
@@ -295,27 +331,42 @@ impl SeriesRepartitionExec {
             SeriesOrdering::Contiguous
         };
         let declared = match content {
-            FrameContent::Evaluated => pack_evaluated_series(
-                Box::pin(futures::stream::empty()),
-                Arc::clone(&series_schema),
-            )?
-            .schema(),
-            FrameContent::Raw => {
-                let source = EmptyRawStream {
-                    schema: Arc::clone(&series_schema),
-                    ordering,
-                };
-                pack_raw_series(Box::pin(source))?.schema()
-            }
+            FrameContent::Evaluated => common_query::series_frame::frame_schema_with(
+                &series_schema,
+                FrameLabelMode::Explicit,
+                None,
+                SeriesOrdering::Contiguous,
+            )?,
+            FrameContent::Raw => raw_series_frame_schema_with_ordering(
+                &series_schema,
+                &store_api::region_engine::NO_BOUND_LABEL_SOURCE,
+                ordering,
+            )?,
+            FrameContent::AggregateState => input.schema(),
         };
-        if declared != input.schema() {
+        // The input is re-declared from what it says about itself, not from what this node
+        // publishes: the two differ whenever the child carries its labels in its keys.
+        let rebuilt_input = if content == FrameContent::AggregateState {
+            None
+        } else {
+            Some(
+                common_query::series_frame::frame_schema_with(
+                    &series_schema,
+                    declaration.labels(),
+                    declaration.label_decode(),
+                    ordering,
+                )
+                .map_err(|error| DataFusionError::Plan(error.to_string()))?,
+            )
+        };
+        if rebuilt_input.is_some_and(|rebuilt| rebuilt != input.schema()) {
             return Err(DataFusionError::Plan(
                 "SeriesRepartition input frame carries a schema this node cannot re-declare"
                     .to_string(),
             ));
         }
         let properties = PlanProperties::new(
-            EquivalenceProperties::new(input.schema()),
+            EquivalenceProperties::new(declared),
             Partitioning::UnknownPartitioning(outputs),
             // Each exact identity becomes final independently at its per-input close/EOF barrier.
             EmissionType::Incremental,
@@ -324,13 +375,16 @@ impl SeriesRepartitionExec {
         )
         .with_evaluation_type(EvaluationType::Eager)
         .with_scheduling_type(SchedulingType::Cooperative);
+        let state = declaration.aggregate_state().cloned().map(Arc::new);
         let properties = Arc::new(properties);
         Ok(Self {
             input,
             series_schema,
             routing: Routing::with_policy(outputs, routing_policy.clone()),
             routing_policy,
+            identity_completion,
             content,
+            state,
             ordering,
             shared: Mutex::new(None),
             properties,
@@ -340,6 +394,10 @@ impl SeriesRepartitionExec {
     /// The routing policy used by this node.
     pub fn routing_policy(&self) -> &SeriesRouting {
         &self.routing_policy
+    }
+
+    pub fn identity_completion(&self) -> IdentityCompletion {
+        self.identity_completion
     }
 
     /// How many output partitions this node has.
@@ -418,10 +476,11 @@ impl ExecutionPlan for SeriesRepartitionExec {
         }
         // Rebuilt rather than patched, so a child whose schema changed is refused here instead of
         // routed under a frame declaration the new child does not make.
-        Ok(Arc::new(Self::try_new_with_routing(
+        Ok(Arc::new(Self::try_new_with_completion(
             children.swap_remove(0),
             self.outputs(),
             self.routing_policy.clone(),
+            self.identity_completion,
         )?))
     }
 
@@ -448,6 +507,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
                     &self.input,
                     self.routing.clone(),
                     Arc::clone(&self.series_schema),
+                    self.state.clone(),
                     &context,
                 )?);
             }
@@ -459,6 +519,15 @@ impl ExecutionPlan for SeriesRepartitionExec {
             ))
         })?;
         // Take the queue and its claim on the read together.
+        if self.content == FrameContent::AggregateState {
+            return Ok(Box::pin(StateBatchOutputStream {
+                schema: self.input.schema(),
+                receiver,
+                lease,
+                retained: None,
+                reported: false,
+            }));
+        }
         let inner = RepartitionStream::new(
             receiver,
             lease,
@@ -466,6 +535,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
             &context.runtime_env().memory_pool,
             self.input.properties().partitioning.partition_count(),
             self.ordering,
+            self.identity_completion,
         );
         let handoff = Arc::clone(&inner.handoff);
         let output: SendableRecordBatchStream = match self.content {
@@ -483,6 +553,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
                 };
                 pack_raw_series(Box::pin(raw))?
             }
+            FrameContent::AggregateState => unreachable!("aggregate state output handled above"),
         };
         let schema = output.schema();
         let output = Box::pin(PackedHandoffStream {
@@ -553,6 +624,7 @@ impl SharedExecution {
         input: &Arc<dyn ExecutionPlan>,
         routing: Routing,
         series_schema: Arc<SeriesSchema>,
+        state: Option<Arc<AggregateStateSchema>>,
         context: &Arc<TaskContext>,
     ) -> DataFusionResult<Arc<Self>> {
         // What the child carries is what it declares, not what the policy suggests: a raw frame
@@ -573,7 +645,19 @@ impl SharedExecution {
                     Some(Arc::clone(&series_schema)),
                 )?),
                 FrameContent::Raw => {
-                    RoutedInput::Raw(unpack_raw_series(frames, Some(Arc::clone(&series_schema)))?)
+                    // The node publishes labels, so a child that names them by its key is decoded
+                    // here, where the frames are already unpacked. An already-labelled stream
+                    // passes through untouched.
+                    let stream = unpack_raw_series(frames, Some(Arc::clone(&series_schema)))?;
+                    let stream = crate::source::materialize_raw_labels(stream)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                    RoutedInput::Raw(stream)
+                }
+                FrameContent::AggregateState => {
+                    let state = state.as_ref().ok_or_else(|| {
+                        DataFusionError::Plan("aggregate state declaration is missing".into())
+                    })?;
+                    RoutedInput::State(frames, Arc::clone(state), Arc::clone(&series_schema))
                 }
             });
         }
@@ -966,6 +1050,200 @@ impl Inputs {
     }
 }
 
+/// Upper bound for transient arrays allocated by slicing one aggregate-state row. It counts each
+/// schema node's concrete array object, two `usize` wrapper words, and one reference per child.
+fn state_slice_wrapper_bytes(
+    schema: &datafusion::arrow::datatypes::Schema,
+) -> DataFusionResult<usize> {
+    use datafusion::arrow::array::{
+        ArrayRef, BinaryArray, BooleanArray, ListArray, PrimitiveArray, StringArray, StructArray,
+    };
+    use datafusion::arrow::datatypes::{DataType, Float64Type, UInt64Type};
+    fn node(data_type: &DataType) -> DataFusionResult<usize> {
+        let children = match data_type {
+            DataType::Struct(fields) => fields
+                .iter()
+                .map(|field| node(field.data_type()))
+                .collect::<DataFusionResult<Vec<_>>>()?,
+            DataType::List(_) => Vec::new(),
+            _ => Vec::new(),
+        };
+        let object = match data_type {
+            DataType::Struct(_) => std::mem::size_of::<StructArray>(),
+            DataType::List(_) => std::mem::size_of::<ListArray>(),
+            DataType::Utf8 | DataType::LargeUtf8 => std::mem::size_of::<StringArray>(),
+            DataType::Binary | DataType::LargeBinary => std::mem::size_of::<BinaryArray>(),
+            DataType::Boolean => std::mem::size_of::<BooleanArray>(),
+            DataType::Float64 => std::mem::size_of::<PrimitiveArray<Float64Type>>(),
+            DataType::UInt64 => std::mem::size_of::<PrimitiveArray<UInt64Type>>(),
+            // Frame schema types outside this list are bounded by the largest enumerated object.
+            _ => [
+                std::mem::size_of::<StructArray>(),
+                std::mem::size_of::<ListArray>(),
+                std::mem::size_of::<StringArray>(),
+                std::mem::size_of::<BinaryArray>(),
+                std::mem::size_of::<BooleanArray>(),
+                std::mem::size_of::<PrimitiveArray<Float64Type>>(),
+                std::mem::size_of::<PrimitiveArray<UInt64Type>>(),
+            ]
+            .into_iter()
+            .max()
+            .unwrap(),
+        };
+        object
+            .checked_add(2 * std::mem::size_of::<usize>())
+            .and_then(|bytes| bytes.checked_add(children.len() * std::mem::size_of::<ArrayRef>()))
+            .and_then(|bytes| children.into_iter().try_fold(bytes, usize::checked_add))
+            .ok_or_else(|| {
+                DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+            })
+    }
+    let arrays = schema.fields().iter().try_fold(0usize, |bytes, field| {
+        bytes.checked_add(node(field.data_type())?).ok_or_else(|| {
+            DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+        })
+    })?;
+    // `RecordBatch::slice` also allocates the vector it collects the sliced columns into.
+    arrays
+        .checked_add(
+            schema
+                .fields()
+                .len()
+                .checked_mul(std::mem::size_of::<ArrayRef>())
+                .ok_or_else(|| {
+                    DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+                })?,
+        )
+        .ok_or_else(|| {
+            DataFusionError::Execution("aggregate-state slice wrapper size overflow".into())
+        })
+}
+
+/// Routes state rows without materializing Rust accumulator objects or rebuilding Arrow columns.
+async fn read_state_batches(
+    stream: &mut SendableRecordBatchStream,
+    _partition: usize,
+    routing: &Routing,
+    senders: &[mpsc::UnboundedSender<Queued>],
+    read_ahead: &MemoryReservation,
+    state: &AggregateStateSchema,
+    series: &SeriesSchema,
+) -> Stop {
+    use datatypes::series::frame::FrameLabelMode;
+    let decoder = match SeriesFrameDecoder::try_new_aggregate_state(
+        state,
+        series,
+        FrameLabelMode::Explicit,
+    ) {
+        Ok(decoder) => decoder,
+        Err(error) => return Stop::Failed(Arc::new(DataFusionError::Execution(error.to_string()))),
+    };
+    let expected_schema = match datatypes::series::frame::aggregate_state_frame_schema(
+        state,
+        series,
+        FrameLabelMode::Explicit,
+    ) {
+        Ok(schema) => schema,
+        Err(error) => return Stop::Failed(Arc::new(DataFusionError::Execution(error.to_string()))),
+    };
+    while let Some(next) = stream.next().await {
+        let batch = match next {
+            Ok(batch) => batch,
+            Err(error) => {
+                return Stop::Failed(Arc::new(DataFusionError::External(Box::new(error))));
+            }
+        };
+        if batch.schema().as_ref() != expected_schema.as_ref() {
+            return Stop::Failed(Arc::new(DataFusionError::Execution(
+                "aggregate state frame schema mismatch".into(),
+            )));
+        }
+        let charge = read_ahead.new_empty();
+        // Charge the input batch's retained buffers once. List slices still reference their entire
+        // values array, so a slice-size estimate cannot safely charge each queued row instead.
+        let batch_bytes = std::mem::size_of::<RecordBatch>()
+            .saturating_add(
+                batch
+                    .num_columns()
+                    .saturating_mul(std::mem::size_of::<datafusion::arrow::array::ArrayRef>()),
+            )
+            .saturating_add(batch.get_array_memory_size());
+        if let Err(error) = charge.try_grow(batch_bytes) {
+            return Stop::Failed(Arc::new(error));
+        }
+        let labels = match decoder.decode_aggregate_state_labels(&batch) {
+            Ok(labels) => labels,
+            Err(error) => {
+                return Stop::Failed(Arc::new(DataFusionError::Execution(error.to_string())));
+            }
+        };
+        let charge = Arc::new(charge);
+        let batch = Arc::new(batch);
+        if routing.outputs == 1 {
+            // Every row has the same owner. Keep the frame packed so a downstream router reads
+            // its shared payload once rather than receiving one parent-retaining slice per row.
+            if !labels.is_empty() && !senders[0].is_closed() {
+                let metadata = read_ahead.new_empty();
+                // Cloning the batch for the output allocates a new column-reference vector.
+                let wrapper_bytes = std::mem::size_of::<Queued>()
+                    .saturating_add(std::mem::size_of::<RecordBatch>())
+                    .saturating_add(
+                        batch.num_columns().saturating_mul(std::mem::size_of::<
+                            datafusion::arrow::array::ArrayRef,
+                        >()),
+                    );
+                if let Err(error) = metadata.try_grow(wrapper_bytes) {
+                    return Stop::Failed(Arc::new(error));
+                }
+                if let Err(error) = senders[0].send(Queued::StateBatch {
+                    batch,
+                    row: None,
+                    _charge: charge,
+                    _metadata: metadata,
+                }) {
+                    drop(error.0);
+                }
+            }
+            tokio::task::coop::consume_budget().await;
+            continue;
+        }
+        // Each queued row receives a reservation for the schema-based slice-wrapper upper bound.
+        let slice_charge = match state_slice_wrapper_bytes(batch.schema().as_ref()) {
+            Ok(bytes) => bytes,
+            Err(error) => return Stop::Failed(Arc::new(error)),
+        };
+        let slice_metadata_bytes = match std::mem::size_of::<Queued>().checked_add(slice_charge) {
+            Some(bytes) => bytes,
+            None => {
+                return Stop::Failed(Arc::new(DataFusionError::Execution(
+                    "aggregate-state slice wrapper size overflow".into(),
+                )));
+            }
+        };
+        for (index, metric) in labels.iter().enumerate() {
+            let output = routing.output_labels(metric);
+            if senders[output].is_closed() {
+                continue;
+            }
+            // All slices retain the same parent buffers; a shared reservation charges them once.
+            let metadata = read_ahead.new_empty();
+            if let Err(error) = metadata.try_grow(slice_metadata_bytes) {
+                return Stop::Failed(Arc::new(error));
+            }
+            if let Err(error) = senders[output].send(Queued::StateBatch {
+                batch: Arc::clone(&batch),
+                row: Some(index),
+                _charge: Arc::clone(&charge),
+                _metadata: metadata,
+            }) {
+                drop(error.0);
+            }
+        }
+        tokio::task::coop::consume_budget().await;
+    }
+    Stop::Ended
+}
+
 /// One input partition's task: reads its own child, assembles chains, and sends each complete chain to
 /// its canonical owner. Output queues are unbounded, so sending does not wait for an owner to poll;
 /// queued chains remain charged to the pool until consumed or dropped. Each task records its outcome
@@ -986,6 +1264,18 @@ async fn route_partition(
         }
         RoutedInput::Raw(stream) => {
             read_raw_chains(stream, partition, &routing, &senders, &read_ahead).await
+        }
+        RoutedInput::State(stream, state, series) => {
+            read_state_batches(
+                stream,
+                partition,
+                &routing,
+                &senders,
+                &read_ahead,
+                state,
+                series,
+            )
+            .await
         }
     };
     if matches!(&stop, Stop::Ended) {
@@ -1352,18 +1642,6 @@ async fn read_raw_chains(
     }
 }
 
-fn exact_identity(series: &Series) -> ExactIdentity {
-    (
-        series.metric.name().map(Arc::<str>::from),
-        series
-            .metric
-            .tags()
-            .iter()
-            .map(|tag| (Arc::clone(&tag.name), Arc::clone(&tag.value)))
-            .collect(),
-    )
-}
-
 /// Merges exact metric-name and complete-tag identities, preserving first-seen group order.
 ///
 /// The Fused series stack calls this helper for evaluated frame finalization; this branch does not
@@ -1474,6 +1752,11 @@ enum Ending {
 enum RoutedInput {
     Evaluated(SendableEvaluatedSeriesStream),
     Raw(SendableRawSeriesStream),
+    State(
+        SendableRecordBatchStream,
+        Arc<AggregateStateSchema>,
+        Arc<SeriesSchema>,
+    ),
 }
 
 enum RoutedChain {
@@ -1492,9 +1775,28 @@ enum Queued {
         input: usize,
         _metadata: MemoryReservation,
     },
+    StateBatch {
+        batch: Arc<RecordBatch>,
+        // None forwards the entire parent; Some selects one row for multi-output routing.
+        row: Option<usize>,
+        _charge: Arc<MemoryReservation>,
+        _metadata: MemoryReservation,
+    },
 }
 
 type ExactIdentity = (Option<Arc<str>>, Vec<(Arc<str>, Arc<str>)>);
+
+fn exact_identity(series: &Series) -> ExactIdentity {
+    (
+        series.metric.name().map(Arc::<str>::from),
+        series
+            .metric
+            .tags()
+            .iter()
+            .map(|tag| (Arc::clone(&tag.name), Arc::clone(&tag.value)))
+            .collect(),
+    )
+}
 
 /// Turns an owner's evaluated publications into the evaluated stream the packer consumes.
 struct EvaluatedOutputStream {
@@ -1597,6 +1899,10 @@ enum OwnerKey {
     Raw(Vec<u8>),
 }
 
+fn raw_identity(chunk: &RawSeriesChunk) -> OwnerKey {
+    OwnerKey::Raw(chunk.primary_key.as_slice().to_vec())
+}
+
 /// The raw identity of one chunk: its complete stored primary key and nothing else.
 ///
 /// Labels are deliberately not part of the key. Two pieces of one physical key must always meet in
@@ -1654,10 +1960,6 @@ fn raw_chunk_slice_bytes(chunk: &RawSeriesChunk) -> DataFusionResult<usize> {
         .saturating_add(fields_bytes))
 }
 
-fn raw_identity(chunk: &RawSeriesChunk) -> OwnerKey {
-    OwnerKey::Raw(chunk.primary_key.as_slice().to_vec())
-}
-
 struct PendingGroup {
     fragments: Vec<Series>,
     raw_chunks: Vec<RawSeriesChunk>,
@@ -1677,6 +1979,7 @@ fn group_ready(
     eof: &[bool],
     last_key_from: &[Option<Vec<u8>>],
     ordering: SeriesOrdering,
+    completion: IdentityCompletion,
     key: &OwnerKey,
 ) -> bool {
     if ordering == SeriesOrdering::KeyThenTime {
@@ -1688,6 +1991,9 @@ fn group_ready(
                 *received || *eof || last_key.as_ref().is_some_and(|last| last > key)
             },
         );
+    }
+    if completion == IdentityCompletion::CompleteDisjoint {
+        return true;
     }
     group
         .received
@@ -1713,6 +2019,88 @@ struct ReadyCharges {
 }
 
 /// One owner processes identities as soon as every input has closed or contributed its final chain.
+struct StateBatchOutputStream {
+    schema: SchemaRef,
+    receiver: mpsc::UnboundedReceiver<Queued>,
+    lease: OutputLease,
+    retained: Option<(Arc<MemoryReservation>, MemoryReservation)>,
+    reported: bool,
+}
+
+impl RecordBatchStream for StateBatchOutputStream {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
+impl Stream for StateBatchOutputStream {
+    type Item = DataFusionResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.reported {
+            return Poll::Ready(None);
+        }
+        self.retained = None;
+        loop {
+            if let Ending::Failed(error) = self.lease.shared.ending() {
+                self.reported = true;
+                self.receiver.close();
+                while self.receiver.try_recv().is_ok() {}
+                self.retained = None;
+                return Poll::Ready(Some(Err(DataFusionError::from(&error))));
+            }
+            match self.receiver.poll_recv(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Queued::StateBatch {
+                    batch,
+                    row,
+                    _charge,
+                    _metadata,
+                })) => {
+                    // Keep the router reservation through the next poll so Final can admit the
+                    // returned batch's retained component arrays before releasing router charge.
+                    self.retained = Some((_charge, _metadata));
+                    let batch = match row {
+                        Some(row) => batch.slice(row, 1),
+                        None => batch.as_ref().clone(),
+                    };
+                    return Poll::Ready(Some(Ok(batch)));
+                }
+                Poll::Ready(Some(Queued::Eof { input, _metadata })) => {
+                    // The shared Ending state and channel closure establish stream completion;
+                    // this message is only a queue-order barrier for the routed state stream.
+                    let _ = input;
+                    drop(_metadata);
+                }
+                Poll::Ready(Some(Queued::Chain { .. })) => {
+                    let error = DataFusionError::Internal(
+                        "series router received a non-state message".into(),
+                    );
+                    self.lease.fail(Arc::new(DataFusionError::Internal(
+                        "series router received a non-state message".into(),
+                    )));
+                    self.reported = true;
+                    self.receiver.close();
+                    while self.receiver.try_recv().is_ok() {}
+                    self.retained = None;
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Ready(None) => {
+                    self.reported = true;
+                    self.retained = None;
+                    return match self.lease.ending() {
+                        Some(Err(error)) => {
+                            Poll::Ready(Some(Err(DataFusionError::External(Box::new(error)))))
+                        }
+                        Some(Ok(_)) => unreachable!(),
+                        None => Poll::Ready(None),
+                    };
+                }
+            }
+        }
+    }
+}
+
 struct RepartitionStream {
     receiver: mpsc::UnboundedReceiver<Queued>,
     lease: OutputLease,
@@ -1720,6 +2108,7 @@ struct RepartitionStream {
     pool: Arc<dyn MemoryPool>,
     /// What the frame this stream emits declares about the order of its keys.
     ordering: SeriesOrdering,
+    identity_completion: IdentityCompletion,
     groups: BTreeMap<OwnerKey, PendingGroup>,
     eof: Vec<bool>,
     last_key_from: Vec<Option<Vec<u8>>>,
@@ -1794,12 +2183,14 @@ impl RepartitionStream {
         pool: &Arc<dyn MemoryPool>,
         inputs: usize,
         ordering: SeriesOrdering,
+        identity_completion: IdentityCompletion,
     ) -> Self {
         Self {
             receiver,
             lease,
             schema,
             ordering,
+            identity_completion,
             pool: Arc::clone(pool),
             groups: BTreeMap::new(),
             eof: Vec::new(),
@@ -1981,8 +2372,15 @@ impl Stream for RepartitionStream {
             if this.rescan {
                 let next = if this.ordering == SeriesOrdering::KeyThenTime {
                     this.groups.first_key_value().and_then(|(key, group)| {
-                        group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
-                            .then(|| key.clone())
+                        group_ready(
+                            group,
+                            &this.eof,
+                            &this.last_key_from,
+                            this.ordering,
+                            this.identity_completion,
+                            key,
+                        )
+                        .then(|| key.clone())
                     })
                 } else {
                     match &this.resume_after {
@@ -1998,13 +2396,21 @@ impl Stream for RepartitionStream {
                                     &this.eof,
                                     &this.last_key_from,
                                     this.ordering,
+                                    this.identity_completion,
                                     key,
                                 )
                                 .then(|| key.clone())
                             }),
                         None => this.groups.iter().find_map(|(key, group)| {
-                            group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
-                                .then(|| key.clone())
+                            group_ready(
+                                group,
+                                &this.eof,
+                                &this.last_key_from,
+                                this.ordering,
+                                this.identity_completion,
+                                key,
+                            )
+                            .then(|| key.clone())
                         }),
                     }
                 };
@@ -2041,6 +2447,11 @@ impl Stream for RepartitionStream {
                 return Poll::Pending;
             }
             match this.receiver.poll_recv(cx) {
+                Poll::Ready(Some(Queued::StateBatch { .. })) => {
+                    this.lease.fail(Arc::new(DataFusionError::Internal(
+                        "non-state output received an aggregate-state batch".into(),
+                    )));
+                }
                 Poll::Ready(Some(Queued::Chain {
                     input,
                     chain,
@@ -2053,15 +2464,6 @@ impl Stream for RepartitionStream {
                                 continue;
                             };
                             let key = exact_identity(&first.0);
-                            if chain
-                                .iter()
-                                .any(|(series, _, _)| exact_identity(series) != key)
-                            {
-                                this.lease.fail(Arc::new(DataFusionError::Execution(
-                                    "one series chain contains multiple exact identities".into(),
-                                )));
-                                continue;
-                            }
                             (OwnerKey::Evaluated(key), RoutedChain::Evaluated(chain))
                         }
                         RoutedChain::Raw(chain) => {
@@ -2069,12 +2471,6 @@ impl Stream for RepartitionStream {
                                 continue;
                             };
                             let key = raw_identity(&first.0);
-                            if chain.iter().any(|(chunk, _)| raw_identity(chunk) != key) {
-                                this.lease.fail(Arc::new(DataFusionError::Execution(
-                                    "one raw chain contains multiple primary keys".into(),
-                                )));
-                                continue;
-                            }
                             if let OwnerKey::Raw(raw_key) = &key
                                 && this.ordering == SeriesOrdering::KeyThenTime
                             {
@@ -2159,6 +2555,7 @@ impl Stream for RepartitionStream {
                         &this.eof,
                         &this.last_key_from,
                         this.ordering,
+                        this.identity_completion,
                         &key,
                     ) && let Err(error) = this.finish_group(&key)
                     {
@@ -2252,11 +2649,14 @@ impl Routing {
         let mut hasher = XxHash64::with_seed(self.seed);
         match &self.policy {
             SeriesRouting::CanonicalLabels => label_set(metric).hash(&mut hasher),
+            SeriesRouting::CanonicalLabelsExcept(excluded) => {
+                let mut labels = label_set(metric);
+                labels.retain(|(name, _)| !excluded.contains(name));
+                labels.hash(&mut hasher);
+            }
             SeriesRouting::Matching(policy) => {
                 crate::vector_match::group_key(metric, policy).hash(&mut hasher)
             }
-            // A raw frame routed by its stored key never reaches here: its destination is the
-            // stored key itself, not a label hash. Evaluated frames never use this policy.
             SeriesRouting::RawPrimaryKey => {
                 debug_assert!(
                     false,

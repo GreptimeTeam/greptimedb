@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 
 use catalog::RegisterTableRequest;
 use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
@@ -42,11 +44,14 @@ use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
-use promql::extension_plan::{AggregateFinalize, FusedSeries, HistogramFold, RawSeriesSource};
-use promql::native::plan::NativeExpr;
+use promql::extension_plan::{
+    FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
+};
+use promql::native::plan::{AggregateStage, BoundVectorOp, NativeExpr, NativeNode, NativeType};
+use promql::vector_match::MatchingLabels;
 use promql_parser::label::Labels;
 use promql_parser::parser;
-use session::context::QueryContext;
+use session::context::{MetricDiscoveryScope, QueryContext};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::Table;
 use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder};
@@ -233,6 +238,17 @@ fn operator_metric_table(
     le: Option<&str>,
     value: DirectOrValue,
 ) -> table::TableRef {
+    operator_metric_table_with_engine(name, table_id, tag, le, value, DEFAULT_ENGINE)
+}
+
+fn operator_metric_table_with_engine(
+    name: &str,
+    table_id: u32,
+    tag: &str,
+    le: Option<&str>,
+    value: DirectOrValue,
+    engine: &str,
+) -> table::TableRef {
     let value_type = match &value {
         DirectOrValue::Float64(_) => ConcreteDataType::float64_datatype(),
         DirectOrValue::Int64(_) => ConcreteDataType::int64_datatype(),
@@ -240,8 +256,13 @@ fn operator_metric_table(
         DirectOrValue::Utf8(_) => ConcreteDataType::string_datatype(),
     };
     let tag_count = 1 + usize::from(le.is_some());
+    let (tag_name, time_name, value_name) = if engine == NATIVE_ENGINE {
+        ("tag_0", "timestamp", "field_0")
+    } else {
+        ("tag", "ts", "v")
+    };
     let mut columns = vec![ColumnSchema::new(
-        "tag".to_string(),
+        tag_name.to_string(),
         ConcreteDataType::string_datatype(),
         false,
     )];
@@ -254,12 +275,12 @@ fn operator_metric_table(
     }
     columns.extend([
         ColumnSchema::new(
-            "ts".to_string(),
+            time_name.to_string(),
             ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         )
         .with_time_index(true),
-        ColumnSchema::new("v".to_string(), value_type, true),
+        ColumnSchema::new(value_name.to_string(), value_type, true),
     ]);
     let schema = Arc::new(Schema::new(columns));
     let mut arrays = vec![Arc::new(StringArray::from(vec![tag])) as Arc<dyn Array>];
@@ -280,6 +301,7 @@ fn operator_metric_table(
     );
     let value_index = tag_count + 1;
     let meta = TableMetaBuilder::empty()
+        .engine(engine.to_string())
         .schema(schema)
         .primary_key_indices((0..tag_count).collect())
         .value_indices(vec![value_index])
@@ -909,6 +931,243 @@ const DEFAULT_ENGINE: &str = "";
 /// It also decides whether a tag column is dictionary encoded, so a fixture that sets it sees
 /// `Dictionary(UInt32, Utf8)` where a blank-engine fixture sees `Utf8`.
 const NATIVE_ENGINE: &str = MITO_ENGINE;
+
+async fn build_test_table_provider_with_tsid_tag_names(
+    table_specs: &[((String, String), usize, usize)],
+    tag_names: &[Vec<String>],
+    logical_field_order: Option<&[usize]>,
+) -> DfTableSourceProvider {
+    build_test_table_provider_with_tsid_tag_fields_and_field_order_and_times(
+        table_specs,
+        tag_names,
+        logical_field_order,
+        &vec!["timestamp".to_string(); table_specs.len()],
+    )
+    .await
+}
+
+async fn build_test_table_provider_with_tsid_tag_fields_and_field_order_and_times(
+    table_specs: &[((String, String), usize, usize)],
+    tag_names: &[Vec<String>],
+    logical_field_order: Option<&[usize]>,
+    logical_times: &[String],
+) -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+
+    let physical_table_name = "phy";
+    let physical_table_id = 999u32;
+    let physical_tag_names = tag_names
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let physical_num_field = table_specs
+        .iter()
+        .map(|(_, _, num_field)| *num_field)
+        .max()
+        .unwrap_or(0);
+    let physical_time_names = logical_times
+        .iter()
+        .filter(|name| name.as_str() != "timestamp")
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    // Register a metric engine physical table with internal columns.
+    {
+        let mut columns = vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+        ];
+        for tag in &physical_tag_names {
+            columns.push(ColumnSchema::new(
+                tag.clone(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ));
+        }
+        columns.push(
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        for name in &physical_time_names {
+            columns.push(ColumnSchema::new(
+                name.clone(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ));
+        }
+        for i in 0..physical_num_field {
+            columns.push(ColumnSchema::new(
+                format!("field_{i}"),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+        }
+
+        let schema = Arc::new(Schema::new(columns));
+        let primary_key_indices = (0..(2 + physical_tag_names.len())).collect::<Vec<_>>();
+        let mut options = table::requests::TableOptions::default();
+        options
+            .extra_options
+            .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .options(options)
+            .primary_key_indices(primary_key_indices)
+            .value_indices(
+                (2 + physical_tag_names.len()
+                    ..2 + physical_tag_names.len()
+                        + 1
+                        + physical_time_names.len()
+                        + physical_num_field)
+                    .collect(),
+            )
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .table_id(physical_table_id)
+            .name(physical_table_name)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: physical_table_name.to_string(),
+                    table_id: physical_table_id,
+                    table,
+                })
+                .is_ok()
+        );
+    }
+
+    // Register metric engine logical tables without `__tsid`, referencing the physical table.
+    for (idx, ((schema_name, table_name), _num_tag, num_field)) in table_specs.iter().enumerate() {
+        let table_tags = &tag_names[idx];
+        let time_name = &logical_times[idx];
+        let mut columns = vec![];
+        for tag in table_tags {
+            columns.push(ColumnSchema::new(
+                tag.clone(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ));
+        }
+        columns.push(
+            ColumnSchema::new(
+                time_name.clone(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        let field_order = logical_field_order
+            .map(|order| {
+                order
+                    .iter()
+                    .copied()
+                    .filter(|i| i < num_field)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| (0..*num_field).collect());
+        for i in field_order {
+            columns.push(ColumnSchema::new(
+                format!("field_{i}"),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+        }
+
+        let schema = Arc::new(Schema::new(columns));
+        let mut options = table::requests::TableOptions::default();
+        options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            physical_table_name.to_string(),
+        );
+        let table_id = 1024u32 + idx as u32;
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices((0..table_tags.len()).collect())
+            .value_indices((table_tags.len() + 1..table_tags.len() + 1 + *num_field).collect())
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .options(options)
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .table_id(table_id)
+            .name(table_name.clone())
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: schema_name.clone(),
+                    table_name: table_name.clone(),
+                    table_id,
+                    table,
+                })
+                .is_ok()
+        );
+    }
+    // The scope is what discovery consults before it reads anything, and its default declines, so
+    // a fixture that wants discovery to run has to say so.
+    let query_ctx = {
+        let base = QueryContext::arc();
+        let mut ctx = (*base).clone();
+        ctx.set_metric_discovery_scope(SCOPE.with(|scope| {
+            scope
+                .borrow()
+                .clone()
+                .unwrap_or(MetricDiscoveryScope::Unrestricted)
+        }));
+        Arc::new(ctx)
+    };
+    DfTableSourceProvider::new(catalog_list, false, query_ctx, DummyDecoder::arc(), false)
+}
+
+thread_local! {
+    /// What the metric fixture's provider reports as the request's discovery scope, so a test can
+    /// deny a table without rebuilding the catalog.
+    static SCOPE: std::cell::RefCell<Option<MetricDiscoveryScope>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A schema of logical metric tables, one tag and one field each, all served through the one
+/// physical table the fixture registers. A selector that names no metric enumerates these.
+async fn metric_discovery_provider(names: &[&str]) -> DfTableSourceProvider {
+    let specs = names
+        .iter()
+        .map(|name| ((DEFAULT_SCHEMA_NAME.to_string(), (*name).to_string()), 1, 1))
+        .collect::<Vec<_>>();
+    let tags = names
+        .iter()
+        .map(|_| vec!["tag_0".to_string()])
+        .collect::<Vec<_>>();
+    build_test_table_provider_with_tsid_tag_names(&specs, &tags, None).await
+}
 
 async fn build_test_table_provider(
     table_name_tuples: &[(String, String)],
@@ -1801,6 +2060,84 @@ async fn do_single_instant_function_call(fn_name: &'static str, plan_name: &str)
 /// The table is the one [`build_test_table_provider`] builds — one tag `tag_0`, the millisecond
 /// time index `timestamp`, one field `field_0` — which is the shape the selector context resolves
 /// to a raw series schema of one field.
+/// A discovered selector reports each series' identity as a `__name__` tag, and the operator
+/// decides whether that survives. The first case is the whole point of the feature: two metrics
+/// whose ordinary labels are equal are told apart by name alone.
+#[tokio::test]
+async fn native_metric_discovery_names_each_metric_where_the_operator_keeps_it() {
+    for (query, expected) in [
+        // The selection itself keeps the name.
+        ("{tag_0=\"x\"}", true),
+        // A filtering comparison reports the kept side's samples with their labels.
+        ("{tag_0=\"x\"} > 0", true),
+        // A range function, a math kernel and a folding aggregate all report values of their own.
+        ("rate({tag_0=\"x\"}[5m])", false),
+        ("abs({tag_0=\"x\"})", false),
+        ("sum({tag_0=\"x\"})", false),
+        // Grouping by the name is how an aggregate keeps it.
+        ("sum by (__name__) ({tag_0=\"x\"})", true),
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+        )
+        .await;
+        // The response layer reads the plan's own output schema, so that is what has to carry the
+        // name. For an aggregate the root is the finalize node, not the fused producer under it.
+        let has_name = plan
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == METRIC_NAME);
+        assert_eq!(expected, has_name, "{query}: {plan:?}");
+    }
+}
+
+/// The scope is the authority on which of the discovered metrics a caller may see. A denied table
+/// never becomes a source, so its name reaches neither the plan nor the answer.
+#[tokio::test]
+async fn native_metric_discovery_reads_only_what_the_scope_allows() {
+    SCOPE.with(|scope| {
+        *scope.borrow_mut() = Some(MetricDiscoveryScope::allowed([(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "alpha_total".to_string(),
+        )]))
+    });
+    let plan = build_native_fused_plan_with_provider(
+        "{tag_0=\"x\"}",
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    let formatted = format!("{plan:?}");
+    assert!(formatted.contains("alpha_total"), "{formatted}");
+    assert!(!formatted.contains("beta_total"), "{formatted}");
+    SCOPE.with(|scope| *scope.borrow_mut() = None);
+}
+
+/// One input per discovered metric, and each names the metric it reads.
+#[tokio::test]
+async fn native_metric_discovery_prepares_one_source_per_metric() {
+    let plan = build_native_fused_plan_with_provider(
+        "{tag_0=\"x\"}",
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    let formatted = format!("{plan:?}");
+    for name in ["alpha_total", "beta_total"] {
+        assert!(formatted.contains(name), "{name} missing from {formatted}");
+    }
+    let fused = find_fused_series(&plan).expect("fused plan");
+    assert_eq!(
+        fused.children().len(),
+        1,
+        "the sources live under one union input: {plan:?}"
+    );
+}
+
 async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan {
     let table_provider = build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
@@ -1951,6 +2288,160 @@ async fn native_fused_plans_dynamic_scalars() {
         let fused = find_fused_series(&plan).expect("a data-free statement uses the native route");
         assert!(fused.children().is_empty(), "{query}");
     }
+    for (query, expected_value, expected_label, expected_formatted_value) in [
+        ("count_values(\"l\", vector(1))", "value", "l", "1"),
+        (
+            "count_values(\"value\", vector(1))",
+            "native_value_0",
+            "value",
+            "1",
+        ),
+        ("count_values(\"time\", vector(1))", "value", "time", "1"),
+        (
+            "count_values(\"value\", vector(1)) by (native_value_0)",
+            "native_value_1",
+            "value",
+            "1",
+        ),
+        (
+            "count_values(\"vector(s)\", vector(1))",
+            "value",
+            "vector(s)",
+            "1",
+        ),
+        (
+            "count_values(\"__name__\", vector(1))",
+            "value",
+            "__name__",
+            "1",
+        ),
+        ("count_values(\"值\", vector(1))", "value", "值", "1"),
+        (
+            "count_values(\"value\", vector(time() - time() + 1))",
+            "native_value_0",
+            "value",
+            "1",
+        ),
+        (
+            "count_values(\"value\", hour())",
+            "native_value_0",
+            "value",
+            "__hour__",
+        ),
+        (
+            "count_values(\"value\", abs(vector(1)))",
+            "native_value_0",
+            "value",
+            "1",
+        ),
+        (
+            "count_values(\"value\", count_values(\"native_value_0\", vector(1)))",
+            "native_value_1",
+            "value",
+            "1",
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan).expect("data-free count_values takes native route");
+        assert!(fused.children().is_empty(), "{query}");
+        let expected_time = if expected_label == "time" {
+            "native_time_0"
+        } else {
+            DEFAULT_TIME_INDEX_COLUMN
+        };
+        let expected_schema = vec![expected_time, expected_value, expected_label];
+        let root_fields = fused.tree().root().output.samples().unwrap();
+        assert_eq!(
+            vec![expected_value],
+            root_fields
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            "{query} native value field"
+        );
+        assert_eq!(
+            expected_schema,
+            fused
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            "{query} output schema"
+        );
+        let encoded = fused.serialize().unwrap();
+        let decoded = FusedSeries::deserialize(&encoded).unwrap();
+        assert_eq!(fused.schema(), decoded.schema(), "{query} roundtrip schema");
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(decoded),
+        });
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert!(!batches.is_empty(), "{query}");
+        for batch in &batches {
+            assert_eq!(
+                expected_schema,
+                batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().as_str())
+                    .collect::<Vec<_>>(),
+                "{query} Arrow schema"
+            );
+            assert!(batch.num_rows() > 0, "{query}: {batch:?}");
+            let output_label = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let output_count = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                let expected = if expected_formatted_value == "__hour__" {
+                    let timestamp = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .value(row);
+                    ((timestamp / 3_600_000).rem_euclid(24)).to_string()
+                } else {
+                    expected_formatted_value.to_string()
+                };
+                assert_eq!(
+                    expected,
+                    output_label.value(row),
+                    "{query}: formatted label at row {row}"
+                );
+                assert_eq!(1.0, output_count.value(row), "{query}: count at row {row}");
+            }
+        }
+    }
+    let query = "sum(count_values(\"time\", vector(1)))";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("a data-free time label keeps the native route");
+    assert!(fused.children().is_empty(), "{query}");
+    assert_eq!(
+        vec!["value"],
+        fused
+            .tree()
+            .root()
+            .output
+            .samples()
+            .unwrap()
+            .fields
+            .iter()
+            .map(|field| field.name.as_ref())
+            .collect::<Vec<_>>(),
+        "{query} native value field"
+    );
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    assert!(!batches.is_empty(), "{query}");
+
     for query in [
         "scalar(some_metric)",
         "some_metric > bool scalar(some_metric)",
@@ -1998,7 +2489,8 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     );
     // The scan below is chosen during physical planning, so the route cannot know whether it is
     // the legacy scan (`KeyThenTime`) or the two-phase one (`Contiguous`) and must bind the weaker
-    // guarantee both provide. `rate` compiles to one window over that raw input.
+    // guarantee both provide. `rate` compiles to one window over that raw input. The canonical
+    // merge planner test uses an evaluated subquery window.
     let NativeExpr::Window { input, .. } = &fused.tree().root().expr else {
         panic!("the root is not a window: {:?}", fused.tree().root().expr);
     };
@@ -2108,6 +2600,39 @@ async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
     let plan =
         build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
     assert!(plan.display_indent().to_string().contains("FusedSeries"));
+}
+
+/// A label rewrite that collapses the partition column cannot be answered by one region.
+///
+/// The canonical boundary's router only collects the pieces its own region's producer holds, so a
+/// table split into several regions would answer a canonical label set from whichever region held a
+/// piece of it. The route therefore declines that tree - and only that tree: `rate` on the same
+/// partitioned table keeps fusing, which the test above asserts. Declining means the existing
+/// planner's plan, exactly.
+#[tokio::test]
+async fn native_fused_partitioned_table_label_rewrite_falls_back() {
+    let query = r#"label_replace(some_metric, "tag_0", "same", "tag_0", ".*")"#;
+    let native =
+        build_native_fused_plan_with_provider(query, true, native_engine_provider(vec![0]).await)
+            .await;
+    let fallback =
+        build_native_fused_plan_with_provider(query, false, native_engine_provider(vec![0]).await)
+            .await;
+    assert!(
+        find_fused_series(&native).is_none(),
+        "a collapsing rewrite over a partitioned table must keep the existing plan: {}",
+        native.display_indent()
+    );
+    assert!(
+        !native.display_indent().to_string().contains("FusedSeries"),
+        "{}",
+        native.display_indent()
+    );
+    assert_eq!(
+        native.display_indent().to_string(),
+        fallback.display_indent().to_string(),
+        "the native setting must plan exactly what the existing planner plans"
+    );
 }
 
 /// Metric logical scans retain their table-id restriction on the direct fused scan input.
@@ -2220,23 +2745,34 @@ async fn native_fused_metric_fields_follow_logical_order() {
     }));
 }
 
-/// Every selector `plan`'s fused node reads answers with a raw source naming its own metric.
+/// Every raw source or directly bound scan below `plan` names its own metric occurrence.
 fn fused_input_metrics(plan: &LogicalPlan) -> Vec<String> {
-    let fused = find_fused_series(plan).unwrap_or_else(|| panic!("no fused node in {plan}"));
-    fused
-        .inputs()
-        .iter()
-        .map(|input| {
-            let LogicalPlan::Extension(Extension { node }) = input else {
-                panic!("expected a raw source, got {input}");
-            };
-            node.as_any()
-                .downcast_ref::<RawSeriesSource>()
-                .unwrap_or_else(|| panic!("expected a raw source, got {input}"))
-                .metric_name()
-                .to_string()
-        })
-        .collect()
+    fn visit(plan: &LogicalPlan, metrics: &mut Vec<String>) {
+        if let LogicalPlan::Extension(Extension { node }) = plan {
+            if let Some(source) = node.as_any().downcast_ref::<RawSeriesSource>() {
+                metrics.push(source.metric_name().to_string());
+            } else if let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+                && let Some(metric) = &fused.binding().metric_name
+            {
+                // A single-source segment binds its own metric rather than wrapping its scan in
+                // RawSeriesSource, even when other segments read different logical tables.
+                for _ in fused
+                    .children()
+                    .iter()
+                    .filter(|child| matches!(child, LogicalPlan::TableScan(_)))
+                {
+                    metrics.push(metric.to_string());
+                }
+            }
+        }
+        // Segmented boundaries may add projections above extension nodes.
+        for child in plan.inputs() {
+            visit(child, metrics);
+        }
+    }
+    let mut metrics = Vec::new();
+    visit(plan, &mut metrics);
+    metrics
 }
 
 /// Two metric logical tables over one physical table are two metrics, one input each, though one
@@ -2256,18 +2792,23 @@ async fn native_fused_metric_engine_selectors_keep_their_own_logical_table() {
         build_native_fused_plan_with_provider("other_metric", true, provider().await).await;
     let fused = find_fused_series(&single).unwrap_or_else(|| panic!("{single}"));
     assert_eq!(Some("other_metric"), fused.binding().metric_name.as_deref());
-    for query in [
-        "some_metric / other_metric",
-        "some_metric + other_metric + some_metric",
+    for (query, expected_metrics) in [
+        (
+            "some_metric / other_metric",
+            vec!["some_metric", "other_metric"],
+        ),
+        (
+            "some_metric + other_metric + some_metric",
+            vec!["some_metric", "other_metric", "some_metric"],
+        ),
     ] {
         let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
         assert!(has_pair_node(&native), "{query}: {native}");
         let fused = find_fused_series(&native).unwrap_or_else(|| panic!("{query}: {native}"));
         assert_eq!(None, fused.binding().metric_name, "{query}");
-        assert!(
-            fused_input_metrics(&native)
-                .iter()
-                .any(|metric| metric == "other_metric"),
+        assert_eq!(
+            expected_metrics,
+            fused_input_metrics(&native),
             "{query}: {native}"
         );
     }
@@ -2302,22 +2843,60 @@ async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
         (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
     ];
     let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
-    for query in [
-        "sum(some_metric) / sum(other_metric)",
-        "sum(sum(some_metric)) / sum(other_metric)",
-        "sum by (tag_0) (some_metric) / sum by (tag_0) (other_metric)",
+    for (query, columns) in [
+        (
+            "sum(some_metric) / sum(other_metric)",
+            vec!["timestamp", "field_0"],
+        ),
+        (
+            "sum(sum(some_metric)) / sum(other_metric)",
+            vec!["timestamp", "field_0"],
+        ),
+        (
+            "sum by (tag_0) (some_metric) / sum by (tag_0) (other_metric)",
+            vec!["timestamp", "field_0", "tag_0"],
+        ),
     ] {
         let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
         let fused = find_fused_series(&native)
             .unwrap_or_else(|| panic!("{query}: no fused node: {native}"));
+        assert_eq!(
+            columns,
+            native
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            "{query}: segmented output uses native tree names and order"
+        );
         assert_eq!(2, fused.inputs().len(), "{query}: {native}");
         assert!(
-            fused.partial_fold().is_none(),
-            "{query}: a multi-input aggregate is not a split: {native}"
+            find_final_split(&native).is_none(),
+            "{query}: every input partition folds in one execution: {native}"
         );
+        let input_metrics = fused
+            .inputs()
+            .iter()
+            .map(|input| {
+                let LogicalPlan::Extension(Extension { node }) = input else {
+                    panic!("{query}: expected a segment FusedSeries input, got {input}");
+                };
+                node.as_any()
+                    .downcast_ref::<FusedSeries>()
+                    .unwrap_or_else(|| {
+                        panic!("{query}: expected a segment FusedSeries, got {input}")
+                    })
+                    .binding()
+                    .metric_name
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{query}: segment has no metric binding: {input}"))
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             vec!["some_metric".to_string(), "other_metric".to_string()],
-            fused_input_metrics(&native),
+            input_metrics,
             "{query}: {native}"
         );
     }
@@ -2578,36 +3157,83 @@ async fn native_fused_delta_temporality_non_counter_math_still_folds() {
     }
 }
 
-/// A whole-vector operation is not a per-series tree, so it stays on the existing plan.
+/// A whole-vector operation reaches the native route like any other call the compiler folds.
+///
+/// `sort` and `absent` read across a vector rather than one series at a time, which is why an
+/// earlier version of this route refused them by name. The refusal was a second capability list
+/// beside the compiler's, and it disagreed with it: these calls compile, so the list was the only
+/// thing turning them away.
 #[tokio::test]
-async fn native_fused_whole_vector_operation_falls_back() {
+async fn native_fused_whole_vector_operations_are_admitted() {
     for query in ["sort(some_metric)", "absent(some_metric)"] {
         let native = build_native_fused_plan(query, true).await;
-        let without_flag = build_native_fused_plan(query, false).await;
         assert!(
-            find_fused_series(&native).is_none(),
-            "`{query}` reads the whole vector and must not be placed region-side"
-        );
-        assert_eq!(
-            native.display_indent().to_string(),
-            without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan, not an approximation of it"
+            find_fused_series(&native).is_some(),
+            "`{query}` compiles, so the native route plans it: {native:?}"
         );
     }
 }
 
 #[tokio::test]
+async fn native_fused_depth_limit_falls_back_to_legacy_plan() {
+    // At 63 selector terms the tree reaches depth 64; the 64th exceeds the limit.
+    let schema = Arc::new(datatypes::series::samples::SeriesSchema {
+        fields: Arc::from([datatypes::series::samples::FieldSpec { name: "v0".into() }]),
+        eval_grid: None,
+    });
+    let compile = |terms| {
+        let query = std::iter::repeat_n("some_metric", terms)
+            .collect::<Vec<_>>()
+            .join(" + ");
+        crate::promql::native_compile::compile_selectors(
+            &build_eval_stmt(&query),
+            &|_| Ok(Arc::clone(&schema)),
+            SeriesOrdering::KeyThenTime,
+        )
+    };
+    compile(63).expect("63 selector terms must fit native tree depth 64");
+    let error = compile(64).expect_err("64 selector terms must exceed native tree depth 64");
+    assert!(
+        matches!(
+            &error,
+            datafusion::error::DataFusionError::NotImplemented(_)
+        ),
+        "expected a NotImplemented depth-limit rejection, got: {error}"
+    );
+    assert!(
+        error.to_string().contains("native tree nesting exceeds 64"),
+        "unexpected compiler rejection: {error}"
+    );
+    let query = std::iter::repeat_n("some_metric", 64)
+        .collect::<Vec<_>>()
+        .join(" + ");
+
+    let native = build_native_fused_plan(&query, true).await;
+    let legacy = build_native_fused_plan(&query, false).await;
+    let display = native.display_indent().to_string();
+    assert!(
+        !display.contains("FusedSeries"),
+        "64 selector terms exceed the native tree depth cap: {display}"
+    );
+    assert_eq!(
+        display,
+        legacy.display_indent().to_string(),
+        "a native depth-limit rejection must preserve the legacy plan"
+    );
+}
+
+/// What the compiler has no node for still keeps the existing plan.
+#[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
     for query in [
+        // A subquery evaluates its own body on a grid of its own, which this route does not offer.
         "sum_over_time(rate(some_metric[5m])[1h:])",
-        "histogram_count(some_metric)",
-        "ceil(some_metric)",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
         assert!(
             !display.contains("FusedSeries"),
-            "`{query}` must not enter the limited native POC: {display}"
+            "`{query}` must not enter the native route: {display}"
         );
         // Falling back is the existing plan, not an approximation of it.
         let without_flag = build_native_fused_plan(query, false).await;
@@ -2617,6 +3243,34 @@ async fn native_fused_unsupported_shape_falls_back() {
             "`{query}` must keep the existing plan"
         );
     }
+}
+
+#[tokio::test]
+async fn native_histogram_count_drops_float_input() {
+    let query = "histogram_count(some_metric)";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("histogram_count uses the native route");
+    assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
+    assert!(format!("{:?}", fused.tree()).contains("Count"));
+    // The in-memory table scan is not a RegionScanExec or an explicit raw-frame source, so this
+    // unit harness cannot execute a region-backed native plan. Native histogram kernels test that
+    // a float input is dropped; this test pins the compiled operation and route.
+}
+
+#[tokio::test]
+async fn native_ceil_maps_raw_float_input() {
+    let query = "ceil(some_metric)";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("ceil uses the native route");
+    assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
+    let mut names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(vec!["field_0", "tag_0", "timestamp"], names);
 }
 
 /// Independent selector occurrences remain distinct scans in the native tree.
@@ -2757,29 +3411,52 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
         .await;
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
         assert_eq!(None, fused.binding().metric_name, "{query}");
-        let sources = fused
-            .inputs()
-            .iter()
-            .map(|input| {
-                let LogicalPlan::Extension(Extension { node }) = input else {
-                    panic!("{query}: expected a raw source, got {input}");
-                };
-                let source = node
-                    .as_any()
-                    .downcast_ref::<RawSeriesSource>()
-                    .unwrap_or_else(|| panic!("{query}: expected a raw source, got {input}"));
-                let [LogicalPlan::TableScan(scan)] = UserDefinedLogicalNodeCore::inputs(source)[..]
-                else {
-                    panic!("{query}: the raw source reads its table scan directly");
-                };
-                (
-                    source.metric_name().to_string(),
-                    scan.table_name.table().to_string(),
-                    source.tags().to_vec(),
-                    source.fields().to_vec(),
-                )
-            })
-            .collect::<Vec<_>>();
+        fn source_bindings(
+            query: &str,
+            input: &LogicalPlan,
+            output: &mut Vec<(String, String, Vec<String>, Vec<String>)>,
+        ) {
+            if let LogicalPlan::Extension(Extension { node }) = input {
+                if let Some(source) = node.as_any().downcast_ref::<RawSeriesSource>() {
+                    let [LogicalPlan::TableScan(scan)] =
+                        UserDefinedLogicalNodeCore::inputs(source)[..]
+                    else {
+                        panic!("{query}: the raw source reads its table scan directly");
+                    };
+                    output.push((
+                        source.metric_name().to_string(),
+                        scan.table_name.table().to_string(),
+                        source.tags().to_vec(),
+                        source.fields().to_vec(),
+                    ));
+                } else if let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+                    && let [LogicalPlan::TableScan(scan)] = fused.inputs()[..]
+                    && let Some(metric_name) = &fused.binding().metric_name
+                {
+                    output.push((
+                        metric_name.to_string(),
+                        scan.table_name.table().to_string(),
+                        fused.binding().tags.clone(),
+                        scan.projected_schema
+                            .fields()
+                            .iter()
+                            .filter(|field| {
+                                field.name() != "timestamp"
+                                    && !fused.binding().tags.contains(field.name())
+                            })
+                            .map(|field| field.name().clone())
+                            .collect(),
+                    ));
+                }
+                for child in node.inputs() {
+                    source_bindings(query, child, output);
+                }
+            }
+        }
+        let mut sources = Vec::new();
+        for input in fused.inputs() {
+            source_bindings(query, input, &mut sources);
+        }
         assert_eq!(
             vec![
                 (
@@ -2798,6 +3475,7 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
             sources,
             "{query}"
         );
+        // This pair route is not an aggregate route: it publishes the node's own field names.
         assert_eq!(
             vec!["field_0", "tag_0", "timestamp"],
             sorted_column_names(&plan),
@@ -2806,8 +3484,8 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
     }
 }
 
-/// Whether `plan` holds a native node over more than one input. The hybrid route plans a binary's
-/// selector operands as single-input nodes under the existing join, which this does not count.
+/// Whether `plan` holds a native node over more than one input; single-input native operands under
+/// a legacy join do not count as a native multi-input execution.
 fn has_pair_node(plan: &LogicalPlan) -> bool {
     if let LogicalPlan::Extension(Extension { node }) = plan
         && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
@@ -2816,6 +3494,114 @@ fn has_pair_node(plan: &LogicalPlan) -> bool {
         return true;
     }
     plan.inputs().into_iter().any(has_pair_node)
+}
+
+/// Computed operands with a dropped matching label are cut before matching, so the parent can
+/// repartition their evaluated frames by the remaining labels.
+#[tokio::test]
+async fn native_fused_cuts_computed_matching_key_operands_once() {
+    for query in [
+        "(some_metric * 2) + on(__name__, tag_0) (some_metric * 2)",
+        "timestamp(some_metric) + on(__name__, tag_0) timestamp(some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let parent = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        assert_eq!(2, parent.inputs().len(), "{query}: {plan}");
+        assert!(
+            matches!(
+                input_locality(parent.tree().root()),
+                InputLocality::MatchingLocal(MatchingLabels::On(labels))
+                    if labels.iter().map(AsRef::as_ref).collect::<Vec<_>>() == ["__name__", "tag_0"]
+            ),
+            "{query}: {plan}"
+        );
+        let NativeExpr::Binary { left, right, .. } = &parent.tree().root().expr else {
+            panic!("{query}: expected parent binary: {plan}");
+        };
+        let (NativeExpr::Input(left), NativeExpr::Input(right)) = (&left.expr, &right.expr) else {
+            panic!("{query}: parent operands are not input boundaries: {plan}");
+        };
+        assert_eq!((0, 1), (left.source_index, right.source_index), "{query}");
+        for input in parent.inputs() {
+            let prefix = find_fused_series(input)
+                .unwrap_or_else(|| panic!("{query}: expected a cut prefix in {input}"));
+            assert!(
+                matches!(
+                    prefix.tree().root().output.samples(),
+                    Some(schema) if schema.eval_grid.is_some()
+                ),
+                "{query}: cut prefix must produce evaluated frames: {input}"
+            );
+            assert!(
+                matches!(
+                    input_locality(prefix.tree().root()),
+                    InputLocality::PartitionLocal | InputLocality::MatchingLocal(_)
+                ),
+                "{query}: prefix must remain parallel-local: {input}"
+            );
+        }
+    }
+}
+
+/// A nested three-source match segments its inner pair, then partitions the outer match.
+#[tokio::test]
+async fn native_fused_nested_match_segments_inner_pair_and_partitions_outer_match() {
+    for query in [
+        "some_metric + other_metric + some_metric",
+        "(some_metric + on(tag_0) other_metric) / on(job) some_metric",
+        "((some_metric + on(tag_0) other_metric) / on(job) some_metric) * on(tag_0) other_metric",
+        "(some_metric + on(tag_0) other_metric) / on(job) (some_metric * on(tag_0) other_metric)",
+    ] {
+        let provider = native_two_table_provider(vec![]).await;
+        let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+        assert!(has_pair_node(&plan), "{query}: {plan}");
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        assert!(matches!(
+            input_locality(fused.tree().root()),
+            InputLocality::MatchingLocal(_)
+        ));
+        let mut matching_policies = Vec::new();
+        fn collect_matching_policies(plan: &LogicalPlan, policies: &mut Vec<MatchingLabels>) {
+            if let Some(fused) = find_fused_series(plan) {
+                if let InputLocality::MatchingLocal(policy) = input_locality(fused.tree().root()) {
+                    policies.push(policy);
+                }
+                for child in fused.inputs() {
+                    collect_matching_policies(child, policies);
+                }
+            }
+        }
+        for child in fused.inputs() {
+            collect_matching_policies(child, &mut matching_policies);
+        }
+        assert!(
+            !matching_policies.is_empty(),
+            "query={query}: no nested matching-local segment: {plan}"
+        );
+    }
+}
+
+/// A three-occurrence same-table expression retains native planning with the existing input shape.
+#[tokio::test]
+async fn native_fused_same_table_nested_match_keeps_prior_admission() {
+    let plan = build_native_fused_plan("some_metric + some_metric + some_metric", true).await;
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{plan}"));
+    fn scan_count(plan: &LogicalPlan) -> usize {
+        usize::from(matches!(plan, LogicalPlan::TableScan(_)))
+            + plan.inputs().into_iter().map(scan_count).sum::<usize>()
+    }
+    assert_eq!(
+        3,
+        scan_count(&plan),
+        "all three selector occurrences remain: {plan}"
+    );
+    assert!(
+        matches!(
+            input_locality(fused.tree().root()),
+            InputLocality::MatchingLocal(_)
+        ),
+        "native same-table expression must retain matching locality: {plan}"
+    );
 }
 
 /// Two selectors over tables split into regions are not one two-input node, across tables as on
@@ -3018,8 +3804,8 @@ async fn native_fused_info_over_its_own_table_reads_two_scans_in_the_region() {
     );
 }
 
-/// A function of each value or an operation with a constant around a pair keeps the pair native,
-/// on one table with both scans under the node.
+/// A compiled native function (including `ceil`) and a pointwise operation around a pair
+/// remain native, on one table with both scans under the node.
 #[tokio::test]
 async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
     for query in [
@@ -3040,6 +3826,10 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
         );
         assert_eq!(2, fused.inputs().len(), "{query}");
     }
+
+    let query = "ceil(some_metric)";
+    let plan = build_native_fused_plan(query, true).await;
+    assert!(find_fused_series(&plan).is_some(), "{query}: {plan}");
 }
 
 /// A tree of more than two selectors binds one input per occurrence: under the node directly when
@@ -3072,37 +3862,100 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
         .await;
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
         let cross_table = tables.iter().any(|table| *table != tables[0]);
-        let read_tables = fused
-            .inputs()
-            .iter()
-            .map(|input| match input {
-                LogicalPlan::TableScan(scan) if !cross_table => scan.table_name.table().to_string(),
-                LogicalPlan::Extension(Extension { node }) if cross_table => {
-                    let source = node
-                        .as_any()
-                        .downcast_ref::<RawSeriesSource>()
-                        .unwrap_or_else(|| panic!("{query}: expected a raw source, got {input}"));
-                    let [LogicalPlan::TableScan(scan)] =
-                        UserDefinedLogicalNodeCore::inputs(source)[..]
-                    else {
-                        panic!("{query}: the raw source reads its table scan directly");
-                    };
-                    assert_eq!(source.metric_name(), scan.table_name.table(), "{query}");
-                    scan.table_name.table().to_string()
+        fn visit(node: &NativeNode, fused: &FusedSeries, output: &mut Vec<String>) {
+            let mut child = |node: &NativeNode| visit(node, fused, output);
+            match &node.expr {
+                NativeExpr::Input(input) => {
+                    let inputs = fused.inputs();
+                    let plan = inputs.get(input.source_index).unwrap_or_else(|| {
+                        panic!(
+                            "source index {} is out of bounds: {fused:?}",
+                            input.source_index
+                        )
+                    });
+                    match plan {
+                        LogicalPlan::TableScan(scan) => {
+                            let table = scan.table_name.table();
+                            assert_eq!(
+                                Some(table),
+                                fused.binding().metric_name.as_deref(),
+                                "{plan}"
+                            );
+                            output.push(table.to_string());
+                        }
+                        LogicalPlan::Extension(Extension { node }) => {
+                            if let Some(source) = node.as_any().downcast_ref::<RawSeriesSource>() {
+                                let [LogicalPlan::TableScan(scan)] =
+                                    UserDefinedLogicalNodeCore::inputs(source)[..]
+                                else {
+                                    panic!("raw source must have one table scan: {source:?}");
+                                };
+                                let table = scan.table_name.table();
+                                assert_eq!(source.metric_name(), table, "{source:?}");
+                                output.push(source.metric_name().to_string());
+                            } else if let Some(nested) = node.as_any().downcast_ref::<FusedSeries>()
+                            {
+                                visit(nested.tree().root(), nested, output);
+                            } else {
+                                panic!("unsupported native input: {plan}");
+                            }
+                        }
+                        other => panic!("unsupported native input: {other}"),
+                    }
                 }
-                other => panic!("{query}: unexpected input {other}"),
-            })
-            .collect::<Vec<_>>();
+                NativeExpr::Instant { input, .. }
+                | NativeExpr::Window { input, .. }
+                | NativeExpr::Merge { input }
+                | NativeExpr::Map { input, .. }
+                | NativeExpr::Timestamp { input }
+                | NativeExpr::Vector { input, .. }
+                | NativeExpr::Aggregate { input, .. }
+                | NativeExpr::VectorOf { input } => child(input),
+                NativeExpr::ParameterizedMap {
+                    input, parameters, ..
+                } => {
+                    child(input);
+                    for parameter in parameters.iter() {
+                        child(parameter);
+                    }
+                }
+                NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                    child(left);
+                    child(right);
+                }
+                NativeExpr::Info { base, info, .. } => {
+                    child(base);
+                    child(info);
+                }
+                NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
+            }
+        }
+        let mut read_tables = Vec::new();
+        visit(fused.tree().root(), fused, &mut read_tables);
         assert_eq!(read_tables, tables, "{query}");
         assert_eq!(
             cross_table,
             fused.binding().metric_name.is_none(),
             "{query}"
         );
+        // All four trees take the segmented route, including same-table selectors. The boundary
+        // publishes the native root's names directly rather than adding a naming projection.
+        assert!(
+            matches!(plan, LogicalPlan::Extension(_)),
+            "{query}: expected the segmented native boundary: {plan}"
+        );
+        assert!(
+            fused.inputs().iter().any(|input| matches!(
+                input,
+                LogicalPlan::Extension(Extension { node })
+                    if node.as_any().downcast_ref::<FusedSeries>().is_some()
+            )),
+            "{query}: expected a segmented producer: {plan}"
+        );
         assert_eq!(
             vec!["field_0", "tag_0", "timestamp"],
             sorted_column_names(&plan),
-            "{query}"
+            "{query}: the segmented boundary uses the native tree's names"
         );
     }
 }
@@ -3125,37 +3978,27 @@ async fn native_fused_three_selectors_on_partitioned_tables_fall_back() {
     }
 }
 
-/// The merge half of a split aggregate, when the plan is one.
-fn find_aggregate_finalize(plan: &LogicalPlan) -> Option<&AggregateFinalize> {
+/// Find the final half of a split aggregate.
+fn find_final_split(plan: &LogicalPlan) -> Option<&FusedSeries> {
     if let LogicalPlan::Extension(Extension { node }) = plan
-        && let Some(finalize) = node.as_any().downcast_ref::<AggregateFinalize>()
+        && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        && fused.reads_aggregate_state()
     {
-        return Some(finalize);
+        return Some(fused);
     }
 
-    plan.inputs().into_iter().find_map(find_aggregate_finalize)
+    plan.inputs().into_iter().find_map(find_final_split)
 }
 
-/// The producer below a split aggregate, which exports the state one partition folded.
-fn partial_producer(finalize: &AggregateFinalize) -> &FusedSeries {
-    // Bound to a local first: the slice handed out by `inputs` borrows this list.
-    let inputs = UserDefinedLogicalNodeCore::inputs(finalize);
-    let [LogicalPlan::Extension(Extension { node })] = inputs.as_slice() else {
-        panic!("the merge should read one producer: {finalize:?}");
+/// The state-exporting producer directly below a final split node.
+fn partial_below(final_node: &FusedSeries) -> Option<&FusedSeries> {
+    let [LogicalPlan::Extension(Extension { node })] = final_node.children() else {
+        return None;
     };
-    let fused = node
-        .as_any()
-        .downcast_ref::<FusedSeries>()
-        .expect("the producer is a fused series node");
-    assert!(
-        fused.partial_fold().is_some(),
-        "the producer below a merge exports state"
-    );
-    fused
+    node.as_any().downcast_ref::<FusedSeries>()
 }
 
-/// The column names of a plan, sorted: the two routes may order the same columns differently, and
-/// what has to agree is which columns a result carries.
+/// The column names of a plan, sorted for tests that do not depend on physical column order.
 fn sorted_column_names(plan: &LogicalPlan) -> Vec<String> {
     let mut names = plan
         .schema()
@@ -3168,11 +4011,10 @@ fn sorted_column_names(plan: &LogicalPlan) -> Vec<String> {
 }
 
 /// An aggregate is split: the merge stays on the frontend and the per-series prefix runs in the
-/// producer, which is the one shape a region can evaluate on its own. The rows carry the columns the
-/// existing plan carries - names, tags and time - which is what keeps the result readable whichever
-/// route answered it.
+/// producer. Native names follow the compiled tree; grouping labels, values and timestamps retain
+/// their existing schema roles.
 #[tokio::test]
-async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
+async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
     for query in [
         "sum(some_metric)",
         "avg(some_metric)",
@@ -3186,7 +4028,6 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
         "sum without (tag_0) (some_metric)",
         "sum(rate(some_metric[5m]))",
         "ceil(sum(some_metric))",
-        "sum(avg(some_metric) by (tag_0))",
         // A literal scalar on either side of the fold. Below the aggregate it is part of the prefix,
         // which is the half that computes the values the state folds; above it the merge rebuilds
         // the operation over the merged values, in the order the query wrote the operands. A
@@ -3202,106 +4043,697 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
         "abs(sum(some_metric)) * 2",
     ] {
         let plan = build_native_fused_plan(query, true).await;
-        let legacy = build_native_fused_plan(query, false).await;
         let display = plan.display_indent().to_string();
-        assert!(
-            display.contains("AggregateFinalize: "),
-            "`{query}`: {display}"
-        );
-        assert!(display.contains("[partial "), "`{query}`: {display}");
+        assert!(find_final_split(&plan).is_some(), "`{query}`: {display}");
         assert!(display.contains("TableScan: some_metric"), "{display}");
 
-        let finalize = find_aggregate_finalize(&plan).expect("the statement plans to a merge");
-        let producer = partial_producer(finalize);
-        // The prefix is the per-series tree; the aggregate itself is not in it.
-        assert!(
-            !producer.tree().to_string().contains("Aggregate"),
-            "`{query}`: {}",
-            producer.tree()
-        );
+        let final_node = find_final_split(&plan).expect("the statement plans to a final split");
+        let final_display = final_node.tree().to_string();
         assert_eq!(
-            sorted_column_names(&legacy),
-            sorted_column_names(&plan),
-            "`{query}` must report the columns the existing plan reports"
+            1,
+            final_display.matches(" final").count(),
+            "`{query}`: the merge must be a Final aggregate: {final_display}"
+        );
+        let partial = partial_below(final_node).expect("the final node reads a partial producer");
+        // The physical final must accept the producer's state and classify its own output fields.
+        let input = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+            Arc::clone(partial.schema().inner()),
+        ));
+        final_node
+            .to_execution_plan(vec![(
+                input,
+                store_api::region_engine::RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            )])
+            .unwrap_or_else(|error| panic!("`{query}`: invalid final physical plan: {error}"));
+        let partial_display = partial.tree().to_string();
+        let NativeExpr::Aggregate { input, op } = &partial.tree().root().expr else {
+            panic!("`{query}`: partial root is not an aggregate: {partial_display}");
+        };
+        assert_eq!(AggregateStage::Partial, op.stage, "`{query}`");
+        assert!(
+            super::native::pointwise_operand(input),
+            "`{query}`: the producer prefix must be per-series: {partial_display}"
+        );
+        // The cut is the only aggregate in the producer: everything below it is the per-series
+        // prefix, which folds nothing. A second stage marker would mean the split left an aggregate
+        // in the half that runs per partition.
+        assert_eq!(
+            1,
+            partial_display.matches(" partial").count(),
+            "`{query}`: {partial_display}"
+        );
+        assert!(
+            !partial_display.contains(" complete") && !partial_display.contains(" final"),
+            "`{query}`: {partial_display}"
+        );
+        // Final and the statement boundary both publish native field names for physical conversion.
+        let NativeType::Samples(schema) = &final_node.tree().root().output else {
+            panic!("`{query}`: final root does not produce samples");
+        };
+        for field in schema.fields.iter() {
+            assert!(
+                final_node
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|column| column.name() == field.name.as_ref()),
+                "`{query}`: final output is missing native field {}",
+                field.name
+            );
+        }
+        assert_eq!(
+            plan.schema(),
+            final_node.schema(),
+            "`{query}` native output schema"
+        );
+        let expected_names: &[&str] = match query {
+            "sum(some_metric)" => &["field_0", "timestamp"],
+            "avg(some_metric)" => &["field_0", "timestamp"],
+            "count(some_metric)" => &["field_0", "timestamp"],
+            "min(some_metric)" => &["field_0", "timestamp"],
+            "max(some_metric)" => &["field_0", "timestamp"],
+            "group(some_metric)" => &["field_0", "timestamp"],
+            "stddev(some_metric)" => &["field_0", "timestamp"],
+            "stdvar(some_metric)" => &["field_0", "timestamp"],
+            "sum by (tag_0) (rate(some_metric[5m]))" => &["field_0", "tag_0", "timestamp"],
+            "sum without (tag_0) (some_metric)" => &["field_0", "timestamp"],
+            "sum(rate(some_metric[5m]))" => &["field_0", "timestamp"],
+            "ceil(sum(some_metric))" => &["field_0", "timestamp"],
+            "sum(avg(some_metric) by (tag_0))" => &["field_0", "timestamp"],
+            "sum(8 * rate(some_metric[5m]))" => &["field_0", "timestamp"],
+            "max(10 - rate(some_metric[5m]))" => &["field_0", "timestamp"],
+            "100 - avg(rate(some_metric[5m]))" => &["field_0", "timestamp"],
+            "sum(some_metric) * 2" => &["field_0", "timestamp"],
+            "100 / sum(some_metric)" => &["field_0", "timestamp"],
+            "-sum(some_metric)" => &["field_0", "timestamp"],
+            "abs(sum(some_metric)) * 2" => &["field_0", "timestamp"],
+            _ => panic!("missing exact native schema expectation for `{query}`"),
+        };
+        assert_eq!(
+            expected_names,
+            sorted_column_names(&plan).as_slice(),
+            "exact native output columns for `{query}`"
         );
     }
 }
 
-/// Only the innermost aggregate is cut out: everything above it, a map included, runs in the suffix
-/// over the merged values.
+/// A data-free vector stays in the gathered parent while the data-bearing prefix is cut.
 #[tokio::test]
-async fn native_fused_nested_aggregate_splits_at_the_innermost_aggregate() {
-    for (query, merge, partial) in [
-        (
-            "sum(avg(some_metric) by (tag_0))",
-            r#"AggregateFinalize: sum(avg by (tag_0) (some_metric)) [Avg By(["tag_0"]) Complete]"#,
-            "[partial avg by (tag_0) Complete]",
-        ),
-        (
-            "ceil(sum(rate(some_metric[5m])) by (tag_0))",
-            r#"AggregateFinalize: ceil(sum by (tag_0) (rate(some_metric[5m]))) [Sum By(["tag_0"]) Complete]"#,
-            "[partial sum by (tag_0) Complete]",
-        ),
-    ] {
-        let plan = build_native_fused_plan(query, true).await;
-        let display = plan.display_indent().to_string();
-        assert!(display.contains(merge), "{display}");
-        assert!(display.contains(partial), "{display}");
-
-        let finalize = find_aggregate_finalize(&plan).expect("the statement plans to a merge");
-        let producer = partial_producer(finalize);
-        // A map above the merge leaves the prefix alone, and so does the outer aggregate.
-        let prefix = producer.tree().to_string();
-        assert!(!prefix.contains("Map"), "{query}: {prefix}");
-        assert!(!prefix.contains("Aggregate"), "{query}: {prefix}");
-    }
-}
-
-/// A nested aggregate's outer names are the existing plan's: `sum(avg(x))` reports the outer `sum`.
-#[tokio::test]
-async fn native_fused_nested_aggregate_keeps_the_outer_names() {
-    let query = "sum(avg(some_metric) by (tag_0))";
-    let plan = build_native_fused_plan(query, true).await;
+async fn native_fused_data_free_vector_does_not_block_segmentation() {
+    let query = "sum(topk(1, some_metric)) + vector(1)";
+    let native = build_native_fused_plan(query, true).await;
     let legacy = build_native_fused_plan(query, false).await;
 
-    assert_eq!(sorted_column_names(&legacy), sorted_column_names(&plan));
-    // The merged value enters the suffix, so no column is named after the inner aggregate.
+    let LogicalPlan::Extension(Extension { node }) = &native else {
+        panic!("expected a native parent rather than a legacy root: {native}");
+    };
+    let parent = node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .unwrap_or_else(|| panic!("expected a fused root rather than a legacy root: {native}"));
+    assert_eq!(parent.promql(), parser::parse(query).unwrap().to_string());
+    let NativeExpr::Binary { left, right, .. } = &parent.tree().root().expr else {
+        panic!("expected the whole binary expression in the native parent: {native}");
+    };
+    assert!(
+        matches!(&right.expr, NativeExpr::VectorOf { .. }),
+        "the data-free vector must stay in the parent: {native}"
+    );
+    let NativeExpr::Aggregate { input, .. } = &left.expr else {
+        panic!("expected sum in the parent: {native}");
+    };
+    let NativeExpr::Vector { input, .. } = &input.expr else {
+        panic!("expected topk in the parent: {native}");
+    };
+    assert!(
+        matches!(&input.expr, NativeExpr::Input(input) if input.source_index == 0),
+        "the data-bearing prefix must be replaced by a segment input: {native}"
+    );
+    assert_eq!(parent.children().len(), 1, "{native}");
+    let LogicalPlan::Extension(Extension { node }) = &parent.children()[0] else {
+        panic!("expected a fused prefix segment: {native}");
+    };
+    let prefix = node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .unwrap_or_else(|| panic!("expected a fused prefix segment: {native}"));
+    assert!(
+        matches!(&prefix.tree().root().expr, NativeExpr::Instant { .. }),
+        "the prefix must evaluate the selector in its own segment: {native}"
+    );
+    assert!(find_fused_series(&legacy).is_none(), "{legacy}");
+}
+
+/// Source-free statements still plan as one native node without needing a segment.
+#[tokio::test]
+async fn native_fused_data_free_aggregate_stays_single_node() {
+    let query = "sum(vector(1))";
+    let plan = build_native_fused_plan(query, true).await;
+    let LogicalPlan::Extension(Extension { node }) = &plan else {
+        panic!("expected a native root: {plan}");
+    };
+    let fused = node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .unwrap_or_else(|| panic!("expected a fused root: {plan}"));
+    let NativeExpr::Aggregate { input, .. } = &fused.tree().root().expr else {
+        panic!("expected the aggregate in the native root: {plan}");
+    };
+    assert!(matches!(&input.expr, NativeExpr::VectorOf { .. }), "{plan}");
+    assert!(fused.children().is_empty(), "{plan}");
+}
+
+/// Scalar broadcasts still leave the data-bearing prefix in its own segment.
+#[tokio::test]
+async fn native_fused_scalar_broadcast_keeps_segmentation() {
+    let query = "sum(topk(1, some_metric)) + 1";
+    let plan = build_native_fused_plan(query, true).await;
+    let LogicalPlan::Extension(Extension { node }) = &plan else {
+        panic!("expected a native parent: {plan}");
+    };
+    let parent = node
+        .as_any()
+        .downcast_ref::<FusedSeries>()
+        .unwrap_or_else(|| panic!("expected a fused parent: {plan}"));
+    let NativeExpr::Binary { left, right, .. } = &parent.tree().root().expr else {
+        panic!("expected the binary in the native parent: {plan}");
+    };
+    assert!(matches!(&right.expr, NativeExpr::Scalar(_)), "{plan}");
+    let NativeExpr::Aggregate { input, .. } = &left.expr else {
+        panic!("expected sum in the parent: {plan}");
+    };
+    let NativeExpr::Vector { input, .. } = &input.expr else {
+        panic!("expected topk in the parent: {plan}");
+    };
+    assert!(
+        matches!(&input.expr, NativeExpr::Input(input) if input.source_index == 0),
+        "the data prefix must remain cut: {plan}"
+    );
+    assert_eq!(parent.children().len(), 1, "{plan}");
+    let prefix = find_fused_series(&parent.children()[0])
+        .unwrap_or_else(|| panic!("expected a fused prefix segment: {plan}"));
+    assert!(
+        matches!(&prefix.tree().root().expr, NativeExpr::Instant { .. }),
+        "{plan}"
+    );
+}
+
+/// The split boundary takes its ordered names from the Final tree, without an aliasing plan.
+#[tokio::test]
+async fn native_split_boundary_uses_native_tree_column_names() {
+    let query = "sum by (tag_0) (abs(some_metric))";
+    let plan = build_native_fused_plan(query, true).await;
+    let LogicalPlan::Extension(Extension { node }) = &plan else {
+        panic!("the Final node must be the output boundary, without a naming projection: {plan}");
+    };
+    let final_node = node.as_any().downcast_ref::<FusedSeries>().unwrap();
+    assert!(final_node.reads_aggregate_state(), "{plan}");
+    let NativeType::Samples(root) = &final_node.tree().root().output else {
+        panic!("the Final tree must publish samples: {plan}");
+    };
+    let field_names = root
+        .fields
+        .iter()
+        .map(|field| field.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["field_0"], field_names);
+    let names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["timestamp", "field_0", "tag_0"], names);
+    assert_eq!(&names[1..1 + field_names.len()], field_names);
+    assert!(partial_below(final_node).is_some(), "{plan}");
+}
+
+/// Split and complete executions of the same compiled query agree on nonempty values and labels.
+#[tokio::test]
+async fn native_split_and_complete_aggregate_produce_identical_values() {
+    use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
+    use datatypes::series::frame::{FrameLabelMode, pack_raw_series_chunk};
+    use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+    use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
+    use datatypes::series::{Label, SeriesLabels};
+    use store_api::region_engine::RawLabelSource;
+
+    let query = "sum by (tag_0) (abs(some_metric))";
+    let stmt = EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH + Duration::from_secs(1),
+        end: UNIX_EPOCH + Duration::from_secs(1),
+        interval: Duration::from_secs(1),
+        lookback_delta: Duration::from_secs(1),
+    };
+    let raw_schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: "field_0".into(),
+        }]
+        .into(),
+        eval_grid: None,
+    });
+    let complete_tree = crate::promql::native_compile::compile(
+        &stmt,
+        Arc::clone(&raw_schema),
+        SeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        2,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await;
+    let state = build_query_engine_state();
+    let split = PromPlanner::stmt_to_plan_with_annotations(provider, &stmt, &state, None, true)
+        .await
+        .unwrap();
+    let final_node = find_final_split(&split).expect("the query must use a split aggregate");
+    let partial = partial_below(final_node).unwrap();
+    let complete = FusedSeries::try_new(
+        Arc::from(query),
+        complete_tree,
+        final_node.binding().clone(),
+        partial.children().to_vec(),
+        Arc::clone(final_node.schema()),
+    )
+    .unwrap();
+    let raw = |key: &str, tag: &str, value: f64| {
+        let labels = SeriesLabels::try_new(
+            Some("some_metric".into()),
+            vec![
+                Label {
+                    name: "tag_0".into(),
+                    value: tag.into(),
+                },
+                Label {
+                    name: "tag_1".into(),
+                    value: key.into(),
+                },
+            ],
+        )
+        .unwrap();
+        let chunk = RawSeriesChunk::try_new(
+            &raw_schema,
+            Buffer::from_slice_ref(key.as_bytes()),
+            Some(labels),
+            RawTimestamps::try_new(ScalarBuffer::from(vec![1_000])).unwrap(),
+            SeriesFields::one(Samples::from_float(Float64Array::from(vec![value]))),
+            true,
+        )
+        .unwrap();
+        pack_raw_series_chunk(&raw_schema, FrameLabelMode::Explicit, None, &chunk).unwrap()
+    };
+    // Two partitions contribute to tag a, exercising state merge rather than just partitioning.
+    let first = [raw("a1", "a", -2.0), raw("b1", "b", 4.0)].concat();
+    let second = raw("a2", "a", 3.0);
+    let frame_schema = first[0].schema();
+    let source = || {
+        Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(
+                &[first.clone(), second.clone()],
+                Arc::clone(&frame_schema),
+                None,
+            )
+            .unwrap(),
+        ))) as Arc<dyn datafusion::physical_plan::ExecutionPlan>
+    };
+    let input = |source| (source, RawLabelSource::Explicit, SeriesOrdering::Contiguous);
+    let partial_exec = partial.to_execution_plan(vec![input(source())]).unwrap();
+    let split_exec = final_node
+        .to_execution_plan(vec![input(partial_exec)])
+        .unwrap();
+    let complete_exec = complete.to_execution_plan(vec![input(source())]).unwrap();
+    let split_batches =
+        datafusion::physical_plan::collect(split_exec, state.session_state().task_ctx())
+            .await
+            .unwrap();
+    let complete_batches =
+        datafusion::physical_plan::collect(complete_exec, state.session_state().task_ctx())
+            .await
+            .unwrap();
+    let rows = |batches: &[RecordBatch]| {
+        let mut rows = batches
+            .iter()
+            .flat_map(|batch| {
+                let tags = batch
+                    .column_by_name("tag_0")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let values = batch
+                    .column_by_name("field_0")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                let times = batch
+                    .column_by_name("timestamp")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                (0..batch.num_rows())
+                    .map(|i| (tags.value(i).to_string(), times.value(i), values.value(i)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.0.cmp(&right.0));
+        rows
+    };
+    let actual = rows(&split_batches);
+    assert_eq!(
+        vec![("a".to_string(), 1_000, 5.0), ("b".to_string(), 1_000, 4.0)],
+        actual
+    );
+    assert_eq!(actual, rows(&complete_batches));
+}
+
+/// A nested multi-source matching subtree is built as a segment consuming each source's explicit frames.
+#[tokio::test]
+async fn native_fused_multi_source_matching_segment_is_constructed() {
+    let plan = build_native_fused_plan_with_provider(
+        "sum(topk(1, some_metric / other_metric))",
+        true,
+        native_two_table_provider(vec![]).await,
+    )
+    .await;
+    let fused = find_fused_series(&plan).expect("native segmented fused root: {plan}");
+    let segments = fused
+        .children()
+        .iter()
+        .filter_map(|child| {
+            let LogicalPlan::Extension(Extension { node }) = child else {
+                return None;
+            };
+            node.as_any().downcast_ref::<FusedSeries>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        segments.iter().any(|segment| segment.children().len() == 2),
+        "expected the m/n matching subtree to be one two-child segment: {plan}"
+    );
+    assert!(
+        !plan
+            .display_indent()
+            .to_string()
+            .contains("PromSeriesDivide"),
+        "must not fall back to legacy: {plan}"
+    );
+}
+
+/// A two-source whole-vector statement uses two per-source prefix segments under one parent, and
+/// each segment binds its own source metric.
+#[tokio::test]
+async fn native_fused_multi_source_aggregate_segmentation_plan() {
+    let provider = build_test_table_provider_with_tsid(
+        &[
+            (DEFAULT_SCHEMA_NAME.to_string(), "m".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "n".to_string()),
+        ],
+        1,
+        1,
+    )
+    .await;
+    let plan =
+        build_native_fused_plan_with_provider("sum(max by (tag_0) (m)) / sum(n)", true, provider)
+            .await;
+    let fused = find_fused_series(&plan).expect("native multi-source fused root: {plan:?}");
+    assert_eq!(
+        2,
+        fused.children().len(),
+        "expected two root children: {plan:?}"
+    );
+    for (child, expected_metric) in fused.children().iter().zip(["m", "n"]) {
+        let LogicalPlan::Extension(Extension { node }) = child else {
+            panic!("expected segment FusedSeries for {expected_metric}: {plan:?}");
+        };
+        let segment = node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap_or_else(|| {
+                panic!("expected segment FusedSeries for {expected_metric}: {plan:?}")
+            });
+        assert_eq!(
+            Some(expected_metric),
+            segment.binding().metric_name.as_deref(),
+            "segment metric binding should match its source: {plan:?}"
+        );
+        assert_eq!(
+            1,
+            segment.children().len(),
+            "segment should have one bare scan: {plan:?}"
+        );
+        let LogicalPlan::TableScan(scan) = &segment.children()[0] else {
+            panic!("segment should bind directly to its TableScan: {plan:?}");
+        };
+        assert_eq!(
+            "phy",
+            scan.table_name.table().to_string(),
+            "segment should bind directly to the shared physical table scan: {plan:?}"
+        );
+    }
+}
+
+/// Two sources on two physical tables: each segment binds its own table's scan, not the first
+/// source's scan for both.
+#[tokio::test]
+async fn native_fused_multi_source_segments_bind_their_own_table_scan() {
+    let plan = build_native_fused_plan_with_provider(
+        "sum(max by (tag_0) (some_metric)) / sum(other_metric)",
+        true,
+        native_two_table_provider(vec![]).await,
+    )
+    .await;
+    let fused = find_fused_series(&plan).expect("native multi-source fused root: {plan:?}");
+    let mut bound = Vec::new();
+    for child in fused.children() {
+        let LogicalPlan::Extension(Extension { node }) = child else {
+            panic!("expected a segment FusedSeries: {plan:?}");
+        };
+        let segment = node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap_or_else(|| panic!("expected a segment FusedSeries: {plan:?}"));
+        let metric = segment
+            .binding()
+            .metric_name
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("segment binds no metric: {plan:?}"));
+        let [LogicalPlan::TableScan(scan)] = segment.children() else {
+            panic!("a segment binds exactly one scan: {plan:?}");
+        };
+        bound.push((metric, scan.table_name.table().to_string()));
+    }
+    assert_eq!(
+        vec![
+            ("some_metric".to_string(), "some_metric".to_string()),
+            ("other_metric".to_string(), "other_metric".to_string()),
+        ],
+        bound,
+        "each segment binds the scan of the table its metric lives in: {plan:?}"
+    );
+}
+
+/// Nested aggregates and their wrappers use the native root's field names, including segmented
+/// trees that the aggregate split declines.
+#[tokio::test]
+async fn native_fused_nested_rate_abs_aggregates_use_native_schema_names() {
+    for query in [
+        "sum(abs(avg(rate(some_metric[5m])) by (tag_0)))",
+        "abs(sum(avg(rate(some_metric[5m])) by (tag_0)))",
+        "ceil(sum(avg(some_metric) by (tag_0)))",
+        "(sum(avg(some_metric) by (tag_0)) + 1) / 2",
+        "floor(sum(avg(some_metric) by (tag_0)))",
+    ] {
+        let native = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&native).unwrap_or_else(|| {
+            panic!("{query}: native planning must produce a fused-series node: {native}")
+        });
+        assert_eq!(
+            vec!["field_0", "timestamp"],
+            sorted_column_names(&native),
+            "{query}: the boundary uses the native tree's field name"
+        );
+        assert!(
+            native
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.data_type() == &ArrowDataType::Float64),
+            "{query}: native plan must retain a Float64 value field: {native}"
+        );
+        let NativeType::Samples(root) = &fused.tree().root().output else {
+            panic!("{query}: the native root answers samples: {native}");
+        };
+        assert_eq!(root.fields[0].name.as_ref(), "field_0", "{query}");
+        assert_eq!(native.schema(), fused.schema(), "{query}: {native}");
+    }
+}
+
+/// A nested aggregate declines the split but its segmented output still uses the native root name.
+#[tokio::test]
+async fn native_fused_declined_nested_aggregate_uses_native_name() {
+    let query = "sum(avg(some_metric) by (tag_0))";
+    let plan = build_native_fused_plan(query, true).await;
+
+    assert!(find_final_split(&plan).is_none(), "{query}: {plan}");
+    assert_eq!(
+        vec!["field_0", "timestamp"],
+        sorted_column_names(&plan),
+        "a bare outer sum drops the inner grouping label and names the value after the compiled root field, not legacy expression text"
+    );
+
+    let grouped = build_native_fused_plan("sum by (tag_0) (some_metric)", true).await;
+    assert_eq!(
+        sorted_column_names(&grouped),
+        vec!["field_0", "tag_0", "timestamp"],
+        "an explicit by grouping keeps its label in the exact native schema"
+    );
+}
+
+#[tokio::test]
+async fn native_fused_clamp_aggregate_is_admitted_without_legacy_registration() {
+    for query in [
+        "sum(clamp(some_metric, 1, 2))",
+        "sum(topk(1, clamp(some_metric, 1, 2)))",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` should be accepted by native: {}",
+            plan.display_indent()
+        );
+        assert!(
+            !plan
+                .display_indent()
+                .to_string()
+                .contains("PromSeriesDivide"),
+            "`{query}` fell back to legacy: {}",
+            plan.display_indent()
+        );
+    }
+}
+
+/// One-row-layout classic histogram fixture with the bucket label the histogram planner folds.
+async fn native_classic_histogram_provider() -> DfTableSourceProvider {
+    let catalog = MemoryCatalogManager::with_default_setup();
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new(LE_COLUMN_NAME, ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new(
+            "timestamp",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("field_0", ConcreteDataType::float64_datatype(), true),
+    ]));
+    let meta = TableMetaBuilder::empty()
+        .schema(schema)
+        .engine(NATIVE_ENGINE.to_string())
+        .primary_key_indices(vec![0, 1])
+        .value_indices(vec![3])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let info = TableInfoBuilder::default()
+        .name("m")
+        .meta(meta)
+        .build()
+        .unwrap();
+    catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "m".to_string(),
+            table_id: 1024,
+            table: EmptyTable::from_table_info(&info),
+        })
+        .unwrap();
+    DfTableSourceProvider::new(
+        catalog,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// Two classic-histogram functions over raw series, each admitted as one native operand: a
+/// `histogram_quantile` reads each histogram off the bucket series that share its other labels and
+/// drops `le`, so neither operand keeps `le` in its binding nor in the statement's output.
+#[tokio::test]
+async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching() {
+    let provider = native_classic_histogram_provider().await;
+    let plan = build_native_fused_plan_with_provider(
+        "histogram_quantile(0.9, m) / histogram_quantile(0.5, m)",
+        true,
+        provider,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    // The whole statement has two same-table selectors and declines at that guard. Each
+    // histogram_quantile is nevertheless a one-selector operand and is admitted by the hybrid path.
+    assert_eq!(4, display.matches("FusedSeries").count(), "{display}");
+    assert!(
+        !display.contains(".le ="),
+        "join key still references dropped `le`: {display}"
+    );
     assert!(
         plan.schema()
             .fields()
             .iter()
-            .all(|field| !field.name().starts_with("avg(")),
-        "{:?}",
-        sorted_column_names(&plan)
+            .all(|field| field.name() != LE_COLUMN_NAME),
+        "output schema still contains dropped `le`: {display}"
     );
+
+    // Check the contexts returned at the contract boundary for both calls independently.
+    let mut planner = PromPlanner {
+        table_provider: native_classic_histogram_provider().await,
+        ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt(
+            "histogram_quantile(0.9, m) / histogram_quantile(0.5, m)",
+        ))
+        .unwrap(),
+        promql_annotations: None,
+        native_fused: true,
+    };
+    let PromExpr::Binary(binary) =
+        parser::parse("histogram_quantile(0.9, m) / histogram_quantile(0.5, m)").unwrap()
+    else {
+        unreachable!()
+    };
+    for operand in [&binary.lhs, &binary.rhs] {
+        let (_, context) = planner
+            .try_plan_native_operand(operand)
+            .await
+            .unwrap()
+            .expect("each histogram call is admitted as one native operand");
+        assert_eq!(vec!["host"], context.tag_columns);
+        assert!(!context.tag_columns.contains(&LE_COLUMN_NAME.to_string()));
+    }
 }
 
-/// A classic histogram function above the cut is the split's: `histogram_quantile` reads each
-/// histogram off the bucket series the merge produced, which are the ones the statement's input
-/// would have produced in one execution, so the statement is answered by the merge over the partial
-/// producer instead of falling back to the existing plan.
-#[tokio::test]
-async fn native_fused_histogram_quantile_over_aggregate_splits() {
-    let query = "histogram_quantile(0.99, sum by (tag_0) (rate(some_metric[5m])))";
-    let plan = build_native_fused_plan(query, true).await;
-    let display = plan.display_indent().to_string();
-    assert!(
-        find_aggregate_finalize(&plan).is_some(),
-        "`{query}` must be answered by a split aggregate: {display}"
-    );
-    assert!(
-        find_fused_series(&plan).is_some(),
-        "`{query}` must keep the producer that exports the state: {display}"
-    );
-    assert!(display.contains("AggregateFinalize: "), "{display}");
-    assert!(display.contains("histogram_quantile"), "{display}");
-}
-
-/// A shape the split cannot keep correct keeps the existing plan: a quantile's state is the group's
-/// samples, a binary operation whose sibling is data would match one side's series before the merge,
-/// a sibling a call computes has no native node at all, and a group by a value field cannot be named
-/// by the state rows. A literal scalar sibling is not one of them: the operation is computed per
-/// series below the fold, or rebuilt over the merged values above it.
+/// A shape the split cannot keep correct keeps the existing plan: a binary operation whose sibling
+/// is data would match one side's series before the merge, a sibling a call computes has no native
+/// node at all, and a group by a value field cannot be named by the state rows. A literal scalar
+/// sibling is not one of them: the operation is computed per series below the fold, or rebuilt over
+/// the merged values above it.
+///
+/// `timestamp(sum(m))` and `sum(timestamp(abs(m)))` are not on this list. `timestamp` over a
+/// computed vector reports the evaluation time, which is what Prometheus reports too - an aggregate
+/// makes a new sample at the evaluation instant rather than inheriting a stored one's time - and
+/// `instant_eval.rs` says so where it projects the grid's own timestamps. The segmentation route
+/// answers those, and `native_promql_timestamp_over_a_computed_vector` pins the values.
 #[tokio::test]
 async fn native_fused_unsplittable_aggregate_falls_back() {
     for query in [
@@ -3310,17 +4742,24 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
         // The sibling is data rather than a literal scalar, so the operation would pair each series
         // with the aggregate's series before the merge.
         "sum(some_metric) / some_metric",
+        "some_metric + sum(some_metric)",
         // A scalar a call computes is not a literal the split could keep: `scalar(...)` has no
         // native node, so the statement keeps the existing plan.
         "sum(some_metric) / scalar(some_metric)",
         "sum by (field_0) (some_metric)",
-        "timestamp(sum(some_metric))",
-        "sum(timestamp(abs(some_metric)))",
     ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;
-        assert!(find_fused_series(&native).is_none(), "`{query}`");
-        assert!(find_aggregate_finalize(&native).is_none(), "`{query}`");
+        assert!(
+            find_fused_series(&native).is_none(),
+            "`{query}`: {}",
+            native.display_indent()
+        );
+        assert!(
+            find_final_split(&native).is_none(),
+            "`{query}`: {}",
+            native.display_indent()
+        );
         assert_eq!(
             native.display_indent().to_string(),
             without_flag.display_indent().to_string(),
@@ -3329,52 +4768,167 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     }
 }
 
-/// `clamp` is not a function the existing planner has a kernel for, so an aggregate over it fails
-/// while the legacy plan is being built - before either route is chosen, and the same way on both.
+/// Suffixes whose answers need the whole vector cannot fuse into a partition-local `Final`, so
+/// the split declines them: it neither exports aggregate state nor runs a `Final` aggregate.
+/// Ranking (`topk`) and a second aggregate cannot be answered from a partition's groups alone.
+/// Classic histogram functions, by contrast, route all buckets of a histogram to the same owner.
 ///
-/// The native route only reads the legacy plan's column names, which means it inherits that refusal
-/// rather than answering a query the existing path would reject. Both the split template
-/// (`clamp(x, 1, 2)`) and the empty range (`clamp(x, 2, 1)`) fail here, so neither is claimed as
-/// supported.
+/// What they fall back to is not asserted: the segmentation route answers some of them, and the
+/// point is only that none of them becomes a split.
 #[tokio::test]
-async fn native_fused_clamp_aggregate_keeps_the_existing_error() {
-    for query in [
-        "sum(clamp(some_metric, 1, 2))",
-        "sum(clamp(some_metric, 2, 1))",
+async fn native_fused_split_declines_a_whole_vector_suffix() {
+    for (suffix, declined, splits) in [
+        // Ranks the whole vector: the winner may be in a group this partition does not own.
+        (
+            "topk",
+            "topk(1, sum by (tag_0) (some_metric))",
+            "sum by (tag_0) (some_metric)",
+        ),
+        // A second fold over the merged values would have to become its own state split.
+        (
+            "a second aggregate",
+            "sum(avg(some_metric) by (tag_0))",
+            "avg(some_metric) by (tag_0)",
+        ),
     ] {
-        for native_fused in [true, false] {
-            // Each attempt needs its own provider: planning moves the one it is given.
-            let table_provider = build_test_table_provider_with_options(
-                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-                1,
-                1,
-                vec![],
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-                ConcreteDataType::float64_datatype(),
-                NATIVE_ENGINE,
-            )
-            .await;
-            let eval_stmt = build_eval_stmt(query);
-            let error = PromPlanner::stmt_to_plan_with_annotations(
-                table_provider,
-                &eval_stmt,
-                &build_query_engine_state(),
-                None,
-                native_fused,
-            )
-            .await
-            .unwrap_err();
+        // The control first: the same fold without the suffix is a split, so the refusal below is
+        // about the suffix and not about a fold this route never takes.
+        let control = build_native_fused_plan(splits, true).await;
+        assert!(
+            find_final_split(&control).is_some(),
+            "{suffix}: `{splits}` must still split, or the refusal proves nothing: {}",
+            control.display_indent()
+        );
 
-            assert!(
-                matches!(
-                    &error,
-                    crate::promql::error::Error::UnsupportedExpr { name, .. } if name == "clamp"
-                ),
-                "`{query}` with the flag {native_fused}: {error}"
-            );
-        }
+        let declined_plan = build_native_fused_plan(declined, true).await;
+        assert!(
+            find_final_split(&declined_plan).is_none(),
+            "{suffix}: `{declined}` must not split: {}",
+            declined_plan.display_indent()
+        );
     }
+}
+
+/// A histogram suffix runs after the Final aggregate, with all of each histogram's buckets routed
+/// together rather than distributed by `le`.
+#[tokio::test]
+async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
+    let query = "histogram_quantile(0.99, sum by (le) (rate(m[5m])))";
+    let plan = build_native_fused_plan_with_provider(
+        query,
+        true,
+        native_classic_histogram_provider().await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    let final_node = find_final_split(&plan)
+        .unwrap_or_else(|| panic!("`{query}` must split into Partial and Final: {display}"));
+    // Only the Final node over state publishes this suffix, so the plan's own text pins it.
+    assert!(
+        display.contains(
+            " (state routing: canonical labels except [\"le\", \"__name__\", \"__type__\", \"__unit__\"])"
+        ),
+        "`{query}`: {display}"
+    );
+    let NativeExpr::Vector {
+        input,
+        op: BoundVectorOp::Histogram(_),
+    } = &final_node.tree().root().expr
+    else {
+        panic!("`{query}`: histogram must run above Final: {display}");
+    };
+    assert!(
+        matches!(&input.expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final),
+        "`{query}`: histogram must read the Final aggregate: {display}"
+    );
+    let partial = partial_below(final_node)
+        .unwrap_or_else(|| panic!("`{query}`: Final must read a Partial producer: {display}"));
+    assert!(
+        matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial),
+        "`{query}`: producer must export Partial state: {display}"
+    );
+}
+
+/// The native route can plan a reversed clamp range without consulting the existing planner,
+/// which has no clamp kernel.
+#[tokio::test]
+async fn native_fused_clamp_reversed_bounds_are_planned_natively() {
+    let native = build_native_fused_plan("sum(clamp(some_metric, 2, 1))", true).await;
+    assert!(find_fused_series(&native).is_some(), "{native}");
+}
+
+/// Native planning derives aggregate schema from the compiled tree, admitting clamp with an exact
+/// native output schema while the legacy planner continues to reject this function.
+#[tokio::test]
+async fn native_fused_clamp_aggregate_is_admitted() {
+    let query = "sum(clamp(m, 1, 2))";
+    let make_provider = || {
+        let catalog = MemoryCatalogManager::with_default_setup();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "m".to_string(),
+                table_id: 3_001,
+                table: operator_metric_table_with_engine(
+                    "m",
+                    3_001,
+                    "a",
+                    None,
+                    DirectOrValue::Float64(0.5),
+                    NATIVE_ENGINE,
+                ),
+            })
+            .unwrap();
+        DfTableSourceProvider::new(
+            catalog,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    };
+    let state = build_query_engine_state();
+    let provider = make_provider();
+    let plan = PromPlanner::stmt_to_plan_with_annotations(
+        provider,
+        &operator_eval_stmt(query),
+        &state,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        find_final_split(&plan).is_some(),
+        "{}",
+        plan.display_indent()
+    );
+    let mut native_names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    native_names.sort();
+    assert_eq!(vec!["field_0", "timestamp"], native_names);
+
+    let legacy_provider = make_provider();
+    let legacy_result = PromPlanner::stmt_to_plan_with_annotations(
+        legacy_provider,
+        &operator_eval_stmt(query),
+        &state,
+        None,
+        false,
+    )
+    .await;
+    assert!(
+        legacy_result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported expr type: clamp"),
+        "with the native flag off, legacy planning must still reject clamp"
+    );
 }
 
 /// A label rewrite keeps the existing plan, on every shape, because the native runtime refuses a
@@ -3395,27 +4949,26 @@ async fn native_fused_label_rewrites_keep_legacy_output_labels() {
         // ... and below another call, which is the same shape one level deeper.
         r#"abs(label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)"))"#,
         r#"abs(label_join(some_metric, "newlabel", "-", "tag_0", "tag_0"))"#,
-        // A second occurrence does not admit it either: the collision is the runtime's, not the
-        // placement's, so the pair keeps the existing plan as well.
+        // A rewrite that meets the same metric again is admitted too: what the runtime refuses is
+        // two series under one label set, not the shape, and the refusal is the Prometheus answer.
         r#"label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)") + on(newlabel) some_metric"#,
         r#"label_join(some_metric, "newlabel", "-", "tag_0", "tag_0") + some_metric"#,
     ] {
         let native = build_native_fused_plan(query, true).await;
         let display = native.display_indent().to_string();
         assert!(
-            find_fused_series(&native).is_none(),
-            "`{query}` writes a label the runtime would refuse twice, so it keeps the existing \
-             plan: {display}"
+            find_fused_series(&native).is_some(),
+            "`{query}` is a point-wise rewrite the native route admits: {display}"
         );
         assert!(
             display.contains("newlabel"),
-            "`{query}` must keep the projection that emits its new label: {display}"
+            "`{query}` must declare the rewritten label: {display}"
         );
         let without_flag = build_native_fused_plan(query, false).await;
-        assert_eq!(
+        assert_ne!(
             display,
             without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan, not an approximation of it"
+            "`{query}` must use the native plan only when it is enabled"
         );
     }
 }
@@ -3443,10 +4996,7 @@ async fn native_fused_aggregate_falls_back_to_legacy_plan() {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
         assert!(!display.contains("FusedSeries"), "{query}: {display}");
-        assert!(
-            !display.contains("AggregateFinalize:"),
-            "{query}: {display}"
-        );
+        assert!(find_final_split(&plan).is_none(), "{query}: {display}");
         assert!(display.contains("Aggregate:"), "{query}: {display}");
         let legacy = build_native_fused_plan(query, false).await;
         assert_eq!(display, legacy.display_indent().to_string(), "{query}");

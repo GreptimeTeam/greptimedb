@@ -80,6 +80,89 @@ fn rewrite_all(
 /// label names are checked.
 #[derive(Debug)]
 pub struct LabelRewrite(Change);
+impl serde::Serialize for LabelRewrite {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        enum Wire<'a> {
+            Replace {
+                dst: &'a str,
+                replacement: &'a str,
+                src: &'a str,
+                pattern: &'a str,
+            },
+            Join {
+                dst: &'a str,
+                separator: &'a str,
+                src: Vec<&'a str>,
+            },
+        }
+        let wire = match &self.0 {
+            Change::Replace {
+                dst,
+                replacement,
+                src,
+                pattern,
+                ..
+            } => Wire::Replace {
+                dst,
+                replacement,
+                src,
+                pattern,
+            },
+            Change::Join {
+                dst,
+                separator,
+                src,
+            } => Wire::Join {
+                dst,
+                separator,
+                src: src.iter().map(AsRef::as_ref).collect(),
+            },
+        };
+        serde::Serialize::serialize(&wire, serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for LabelRewrite {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        enum Wire {
+            Replace {
+                dst: String,
+                replacement: String,
+                src: String,
+                pattern: String,
+            },
+            Join {
+                dst: String,
+                separator: String,
+                src: Vec<String>,
+            },
+        }
+        match <Wire as serde::Deserialize>::deserialize(deserializer)? {
+            Wire::Replace {
+                dst,
+                replacement,
+                src,
+                pattern,
+            } => {
+                Self::replace(&dst, &replacement, &src, &pattern).map_err(serde::de::Error::custom)
+            }
+            Wire::Join {
+                dst,
+                separator,
+                src,
+            } => {
+                let refs: Vec<_> = src.iter().map(String::as_str).collect();
+                Self::join(&dst, &separator, &refs).map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 enum Change {
@@ -98,7 +181,80 @@ enum Change {
     },
 }
 
+impl PartialEq for LabelRewrite {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (
+                Change::Replace {
+                    dst: a,
+                    replacement: b,
+                    src: c,
+                    pattern: d,
+                    ..
+                },
+                Change::Replace {
+                    dst: w,
+                    replacement: x,
+                    src: y,
+                    pattern: z,
+                    ..
+                },
+            ) => (a, b, c, d) == (w, x, y, z),
+            (
+                Change::Join {
+                    dst: a,
+                    separator: b,
+                    src: c,
+                },
+                Change::Join {
+                    dst: w,
+                    separator: x,
+                    src: y,
+                },
+            ) => (a, b, c) == (w, x, y),
+            _ => false,
+        }
+    }
+}
+impl Eq for LabelRewrite {}
+impl std::hash::Hash for LabelRewrite {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match &self.0 {
+            Change::Replace {
+                dst,
+                replacement,
+                src,
+                pattern,
+                ..
+            } => {
+                0u8.hash(state);
+                dst.hash(state);
+                replacement.hash(state);
+                src.hash(state);
+                pattern.hash(state);
+            }
+            Change::Join {
+                dst,
+                separator,
+                src,
+            } => {
+                1u8.hash(state);
+                dst.hash(state);
+                separator.hash(state);
+                src.hash(state);
+            }
+        }
+    }
+}
+
 impl LabelRewrite {
+    /// The label this rewrite writes, which is the one whose routing key may change.
+    pub fn destination(&self) -> &str {
+        match &self.0 {
+            Change::Replace { dst, .. } | Change::Join { dst, .. } => dst,
+        }
+    }
+
     /// `label_replace`'s change, failing on an invalid expression or an empty destination.
     pub fn replace(dst: &str, replacement: &str, src: &str, regex: &str) -> Result<Self> {
         let compiled = Regex::new(&format!("^(?s:{regex})$")).map_err(|_| {

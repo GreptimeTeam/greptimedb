@@ -32,7 +32,10 @@
 //! complete labels when the frame is explicit — with each series' rows contiguous and its
 //! timestamps ascending, which is what the caller's [`SeriesOrdering`] names. The output is one
 //! batch per evaluated chunk, with the statement's grid timestamps in the declared time column.
-//! Everything the tree cannot do is rejected when the execution plan is built, not when the first
+//! Each source contributes exactly one partition per output partition; this node has no internal
+//! gather. Physical planning must normalize global consumers to one partition, and matching locality
+//! requires a verified matching-key router on both operands. Everything the tree cannot do is
+//! rejected when the execution plan is built, not when the first
 //! batch arrives: a tree the native runtime does not execute, a frame whose schema the tree's input
 //! was not compiled against, or an output schema the conversion cannot classify.
 
@@ -44,21 +47,24 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use common_error::ext::BoxedError;
 use common_query::series_frame::{
-    SendableEvaluatedSeriesStream, ensure_frame_matches_label_source, pack_evaluated_series,
-    unpack_raw_series,
+    SendableEvaluatedSeriesStream, SendableStateSeriesStream, ensure_frame_matches_label_source,
+    pack_aggregate_state, pack_evaluated_series, series_frame_ordering, unpack_aggregate_state,
+    unpack_evaluated_series, unpack_raw_series,
 };
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{MemoryPool, MemoryReservation, UnboundedMemoryPool};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -67,21 +73,29 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::{
+    FrameContent, FrameLabelMode, SeriesFrameDeclaration, aggregate_state_frame_schema,
+};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
-use datatypes::series::time::EvalGrid;
-use futures::Stream;
+use datatypes::series::time::{EvalGrid, GridSpec};
+use futures::stream::SelectAll;
+use futures::{Stream, StreamExt};
 use store_api::region_engine::RawLabelSource;
+use table::table::scan::SeriesScanExec;
 
 use crate::evaluated::EvaluatedChunk;
-use crate::extension_plan::aggregate_exchange::{PartialFold, aggregate_op, state_schema};
-use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
+use crate::extension_plan::SeriesRouting;
+use crate::extension_plan::series_repartition::SeriesRepartitionExec;
+use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateStage, Grouping, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
     reads_across_series,
 };
+use crate::native::state::{StateChunk, state_row_from_frame_row};
 use crate::source::materialize_raw_labels;
+use crate::vector_match::{DuplicateEvidence, MatchingLabels};
 
 #[cfg(test)]
 mod tests;
@@ -98,10 +112,6 @@ const METRIC_NAME: &str = "__name__";
 /// for. The budget makes that a poll that yields instead, and the waker makes sure it is polled
 /// again, so nothing is lost by stopping early.
 const POLL_BUDGET: usize = 64;
-
-/// Maximum number of tags the envelope carries, shared by [`FusedSeries::serialize`] and
-/// [`FusedSeries::deserialize`] so a serialized node is always one this version can rebuild.
-const MAX_TAG_COUNT: usize = 1024;
 
 /// The statement grid and output naming that travel with a compiled tree.
 ///
@@ -176,8 +186,34 @@ impl PartialOrd for FusedSeriesBinding {
     }
 }
 
+/// What one bound child of this node produces.
+///
+/// Aggregate state is not a sample input: it carries mergeable accumulators rather than query
+/// values, even though both state and evaluated samples are addressed on a grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FusedInputKind {
+    Raw,
+    Evaluated,
+    AggregateState,
+}
+
+impl FusedInputKind {
+    fn from_native_type(native_type: &NativeType) -> DataFusionResult<Self> {
+        match native_type {
+            NativeType::Samples(schema) if schema.eval_grid.is_none() => Ok(Self::Raw),
+            NativeType::Samples(_) => Ok(Self::Evaluated),
+            NativeType::AggregateState(_) => Ok(Self::AggregateState),
+            NativeType::Scalar(_) => Err(DataFusionError::Plan(
+                "FusedSeries scalar cannot be a source".into(),
+            )),
+        }
+    }
+}
+
 /// The output representation fixed when a fused plan is built.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum FusedOutputFormat {
     /// The existing tabular query result.
     PlainRows,
@@ -197,6 +233,55 @@ fn evaluated_output(tree: &NativeTree) -> DataFusionResult<Arc<SeriesSchema>> {
         NativeType::Scalar(_) => Err(DataFusionError::Plan(
             "FusedSeries frame output does not support a scalar root".into(),
         )),
+    }
+}
+
+/// The declaration is the shared schema; group, fields and grid live in the native binding and
+/// are checked when a frame is decoded against an expected binding.
+fn state_frame_output_schema(tree: &NativeTree) -> DataFusionResult<SchemaRef> {
+    let NativeType::AggregateState(state) = &tree.root().output else {
+        return Err(DataFusionError::Plan(
+            "FusedSeries Partial root does not produce aggregate state".into(),
+        ));
+    };
+    let schema = Arc::new(SeriesSchema {
+        fields: state.accumulators.clone(),
+        eval_grid: Some(Arc::clone(&state.grid)),
+    });
+    let state_schema = datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+        state.kind,
+        state.components.to_vec(),
+    )
+    .map_err(|error| {
+        DataFusionError::Plan(format!(
+            "FusedSeries cannot declare state frame schema: {error}"
+        ))
+    })?;
+    aggregate_state_frame_schema(&state_schema, &schema, FrameLabelMode::Explicit).map_err(
+        |error| {
+            DataFusionError::Plan(format!(
+                "FusedSeries cannot declare state frame schema: {error}"
+            ))
+        },
+    )
+}
+
+fn output_frame_schema(
+    tree: &NativeTree,
+    root_kind: FusedInputKind,
+) -> DataFusionResult<SchemaRef> {
+    match &tree.root().expr {
+        NativeExpr::Aggregate { op, .. }
+            if op.stage == crate::native::plan::AggregateStage::Partial =>
+        {
+            if root_kind != FusedInputKind::AggregateState {
+                return Err(DataFusionError::Plan(
+                    "FusedSeries Partial root must produce aggregate state".into(),
+                ));
+            }
+            state_frame_output_schema(tree)
+        }
+        _ => series_frame_output_schema(evaluated_output(tree)?.as_ref()),
     }
 }
 
@@ -226,200 +311,188 @@ pub struct FusedSeries {
     children: Vec<LogicalPlan>,
     /// The columns this node produces.
     output_schema: DFSchemaRef,
-    /// The aggregate whose partition-local state this node exports instead of query rows.
-    ///
-    /// This row-state bridge is temporary: native final aggregation will consume series frames
-    /// directly, removing state-row encoding and reconstruction.
-    partial_fold: Option<BoundAggregate>,
-    /// Fixed output representation; partial state export always remains PlainRows.
+    /// Fixed output representation, chosen when the node is built.
     format: FusedOutputFormat,
+    /// The half of a canonical boundary this node is, if any.
+    ///
+    /// A [`NativeExpr::Merge`] collects every fragment of one canonical label set, which a node that
+    /// runs per scan partition cannot promise in general - and it is why a tree holding one is
+    /// normally gathered into a single execution. A canonical boundary keeps the query's width by
+    /// letting a producer merge what each partition holds and routing the pieces of one label set
+    /// across partitions; a consumer above it therefore reads whole label sets as ordinary frames.
+    /// That a node is the producer cannot be read off its tree - the merge is at its root - so it is
+    /// stated here by the caller that built the boundary.
+    canonical_producer: bool,
+}
+
+fn canonical_evaluated_local_prefix(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(input) => input
+            .output
+            .samples()
+            .is_some_and(|schema| schema.eval_grid.is_some()),
+        NativeExpr::Merge { input } => canonical_evaluated_local_prefix(input),
+        NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } => {
+            canonical_evaluated_local_prefix(input)
+        }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            canonical_evaluated_local_prefix(input)
+                && parameters.iter().all(canonical_evaluated_local_prefix)
+        }
+        _ => false,
+    }
+}
+
+/// Experimental FusedSeries envelope version. The format is not persisted; any incompatible
+/// layout change may reset this rather than reserving numbers for unreleased revisions.
+const FUSED_SERIES_ENVELOPE_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FusedSeriesPayload {
+    tree: NativeTree,
+    grid: GridSpec,
+    metric_name: Option<Arc<str>>,
+    time_index: String,
+    tags: Vec<String>,
+    format: FusedOutputFormat,
+    promql: Arc<str>,
+    output_schema: datafusion::arrow::datatypes::Schema,
 }
 
 impl FusedSeries {
     /// Serializes the native tree and the binding required to reconstruct this plan node.
     /// The PromQL text is included for diagnostics only and never drives execution; children
-    /// remain ordinary Substrait inputs. Version 1 supports only SeriesFrame without partial folds:
-    /// decoding must rebuild its output schema, and only SeriesFrame derives that schema from the tree.
+    /// remain ordinary Substrait inputs.
+    ///
+    /// A node that reads aggregate state is refused: that is the `Final` half of a split
+    /// aggregate, which folds every partition's state and so has to run where all of it arrives,
+    /// not inside one region. The `Partial` half below it exports state rather than reading it, so
+    /// it travels as an ordinary series-frame producer.
+    ///
+    /// The envelope is [`FUSED_SERIES_ENVELOPE_VERSION`], the payload's length in bytes, then the
+    /// postcard payload itself.
     pub fn serialize(&self) -> DataFusionResult<Vec<u8>> {
-        if self.format != FusedOutputFormat::SeriesFrame {
+        if self.canonical_producer {
             return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support PlainRows output schema".into(),
+                "FusedSeries serialization does not support a canonical producer".into(),
             ));
         }
-        if self.partial_fold.is_some() {
+        if self.reads_aggregate_state() {
             return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support partial_fold".into(),
+                "FusedSeries serialization does not support reading aggregate state".into(),
             ));
         }
-        fn text(out: &mut Vec<u8>, s: &str) -> DataFusionResult<()> {
-            let n = u32::try_from(s.len())
-                .map_err(|_| DataFusionError::Plan("FusedSeries string too long".into()))?;
-            out.extend(n.to_le_bytes());
-            out.extend(s.as_bytes());
-            Ok(())
+        // A node that exports state is only ever planned inside the region it reads: the frame's
+        // `AggregateState` content has no wire form, and the frontend half is what folds it. Refusing
+        // here is what keeps the state router on one machine instead of trusting the encoder.
+        if matches!(&self.tree().root().output, NativeType::AggregateState(_)) {
+            return Err(DataFusionError::NotImplemented(
+                "FusedSeries serialization does not support exporting aggregate state".into(),
+            ));
         }
-        let tree = crate::native::wire::encode_prefix(&self.tree)
-            .map_err(|e| DataFusionError::Plan(format!("cannot encode FusedSeries tree: {e}")))?;
-        let mut out = Vec::new();
-        out.extend(1u32.to_le_bytes());
-        out.extend(
-            u32::try_from(tree.len())
-                .map_err(|_| DataFusionError::Plan("FusedSeries tree too large".into()))?
-                .to_le_bytes(),
-        );
-        out.extend(tree);
-        let spec = self.binding.grid.spec();
-        out.extend(spec.start_ms.to_le_bytes());
-        out.extend(spec.step_ms.to_le_bytes());
-        out.extend(spec.len.to_le_bytes());
-        match &self.binding.metric_name {
-            Some(name) => {
-                out.push(1);
-                text(&mut out, name)?;
-            }
-            None => out.push(0),
-        }
-        text(&mut out, &self.binding.time_index)?;
-        if self.binding.tags.len() > MAX_TAG_COUNT {
-            return Err(DataFusionError::Plan(format!(
-                "too many FusedSeries tags: {} exceeds maximum {MAX_TAG_COUNT}",
-                self.binding.tags.len()
-            )));
-        }
-        out.extend(
-            u32::try_from(self.binding.tags.len())
-                .map_err(|_| DataFusionError::Plan("too many FusedSeries tags".into()))?
-                .to_le_bytes(),
-        );
-        for tag in &self.binding.tags {
-            text(&mut out, tag)?;
-        }
-        out.push(1); // explicit stable tag: SeriesFrame
-        text(&mut out, &self.promql)?;
+        let payload = FusedSeriesPayload {
+            tree: self.tree.clone(),
+            grid: self.binding.grid.spec(),
+            metric_name: self.binding.metric_name.clone(),
+            time_index: self.binding.time_index.clone(),
+            tags: self.binding.tags.clone(),
+            format: self.format,
+            promql: Arc::clone(&self.promql),
+            output_schema: self.output_schema.as_arrow().clone(),
+        };
+        let encoded = postcard::to_stdvec(&payload).map_err(|e| {
+            DataFusionError::Plan(format!("cannot serialize FusedSeries payload: {e}"))
+        })?;
+        let len = u32::try_from(encoded.len())
+            .map_err(|_| DataFusionError::Plan("FusedSeries payload too large".into()))?;
+        let mut out = Vec::with_capacity(8 + encoded.len());
+        out.extend(FUSED_SERIES_ENVELOPE_VERSION.to_le_bytes());
+        out.extend(len.to_le_bytes());
+        out.extend(encoded);
         Ok(out)
     }
 
-    /// Rebuilds a serialized SeriesFrame node. Substrait attaches its child plans separately.
+    /// Rebuilds a serialized FusedSeries node, validating its carried output schema against the
+    /// execution contract. Substrait attaches children separately.
     pub fn deserialize(bytes: &[u8]) -> DataFusionResult<Self> {
-        struct Reader<'a> {
-            b: &'a [u8],
-            p: usize,
+        if bytes.len() < 8 {
+            return Err(DataFusionError::Plan(
+                "truncated FusedSeries envelope".into(),
+            ));
         }
-        impl<'a> Reader<'a> {
-            fn take(&mut self, n: usize) -> DataFusionResult<&'a [u8]> {
-                let e = self
-                    .p
-                    .checked_add(n)
-                    .ok_or_else(|| DataFusionError::Plan("FusedSeries length overflow".into()))?;
-                if e > self.b.len() {
-                    return Err(DataFusionError::Plan(
-                        "truncated FusedSeries payload".into(),
-                    ));
-                }
-                let r = &self.b[self.p..e];
-                self.p = e;
-                Ok(r)
-            }
-            fn u8(&mut self) -> DataFusionResult<u8> {
-                Ok(self.take(1)?[0])
-            }
-            fn u32(&mut self) -> DataFusionResult<u32> {
-                Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-            }
-            fn i64(&mut self) -> DataFusionResult<i64> {
-                Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
-            }
-            fn u64(&mut self) -> DataFusionResult<u64> {
-                Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
-            }
-            fn text(&mut self) -> DataFusionResult<String> {
-                let n = self.u32()? as usize;
-                String::from_utf8(self.take(n)?.to_vec())
-                    .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries UTF-8: {e}")))
-            }
-        }
-        let mut r = Reader { b: bytes, p: 0 };
-        let version = r.u32()?;
-        if version != 1 {
+        let version = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+        if version != FUSED_SERIES_ENVELOPE_VERSION {
             return Err(DataFusionError::Plan(format!(
                 "unsupported FusedSeries envelope version {version}"
             )));
         }
-        let n = r.u32()? as usize;
-        let tree = crate::native::wire::decode_prefix(r.take(n)?)
-            .map_err(|e| DataFusionError::Plan(format!("cannot decode FusedSeries tree: {e}")))?;
-        let grid = Arc::new(
-            EvalGrid::try_deferred(
-                datatypes::series::time::GridSpec::try_new(r.i64()?, r.i64()?, r.u64()?)
-                    .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries grid: {e}")))?,
-            )
-            .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries grid: {e}")))?,
-        );
-        let metric_name = match r.u8()? {
-            0 => None,
-            1 => Some(Arc::<str>::from(r.text()?)),
-            x => {
-                return Err(DataFusionError::Plan(format!(
-                    "invalid FusedSeries metric-name tag {x}"
-                )));
-            }
-        };
-        let time_index = r.text()?;
-        let count = r.u32()? as usize;
-        if count > MAX_TAG_COUNT {
-            return Err(DataFusionError::Plan(format!(
-                "too many FusedSeries tags: {count} exceeds maximum {MAX_TAG_COUNT}"
-            )));
+        let len = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let end = 8usize
+            .checked_add(len)
+            .ok_or_else(|| DataFusionError::Plan("FusedSeries length overflow".into()))?;
+        if end != bytes.len() {
+            return Err(DataFusionError::Plan(if end > bytes.len() {
+                "truncated FusedSeries payload".into()
+            } else {
+                "trailing bytes in FusedSeries payload".into()
+            }));
         }
-        let mut tags = Vec::with_capacity(count);
-        for _ in 0..count {
-            tags.push(r.text()?)
-        }
-        let format = match r.u8()? {
-            1 => FusedOutputFormat::SeriesFrame,
-            x => {
-                return Err(DataFusionError::Plan(format!(
-                    "unsupported FusedSeries output format tag {x}"
-                )));
-            }
-        };
-        let promql = Arc::<str>::from(r.text()?);
-        if r.p != bytes.len() {
+        let (payload, remainder) = postcard::take_from_bytes::<FusedSeriesPayload>(&bytes[8..])
+            .map_err(|e| {
+                DataFusionError::Plan(format!("cannot deserialize FusedSeries payload: {e}"))
+            })?;
+        if !remainder.is_empty() {
             return Err(DataFusionError::Plan(
                 "trailing bytes in FusedSeries payload".into(),
             ));
         }
+        let FusedSeriesPayload {
+            tree,
+            grid,
+            metric_name,
+            time_index,
+            tags,
+            format,
+            promql,
+            output_schema,
+        } = payload;
+        let grid = Arc::new(
+            EvalGrid::try_deferred(grid)
+                .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries grid: {e}")))?,
+        );
         let children = vec![
             LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
                 produce_one_row: false,
-                schema: Arc::new(datafusion::common::DFSchema::empty())
+                schema: Arc::new(datafusion::common::DFSchema::empty()),
             });
             collect_source_schemas(&tree)?.len()
         ];
-        // A frame output declares the layout of the tree's evaluated root, which the tree itself
-        // carries. `try_new_with_format` compares the two, so passing an empty schema here would
-        // make every serialized frame node impossible to rebuild.
-        let output_schema = if format == FusedOutputFormat::SeriesFrame {
-            let evaluated = evaluated_output(&tree)?;
-            Arc::new(datafusion::common::DFSchema::try_from(
-                series_frame_output_schema(evaluated.as_ref())?,
-            )?)
-        } else {
-            Arc::new(datafusion::common::DFSchema::empty())
+        let binding = FusedSeriesBinding {
+            grid,
+            metric_name,
+            time_index,
+            tags,
         };
-        Self::try_new_with_format(
-            promql,
-            tree,
-            FusedSeriesBinding {
-                grid,
-                metric_name,
-                time_index,
-                tags,
-            },
-            children,
-            output_schema,
-            format,
-        )
+        if binding.tags.iter().any(|tag| tag == &binding.time_index) {
+            return Err(DataFusionError::Plan(
+                "tag column cannot be the time column".into(),
+            ));
+        }
+        let output_schema = Arc::new(datafusion::common::DFSchema::try_from(output_schema)?);
+        let node =
+            Self::try_new_with_format(promql, tree, binding, children, output_schema, format)?;
+        if format == FusedOutputFormat::PlainRows {
+            let schema = Arc::new(node.output_schema.as_arrow().clone());
+            validate_plain_output_schema(
+                &schema,
+                &node.tree,
+                &node.output_tags()?,
+                &node.binding.time_index,
+            )?;
+        }
+        Ok(node)
     }
 
     /// The name this node is shown under.
@@ -445,6 +518,62 @@ impl FusedSeries {
         )
     }
 
+    /// Creates the state-exporting half of a split aggregate.
+    ///
+    /// The node runs a `Partial` tree and answers aggregate-state frames, so its output layout is
+    /// the one `tree` declares rather than a caller's: the alternative is a caller free to declare a
+    /// state frame the tree does not produce, which `try_new_with_format` would then only catch for
+    /// some of its columns.
+    pub fn try_new_state_export(
+        promql: Arc<str>,
+        tree: NativeTree,
+        binding: FusedSeriesBinding,
+        children: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        let schema = state_frame_output_schema(&tree)?;
+        let output_schema = DFSchema::try_from(schema).map_err(|error| {
+            DataFusionError::Plan(format!(
+                "FusedSeries cannot declare its state schema: {error}"
+            ))
+        })?;
+        Self::try_new_with_format(
+            promql,
+            tree,
+            binding,
+            children,
+            Arc::new(output_schema),
+            FusedOutputFormat::SeriesFrame,
+        )
+    }
+
+    /// The two trees a native aggregate over `tree` is split into, if it can be split at all.
+    ///
+    /// The first runs where the series are read and answers the state each partition folded; the
+    /// second runs where every partition's state has arrived and answers the statement's series.
+    /// `time_index` is the column the tree's grid points are reported under.
+    pub fn split_aggregate(
+        tree: &NativeTree,
+        time_index: &str,
+    ) -> DataFusionResult<Option<(NativeTree, NativeTree)>> {
+        let fields = crate::native::split::prefix_fields(tree)?;
+        let split = match crate::native::split::split(tree.root(), &fields, time_index) {
+            Ok(Some(split)) => split,
+            Ok(None) => return Ok(None),
+            // A shape the split cannot carry is not a failure: the caller keeps the plan it would
+            // have built without this route.
+            Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(split
+            .into_trees()?
+            .map(|trees| (trees.partial, trees.final_tree)))
+    }
+
+    /// The evaluated series-frame schema declared by a native tree's root.
+    pub fn series_frame_schema(tree: &NativeTree) -> DataFusionResult<SchemaRef> {
+        series_frame_output_schema(evaluated_output(tree)?.as_ref())
+    }
+
     /// Creates a node with an explicitly selected output format.
     pub fn try_new_with_format(
         promql: Arc<str>,
@@ -454,19 +583,31 @@ impl FusedSeries {
         output_schema: DFSchemaRef,
         format: FusedOutputFormat,
     ) -> DataFusionResult<Self> {
-        validate_binding(&tree, &binding, children.len())?;
-        if format == FusedOutputFormat::SeriesFrame && children.len() > 1 {
+        // The binding is checked against each child, since a discovered selector binds one
+        // source per metric. A `SeriesFrame` node over several evaluated inputs stays legal
+        // here.
+        validate_binding(&tree, &binding, &children)?;
+        // State is a frame, not a row table: a `Partial` root has no row layout to publish, so
+        // the mismatch is refused where the format is chosen rather than where the exec is
+        // built.
+        if matches!(
+            &tree.root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+        ) && format != FusedOutputFormat::SeriesFrame
+        {
             return Err(DataFusionError::Plan(
-                "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
+                "FusedSeries Partial stage requires SeriesFrame output".into(),
             ));
         }
         if format == FusedOutputFormat::SeriesFrame {
-            let expected = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
+            let expected = output_frame_schema(
+                &tree,
+                FusedInputKind::from_native_type(&tree.root().output)?,
+            )?;
             if output_schema.as_arrow() != expected.as_ref() {
-                return Err(DataFusionError::Plan(
-                    "FusedSeries SeriesFrame output schema does not match the evaluated frame layout"
-                        .into(),
-                ));
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeries SeriesFrame schema does not match: declared {output_schema:?}, expected {expected:?}"
+                )));
             }
         }
         Ok(Self {
@@ -475,48 +616,66 @@ impl FusedSeries {
             binding,
             children,
             output_schema,
-            partial_fold: None,
             format,
+            canonical_producer: false,
         })
     }
 
-    /// Creates a one-source node that exports partition-local state for a complete aggregate.
-    pub(crate) fn try_new_partial(
+    /// Creates a producer whose terminal canonical merge is answered per input partition.
+    ///
+    /// The tree's root has to be a [`NativeExpr::Merge`], because that is the node this flag changes
+    /// the meaning of: instead of collecting every piece of a label set in one execution, the node
+    /// collects the pieces its own partition holds and exports one series per label set as a series
+    /// frame. What that leaves undone - the pieces of one label set that landed in other partitions -
+    /// is the canonical router's work above this node, and the caller that builds it is the one that
+    /// knows the pieces are split that way.
+    ///
+    /// `output_schema` is the frame the evaluated root declares; it is derived here rather than
+    /// taken from the caller so the two cannot disagree.
+    pub fn try_new_canonical_producer(
         promql: Arc<str>,
         tree: NativeTree,
         binding: FusedSeriesBinding,
         children: Vec<LogicalPlan>,
-        op: BoundAggregate,
     ) -> DataFusionResult<Self> {
-        validate_binding(&tree, &binding, children.len())?;
-        if children.len() != 1 {
+        let NativeExpr::Merge { input } = &tree.root().expr else {
             return Err(DataFusionError::Plan(
-                "FusedSeries partial fold requires one raw child".into(),
+                "a canonical merge producer requires a merge at the tree's root".into(),
+            ));
+        };
+        if !matches!(input_locality(input), InputLocality::PartitionLocal)
+            && !canonical_evaluated_local_prefix(input)
+        {
+            return Err(DataFusionError::Plan(
+                "a canonical merge producer requires a partition-local prefix".into(),
             ));
         }
-        if reads_across_series(tree.root()) {
-            return Err(DataFusionError::Plan(
-                "FusedSeries partial fold prefix reads across series".into(),
-            ));
-        }
-        aggregate_op(&op)?;
-        let output_schema = Arc::new(datafusion::common::DFSchema::try_from(state_schema(
-            &binding.tags,
-        ))?);
+        validate_binding(&tree, &binding, &children)?;
+        let frame = Self::series_frame_schema(&tree)?;
+        let output_schema = Arc::new(datafusion::common::DFSchema::try_from(
+            frame.as_ref().clone(),
+        )?);
         Ok(Self {
             promql,
             tree,
             binding,
             children,
             output_schema,
-            partial_fold: Some(op),
-            format: FusedOutputFormat::PlainRows,
+            format: FusedOutputFormat::SeriesFrame,
+            canonical_producer: true,
         })
     }
 
-    /// The aggregate whose partition-local state this node exports.
-    pub fn partial_fold(&self) -> Option<&BoundAggregate> {
-        self.partial_fold.as_ref()
+    /// Whether a canonical producer's input prefix is safe to run at its local execution width.
+    pub fn canonical_producer_prefix_is_local(&self) -> bool {
+        matches!(&self.tree.root().expr, NativeExpr::Merge { input }
+            if matches!(input_locality(input), InputLocality::PartitionLocal)
+                || canonical_evaluated_local_prefix(input))
+    }
+
+    /// Whether this node is the partition-local producer of a canonical boundary.
+    pub fn is_canonical_producer(&self) -> bool {
+        self.canonical_producer
     }
 
     /// The PromQL text this node was compiled from.
@@ -527,6 +686,29 @@ impl FusedSeries {
     /// The selected output representation.
     pub fn format(&self) -> FusedOutputFormat {
         self.format
+    }
+
+    /// Whether this node's tree reads its input as aggregate state rather than as series.
+    ///
+    /// A state root is the `Final` half of a split aggregate, which reads what the `Partial` half
+    /// exported. The kind is the tree's own: its inputs' bindings decide what each child must
+    /// produce, so a caller that needs to recognize the second half of a split does not have to
+    /// read the first one's labels.
+    pub fn reads_aggregate_state(&self) -> bool {
+        tree_inputs(&self.tree)
+            .iter()
+            .any(|input| matches!(input.output, NativeType::AggregateState(_)))
+    }
+
+    /// Whether this node's output carries the metric name its sources report.
+    ///
+    /// A nameless selector declares `__name__` without binding one name: the sources fill it in.
+    /// A `Final` half inherits that arrangement from the producer it reads, which is why the proof
+    /// has to cross the state boundary rather than stop at a scan.
+    fn publishes_source_metric_name(&self) -> bool {
+        self.binding.tags.iter().any(|tag| tag == METRIC_NAME)
+            && (self.binding.metric_name.is_some()
+                || self.children().iter().all(source_names_its_metric))
     }
 
     /// The compiled tree this node runs.
@@ -553,6 +735,23 @@ impl FusedSeries {
         &self,
         inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        self.to_execution_plan_with_parallelism_option(inputs, None)
+    }
+
+    /// Builds the physical plan using an explicit target width for matching-local work.
+    pub fn to_execution_plan_with_parallelism(
+        &self,
+        inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        target_partitions: usize,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        self.to_execution_plan_with_parallelism_option(inputs, Some(target_partitions))
+    }
+
+    fn to_execution_plan_with_parallelism_option(
+        &self,
+        inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        target_partitions: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         if inputs.len() != self.children.len() {
             return Err(DataFusionError::Plan(format!(
@@ -561,45 +760,294 @@ impl FusedSeries {
                 self.children.len()
             )));
         }
-        let tags = if self.partial_fold.is_some() {
+        let tags = if matches!(self.tree.root().output, NativeType::AggregateState(_)) {
             self.binding.tags.clone()
         } else {
-            self.output_tags()
+            self.output_tags()?
         };
-        Ok(Arc::new(FusedSeriesExec::build(
+        let evaluated = inputs.iter().any(|(input, _, _)| {
+            SeriesFrameDeclaration::parse(input.schema().as_ref())
+                .is_ok_and(|declaration| declaration.content() == FrameContent::Evaluated)
+        });
+        let locality = self.execution_locality();
+        let state_group = state_routing(self.tree.root());
+        let normalize = matches!(locality, InputLocality::SinglePartition);
+
+        let matching_policy = match &locality {
+            InputLocality::MatchingLocal(policy) => Some(policy.clone()),
+            _ => None,
+        };
+        let matching_partitions = matching_policy.as_ref().map(|_| {
+            target_partitions.map_or_else(
+                || {
+                    if let Some(source) = same_source(self.tree.root()) {
+                        inputs
+                            .get(source)
+                            .map(|(input, _, _)| input.properties().partitioning.partition_count())
+                            .unwrap_or(1)
+                    } else {
+                        inputs
+                            .iter()
+                            .map(|(input, _, _)| input.properties().partitioning.partition_count())
+                            .max()
+                            .unwrap_or(1)
+                    }
+                },
+                |target| target.max(1),
+            )
+        });
+        let window_sources = if evaluated
+            && !normalize
+            && inputs
+                .iter()
+                .any(|(input, _, _)| input.properties().partitioning.partition_count() > 1)
+        {
+            partitioned_window_sources(self.tree.root())?
+        } else {
+            Vec::new()
+        };
+        // Validate every declared frame and ordering before inserting any exchanges.
+        let inputs = inputs
+            .into_iter()
+            .enumerate()
+            .map(|(index, (input, label_source, ordering))| {
+                let declaration = SeriesFrameDeclaration::parse(input.schema().as_ref())
+                    .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+                let actual_ordering = series_frame_ordering(input.schema().as_ref())?;
+                if actual_ordering != ordering {
+                    return Err(DataFusionError::Plan(
+                        "FusedSeries source supplied ordering does not match its frame declaration"
+                            .into(),
+                    ));
+                }
+                if declaration.content() == FrameContent::AggregateState {
+                    // Final folds every row of each original group on one owner. A histogram suffix
+                    // additionally requires related groups on that same owner; the policy is
+                    // derived from the Final grouping and the suffix, not matching-key classes.
+                    let (group, policy) = state_group.as_ref().ok_or_else(|| {
+                        DataFusionError::Plan(
+                            "FusedSeries reads aggregate state but holds no Final aggregate".into(),
+                        )
+                    })?;
+                    let count = input.properties().partitioning.partition_count();
+                    // One routing key needs only one owner. Multiple keys split work the way the
+                    // session asks; an unspecified width preserves the producers' width.
+                    let required = match group {
+                        StateGroup::Single => 1,
+                        StateGroup::Grouped => target_partitions.unwrap_or(count).max(1),
+                    };
+                    let input = if let Some(router) = input.downcast_ref::<SeriesRepartitionExec>()
+                    {
+                        if router.outputs() == required
+                            && (required == 1 || router.routing_policy() == policy)
+                        {
+                            return Ok((input, label_source, ordering));
+                        }
+                        // Rebuild over the producer, not the old router's row slices, which retain
+                        // their parent payload and would otherwise be charged once per row again.
+                        Arc::clone(router.children()[0])
+                    } else if count == required && required == 1 {
+                        return Ok((input, label_source, ordering));
+                    } else {
+                        input
+                    };
+                    let routed = Arc::new(SeriesRepartitionExec::try_new_with_routing(
+                        input,
+                        required,
+                        policy.clone(),
+                    )?) as Arc<dyn ExecutionPlan>;
+                    let ordering = series_frame_ordering(routed.schema().as_ref())?;
+                    return Ok((routed, RawLabelSource::Explicit, ordering));
+                }
+                if declaration.content() != FrameContent::Evaluated {
+                    let count = input.properties().partitioning.partition_count();
+                    if normalize && count != 1 {
+                        let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
+                            as Arc<dyn ExecutionPlan>;
+                        let ordering = series_frame_ordering(input.schema().as_ref())?;
+                        return Ok((input, RawLabelSource::Explicit, ordering));
+                    }
+                    if let (Some(policy), Some(required)) =
+                        (matching_policy.as_ref(), matching_partitions)
+                    {
+                        if required == 1 && count != 1 {
+                            let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
+                                as Arc<dyn ExecutionPlan>;
+                            let ordering = series_frame_ordering(input.schema().as_ref())?;
+                            return Ok((input, RawLabelSource::Explicit, ordering));
+                        }
+                        let has_router =
+                            input
+                                .downcast_ref::<SeriesRepartitionExec>()
+                                .is_some_and(|router| {
+                                    router.outputs() == required
+                                        && router.routing_policy()
+                                            == &SeriesRouting::Matching(policy.clone())
+                                });
+                        if required > 1 && !has_router {
+                            let input = Arc::new(SeriesRepartitionExec::try_new_with_routing(
+                                input,
+                                required,
+                                SeriesRouting::Matching(policy.clone()),
+                            )?) as Arc<dyn ExecutionPlan>;
+                            let ordering = series_frame_ordering(input.schema().as_ref())?;
+                            return Ok((input, RawLabelSource::Explicit, ordering));
+                        }
+                    }
+                    return Ok((input, label_source, ordering));
+                }
+                let count = input.properties().partitioning.partition_count();
+                if count == 0 {
+                    return Err(DataFusionError::Plan(format!(
+                        "FusedSeries input {index} has no partitions"
+                    )));
+                }
+                let required = if normalize {
+                    1
+                } else {
+                    matching_partitions.unwrap_or(count)
+                };
+                let needs_owner = window_sources.contains(&index);
+                let contiguous = actual_ordering == SeriesOrdering::Contiguous;
+                let has_router =
+                    input
+                        .downcast_ref::<SeriesRepartitionExec>()
+                        .is_some_and(|router| {
+                            router.outputs() == required
+                                && matching_policy.as_ref().is_some_and(|policy| {
+                                    router.routing_policy()
+                                        == &SeriesRouting::Matching(policy.clone())
+                                })
+                        });
+                if normalize && count != required {
+                    let input = Arc::new(SeriesRepartitionExec::try_new(input, required)?)
+                        as Arc<dyn ExecutionPlan>;
+                    Ok((input, label_source, SeriesOrdering::Contiguous))
+                } else if normalize {
+                    // Already the one partition a global tree needs; wrapping it would add a node
+                    // that changes nothing.
+                    Ok((input, label_source, ordering))
+                } else if let Some(policy) = matching_policy.as_ref()
+                    && required > 1
+                    && (count != required || !has_router)
+                {
+                    // Either there is no router yet or the one there routes by another key. The
+                    // second case re-routes what the first produced: a router's output is plain
+                    // partitions, so another one above it is a legitimate shuffle rather than a
+                    // no-op, and refusing the query would be worse than paying for the move.
+                    let input = Arc::new(SeriesRepartitionExec::try_new_with_routing(
+                        input,
+                        required,
+                        SeriesRouting::Matching(policy.clone()),
+                    )?) as Arc<dyn ExecutionPlan>;
+                    Ok((input, label_source, SeriesOrdering::Contiguous))
+                } else if needs_owner
+                    && !(count == 1 && contiguous)
+                    && input.downcast_ref::<SeriesRepartitionExec>().is_none()
+                {
+                    let input = Arc::new(SeriesRepartitionExec::try_new(input, required)?)
+                        as Arc<dyn ExecutionPlan>;
+                    Ok((input, label_source, SeriesOrdering::Contiguous))
+                } else {
+                    Ok((input, label_source, ordering))
+                }
+            })
+            .collect::<DataFusionResult<Vec<_>>>()?;
+        let exec: Arc<dyn ExecutionPlan> = Arc::new(FusedSeriesExec::build(
             Arc::clone(&self.promql),
             inputs,
             Arc::new(self.tree.clone()),
             output_schema,
             self.binding.time_index.clone(),
             tags,
-            self.partial_fold.clone(),
             self.format,
+            target_partitions,
+            self.canonical_producer,
+        )?);
+        self.with_canonical_router(exec)
+    }
+
+    /// Routes a canonical producer's frames by label set: the canonical collection step above it.
+    ///
+    /// The producer cannot do this itself.
+    ///
+    /// The producer answers one series per label set *per partition*: it merged what it found there.
+    /// The pieces of one set that landed in other partitions are still apart, and every consumer
+    /// above this boundary reads whole label sets, so they are collected here - by canonical label
+    /// set, not by matching key, and by the conservative completion contract, because a producer can
+    /// only promise one series per set per partition and not that each set lives in one partition.
+    ///
+    /// This router is the boundary's middle stage and nothing else: a query whose tree holds no
+    /// canonical merge never reaches this code, and a merge that is not a boundary stays where it is.
+    fn with_canonical_router(
+        &self,
+        exec: Arc<dyn ExecutionPlan>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        if !self.canonical_producer {
+            return Ok(exec);
+        }
+        // The producer's own partitions are where the pieces are, so the router runs at exactly that
+        // width: it neither invents more owners than there is work for nor collects every piece into
+        // one. The session's `target_partitions` is not consulted, because it describes the session
+        // that plans this node and not the work below it: this boundary is planned where its producer
+        // runs - in the region for a regional producer - and the producer's width is already the
+        // scan's, which the frontend assigned. Asking the region's own default instead would gather
+        // every piece into a single owner, which is the shape this boundary exists to avoid.
+        let outputs = exec.properties().partitioning.partition_count().max(1);
+        Ok(Arc::new(SeriesRepartitionExec::try_new_with_routing(
+            exec,
+            outputs,
+            SeriesRouting::CanonicalLabels,
         )?))
     }
 
-    /// The label columns of the output: every column that is neither the time index nor a field of
-    /// the root. A scalar root has no labels; its one other column is the value.
+    /// The locality this node's physical execution runs at.
     ///
-    /// The planner decides them from the whole tree - a match narrows them, `or` joins both sides'
-    /// and a wrapper around either keeps them - and the output schema is where it records that.
-    fn output_tags(&self) -> Vec<String> {
-        let Some(root) = self.tree.root().output.samples() else {
-            return Vec::new();
-        };
-        self.output_schema
+    /// Normally that is the tree's own classification: a tree that reads across series answers one
+    /// partition and gathers what it reads. A partition-local canonical merge is the one deliberate
+    /// exception, and it is a fact about *this* node's contract rather than about the tree, so it is
+    /// read here and not inferred from the root: the caller that built the node knows its inputs are
+    /// whole per partition, and the merge it ends with collects only that partition's fragments.
+    /// Treating every merge as partition-local would instead let a merge that needs every piece run
+    /// where it cannot see them.
+    fn execution_locality(&self) -> InputLocality {
+        if self.canonical_producer {
+            InputLocality::PartitionLocal
+        } else {
+            input_locality(self.tree.root())
+        }
+    }
+
+    /// The label columns of the output, independent of the raw-input binding.
+    ///
+    /// A scalar root has no labels; its one other column is the value. The planner decides them
+    /// from the whole tree - a match narrows them, `or` joins both sides' and a wrapper around
+    /// either keeps them - and the output schema is where it records that.
+    fn output_tags(&self) -> DataFusionResult<Vec<String>> {
+        let field_names = self
+            .tree
+            .root()
+            .output
+            .samples()
+            .map(|schema| {
+                schema
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_ref())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        Ok(self
+            .output_schema
             .fields()
             .iter()
-            .map(|field| field.name())
-            .filter(|name| {
-                *name != &self.binding.time_index
-                    && !root
-                        .fields
-                        .iter()
-                        .any(|field| field.name.as_ref() == name.as_str())
+            .filter(|field| {
+                field.name() != &self.binding.time_index
+                    && !field_names.contains(field.name().as_str())
+                    && !matches!(self.tree.root().output, NativeType::Scalar(_))
             })
-            .cloned()
-            .collect()
+            .map(|field| field.name().clone())
+            .collect())
     }
 }
 
@@ -623,18 +1071,23 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
     }
 
     fn fmt_for_explain(&self, f: &mut Formatter) -> fmt::Result {
-        match &self.partial_fold {
-            Some(op) => write!(
+        match self.format {
+            FusedOutputFormat::SeriesFrame if self.canonical_producer => write!(
                 f,
-                "FusedSeries: {} [partial {}]",
-                self.promql,
-                render_partial_fold(op)
-            ),
-            None if self.format == FusedOutputFormat::SeriesFrame => {
-                write!(f, "FusedSeries: {} (output: series_frame)", self.promql)
+                "FusedSeries: {} (output: series_frame, per-partition canonical merge)",
+                self.promql
+            )?,
+            FusedOutputFormat::SeriesFrame => {
+                write!(f, "FusedSeries: {} (output: series_frame)", self.promql)?
             }
-            None => write!(f, "FusedSeries: {}", self.promql),
+            FusedOutputFormat::PlainRows => write!(f, "FusedSeries: {}", self.promql)?,
         }
+        if let Some((_, SeriesRouting::CanonicalLabelsExcept(excluded))) =
+            state_routing(self.tree.root())
+        {
+            write!(f, " (state routing: canonical labels except {excluded:?})")?;
+        }
+        Ok(())
     }
 
     fn with_exprs_and_inputs(
@@ -642,33 +1095,28 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
         _exprs: Vec<Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        validate_binding(&self.tree, &self.binding, inputs.len())?;
+        validate_binding(&self.tree, &self.binding, &inputs)?;
         Ok(Self {
             promql: Arc::clone(&self.promql),
             tree: self.tree.clone(),
             binding: self.binding.clone(),
             children: inputs,
             output_schema: Arc::clone(&self.output_schema),
-            partial_fold: self.partial_fold.clone(),
             format: self.format,
+            canonical_producer: self.canonical_producer,
         })
     }
 }
 
 impl PartialEq for FusedSeries {
     fn eq(&self, other: &Self) -> bool {
-        // `NativeTree` carries no structural equality, so the rendered tree stands in for it. The
-        // renderer names every node with its bound operation and grids, which is what makes two
-        // nodes the same computation; comparing the text alone would call two different trees
-        // equal whenever their PromQL happens to read the same.
         self.promql == other.promql
-            && self.tree.to_string() == other.tree.to_string()
-            && tree_input_fields(&self.tree) == tree_input_fields(&other.tree)
+            && self.tree == other.tree
             && self.binding == other.binding
             && self.children == other.children
             && self.output_schema == other.output_schema
-            && partial_key(self.partial_fold.as_ref()) == partial_key(other.partial_fold.as_ref())
             && self.format == other.format
+            && self.canonical_producer == other.canonical_producer
     }
 }
 
@@ -680,8 +1128,9 @@ impl Hash for FusedSeries {
         self.binding.hash(state);
         self.children.hash(state);
         self.output_schema.hash(state);
-        partial_key(self.partial_fold.as_ref()).hash(state);
+        self.tree.hash(state);
         self.format.hash(state);
+        self.canonical_producer.hash(state);
     }
 }
 
@@ -699,21 +1148,14 @@ impl PartialOrd for FusedSeries {
             Some(Ordering::Equal) => {}
             ord => return ord,
         }
-        match self.tree.to_string().partial_cmp(&other.tree.to_string()) {
-            Some(Ordering::Equal) => {}
-            ord => return ord,
-        }
-        match partial_key(self.partial_fold.as_ref())
-            .partial_cmp(&partial_key(other.partial_fold.as_ref()))
-        {
-            Some(Ordering::Equal) => {}
-            ord => return ord,
+        if self.tree != other.tree {
+            return None;
         }
         match self.format.cmp(&other.format) {
             Ordering::Equal => {}
             ord => return Some(ord),
         }
-        match tree_input_fields(&self.tree).cmp(&tree_input_fields(&other.tree)) {
+        match self.canonical_producer.cmp(&other.canonical_producer) {
             Ordering::Equal => {}
             ord => return Some(ord),
         }
@@ -725,88 +1167,515 @@ impl PartialOrd for FusedSeries {
     }
 }
 
-/// Renders a partial aggregate with the stable names used by the exchange plan.
-fn render_partial_fold(op: &BoundAggregate) -> String {
-    let group = match &op.group {
-        Grouping::By(labels) => format!("by ({})", labels.join(", ")),
-        Grouping::Without(labels) => format!("without ({})", labels.join(", ")),
-    };
-    let kind = match op.kind {
-        AggregateKind::Quantile { quantile } => format!("quantile({quantile})"),
-        kind => format!("{kind:?}").to_lowercase(),
-    };
-    format!("{kind} {group} {:?}", op.stage)
-}
-
-/// A stable comparable representation for an optional partial fold.
-fn partial_key(partial: Option<&BoundAggregate>) -> Option<String> {
-    partial.map(render_partial_fold)
-}
-
-/// The raw field names bound to each input leaf, retaining source association and leaf order.
-fn tree_input_fields(tree: &NativeTree) -> Vec<(usize, Vec<String>)> {
-    tree_inputs(tree)
-        .into_iter()
-        .map(|input| {
-            let fields = match &input.output {
-                NativeType::Samples(schema) => schema
-                    .fields
-                    .iter()
-                    .map(|field| field.name.to_string())
-                    .collect(),
-                NativeType::Scalar(_) | NativeType::AggregateState(_) => Vec::new(),
-            };
-            (input.source_index, fields)
-        })
-        .collect()
-}
-
 /// The schemas read by distinct raw sources, in dense source-index order.
 fn collect_source_schemas(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesSchema>>> {
-    let mut schemas: Vec<(usize, Arc<SeriesSchema>)> = Vec::new();
-    for input in tree_inputs(tree) {
-        let NativeType::Samples(found) = &input.output else {
-            return Err(DataFusionError::Plan(
-                "FusedSeries input is not samples".into(),
-            ));
-        };
-        if found.eval_grid.is_some() {
-            return Err(DataFusionError::Plan(
-                "FusedSeries input is not raw samples".into(),
-            ));
-        }
-        if let Some((_, expected)) = schemas
-            .iter()
-            .find(|(index, _)| *index == input.source_index)
-        {
-            if !same_fields(expected, found) {
+    collect_source_schemas_from_inputs(tree_inputs(tree))
+}
+
+fn collect_source_schemas_from_inputs(
+    inputs: Vec<&crate::native::plan::BoundInput>,
+) -> DataFusionResult<Vec<Arc<SeriesSchema>>> {
+    let mut schemas: Vec<(usize, Arc<SeriesSchema>, FusedInputKind)> = Vec::new();
+    for input in inputs {
+        let kind = FusedInputKind::from_native_type(&input.output)?;
+        let found = match &input.output {
+            NativeType::Samples(schema) => Arc::clone(schema),
+            NativeType::AggregateState(state) => Arc::new(SeriesSchema {
+                fields: state.accumulators.clone(),
+                eval_grid: Some(Arc::clone(&state.grid)),
+            }),
+            NativeType::Scalar(_) => {
                 return Err(DataFusionError::Plan(
-                    "FusedSeries repeated source has different fields".into(),
+                    "FusedSeries scalar cannot be a source".into(),
+                ));
+            }
+        };
+        if let Some((_, expected, expected_kind)) = schemas
+            .iter()
+            .find(|(index, _, _)| *index == input.source_index)
+        {
+            if *expected_kind != kind {
+                return Err(DataFusionError::Plan(
+                    "FusedSeries repeated source disagrees on input kind".into(),
+                ));
+            }
+            let same_grid = match (&expected.eval_grid, &found.eval_grid) {
+                (None, None) => true,
+                (Some(left), Some(right)) => left.spec() == right.spec(),
+                _ => false,
+            };
+            if !same_fields(expected, &found) || !same_grid {
+                return Err(DataFusionError::Plan(
+                    "FusedSeries repeated source has different fields or evaluation grid".into(),
                 ));
             }
         } else {
-            schemas.push((input.source_index, Arc::clone(found)));
+            schemas.push((input.source_index, found, kind));
         }
     }
-    schemas.sort_unstable_by_key(|(index, _)| *index);
+    schemas.sort_unstable_by_key(|(index, _, _)| *index);
     if schemas
         .iter()
         .enumerate()
-        .any(|(expected, (actual, _))| expected != *actual)
+        .any(|(expected, (actual, _, _))| expected != *actual)
     {
         return Err(DataFusionError::Plan(
             "FusedSeries source indexes are not dense".into(),
         ));
     }
-    Ok(schemas.into_iter().map(|(_, schema)| schema).collect())
+    Ok(schemas.into_iter().map(|(_, schema, _)| schema).collect())
+}
+
+#[derive(Clone, Debug)]
+pub enum InputLocality {
+    /// Each series is answered on its own, so the tree runs on whatever partitions its input has.
+    PartitionLocal,
+    /// The tree pairs series of whole vectors by one match key, so those classes must meet.
+    MatchingLocal(MatchingLabels),
+    /// The tree reads across series, so it needs every input on one partition.
+    SinglePartition,
+}
+
+/// The one source every leaf of `node` reads, when the tree keeps the matching key of that source.
+fn same_source(node: &NativeNode) -> Option<usize> {
+    match &node.expr {
+        NativeExpr::Input(input)
+            if node.output.grid().is_some()
+                || node
+                    .output
+                    .samples()
+                    .is_some_and(|schema| schema.eval_grid.is_none()) =>
+        {
+            Some(input.source_index)
+        }
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Timestamp { input } => same_source(input),
+        NativeExpr::Map { input, op }
+            if !op
+                .ops
+                .iter()
+                .any(|op| matches!(op, crate::native::plan::MapOp::Label(_))) =>
+        {
+            same_source(input)
+        }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } if parameters.iter().all(|parameter| {
+            matches!(
+                parameter.expr,
+                NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. }
+            )
+        }) =>
+        {
+            same_source(input)
+        }
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } if matches!(left.output, NativeType::Scalar(_)) => {
+            let _ = matching;
+            same_source(right)
+        }
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } if matches!(right.output, NativeType::Scalar(_)) => {
+            let _ = matching;
+            same_source(left)
+        }
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } if matching.labels == MatchingLabels::Ignoring(Vec::new())
+            && matching.cardinality == crate::vector_match::Cardinality::OneToOne =>
+        {
+            let source = same_source(left)?;
+            (same_source(right) == Some(source)).then_some(source)
+        }
+        NativeExpr::Aggregate { .. }
+        | NativeExpr::Vector { .. }
+        | NativeExpr::VectorOf { .. }
+        | NativeExpr::Set { .. }
+        | NativeExpr::Info { .. }
+        | NativeExpr::Merge { .. }
+        | NativeExpr::Binary { .. }
+        | NativeExpr::Input(_)
+        | NativeExpr::Scalar(_)
+        | NativeExpr::EvalTime { .. }
+        | NativeExpr::Map { .. }
+        | NativeExpr::ParameterizedMap { .. } => None,
+    }
+}
+
+/// Whether every operation in `node` preserves the labels used by `matching`.
+///
+/// This is deliberately separate from `same_source`: a subtree can read one source while
+/// changing the labels used to route its eventual vector match.
+fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool {
+    const COMPUTED_LABELS: [&str; 3] = [METRIC_NAME, "__type__", "__unit__"];
+    let key_contains = |label: &str| match matching {
+        MatchingLabels::On(labels) => labels.iter().any(|candidate| candidate.as_ref() == label),
+        MatchingLabels::Ignoring(labels) => {
+            label != METRIC_NAME && !labels.iter().any(|candidate| candidate.as_ref() == label)
+        }
+    };
+    let labels_removed = |labels: &[&str]| labels.iter().any(|label| key_contains(label));
+
+    match &node.expr {
+        NativeExpr::Input(_) => true,
+        NativeExpr::Instant { input, op } => {
+            (op.value != InstantValue::Timestamp || !labels_removed(&COMPUTED_LABELS))
+                && preserves_matching_key(input, matching)
+        }
+        NativeExpr::Map { input, op } => {
+            op.ops.iter().all(|op| match op {
+                crate::native::plan::MapOp::Math(_) => !labels_removed(&COMPUTED_LABELS),
+                // Label rewrites and histogram maps are not proven to retain the requested key.
+                crate::native::plan::MapOp::Label(_) | crate::native::plan::MapOp::Histogram(_) => {
+                    false
+                }
+            }) && preserves_matching_key(input, matching)
+        }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            !labels_removed(&COMPUTED_LABELS)
+                && preserves_matching_key(input, matching)
+                && parameters.iter().all(|parameter| {
+                    matches!(
+                        parameter.expr,
+                        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. }
+                    )
+                })
+        }
+        NativeExpr::Timestamp { input } => {
+            !labels_removed(&COMPUTED_LABELS) && preserves_matching_key(input, matching)
+        }
+        NativeExpr::Window { input, op } => {
+            (!op.function.drops_metric_name() || !labels_removed(&COMPUTED_LABELS))
+                && preserves_matching_key(input, matching)
+        }
+        NativeExpr::Binary {
+            left,
+            right,
+            matching: binary,
+        } if matches!(left.output, NativeType::Scalar(_)) => {
+            let drops_labels = binary.return_bool
+                || !matches!(
+                    binary.op,
+                    crate::vector_match::BinaryOp::Eq
+                        | crate::vector_match::BinaryOp::Ne
+                        | crate::vector_match::BinaryOp::Gt
+                        | crate::vector_match::BinaryOp::Lt
+                        | crate::vector_match::BinaryOp::Ge
+                        | crate::vector_match::BinaryOp::Le
+                );
+            (!drops_labels || !labels_removed(&COMPUTED_LABELS))
+                && preserves_matching_key(right, matching)
+        }
+        NativeExpr::Binary {
+            left,
+            right,
+            matching: binary,
+        } if matches!(right.output, NativeType::Scalar(_)) => {
+            let drops_labels = binary.return_bool
+                || !matches!(
+                    binary.op,
+                    crate::vector_match::BinaryOp::Eq
+                        | crate::vector_match::BinaryOp::Ne
+                        | crate::vector_match::BinaryOp::Gt
+                        | crate::vector_match::BinaryOp::Lt
+                        | crate::vector_match::BinaryOp::Ge
+                        | crate::vector_match::BinaryOp::Le
+                );
+            (!drops_labels || !labels_removed(&COMPUTED_LABELS))
+                && preserves_matching_key(left, matching)
+        }
+        // These operations can change labels or select/merge series; absent a node-specific
+        // proof, do not claim that the routed key survives.
+        _ => false,
+    }
+}
+
+/// Whether this input reports the metric each of its rows came from, by naming it itself.
+///
+/// A discovered selector binds one source per metric, so the name comes from the sources rather
+/// than from a single name on the node.
+fn source_names_its_metric(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Extension(extension) => {
+            if let Some(source) = extension
+                .node
+                .as_any()
+                .downcast_ref::<super::RawSeriesSource>()
+            {
+                return !source.metric_name().is_empty();
+            }
+            // A split's final half reads its producer's state, and the producer is the node that
+            // named the metric: it either bound one name or was itself built over sources that do.
+            extension
+                .node
+                .as_any()
+                .downcast_ref::<FusedSeries>()
+                .is_some_and(FusedSeries::publishes_source_metric_name)
+        }
+        LogicalPlan::Union(union) => union
+            .inputs
+            .iter()
+            .all(|input| source_names_its_metric(input)),
+        _ => false,
+    }
+}
+
+/// Whether matching operands can be segmented as independent single-source computations and
+/// at least one fails to preserve the requested key.
+///
+/// This is the key-change case the planner can handle by cutting the operands before matching.
+/// A failed preservation proof alone does not establish that a key was changed. The planner and
+/// [`input_locality`] share this predicate so that this admission rule cannot drift from locality.
+pub fn matching_operands_drop_key(root: &NativeNode) -> bool {
+    matching_site(root).is_some_and(|(left, right, labels)| {
+        same_source(left).is_some()
+            && same_source(right).is_some()
+            && (!preserves_matching_key(left, labels) || !preserves_matching_key(right, labels))
+    })
+}
+
+/// Derives the partition contract from the bound root, not from a physical property registry.
+/// Whether `node` contains a vector-vector binary, which matches series of the whole vector.
+///
+/// A tree of unary nodes evaluates each series on its own, so its partitions need nothing from
+/// each other. A binary with two vector sides pairs by match key instead, and every series of one
+/// key class has to reach the same partition.
+fn needs_vector_matching(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Binary { left, right, .. } => {
+            let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
+            if scalar(left) || scalar(right) {
+                needs_vector_matching(left) || needs_vector_matching(right)
+            } else {
+                true
+            }
+        }
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::VectorOf { input }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => needs_vector_matching(input),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => needs_vector_matching(input) || parameters.iter().any(needs_vector_matching),
+        NativeExpr::Set { left, right, .. } => {
+            needs_vector_matching(left) || needs_vector_matching(right)
+        }
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
+        NativeExpr::Info { .. } => true,
+    }
+}
+
+/// The vector/vector match this tree performs, looking through the pointwise nodes wrapped on top.
+///
+/// A match pairs series of two whole vectors, so where it sits — including under a scalar
+/// broadcast or a pointwise wrapper — is the place that needs matching-key co-location.
+fn matching_site(node: &NativeNode) -> Option<(&NativeNode, &NativeNode, &MatchingLabels)> {
+    match &node.expr {
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => {
+            let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
+            if scalar(left) {
+                matching_site(right)
+            } else if scalar(right) {
+                matching_site(left)
+            } else {
+                Some((left, right, &matching.labels))
+            }
+        }
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Timestamp { input } => matching_site(input),
+        _ => None,
+    }
+}
+
+pub fn input_locality(root: &NativeNode) -> InputLocality {
+    // A `Partial` aggregate folds only the rows its own partition reads and exports the state it
+    // folded; the `Final` half above the exchange is what needs every contribution in one place.
+    // Reading it as a global fold instead would gather the scan into one partition and throw away
+    // the parallelism the split exists to keep.
+    if matches!(
+        &root.expr,
+        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+    ) {
+        return InputLocality::PartitionLocal;
+    }
+    if let Some(index) = same_source(root) {
+        let raw = root.output.samples().is_some_and(|_| {
+            // The root's grid does not reliably indicate source content after windowing; inspect its bound inputs.
+            tree_inputs_for_locality(root)
+                .into_iter()
+                .find(|input| input.source_index == index)
+                .is_some_and(|input| {
+                    input
+                        .output
+                        .samples()
+                        .is_some_and(|schema| schema.eval_grid.is_none())
+                })
+        });
+        // Only a tree that matches two vectors needs its matching-key classes to meet in one
+        // partition. A tree of unary nodes answers each series on its own, and asking for the
+        // router there would both cost a shuffle and hide the ownership a Window needs.
+        if !needs_vector_matching(root) {
+            return InputLocality::PartitionLocal;
+        }
+        if raw {
+            if matching_operands_drop_key(root) {
+                return InputLocality::SinglePartition;
+            }
+            return InputLocality::PartitionLocal;
+        }
+        return InputLocality::MatchingLocal(MatchingLabels::Ignoring(Vec::new()));
+    }
+    // A match between two different sources needs its match keys co-located, wherever the match
+    // sits under the pointwise nodes above it.
+    if let Some((left, right, labels)) = matching_site(root)
+        && let (Some(_left_source), Some(_right_source)) = (same_source(left), same_source(right))
+        && preserves_matching_key(left, labels)
+        && preserves_matching_key(right, labels)
+    {
+        return InputLocality::MatchingLocal(labels.clone());
+    }
+    if reads_across_series(root) {
+        InputLocality::SinglePartition
+    } else {
+        InputLocality::PartitionLocal
+    }
+}
+
+fn tree_inputs_for_locality(root: &NativeNode) -> Vec<&crate::native::plan::BoundInput> {
+    fn visit<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a crate::native::plan::BoundInput>) {
+        match &node.expr {
+            NativeExpr::Input(input) => inputs.push(input),
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. } => visit(input, inputs),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                visit(input, inputs);
+                for parameter in parameters {
+                    visit(parameter, inputs);
+                }
+            }
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                visit(left, inputs);
+                visit(right, inputs);
+            }
+            NativeExpr::Info { base, info, .. } => {
+                visit(base, inputs);
+                visit(info, inputs);
+            }
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
+        }
+    }
+    let mut inputs = Vec::new();
+    visit(root, &mut inputs);
+    inputs
+}
+
+/// The owner count and routing policy required by a Final aggregate and its suffix.
+///
+/// State rows already carry the cut's full group labels. Histogram suffixes need a coarser key:
+/// every bound of one histogram and every histogram whose metadata-free outputs collide must
+/// meet, while the Final kernel still folds separately by the original group labels.
+fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
+    fn find(node: &NativeNode, histogram: bool) -> Option<(&Grouping, bool)> {
+        match &node.expr {
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final => {
+                Some((&op.group, histogram))
+            }
+            NativeExpr::Vector { input, op } => find(
+                input,
+                histogram || matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)),
+            ),
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ParameterizedMap { input, .. }
+            | NativeExpr::Aggregate { input, .. } => find(input, histogram),
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                find(left, histogram).or_else(|| find(right, histogram))
+            }
+            NativeExpr::Info { base, info, .. } => {
+                find(base, histogram).or_else(|| find(info, histogram))
+            }
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => None,
+        }
+    }
+    let (group, histogram) = find(root, false)?;
+    if histogram {
+        let owners = if crate::native::split::histogram_group_is_single(group) {
+            StateGroup::Single
+        } else {
+            StateGroup::Grouped
+        };
+        Some((
+            owners,
+            SeriesRouting::CanonicalLabelsExcept(
+                HISTOGRAM_ROUTING_EXCLUDED_LABELS
+                    .iter()
+                    .copied()
+                    .map(Arc::from)
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        ))
+    } else {
+        let owners = match group {
+            Grouping::By(labels) if labels.is_empty() => StateGroup::Single,
+            _ => StateGroup::Grouped,
+        };
+        Some((owners, SeriesRouting::CanonicalLabels))
+    }
+}
+
+/// How many owners the groups of a state input have to be split across.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StateGroup {
+    /// One group: every row belongs to it, so one owner folds the answer.
+    Single,
+    /// More than one group: the rows can be split by their group's labels.
+    Grouped,
 }
 
 fn validate_binding(
     tree: &NativeTree,
     binding: &FusedSeriesBinding,
-    child_count: usize,
+    children: &[LogicalPlan],
 ) -> DataFusionResult<()> {
-    if binding.tags.iter().any(|tag| tag == METRIC_NAME) && binding.metric_name.is_none() {
+    // A `__name__` tag is filled either by one bound metric name or by the sources themselves.
+    if binding.tags.iter().any(|tag| tag == METRIC_NAME)
+        && binding.metric_name.is_none()
+        && !children.iter().all(source_names_its_metric)
+    {
         return Err(DataFusionError::Plan(format!(
             "FusedSeries declares {METRIC_NAME:?} but binds no metric name"
         )));
@@ -817,17 +1686,17 @@ fn validate_binding(
     if schemas.is_empty() {
         tree.root().validate()?;
     }
-    if schemas.len() != child_count {
+    if schemas.len() != children.len() {
         return Err(DataFusionError::Plan(
             "FusedSeries source indexes must densely match its children".into(),
         ));
     }
-    if !tree
-        .root()
-        .output
-        .grid()
-        .is_some_and(|grid| grid.spec() == binding.grid.spec())
-    {
+    let root_grid = match &tree.root().output {
+        NativeType::Samples(schema) => schema.eval_grid.as_ref(),
+        NativeType::AggregateState(state) => Some(&state.grid),
+        NativeType::Scalar(grid) => Some(grid),
+    };
+    if !root_grid.is_some_and(|grid| grid.spec() == binding.grid.spec()) {
         return Err(DataFusionError::Plan(
             "FusedSeries output is not on the statement grid".into(),
         ));
@@ -873,6 +1742,56 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
     inputs
 }
 
+/// Sources whose evaluated series must be kept together for partitioned windows.
+fn partitioned_window_sources(node: &NativeNode) -> DataFusionResult<Vec<usize>> {
+    fn visit(node: &NativeNode, sources: &mut Vec<usize>) -> DataFusionResult<()> {
+        match &node.expr {
+            NativeExpr::Window { input, .. } => {
+                let NativeExpr::Input(bound) = &input.expr else {
+                    return Err(DataFusionError::Plan(
+                        "partitioned FusedSeries windows require a direct Input under Window"
+                            .into(),
+                    ));
+                };
+                if !sources.contains(&bound.source_index) {
+                    sources.push(bound.source_index);
+                }
+                visit(input, sources)?;
+            }
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::VectorOf { input } => visit(input, sources)?,
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                visit(input, sources)?;
+                for parameter in parameters {
+                    visit(parameter, sources)?;
+                }
+            }
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
+                visit(left, sources)?;
+                visit(right, sources)?;
+            }
+            NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
+        }
+        Ok(())
+    }
+    let mut sources = Vec::new();
+    visit(node, &mut sources)?;
+    Ok(sources)
+}
+
 fn ordering_satisfies(producer: SeriesOrdering, required: SeriesOrdering) -> bool {
     match required {
         SeriesOrdering::KeyThenTime => producer == SeriesOrdering::KeyThenTime,
@@ -891,7 +1810,7 @@ fn same_fields(left: &SeriesSchema, right: &SeriesSchema) -> bool {
 }
 
 /// Fields read by each distinct raw source in source-index order.
-pub(crate) fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<String>>> {
+pub fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<String>>> {
     Ok(collect_source_schemas(tree)?
         .into_iter()
         .map(|schema| {
@@ -904,14 +1823,71 @@ pub(crate) fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<
         .collect())
 }
 
-fn validate_physical_tree(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesSchema>>> {
+/// Validates a decoded plain-row node's schema against the tree that produces it.
+///
+/// A deserialized node carries its own output schema, so this is where a payload that names
+/// columns the tree cannot produce is refused, before the node runs.
+fn validate_plain_output_schema(
+    schema: &SchemaRef,
+    tree: &NativeTree,
+    tags: &[String],
+    time: &str,
+) -> DataFusionResult<()> {
+    let fields = match &tree.root().output {
+        NativeType::Samples(s) => s.fields.to_vec(),
+        NativeType::Scalar(_) => {
+            let non_time_columns = schema
+                .fields()
+                .iter()
+                .filter(|field| field.name().as_str() != time)
+                .count();
+            if non_time_columns != 1 {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeriesExec scalar root cannot produce {} tag columns",
+                    non_time_columns.saturating_sub(1)
+                )));
+            }
+            scalar_root_fields(schema, &[], time)?
+        }
+        NativeType::AggregateState(_) => {
+            return Err(DataFusionError::Plan(
+                "PlainRows does not support aggregate-state roots".into(),
+            ));
+        }
+    };
+    classify_output(schema, &fields, tags, time)?;
+    Ok(())
+}
+
+/// Validates the tree's bound inputs and carries the root kind with their schemas.
+///
+/// The root kind must travel with the schemas because an evaluated sample schema and an
+/// aggregate-state schema both have a grid, but require different physical frame decoders.
+fn validate_physical_tree(
+    tree: &NativeTree,
+) -> DataFusionResult<(Vec<Arc<SeriesSchema>>, Vec<FusedInputKind>, FusedInputKind)> {
     let schemas = collect_source_schemas(tree)?;
-    if tree.root().output.grid().is_none() {
-        return Err(DataFusionError::Plan(
-            "FusedSeries output is not evaluated samples".into(),
-        ));
+    let mut source_kinds = Vec::new();
+    for input in tree_inputs(tree) {
+        let kind = FusedInputKind::from_native_type(&input.output)?;
+        if source_kinds.len() <= input.source_index {
+            source_kinds.resize(input.source_index + 1, kind);
+        }
     }
-    Ok(schemas)
+    let root_kind = match &tree.root().output {
+        NativeType::Scalar(_) => FusedInputKind::Evaluated,
+        native_type => FusedInputKind::from_native_type(native_type)?,
+    };
+    match root_kind {
+        FusedInputKind::Evaluated | FusedInputKind::AggregateState => {}
+        FusedInputKind::Raw => {
+            return Err(DataFusionError::Plan(
+                "FusedSeries output is raw samples, not an evaluated or aggregate-state result"
+                    .into(),
+            ));
+        }
+    }
+    Ok((schemas, source_kinds, root_kind))
 }
 
 /// Where one output column of [`FusedSeriesExec`] comes from.
@@ -963,6 +1939,17 @@ pub(crate) fn classify_output(
     tags: &[String],
     time_column: &str,
 ) -> DataFusionResult<Vec<OutputColumn>> {
+    if output_schema
+        .fields()
+        .iter()
+        .filter(|field| field.name().as_str() == time_column)
+        .count()
+        > 1
+    {
+        return Err(DataFusionError::Plan(format!(
+            "duplicate time column {time_column:?} in FusedSeriesExec output schema"
+        )));
+    }
     for (index, tag) in tags.iter().enumerate() {
         if tags[..index].contains(tag) {
             return Err(DataFusionError::Plan(format!(
@@ -1083,7 +2070,71 @@ pub(crate) fn classify_output(
             )));
         }
     }
+    if output_schema.fields().len() != 1 + series_fields.len() + tags.len() {
+        return Err(DataFusionError::Plan(
+            "FusedSeriesExec output schema has an unexpected number of columns".into(),
+        ));
+    }
     Ok(classification)
+}
+
+/// Whether the tree has a binary with two vector operands that can produce a duplicate verdict.
+fn native_tree_has_vector_binary(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Binary { left, right, .. } => {
+            (!matches!(left.output, NativeType::Scalar(_))
+                && !matches!(right.output, NativeType::Scalar(_)))
+                || native_tree_has_vector_binary(left)
+                || native_tree_has_vector_binary(right)
+        }
+        NativeExpr::VectorOf { input }
+        | NativeExpr::Instant { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => native_tree_has_vector_binary(input),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            native_tree_has_vector_binary(input)
+                || parameters.iter().any(native_tree_has_vector_binary)
+        }
+        NativeExpr::Set { left, right, .. } => {
+            native_tree_has_vector_binary(left) || native_tree_has_vector_binary(right)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            native_tree_has_vector_binary(base) || native_tree_has_vector_binary(info)
+        }
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
+    }
+}
+
+/// Evidence shared by the output partitions of this plan's single execution.
+struct EvidenceClaims {
+    evidence: Option<Arc<DuplicateEvidence>>,
+    claimed: Vec<bool>,
+}
+
+fn claim_evidence(
+    claims: &Mutex<EvidenceClaims>,
+    partition: usize,
+    partitions: usize,
+    pool: &Arc<dyn MemoryPool>,
+) -> DataFusionResult<Arc<DuplicateEvidence>> {
+    let mut claims = claims.lock().unwrap_or_else(|e| e.into_inner());
+    if claims.evidence.is_none() {
+        claims.evidence = Some(Arc::new(DuplicateEvidence::new(pool, partitions)));
+        claims.claimed = vec![false; partitions];
+    }
+    if claims.claimed.get(partition).copied().unwrap_or(false) {
+        return Err(DataFusionError::Execution(
+            "FusedSeries plan instance was executed more than once for the same partition".into(),
+        ));
+    }
+    claims.claimed[partition] = true;
+    Ok(Arc::clone(claims.evidence.as_ref().unwrap()))
 }
 
 /// The physical node that runs a compiled native tree over its input's raw series.
@@ -1094,6 +2145,7 @@ pub struct FusedSeriesExec {
     tree: Arc<NativeTree>,
     /// Each source's compiled raw schema, used to decode only that source's frames.
     series_schemas: Vec<Arc<SeriesSchema>>,
+    source_kinds: Vec<FusedInputKind>,
     /// Physical input plans, preserving each source's frame binding and ordering.
     inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
     /// Where each output column comes from.
@@ -1105,16 +2157,87 @@ pub struct FusedSeriesExec {
     tags: Arc<[String]>,
     /// The columns this node produces.
     output_schema: SchemaRef,
+    /// The evidence claimed by this plan's output partitions.
+    duplicate_evidence: Mutex<EvidenceClaims>,
     /// Per-node metrics, registered by each execution of the tree.
     metric: ExecutionPlanMetricsSet,
-    /// Aggregate state exported by each partition, when this is the partial mode.
-    partial_fold: Option<BoundAggregate>,
     format: FusedOutputFormat,
+    matching_parallelism: Option<usize>,
+    /// Whether this node is a partition-local canonical producer.
+    canonical_producer: bool,
+    /// Test-only inspection of the physical routing contract; no execution behavior depends on it.
+    #[cfg(feature = "test-utils")]
+    canonical_producer_for_test: bool,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
 
+fn preserves_partition_identity(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) => true,
+        NativeExpr::Instant { input, op } => {
+            op.value == InstantValue::Sample && preserves_partition_identity(input)
+        }
+        _ => false,
+    }
+}
+
+/// Returns whether the scan's bound logical tags cover every user-visible primary-key column.
+///
+/// Internal metric-engine keys are not output labels. The per-series scan guarantees `__tsid` is
+/// derived from user tags; within one logical table, distinct series are distinguished by their
+/// user-visible primary-key columns. Requiring all of those columns prevents distinct stored series
+/// from collapsing onto one output identity.
+fn bound_tags_cover_primary_key(label_source: &RawLabelSource) -> bool {
+    let RawLabelSource::PrimaryKey {
+        physical_metadata,
+        logical_tags,
+        ..
+    } = label_source
+    else {
+        return false;
+    };
+    let bound_ids = logical_tags
+        .iter()
+        .map(|tag| tag.column_id)
+        .collect::<std::collections::HashSet<_>>();
+    let table_id = store_api::storage::consts::ReservedColumnId::table_id();
+    let tsid = store_api::storage::consts::ReservedColumnId::tsid();
+    physical_metadata.primary_key_columns().all(|column| {
+        column.column_id == table_id
+            || column.column_id == tsid
+            || bound_ids.contains(&column.column_id)
+    })
+}
+
 impl FusedSeriesExec {
+    /// Returns whether each output series identity is confined to one input partition.
+    ///
+    /// This is true only for a single per-series scan with every primary-key tag bound (or another
+    /// proven fused chain) whose native tree consists solely of identity-preserving instant
+    /// selections and inputs.
+    pub fn has_partition_disjoint_identities(&self) -> bool {
+        if self.inputs.len() != 1 || !preserves_partition_identity(self.tree.root()) {
+            return false;
+        }
+
+        fn is_complete_series_input(plan: &dyn ExecutionPlan) -> bool {
+            if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
+                return bound_tags_cover_primary_key(scan.label_source());
+            }
+            if let Some(cooperative) = plan.downcast_ref::<CooperativeExec>() {
+                return cooperative
+                    .children()
+                    .first()
+                    .is_some_and(|child| is_complete_series_input(child.as_ref()));
+            }
+            plan.downcast_ref::<FusedSeriesExec>()
+                .is_some_and(FusedSeriesExec::has_partition_disjoint_identities)
+        }
+
+        is_complete_series_input(self.inputs[0].0.as_ref())
+    }
+
     /// Creates the node, rejecting whatever this node cannot execute or convert.
     ///
     /// `input` produces native raw series frames: the series' encoded key, its finality, its
@@ -1141,8 +2264,9 @@ impl FusedSeriesExec {
             output_schema,
             time_column,
             tags,
-            None,
             FusedOutputFormat::PlainRows,
+            None,
+            false,
         )
     }
 
@@ -1154,15 +2278,37 @@ impl FusedSeriesExec {
         output_schema: SchemaRef,
         time_column: String,
         tags: Vec<String>,
-        partial_fold: Option<BoundAggregate>,
         format: FusedOutputFormat,
+        matching_parallelism: Option<usize>,
+        canonical_producer: bool,
     ) -> DataFusionResult<Self> {
-        if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame && inputs.len() > 1 {
-            return Err(DataFusionError::Plan(
-                "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
-            ));
+        // A partition-local canonical merge is an explicit contract about this node's inputs, so it
+        // replaces the tree's own classification rather than being folded into it: the tree's root
+        // merge reads across series in general, and only the caller knows that these partitions each
+        // hold whole series.
+        let locality = if canonical_producer {
+            InputLocality::PartitionLocal
+        } else {
+            input_locality(tree.root())
+        };
+        if canonical_producer {
+            if !matches!(tree.root().expr, NativeExpr::Merge { .. }) {
+                return Err(DataFusionError::Plan(
+                    "a canonical boundary requires a merge at the tree's root".into(),
+                ));
+            }
+            if matches!(&tree.root().output, NativeType::AggregateState(_)) {
+                return Err(DataFusionError::Plan(
+                    "a canonical boundary exports series frames, not aggregate state".into(),
+                ));
+            }
+            if format != FusedOutputFormat::SeriesFrame {
+                return Err(DataFusionError::Plan(
+                    "a canonical merge producer exports a series frame".into(),
+                ));
+            }
         }
-        let raw_schemas = validate_physical_tree(&tree)?;
+        let (raw_schemas, source_kinds, root_kind) = validate_physical_tree(&tree)?;
         if inputs.len() != raw_schemas.len() {
             return Err(DataFusionError::Plan(format!(
                 "FusedSeries physical input count {} does not match its {} raw sources",
@@ -1171,30 +2317,39 @@ impl FusedSeriesExec {
             )));
         }
         // Building a state proves the runtime executes this tree; drop the validation state now.
-        let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
+        let _ =
+            NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)?;
         let output_series = tree.root().output.samples();
         let scalar_root = matches!(tree.root().output, NativeType::Scalar(_));
-        if let Some(op) = &partial_fold {
-            aggregate_op(op)?;
-        }
-        if partial_fold.is_some() && (inputs.len() != 1 || reads_across_series(tree.root())) {
+        let partial_root = matches!(&tree.root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial);
+        if partial_root && format != FusedOutputFormat::SeriesFrame {
             return Err(DataFusionError::Plan(
-                "FusedSeries partial fold requires one raw source and a per-series prefix".into(),
+                "FusedSeries Partial stage requires SeriesFrame output".into(),
             ));
         }
-        let frame_schema = if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame {
-            let declared = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
-            if declared != output_schema {
+        let frame_schema = if format == FusedOutputFormat::SeriesFrame {
+            if inputs.iter().any(|(input, _, _)| {
+                matches!(
+                    input.properties().boundedness,
+                    Boundedness::Unbounded { .. }
+                )
+            }) {
                 return Err(DataFusionError::Plan(
-                    "FusedSeriesExec output schema does not match the evaluated frame layout"
+                    "FusedSeries SeriesFrame output requires finite input to publish final series"
                         .into(),
                 ));
+            }
+            let declared = output_frame_schema(&tree, root_kind)?;
+            if declared != output_schema {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeriesExec schema does not match: declared {output_schema:?}, expected {declared:?}"
+                )));
             }
             true
         } else {
             false
         };
-        let classification = if partial_fold.is_some() || frame_schema {
+        let classification = if partial_root || frame_schema {
             Vec::new()
         } else if scalar_root {
             let scalar_fields = scalar_root_fields(&output_schema, &tags, &time_column)?;
@@ -1214,6 +2369,18 @@ impl FusedSeriesExec {
         let partition_count = inputs.first().map_or(1, |(input, _, _)| {
             input.properties().partitioning.partition_count()
         });
+        let window_sources = if raw_schemas.iter().any(|schema| schema.eval_grid.is_some())
+            && inputs
+                .iter()
+                .any(|(input, _, _)| input.properties().partitioning.partition_count() > 1)
+        {
+            partitioned_window_sources(tree.root())?
+                .into_iter()
+                .filter(|&index| raw_schemas[index].eval_grid.is_some())
+                .collect()
+        } else {
+            Vec::new()
+        };
         for (index, (input, label_source, ordering)) in inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if count == 0 {
@@ -1221,7 +2388,79 @@ impl FusedSeriesExec {
                     "FusedSeries input {index} has no partitions"
                 )));
             }
-            let required_ordering = if inputs.len() > 1 && count > 1 {
+            if count != partition_count {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeries input {index} has {count} partitions; every source must have the same positive count ({partition_count})"
+                )));
+            }
+            // State is the one input a cross-series tree may read from more than one partition:
+            // the router above the producers put every row of a group in exactly one of them, so
+            // the `Final` aggregate folds that group's whole contribution where it arrives. Any
+            // other global input has no such owner and has to be gathered.
+            let state = source_kinds[index] == FusedInputKind::AggregateState;
+            if state && count > 1 {
+                let (owners, policy) = state_routing(tree.root()).ok_or_else(|| {
+                    DataFusionError::Plan(
+                        "FusedSeries reads aggregate state but holds no Final aggregate".into(),
+                    )
+                })?;
+                if owners == StateGroup::Single
+                    || input
+                        .downcast_ref::<SeriesRepartitionExec>()
+                        .is_none_or(|router| {
+                            router.outputs() != count || router.routing_policy() != &policy
+                        })
+                {
+                    return Err(DataFusionError::Plan(format!(
+                        "FusedSeries state input {index} requires a direct owner router with the Final routing policy"
+                    )));
+                }
+            }
+            if matches!(locality, InputLocality::SinglePartition) && count != 1 && !state {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeries global evaluated input {index} must have one partition"
+                )));
+            }
+            if let InputLocality::MatchingLocal(policy) = &locality
+                && count > 1
+                && input
+                    .downcast_ref::<SeriesRepartitionExec>()
+                    .is_none_or(|router| {
+                        router.outputs() != count
+                            || router.routing_policy() != &SeriesRouting::Matching(policy.clone())
+                    })
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeries matching-local input {index} requires a direct matching-key SeriesRepartitionExec with {count} outputs"
+                )));
+            }
+            if window_sources.contains(&index)
+                && count > 1
+                && input.downcast_ref::<SeriesRepartitionExec>().is_none()
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeries partitioned window input {index} requires a direct SeriesRepartitionExec owner router"
+                )));
+            }
+            let declaration = SeriesFrameDeclaration::parse(input.schema().as_ref())
+                .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+            let actual_ordering = series_frame_ordering(input.schema().as_ref())
+                .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+            if actual_ordering != *ordering {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeries source {index} supplied ordering does not match its frame declaration"
+                )));
+            }
+            if declaration.content() == FrameContent::Evaluated
+                && actual_ordering != SeriesOrdering::Contiguous
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeries evaluated source {index} must declare contiguous ordering"
+                )));
+            }
+            let evaluated_global = raw_schemas[index].eval_grid.is_some()
+                && matches!(locality, InputLocality::SinglePartition);
+            let required_ordering = if evaluated_global || (inputs.len() > 1 && count > 1) {
                 SeriesOrdering::Contiguous
             } else {
                 *ordering
@@ -1236,25 +2475,66 @@ impl FusedSeriesExec {
                 )));
             }
             ensure_frame_matches_label_source(input.schema().as_ref(), label_source)?;
-            unpack_raw_series(
+            let expected_content = match source_kinds[index] {
+                FusedInputKind::Raw => FrameContent::Raw,
+                FusedInputKind::Evaluated => FrameContent::Evaluated,
+                FusedInputKind::AggregateState => FrameContent::AggregateState,
+            };
+            if declaration.content() != expected_content {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeries source {index} frame content does not match its compiled input"
+                )));
+            }
+            let empty = || {
                 Box::pin(RecordBatchStreamAdapter::new(
                     input.schema(),
                     futures::stream::empty(),
-                )),
-                Some(raw_schemas[index].clone()),
-            )?;
+                ))
+            };
+            match source_kinds[index] {
+                FusedInputKind::Evaluated => {
+                    let _ = unpack_evaluated_series(empty(), Some(raw_schemas[index].clone()))?;
+                }
+                FusedInputKind::Raw => {
+                    unpack_raw_series(empty(), Some(raw_schemas[index].clone()))?;
+                }
+                FusedInputKind::AggregateState => {
+                    let bound = tree_inputs(&tree)
+                        .into_iter()
+                        .find(|bound| bound.source_index == index)
+                        .ok_or_else(|| {
+                            DataFusionError::Plan(format!(
+                                "FusedSeries state source {index} has no bound input"
+                            ))
+                        })?;
+                    let NativeType::AggregateState(state) = &bound.output else {
+                        return Err(DataFusionError::Plan(format!(
+                            "FusedSeries source {index} is declared aggregate state but its binding is not"
+                        )));
+                    };
+                    let _ = unpack_aggregate_state(
+                        empty(),
+                        Some(Arc::new(
+                            datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                                state.kind,
+                                state.components.to_vec(),
+                            )
+                            .map_err(|error| DataFusionError::Plan(error.to_string()))?,
+                        )),
+                        Some(raw_schemas[index].clone()),
+                    )?;
+                }
+            }
         }
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(if inputs.len() != 1 {
-                1
-            } else {
-                partition_count
-            }),
-            if partial_fold.is_some() {
-                // Partial aggregate state is only emitted after the scan reaches EOF.
+            Partitioning::UnknownPartitioning(partition_count),
+            if partial_root || frame_schema {
+                // Partial aggregate state and canonical frame series are emitted only after EOF.
                 EmissionType::Final
             } else {
+                // A frame's identities, and every other output, are emitted while the input is
+                // still arriving, so the node's emission type is the input's.
                 inputs.first().map_or(EmissionType::Final, |(input, _, _)| {
                     input.properties().emission_type
                 })
@@ -1269,15 +2549,23 @@ impl FusedSeriesExec {
             promql,
             tree,
             series_schemas: raw_schemas,
+            source_kinds,
             inputs,
             classification: classification.into(),
             time_column,
             tags: tags.into(),
             output_schema,
+            duplicate_evidence: Mutex::new(EvidenceClaims {
+                evidence: None,
+                claimed: Vec::new(),
+            }),
             metric: ExecutionPlanMetricsSet::new(),
             properties,
-            partial_fold,
             format,
+            matching_parallelism,
+            canonical_producer,
+            #[cfg(feature = "test-utils")]
+            canonical_producer_for_test: canonical_producer,
         })
     }
 
@@ -1285,6 +2573,12 @@ impl FusedSeriesExec {
     pub const fn name() -> &'static str {
         "FusedSeriesExec"
     }
+}
+
+#[cfg(feature = "test-utils")]
+pub fn is_canonical_producer_exec(plan: &dyn ExecutionPlan) -> bool {
+    plan.downcast_ref::<FusedSeriesExec>()
+        .is_some_and(|fused| fused.canonical_producer_for_test)
 }
 
 impl std::fmt::Debug for FusedSeriesExec {
@@ -1298,9 +2592,7 @@ impl DisplayAs for FusedSeriesExec {
     /// `Display`, so `EXPLAIN` and the node's metrics name the same nodes.
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
         write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)?;
-        if let Some(op) = &self.partial_fold {
-            write!(f, "\npartial state: {}", render_partial_fold(op))?;
-        } else if self.format == FusedOutputFormat::SeriesFrame {
+        if self.format == FusedOutputFormat::SeriesFrame {
             write!(f, "\noutput: series_frame")?;
         }
         Ok(())
@@ -1312,17 +2604,17 @@ impl ExecutionPlan for FusedSeriesExec {
         Self::name()
     }
 
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metric.clone_inner())
+    }
+
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
-    /// Nothing is asked of the input's distribution, and nothing may be inserted above it.
-    ///
-    /// A hash requirement would make a hash exchange necessary as soon as the child has more than
-    /// one partition - even where the child already satisfies the requirement - and a hash exchange
-    /// does not preserve order. The input's own layout is already the one this node needs, because
-    /// the scan it reads from guarantees a series stays in one partition, so the requirement says
-    /// only that the layout is left alone.
+    /// No optimizer exchange is requested here: evaluated-input partition counts and window owner
+    /// routing are normalized explicitly while constructing the physical plan. Raw-input layout is
+    /// left to its existing execution path.
     fn input_distribution_requirements(&self) -> InputDistributionRequirements {
         InputDistributionRequirements::new(
             self.inputs
@@ -1376,8 +2668,9 @@ impl ExecutionPlan for FusedSeriesExec {
             self.output_schema.clone(),
             self.time_column.clone(),
             self.tags.to_vec(),
-            self.partial_fold.clone(),
             self.format,
+            self.matching_parallelism,
+            self.canonical_producer,
         )?))
     }
 
@@ -1391,57 +2684,148 @@ impl ExecutionPlan for FusedSeriesExec {
                 "FusedSeries output partition is out of range".into(),
             ));
         }
-        let state = NativeExecutionState::try_new(
+        let partitions = self.properties.partitioning.partition_count();
+        let needs_evidence = partitions > 1 && native_tree_has_vector_binary(self.tree.root());
+        let evidence = if needs_evidence {
+            Some(claim_evidence(
+                &self.duplicate_evidence,
+                partition,
+                partitions,
+                &context.runtime_env().memory_pool,
+            )?)
+        } else {
+            None
+        };
+        let mut claim = evidence.as_ref().map(|evidence| EvidenceClaim {
+            evidence: Arc::clone(evidence),
+            active: true,
+        });
+        let state = match NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
-        )?;
-        state.register_metrics(&self.metric, partition);
-        let mut streams = Vec::new();
-        for (source, (input, _, _)) in self.inputs.iter().enumerate() {
-            let count = input.properties().partitioning.partition_count();
-            if self.inputs.len() == 1 && partition >= count {
-                return Err(DataFusionError::Execution(format!(
-                    "FusedSeries input {source} has no partition {partition}"
-                )));
+            evidence.clone(),
+        ) {
+            Ok(state) => state,
+            Err(error) => {
+                if let Some(claim) = &mut claim {
+                    claim.abort();
+                }
+                return Err(error);
             }
-            let start = if self.inputs.len() > 1 { 0 } else { partition };
-            let end = if self.inputs.len() > 1 {
-                count
-            } else {
-                partition + 1
-            };
-            let partitions = start..end;
-            for child_partition in partitions {
-                let frames = input.execute(child_partition, Arc::clone(&context))?;
-                let raw =
-                    unpack_raw_series(frames, Some(Arc::clone(&self.series_schemas[source])))?;
-                let raw = materialize_raw_labels(raw)
-                    .map_err(|error| DataFusionError::External(Box::new(error)))?;
-                streams.push((source, raw));
+        };
+        state.register_metrics(&self.metric, partition);
+        let mut streams: Vec<futures::stream::BoxStream<'static, Result<FusedFeed, BoxedError>>> =
+            Vec::new();
+        let bound_inputs = tree_inputs(&self.tree);
+        for (source, (input, _, _)) in self.inputs.iter().enumerate() {
+            let frames = input.execute(partition, Arc::clone(&context))?;
+            match self.source_kinds[source] {
+                FusedInputKind::Evaluated => {
+                    let decoded = unpack_evaluated_series(
+                        frames,
+                        Some(Arc::clone(&self.series_schemas[source])),
+                    )?;
+                    streams.push(
+                        decoded
+                            .map(move |item| {
+                                item.map(|(series, is_last)| FusedFeed {
+                                    source,
+                                    chunk: FusedChunk::Evaluated(EvaluatedChunk {
+                                        series,
+                                        is_last,
+                                    }),
+                                })
+                            })
+                            .boxed(),
+                    );
+                }
+                FusedInputKind::AggregateState => {
+                    let bound = bound_inputs
+                        .iter()
+                        .find(|bound| bound.source_index == source)
+                        .ok_or_else(|| {
+                            DataFusionError::Plan(format!(
+                                "FusedSeries state source {source} has no bound input"
+                            ))
+                        })?;
+                    let NativeType::AggregateState(binding) = bound.output.clone() else {
+                        return Err(DataFusionError::Plan(format!(
+                            "FusedSeries source {source} is declared aggregate state but its binding is not"
+                        )));
+                    };
+                    let declared = Arc::new(
+                        datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                            binding.kind,
+                            binding.components.to_vec(),
+                        )
+                        .map_err(|error| DataFusionError::Plan(error.to_string()))?,
+                    );
+                    let decoded = unpack_aggregate_state(
+                        frames,
+                        Some(declared.clone()),
+                        Some(Arc::clone(&self.series_schemas[source])),
+                    )?;
+                    streams.push(
+                        decoded
+                            .map(move |item| match item {
+                                Ok(row) => state_row_from_frame_row(row, &binding)
+                                    .map(|row| FusedFeed {
+                                        source,
+                                        chunk: FusedChunk::State(StateChunk::Row(row)),
+                                    })
+                                    .map_err(|error| {
+                                        BoxedError::new(common_query::error::Error::from(error))
+                                    }),
+                                Err(error) => Err(error),
+                            })
+                            .boxed(),
+                    );
+                }
+                FusedInputKind::Raw => {
+                    let raw =
+                        unpack_raw_series(frames, Some(Arc::clone(&self.series_schemas[source])))?;
+                    let raw = materialize_raw_labels(raw)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                    streams.push(
+                        raw.map(move |item| {
+                            item.map(|chunk| FusedFeed {
+                                source,
+                                chunk: FusedChunk::Raw(chunk),
+                            })
+                        })
+                        .boxed(),
+                    );
+                }
             }
         }
         let input_ids = (0..self.series_schemas.len())
             .map(|source| state.input_ids(source).collect())
             .collect();
-        let export_budget = Arc::new(Mutex::new(None));
-        let partial_fold = self
-            .partial_fold
-            .clone()
-            .map(|op| {
-                PartialFold::try_new(
-                    op,
-                    self.tree
-                        .root()
-                        .output
-                        .samples()
-                        .ok_or_else(|| {
-                            DataFusionError::Plan("FusedSeries output is not samples".into())
-                        })?
-                        .clone(),
-                    Arc::clone(&self.tags),
-                    Arc::clone(&export_budget),
-                    &context.runtime_env().memory_pool,
+        // One reading of the root decides both the mode and its binding, so the mode cannot
+        // disagree with its binding: a Partial root without state output is a plan error.
+        let state_binding = match (&self.tree.root().expr, &self.tree.root().output) {
+            (NativeExpr::Aggregate { op, .. }, NativeType::AggregateState(binding))
+                if op.stage == AggregateStage::Partial =>
+            {
+                Some(Arc::clone(binding))
+            }
+            (NativeExpr::Aggregate { op, .. }, _) if op.stage == AggregateStage::Partial => {
+                return Err(DataFusionError::Plan(
+                    "FusedSeries Partial root must produce aggregate state".into(),
+                ));
+            }
+            _ => None,
+        };
+        let state_mode = state_binding.is_some();
+        let state_schema = state_binding
+            .as_ref()
+            .map(|binding| {
+                datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                    binding.kind,
+                    binding.components.to_vec(),
                 )
+                .map(Arc::new)
+                .map_err(|error| DataFusionError::Plan(error.to_string()))
             })
             .transpose()?;
         let mut executor = NativeExecutor::new(state);
@@ -1449,17 +2833,11 @@ impl ExecutionPlan for FusedSeriesExec {
             executor.end_of_input()?;
             None
         } else {
-            let reservation = MemoryConsumer::new(format!("FusedSeriesGather[{partition}]"))
-                .register(&context.runtime_env().memory_pool);
-            Some(SeriesGather::new(
-                spawn_partitions(streams, &context.runtime_env().memory_pool),
-                reservation,
-            ))
+            Some(futures::stream::select_all(streams))
         };
         // A frame is encoded from the tree's own evaluated output, and only when the node answers
         // values rather than state: partial state is a third output the format does not reach.
-        let frame_mode =
-            self.partial_fold.is_none() && self.format == FusedOutputFormat::SeriesFrame;
+        let frame_mode = self.format == FusedOutputFormat::SeriesFrame && !state_mode;
         let stream = FusedSeriesStream {
             inputs,
             executor: Some(executor),
@@ -1467,24 +2845,56 @@ impl ExecutionPlan for FusedSeriesExec {
             classification: Arc::clone(&self.classification),
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
-            partial_fold,
+            state_mode,
             frame_mode,
-            _export_budget: Arc::clone(&export_budget),
             ready: VecDeque::new(),
             done: false,
+            duplicate_evidence: evidence,
+            evidence_completed: false,
+            evidence_claim: claim,
         };
-        if frame_mode {
-            let schema = evaluated_output(&self.tree)?;
-            let source: SendableEvaluatedSeriesStream =
-                Box::pin(FusedEvaluatedStream { source: stream });
-            Ok(pack_evaluated_series(source, schema)?)
+        if self.format == FusedOutputFormat::SeriesFrame {
+            if state_mode {
+                let binding = state_binding.as_ref().ok_or_else(|| {
+                    DataFusionError::Plan(
+                        "FusedSeries Partial root has no aggregate-state binding".into(),
+                    )
+                })?;
+                let schema = Arc::new(SeriesSchema {
+                    fields: binding.accumulators.clone(),
+                    eval_grid: Some(Arc::clone(&binding.grid)),
+                });
+                let source: SendableStateSeriesStream = Box::pin(FusedStateStream {
+                    source: stream,
+                    pending: Vec::new().into_iter(),
+                    reservation: None,
+                });
+                Ok(pack_aggregate_state(
+                    source,
+                    state_schema.ok_or_else(|| {
+                        DataFusionError::Plan("FusedSeries Partial state schema is missing".into())
+                    })?,
+                    schema,
+                )?)
+            } else {
+                let schema = evaluated_output(&self.tree)?;
+                let source: SendableEvaluatedSeriesStream =
+                    Box::pin(FusedEvaluatedStream { source: stream });
+                Ok(pack_evaluated_series(source, schema)?)
+            }
         } else {
             Ok(Box::pin(stream))
         }
     }
+}
 
-    fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metric.clone_inner())
+impl Drop for FusedSeriesStream {
+    fn drop(&mut self) {
+        if !self.evidence_completed
+            && let Some(claim) = &mut self.evidence_claim
+        {
+            claim.abort();
+        }
     }
 }
 
@@ -1578,6 +2988,23 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
     }
 }
 
+/// One chunk a child handed over, in the form the child's frame declared it in.
+#[derive(Debug)]
+enum FusedChunk {
+    /// Raw samples: one scan series, with its own timestamps.
+    Raw(RawSeriesChunk),
+    /// Values a producer already evaluated on the grid the frame declares.
+    Evaluated(EvaluatedChunk),
+    /// Aggregate state decoded from a declared state frame.
+    State(StateChunk),
+}
+
+/// One chunk and the source index it belongs to.
+struct FusedFeed {
+    source: usize,
+    chunk: FusedChunk,
+}
+
 /// The batches one execution of [`FusedSeriesExec`] yields.
 pub struct FusedSeriesStream {
     /// Every input partition, read concurrently, or `None` once they all ended.
@@ -1585,7 +3012,7 @@ pub struct FusedSeriesStream {
     /// Each decoder holds its current batch, decoded chunks and upstream source. Dropping this on
     /// error releases them even if the consumer keeps the terminated stream; a partition read on a
     /// spawned task is released once its runtime cancels the task, not by the time this returns.
-    inputs: Option<SeriesGather>,
+    inputs: Option<SelectAll<futures::stream::BoxStream<'static, Result<FusedFeed, BoxedError>>>>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
     /// Runtime input IDs for each source index.
@@ -1596,34 +3023,83 @@ pub struct FusedSeriesStream {
     tags: Arc<[String]>,
     /// The schema of every batch this stream yields.
     output_schema: SchemaRef,
-    /// Per-partition aggregate state fold, if this stream exports a partial result.
-    partial_fold: Option<PartialFold>,
-    /// Whether evaluated chunks are emitted as series frames rather than converted to rows.
+    /// Whether the root exports aggregate-state chunks.
+    state_mode: bool,
+    /// Whether output is a declared SeriesFrame rather than rows.
     frame_mode: bool,
-    /// Keeps exported state batches charged for as long as this stream holds them.
-    _export_budget: Arc<Mutex<Option<MemoryReservation>>>,
     /// The batches the executor settled since the last poll of the input.
     ready: VecDeque<RecordBatch>,
     /// Whether the input ended and everything it settled has been handed out.
     done: bool,
+    duplicate_evidence: Option<Arc<DuplicateEvidence>>,
+    evidence_completed: bool,
+    evidence_claim: Option<EvidenceClaim>,
+}
+
+struct EvidenceClaim {
+    evidence: Arc<DuplicateEvidence>,
+    active: bool,
+}
+
+impl EvidenceClaim {
+    fn abort(&mut self) {
+        if self.active {
+            self.evidence.abort();
+            self.active = false;
+        }
+    }
+    fn complete(&mut self) -> bool {
+        if self.active {
+            self.active = false;
+            self.evidence.complete()
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for EvidenceClaim {
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 impl FusedSeriesStream {
     /// Hands one raw chunk over and queues what it settled.
-    fn push(&mut self, source: usize, chunk: RawSeriesChunk) -> DataFusionResult<()> {
+    fn push(&mut self, feed: FusedFeed) -> DataFusionResult<()> {
         let Some(executor) = self.executor.as_mut() else {
             return Err(DataFusionError::Execution(
                 "FusedSeriesExec stream pushed a chunk after its execution closed".to_string(),
             ));
         };
-        for input_id in self.input_ids.get(source).ok_or_else(|| {
+        let input_ids = self.input_ids.get(feed.source).ok_or_else(|| {
             DataFusionError::Execution(format!(
-                "FusedSeries has no runtime input IDs for source {source}"
+                "FusedSeries has no runtime input IDs for source {}",
+                feed.source
             ))
-        })? {
-            executor.push_raw(*input_id, chunk.clone())?;
+        })?;
+        // One source feeding several runtime inputs hands each the same value. Raw and evaluated
+        // chunks are cloned for every input, which is what the base route does; a state row read
+        // from a frame is copied the same way. A producer's state batch carries the charge for its
+        // whole payload, and no tree binds one of those to several inputs.
+        let chunk = Some(feed.chunk);
+        for input_id in input_ids {
+            match chunk.as_ref().expect("the feed is read at most twice") {
+                FusedChunk::Raw(value) => executor.push_raw(*input_id, value.clone())?,
+                FusedChunk::Evaluated(value) => {
+                    executor.push_evaluated(*input_id, value.clone())?
+                }
+                FusedChunk::State(StateChunk::Row(row)) => {
+                    executor.push_state(*input_id, StateChunk::Row(row.clone()))?
+                }
+                FusedChunk::State(StateChunk::Series { .. }) => {
+                    return Err(DataFusionError::Execution(
+                        "one producer state batch cannot feed several runtime inputs".to_string(),
+                    ));
+                }
+            }
         }
-        if self.frame_mode {
+        if self.frame_mode || self.state_mode {
             Ok(())
         } else {
             let mut settled = Vec::new();
@@ -1659,6 +3135,9 @@ impl FusedSeriesStream {
     /// once. `None` is also when the execution closes and returns its reservations, so it is
     /// dropped here rather than staying alive until the stream is.
     fn pull_one(&mut self) -> DataFusionResult<Option<EvaluatedChunk>> {
+        if self.state_mode {
+            return Ok(None);
+        }
         let Some(executor) = self.executor.as_mut() else {
             return Ok(None);
         };
@@ -1679,25 +3158,22 @@ impl FusedSeriesStream {
     /// hold the evaluator, the decoder's held batch and chunks, and the plan upstream of it.
     fn fail(&mut self) {
         self.done = true;
+        if !self.evidence_completed {
+            if let Some(claim) = &mut self.evidence_claim {
+                claim.abort();
+            }
+            self.evidence_completed = true;
+        }
         self.executor = None;
-        self.partial_fold = None;
         self.inputs = None;
         // This reservation belongs only to this execution. Release it even if the consumer keeps
         // the failed stream and the plan alive.
-        self._export_budget
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
         // A batch queued before the error was settled by a run that has now stopped.
         self.ready.clear();
     }
 
     /// Converts one settled chunk into a row batch. Evaluated frames leave this driver as chunks.
     fn convert_rows(&mut self, chunk: EvaluatedChunk) -> DataFusionResult<()> {
-        if let Some(fold) = self.partial_fold.as_mut() {
-            fold.update(chunk)?;
-            return Ok(());
-        }
         let batch = series_to_record_batch(
             &self.classification,
             &self.tags,
@@ -1707,19 +3183,13 @@ impl FusedSeriesStream {
         self.ready.push_back(batch);
         Ok(())
     }
-
-    /// Publishes the partition's fold only after the input and native execution have drained.
-    fn finish_fold(&mut self) -> DataFusionResult<()> {
-        if let Some(mut fold) = self.partial_fold.take() {
-            self.ready.extend(fold.finish()?);
-        }
-        Ok(())
-    }
 }
 
 enum FusedOutput {
     Rows(RecordBatch),
     Evaluated(EvaluatedChunk),
+    /// Aggregate state decoded from a declared state frame.
+    State(StateChunk),
 }
 
 impl FusedSeriesStream {
@@ -1727,6 +3197,21 @@ impl FusedSeriesStream {
         for _ in 0..POLL_BUDGET {
             if let Some(batch) = self.ready.pop_front() {
                 return Poll::Ready(Some(Ok(FusedOutput::Rows(batch))));
+            }
+            if self.state_mode && !self.done {
+                match self
+                    .executor
+                    .as_mut()
+                    .map_or(Ok(None), NativeExecutor::next_state)
+                {
+                    Ok(Some(chunk)) => return Poll::Ready(Some(Ok(FusedOutput::State(chunk)))),
+                    Ok(None) if self.inputs.is_none() => self.executor = None,
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.fail();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
             }
             if self.frame_mode && !self.done {
                 match self
@@ -1758,11 +3243,22 @@ impl FusedSeriesStream {
                         }
                     }
                     Ok(None) => {
-                        if let Err(error) = self.finish_fold() {
-                            self.fail();
-                            return Poll::Ready(Some(Err(error)));
-                        }
                         self.done = true;
+                        if self
+                            .evidence_claim
+                            .as_mut()
+                            .is_some_and(EvidenceClaim::complete)
+                            && let Some(candidate) = self
+                                .duplicate_evidence
+                                .as_ref()
+                                .and_then(|evidence| evidence.take_verdict())
+                        {
+                            self.fail();
+                            return Poll::Ready(Some(Err(DataFusionError::Execution(
+                                candidate.message(),
+                            ))));
+                        }
+                        self.evidence_completed = true;
                         continue;
                     }
                     Err(error) => {
@@ -1785,8 +3281,8 @@ impl FusedSeriesStream {
                     self.fail();
                     return Poll::Ready(Some(Err(DataFusionError::External(Box::new(error)))));
                 }
-                Poll::Ready(Some(Ok((source, chunk)))) => {
-                    if let Err(error) = self.push(source, chunk) {
+                Poll::Ready(Some(Ok(feed))) => {
+                    if let Err(error) = self.push(feed) {
                         self.fail();
                         return Poll::Ready(Some(Err(error)));
                     }
@@ -1810,7 +3306,7 @@ impl Stream for FusedSeriesStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.poll_output(cx) {
             Poll::Ready(Some(Ok(FusedOutput::Rows(batch)))) => Poll::Ready(Some(Ok(batch))),
-            Poll::Ready(Some(Ok(FusedOutput::Evaluated(_)))) => {
+            Poll::Ready(Some(Ok(FusedOutput::Evaluated(_) | FusedOutput::State(_)))) => {
                 self.fail();
                 Poll::Ready(Some(Err(DataFusionError::Internal(
                     "evaluated chunk reached the row stream adapter".into(),
@@ -1835,19 +3331,99 @@ impl Stream for FusedEvaluatedStream {
             Poll::Ready(Some(Ok(FusedOutput::Evaluated(chunk)))) => {
                 Poll::Ready(Some(Ok((chunk.series, chunk.is_last))))
             }
-            Poll::Ready(Some(Ok(FusedOutput::Rows(_)))) => {
-                self.source.fail();
+            Poll::Ready(Some(Ok(FusedOutput::Rows(_) | FusedOutput::State(_)))) => {
+                Pin::new(&mut self.source).fail();
                 Poll::Ready(Some(Err(common_error::ext::BoxedError::new(
                     common_query::error::Error::from(DataFusionError::Internal(
                         "row batch reached the evaluated stream adapter".into(),
                     )),
                 ))))
             }
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(
-                common_error::ext::BoxedError::new(common_query::error::Error::from(error)),
-            ))),
+            Poll::Ready(Some(Err(error))) => {
+                Pin::new(&mut self.source).fail();
+                Poll::Ready(Some(Err(common_error::ext::BoxedError::new(
+                    common_query::error::Error::from(error),
+                ))))
+            }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+struct FusedStateStream {
+    source: FusedSeriesStream,
+    /// The series of the one producer chunk being handed out.
+    pending: std::vec::IntoIter<datatypes::series::aggregate_state::StateSeries>,
+    /// What that chunk still holds, released once its last series has been handed out.
+    reservation: Option<MemoryReservation>,
+}
+
+impl FusedStateStream {
+    /// Drops what this stream still held and ends it: the packer above reads nothing more.
+    fn finish(&mut self) {
+        self.pending = Vec::new().into_iter();
+        self.reservation = None;
+    }
+}
+
+impl Stream for FusedStateStream {
+    type Item = Result<(datatypes::series::aggregate_state::StateSeries, bool), BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(series) = self.pending.next() {
+                // is_last closes this producer's partial chunk chain; Final still merges every
+                // producer's contribution before completing a group.
+                return Poll::Ready(Some(Ok((series, true))));
+            }
+            // Every series of that chunk has been handed out, so its charge and the buffer those
+            // series came from both go back before the next chunk is read. Holding the charge until
+            // this point is what keeps the last series' payload accounted for while the packer
+            // still reads it; dropping the exhausted iterator here keeps its spare capacity from
+            // outliving the charge that covered it.
+            self.reservation = None;
+            self.pending = Vec::new().into_iter();
+            match Pin::new(&mut self.source).poll_output(cx) {
+                Poll::Ready(Some(Ok(FusedOutput::State(chunk)))) => {
+                    let StateChunk::Series {
+                        series,
+                        reservation,
+                        ..
+                    } = chunk
+                    else {
+                        Pin::new(&mut self.source).fail();
+                        self.finish();
+                        return Poll::Ready(Some(Err(BoxedError::new(
+                            common_query::error::Error::from(DataFusionError::Internal(
+                                "row state reached state export stream".into(),
+                            )),
+                        ))));
+                    };
+                    self.pending = series.into_iter();
+                    self.reservation = reservation;
+                }
+                Poll::Ready(Some(Ok(_))) => {
+                    Pin::new(&mut self.source).fail();
+                    self.finish();
+                    return Poll::Ready(Some(Err(BoxedError::new(
+                        common_query::error::Error::from(DataFusionError::Internal(
+                            "non-state output reached state stream".into(),
+                        )),
+                    ))));
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    self.finish();
+                    return Poll::Ready(Some(Err(BoxedError::new(
+                        common_query::error::Error::from(error),
+                    ))));
+                }
+                Poll::Ready(None) => {
+                    self.finish();
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
         }
     }
 }
