@@ -2061,14 +2061,20 @@ async fn test_automatic_trigger_during_execution_clears_continuation_scope() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let mut scheduler = env.mock_compaction_scheduler_with_config(
+        tx,
+        MitoConfig {
+            max_background_compactions: 4,
+            ..Default::default()
+        },
+    );
 
     let mut builder = VersionControlBuilder::new();
-    for offset in [0, 10, 20, 30] {
-        builder.push_l0_file(offset, 1_000);
-    }
-    for offset in [0, 10, 20, 30] {
-        builder.push_l0_file(2 * 3_600_000 + offset, 2 * 3_600_000 + 1_000);
+    // Two windows remain eligible while the manual unit reserves window 0.
+    for window_start in [0, 2 * 3_600_000, 4 * 3_600_000] {
+        for offset in [0, 10, 20, 30] {
+            builder.push_l0_file(window_start + offset, window_start + 1_000);
+        }
     }
     let region_id = builder.region_id();
     let version_control = Arc::new(builder.build());
@@ -2146,14 +2152,16 @@ async fn test_automatic_trigger_during_execution_clears_continuation_scope() {
     let CompactionPlanningResult::Prepared(prepared) = continuation.result else {
         panic!("expected the unrestricted follow-up to select out-of-range windows");
     };
-    assert!(
-        prepared
-            .picker_output
-            .outputs
-            .iter()
-            .flat_map(|output| &output.inputs)
-            .any(|file| file.time_range().1 >= Timestamp::new_millisecond(2 * 3_600_000))
-    );
+    assert_eq!(2, prepared.picker_output.outputs.len());
+    assert_eq!(4, prepared.compaction_region.max_parallelism);
+    let windows: std::collections::HashSet<_> = prepared
+        .picker_output
+        .outputs
+        .iter()
+        .flat_map(|output| &output.inputs)
+        .map(|file| file.time_range().0.value() / 3_600_000)
+        .collect();
+    assert_eq!(std::collections::HashSet::from([2, 4]), windows);
 }
 
 #[tokio::test]
