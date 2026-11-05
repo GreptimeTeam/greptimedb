@@ -44,6 +44,7 @@ use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
+use promql::extension_plan::FieldKind;
 use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
@@ -3193,6 +3194,7 @@ async fn native_fused_depth_limit_falls_back_to_legacy_plan() {
             &build_eval_stmt(&query),
             &|_| Ok(Arc::clone(&schema)),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
     };
     compile(63).expect("63 selector terms must fit native tree depth 64");

@@ -23,8 +23,10 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, duplicates_canonical_labels, fused_output_tags, reads_across_series,
+    NativeType, aggregate_state_binding, duplicates_canonical_labels, fused_output_tags,
+    reads_across_series,
 };
+use crate::extension_plan::FieldKind;
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::info::InfoSelector;
 use crate::map::MathOp;
@@ -148,6 +150,7 @@ fn partial_aggregate(inner: NativeNode) -> NativeNode {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
@@ -172,6 +175,7 @@ fn final_aggregate(state: NativeNode) -> NativeNode {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Final,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(Arc::new([]), grid),
@@ -931,6 +935,7 @@ fn a_constant_operand_reads_one_series_at_a_time() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(Arc::new([]), Arc::clone(&shared)),
@@ -1030,6 +1035,7 @@ fn an_aggregate_output_matches_its_stage() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(Arc::new([]), Arc::clone(&value_grid)),
@@ -1043,6 +1049,7 @@ fn an_aggregate_output_matches_its_stage() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
@@ -1072,6 +1079,7 @@ fn a_complete_aggregate_cannot_change_the_field_count() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(fields(1), out),
@@ -1097,6 +1105,7 @@ fn an_aggregate_stage_must_agree_with_its_type() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(Arc::new([]), value_grid),
@@ -1121,6 +1130,7 @@ fn a_partial_aggregate_cannot_change_the_accumulator_count() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
@@ -1170,6 +1180,7 @@ fn a_partial_aggregate_indexes_its_state_on_the_inputs_grid() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
@@ -1261,6 +1272,7 @@ fn a_final_aggregate_cannot_change_the_field_count() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
@@ -1288,6 +1300,7 @@ fn a_final_aggregate_cannot_change_the_field_count() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Final,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(fields(1), out),
@@ -1313,6 +1326,7 @@ fn a_final_aggregate_cannot_consume_a_window() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Final,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(Arc::new([]), value_grid),
@@ -1336,6 +1350,7 @@ fn a_complete_aggregate_cannot_consume_state() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(Arc::new([]), state_grid),
@@ -1367,6 +1382,7 @@ fn the_walkthrough_shapes_are_trees() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(Arc::new([]), Arc::clone(&statement_grid)),
@@ -1768,6 +1784,7 @@ fn a_rewrite_after_ranking_or_grouping_may_alias() {
                 kind: AggregateKind::Sum,
                 group: group(),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(fields(1), Arc::clone(&out)),
@@ -2127,4 +2144,69 @@ fn independently_allocated_binding_mismatch_is_rejected() {
         eval_grid: None,
     }));
     assert!(mismatch.validate().is_err());
+}
+
+/// The state an aggregate binds follows the kind its direct input carries.
+///
+/// The two families differ in both the kind and the components, so a node bound over one kind can
+/// never be merged as a node bound over the other: the frame's kind is what says which merge rules
+/// apply, and its component list is what the merge reads.
+#[test]
+fn aggregate_state_binding_follows_the_input_kind() {
+    for (kind, numeric, histogram) in [
+        (
+            AggregateKind::Sum,
+            AggregateStateKind::Sum,
+            AggregateStateKind::HistogramSum,
+        ),
+        (
+            AggregateKind::Avg,
+            AggregateStateKind::Avg,
+            AggregateStateKind::HistogramAvg,
+        ),
+    ] {
+        let (float_kind, float_components) =
+            aggregate_state_binding(kind, FieldKind::Float).expect("a numeric state");
+        assert_eq!(float_kind, numeric, "{kind:?}");
+        let (histogram_kind, histogram_components) =
+            aggregate_state_binding(kind, FieldKind::Histogram).expect("a histogram state");
+        assert_eq!(histogram_kind, histogram, "{kind:?}");
+        // The histogram layout is the kind's own canonical list, which is what a frame accepts.
+        assert_eq!(histogram_components, histogram.components().to_vec());
+        assert_ne!(
+            float_components, histogram_components,
+            "{kind:?} binds one layout, not two"
+        );
+        assert!(
+            !float_components.contains(&StateComponent::HistogramValue),
+            "{kind:?} keeps numeric components over a numeric input"
+        );
+        assert!(
+            histogram_components.contains(&StateComponent::HistogramValue),
+            "{kind:?} keeps the payload over a histogram input"
+        );
+    }
+    // An aggregate that answers a float whatever it reads keeps its numeric state over a histogram
+    // input as well: a count is a count of samples, not of payloads.
+    for kind in [
+        AggregateKind::Count,
+        AggregateKind::Min,
+        AggregateKind::Max,
+        AggregateKind::Group,
+        AggregateKind::Stddev,
+        AggregateKind::Stdvar,
+    ] {
+        assert_eq!(
+            aggregate_state_binding(kind, FieldKind::Histogram),
+            aggregate_state_binding(kind, FieldKind::Float),
+            "{kind:?}"
+        );
+    }
+    // A quantile has no mergeable state at all, whatever it reads.
+    for field_kind in [FieldKind::Float, FieldKind::Histogram] {
+        assert!(
+            aggregate_state_binding(AggregateKind::Quantile { quantile: 0.5 }, field_kind)
+                .is_none()
+        );
+    }
 }
