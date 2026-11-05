@@ -389,69 +389,32 @@ impl Display for JsonType {
 
 /// Converts a json type value to string
 ///
-/// `jsonb::from_slice` also accepts JSON text, which some write paths (e.g. `COPY FROM`
-/// files, or a JSON parameter bound as text through the MySQL protocol) store in place of
-/// binary jsonb.
+/// The binary jsonb is serialized directly with `serde_json`, so object keys and string
+/// values are escaped by `serde_json`. `RawJsonb::to_string()` is avoided, since it falls
+/// back to the lossy raw bytes when serialization fails.
 ///
-/// The value is written out here rather than through `Value`'s `Display`, which leaves
-/// object keys unescaped and escapes strings the Rust way. `RawJsonb`'s `Serialize` is
-/// not used either: it panics on JSON text such as `"abc"`.
+/// Some write paths (e.g. `COPY FROM` files, or a JSON parameter bound as text through
+/// the MySQL protocol) store JSON text in place of binary jsonb. Bytes that fail to
+/// serialize are parsed as text with the extended parser, as `jsonb::from_slice` does.
 pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
     if val.is_empty() {
         return Ok("".to_string());
     }
-    let value = jsonb::from_slice(val).map_err(|error| InvalidJsonbSnafu { error }.build())?;
-    let mut buf = Vec::with_capacity(val.len());
-    write_jsonb_value(&value, &mut buf).map_err(|e| {
-        InvalidJsonSnafu {
-            value: e.to_string(),
-        }
-        .build()
-    })?;
-    String::from_utf8(buf).map_err(|e| {
-        InvalidJsonSnafu {
-            value: e.to_string(),
-        }
-        .build()
-    })
-}
-
-fn write_jsonb_value(value: &jsonb::Value, buf: &mut Vec<u8>) -> std::io::Result<()> {
-    use std::io::Write;
-
-    match value {
-        jsonb::Value::String(s) => serde_json::to_writer(&mut *buf, s.as_ref())?,
-        jsonb::Value::Array(items) => {
-            buf.push(b'[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    buf.push(b',');
-                }
-                write_jsonb_value(item, buf)?;
+    let serialize = |bytes: &[u8]| {
+        serde_json::to_string(&jsonb::RawJsonb::new(bytes)).map_err(|e| {
+            InvalidJsonSnafu {
+                value: e.to_string(),
             }
-            buf.push(b']');
-        }
-        jsonb::Value::Object(entries) => {
-            buf.push(b'{');
-            for (i, (key, item)) in entries.iter().enumerate() {
-                if i > 0 {
-                    buf.push(b',');
-                }
-                serde_json::to_writer(&mut *buf, key)?;
-                buf.push(b':');
-                write_jsonb_value(item, buf)?;
-            }
-            buf.push(b'}');
-        }
-        // Same as `jsonb_to_serde_json`: JSON has no NaN or infinity.
-        jsonb::Value::Number(jsonb::Number::Float64(f)) if !f.is_finite() => {
-            buf.extend_from_slice(b"null")
-        }
-        // The remaining scalars display as JSON tokens; binary/date/time values are
-        // quoted hex or ASCII text.
-        _ => write!(buf, "{value}")?,
+            .build()
+        })
+    };
+    match serialize(val) {
+        Ok(s) => Ok(s),
+        Err(e) => match jsonb::parse_value(val) {
+            Ok(value) => serialize(&value.to_vec()),
+            Err(_) => Err(e),
+        },
     }
-    Ok(())
 }
 
 /// Converts a json type value to serde_json::Value
