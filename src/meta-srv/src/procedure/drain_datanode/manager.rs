@@ -258,7 +258,8 @@ mod tests {
     use std::time::Duration;
 
     use common_procedure::store::state_store::StateStore;
-    use common_procedure::{Procedure, ProcedureId, ProcedureManagerRef};
+    use common_procedure::{Procedure, ProcedureId, ProcedureManagerRef, Status};
+    use tokio::sync::Notify;
 
     use crate::error;
     use crate::key::NodeSchedulingRole;
@@ -272,22 +273,22 @@ mod tests {
     };
 
     struct HoldDrainLock {
-        entered: std::sync::Arc<tokio::sync::Notify>,
-        release: std::sync::Arc<tokio::sync::Notify>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
     }
 
     #[async_trait::async_trait]
-    impl common_procedure::Procedure for HoldDrainLock {
+    impl Procedure for HoldDrainLock {
         fn type_name(&self) -> &str {
             "test-hold-drain-lock"
         }
         async fn execute(
             &mut self,
             _: &common_procedure::Context,
-        ) -> common_procedure::Result<common_procedure::Status> {
+        ) -> common_procedure::Result<Status> {
             self.entered.notify_one();
             self.release.notified().await;
-            Ok(common_procedure::Status::done())
+            Ok(Status::done())
         }
         fn dump(&self) -> common_procedure::Result<String> {
             Ok(String::new())
@@ -307,11 +308,9 @@ mod tests {
         }
     }
 
-    async fn hold_drain_lock(
-        procedure_manager: &ProcedureManagerRef,
-    ) -> std::sync::Arc<tokio::sync::Notify> {
-        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
-        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    async fn hold_drain_lock(procedure_manager: &ProcedureManagerRef) -> Arc<Notify> {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
         procedure_manager
             .submit(common_procedure::ProcedureWithId::with_random_id(Box::new(
                 HoldDrainLock {

@@ -187,7 +187,7 @@ pub(crate) async fn procedure_status(
         util::ensure_leader(&metasrv)?;
         let pid = request.procedure_id.parse::<ProcedureId>().map_err(|_| {
             error::InvalidArgumentsSnafu {
-                err_msg: "invalid procedure id",
+                err_msg: format!("invalid procedure id: {}", request.procedure_id),
             }
             .build()
         })?;

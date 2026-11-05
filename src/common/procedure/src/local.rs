@@ -900,10 +900,20 @@ impl ProcedureManager for LocalManager {
         self.manager_ctx.reset_runtime_state();
         self.manager_ctx.start();
 
-        info!("LocalManager is start.");
-
-        self.recover().await?;
+        if let Err(error) = self.recover().await {
+            // A failed recovery must leave start() retryable, not merely not ready.
+            self.manager_ctx.stop();
+            if let Some(task) = task.take()
+                && let Err(e) = task.stop().await.context(StopRemoveOutdatedMetaTaskSnafu)
+            {
+                error!(e; "Failed to stop remove outdated meta task after recovery failure");
+            }
+            self.manager_ctx.abort_runner_tasks().await;
+            self.manager_ctx.reset_runtime_state();
+            return Err(error);
+        }
         self.recovery_complete.store(true, Ordering::Release);
+        info!("LocalManager is started.");
         Ok(())
     }
 
@@ -1033,7 +1043,7 @@ mod tests {
 
     use super::*;
     use crate::error::{self, Error};
-    use crate::store::state_store::{ObjectStateStore, StateStore};
+    use crate::store::state_store::{KeyValueStream, ObjectStateStore, StateStore};
     use crate::test_util::InMemoryPoisonStore;
     use crate::{
         ChildSubmissionOutcome, Context, EventContext, EventTrigger, Procedure, ProcedureEvent,
@@ -1957,6 +1967,66 @@ mod tests {
             .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
             .unwrap_err();
         assert!(matches!(err, Error::LoaderConflict { .. }), "{err}");
+    }
+
+    /// Injects a transient failure while listing stored procedures.
+    struct FailingRecoveryStore {
+        /// Stores procedures after the injected failure.
+        inner: ObjectStateStore,
+        /// Fails the next recovery scan when set.
+        fail: AtomicBool,
+    }
+
+    #[async_trait]
+    impl StateStore for FailingRecoveryStore {
+        async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+            self.inner.put(key, value).await
+        }
+
+        async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
+            if self.fail.swap(false, AtomicOrdering::Relaxed) {
+                return Err(Error::external(MockError::new(
+                    StatusCode::StorageUnavailable,
+                )));
+            }
+            self.inner.walk_top_down(path).await
+        }
+
+        async fn batch_delete(&self, keys: &[String]) -> Result<()> {
+            self.inner.batch_delete(keys).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_retries_failed_recovery() {
+        let dir = create_temp_dir("retry_failed_recovery");
+        let store = Arc::new(FailingRecoveryStore {
+            inner: ObjectStateStore::new(test_util::new_object_store(&dir)),
+            fail: AtomicBool::new(true),
+        });
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            store,
+            Arc::new(InMemoryPoisonStore::new()),
+            None,
+            None,
+        );
+
+        assert!(manager.start().await.is_err());
+        assert!(!manager.is_ready());
+        assert!(!manager.manager_ctx.running());
+        assert!(manager.remove_outdated_meta_task.lock().await.is_none());
+
+        manager.start().await.unwrap();
+        assert!(manager.is_ready());
+        manager.start().await.unwrap();
+        assert!(manager.is_ready());
+        manager.stop().await.unwrap();
+        assert!(!manager.is_ready());
     }
 
     #[tokio::test]

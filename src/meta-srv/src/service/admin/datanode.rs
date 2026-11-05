@@ -21,7 +21,6 @@ use common_procedure::ProcedureContext;
 use serde::{Deserialize, Serialize};
 use servers::http::result::error_result::ErrorResponse;
 
-use crate::error::Result;
 use crate::key::NodeSchedulingRole;
 use crate::metasrv::Metasrv;
 use crate::procedure::drain_datanode::{
@@ -112,26 +111,21 @@ pub(crate) async fn scheduling_status(
     State(metasrv): State<Arc<Metasrv>>,
     Query(request): Query<DatanodeRequest>,
 ) -> Response {
-    scheduling_status_inner(&metasrv, request.node_id)
-        .await
-        .map(Json)
-        .map_err(ErrorResponse::from_error)
-        .into_response()
-}
-
-async fn scheduling_status_inner(
-    metasrv: &Metasrv,
-    node_id: u64,
-) -> Result<DatanodeSchedulingResponse> {
-    util::ensure_leader(metasrv)?;
-    let schedulable = metasrv
-        .node_scheduling_manager()
-        .is_schedulable(NodeSchedulingRole::Datanode, node_id)
-        .await?;
-    Ok(DatanodeSchedulingResponse {
-        node_id,
-        schedulable,
-    })
+    async {
+        util::ensure_leader(&metasrv)?;
+        let schedulable = metasrv
+            .node_scheduling_manager()
+            .is_schedulable(NodeSchedulingRole::Datanode, request.node_id)
+            .await?;
+        Ok::<_, crate::error::Error>(DatanodeSchedulingResponse {
+            node_id: request.node_id,
+            schedulable,
+        })
+    }
+    .await
+    .map(Json)
+    .map_err(ErrorResponse::from_error)
+    .into_response()
 }
 
 #[cfg(test)]
@@ -354,10 +348,16 @@ mod tests {
                 StatusCode::BAD_REQUEST,
             ),
         ] {
-            assert_eq!(
-                expected,
-                request(app.clone(), Method::GET, uri, Value::Null).await.0
-            );
+            let (status, body) = request(app.clone(), Method::GET, uri, Value::Null).await;
+            assert_eq!(expected, status);
+            if uri.ends_with("=bad") {
+                assert!(
+                    body["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("invalid procedure id: bad")
+                );
+            }
         }
         for (method, uri, body, expected) in [
             (
