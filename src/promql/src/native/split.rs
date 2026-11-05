@@ -65,8 +65,10 @@ pub(crate) fn histogram_group_is_single(group: &Grouping) -> bool {
 /// are owned. Histogram functions can also run there when the state router co-locates every bucket
 /// and every histogram whose output labels collide. A label rewrite may change that key, so it is
 /// only admitted alongside a partitioned histogram when it cannot change a label in the cut's
-/// routing key. A single-owner histogram needs no such restriction. `topk`, a second aggregate and
-/// vector-vector matching still need a whole-vector boundary.
+/// routing key. A single-owner histogram needs no such restriction. A histogram parameter is
+/// answered above the cut, so it has to read no series: one that does would be silently replaced by
+/// the merged values. `topk`, a second aggregate and vector-vector matching still need a whole-vector
+/// boundary.
 ///
 /// An instant selection or window above the cut cannot be applied to the merged values under the
 /// tree's current binding: the cut output is evaluated, whereas these nodes consume raw samples.
@@ -176,12 +178,62 @@ pub(crate) fn split(
             };
             Ok(Some(inner))
         }
+        // The same histogram operation with a parameter evaluated at every grid point instead of
+        // bound as a constant. The parameter is a per-point scalar - an expression of `time()` and
+        // literals - so it reads no series and means the same thing above the merged values, and
+        // the suffix carries it unchanged.
+        NativeExpr::ParameterizedHistogram {
+            input,
+            op,
+            parameters,
+        } => {
+            let Some(mut inner) = split(input, fields, time_index)? else {
+                return Ok(None);
+            };
+            // The same two refusals as the literal form: successive calls may drop different labels,
+            // so only the first call's partition key is known, and a rewrite may change that key.
+            if inner.histogram {
+                return Err(declined("nested histograms above a split aggregate"));
+            }
+            if inner.label_rewrite && !histogram_group_is_single(&inner.op.group) {
+                return Err(declined(
+                    "a routing-label rewrite around a partitioned histogram",
+                ));
+            }
+            // A parameter is answered at its own grid point rather than from the merged values, so
+            // one that reads the series the prefix reads has no source above the cut: applying it
+            // there would silently answer it from the merged state instead.
+            if parameters
+                .iter()
+                .any(|parameter| !suffix_carries(parameter))
+            {
+                return Err(declined(
+                    "a histogram parameter that reads the series the split reads",
+                ));
+            }
+            inner.histogram = true;
+            inner.suffix = NativeNode {
+                expr: NativeExpr::ParameterizedHistogram {
+                    input: Box::new(inner.suffix),
+                    op: op.clone(),
+                    parameters: parameters.clone(),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
+        }
         // TopK ranks the whole vector, not one histogram or aggregation group at a time.
         NativeExpr::Vector {
             op: BoundVectorOp::TopK { .. },
             ..
         } => Err(declined("a whole-vector operation above a split aggregate")),
         NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
+        // These read values the merged state does not answer: an instant selection or window reads
+        // raw samples, `scalar`/`vector` answers one value or one series instead of the vector, and a
+        // parameterized map reads the whole vector at a point. `ParameterizedTopK` declines here
+        // exactly like the literal `topk` above does: a per-point `k` ranks the whole vector just as
+        // a bound one does, so it needs the same whole-vector boundary. Admitting the one and
+        // refusing the other would be an inconsistency rather than a capability.
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
@@ -189,15 +241,12 @@ pub(crate) fn split(
         | NativeExpr::VectorOf { input }
         | NativeExpr::ScalarOf { input }
         | NativeExpr::ParameterizedMap { input, .. }
-        | NativeExpr::ParameterizedTopK { input, .. }
-        | NativeExpr::ParameterizedHistogram { input, .. } => {
-            match split(input, fields, time_index)? {
-                Some(_) => Err(declined(
-                    "an aggregate under an operation that reads evaluated values",
-                )),
-                None => Ok(None),
-            }
-        }
+        | NativeExpr::ParameterizedTopK { input, .. } => match split(input, fields, time_index)? {
+            Some(_) => Err(declined(
+                "an aggregate under an operation that reads evaluated values",
+            )),
+            None => Ok(None),
+        },
         NativeExpr::Binary {
             left,
             right,
@@ -493,8 +542,8 @@ impl Split {
 /// Puts `merged` at the cut and returns the suffix above it.
 ///
 /// A suffix is the spine of point-wise maps, constant-sided binaries and at most one histogram
-/// operation between the cut and the root, with scalar constants preserved. Other whole-vector
-/// operations are refused by `split`.
+/// operation between the cut and the root, with scalar constants and the evaluation time preserved.
+/// Other whole-vector operations are refused by `split`.
 fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     let NativeNode { expr, output } = node;
     let rejected = || {
@@ -502,8 +551,10 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     };
     let expr = match expr {
         NativeExpr::Input(_) => return Ok(merged.clone()),
-        // A constant carries no state: the suffix keeps it as it is, beside the merged values.
-        NativeExpr::Scalar(_) => {
+        // A constant carries no state: the suffix keeps it as it is, beside the merged values. The
+        // evaluation time is such a constant - it answers the grid's own timestamps, and the suffix
+        // runs on the statement's grid, so it answers the same per-point value there.
+        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
             return Ok(NativeNode { expr, output });
         }
         NativeExpr::Map { input, op } => NativeExpr::Map {
@@ -517,6 +568,18 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
             input: Box::new(enter_suffix(*input, merged)?),
             op,
         },
+        // The parameters are per-point scalars that read no series - `split` refuses the split
+        // otherwise - so they mean the same above the merged values and are handed over untouched
+        // while only the input is rebuilt.
+        NativeExpr::ParameterizedHistogram {
+            input,
+            op,
+            parameters,
+        } => NativeExpr::ParameterizedHistogram {
+            input: Box::new(enter_suffix(*input, merged)?),
+            op,
+            parameters,
+        },
         NativeExpr::Binary {
             left,
             right,
@@ -529,4 +592,31 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
         _ => return Err(rejected()),
     };
     Ok(NativeNode { expr, output })
+}
+
+/// Whether [`enter_suffix`] rebuilds this subtree without reading `merged`.
+///
+/// This is the question the histogram arm of [`split`] asks of every parameter before it is carried
+/// above the cut: a parameter that `enter_suffix` rebuilds from constants alone means the same thing
+/// there, and one that reads the series has no source above the cut. Keeping the answer exactly the
+/// set of shapes `enter_suffix` builds is what keeps a misplaced tree a decline rather than an
+/// `Internal` error: a subtree that claims to carry but does not would reach `rejected()`.
+fn suffix_carries(node: &NativeNode) -> bool {
+    match &node.expr {
+        // Constants: they answer their own values on the statement's grid.
+        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
+        // Point-wise spines over something that carries: the map and the histogram application
+        // reach each series the way they are rebuilt.
+        NativeExpr::Map { input, .. }
+        | NativeExpr::Vector {
+            input,
+            op: BoundVectorOp::Histogram(_),
+        } => suffix_carries(input),
+        // A binary operation carries when both sides do: a constant broadcast over a constant is
+        // still a constant.
+        NativeExpr::Binary { left, right, .. } => suffix_carries(left) && suffix_carries(right),
+        // Everything else reads a source: the cut's own values (`Input`), the whole vector at a
+        // point (`ScalarOf`, a vector operation), or the series a parameter reads.
+        _ => false,
+    }
 }

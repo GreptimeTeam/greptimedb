@@ -4331,6 +4331,10 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
         // A map between the two: the constant is broadcast over a map above the fold, so the prefix
         // stays the selection and the suffix is `abs` over the merged value, then the multiply.
         "abs(sum(some_metric)) * 2",
+        // A histogram whose parameter is a per-point constant is carried like the literal form: the
+        // argument reads no series, so it means the same above the merged values and stays native.
+        "histogram_quantile(time() / 150, sum by (le) (rate(some_metric[5m])))",
+        "histogram_fraction(time() / 150, time() / 75 + 0.5, sum by (le) (rate(some_metric[5m])))",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
@@ -4344,6 +4348,22 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             final_display.matches(" final").count(),
             "`{query}`: the merge must be a Final aggregate: {final_display}"
         );
+        // A per-point parameter keeps the function native: the node the compiler bound for it sits
+        // above the Final aggregate rather than the literal `Histogram` op the constant form binds.
+        match query {
+            "histogram_quantile(time() / 150, sum by (le) (rate(some_metric[5m])))" => assert!(
+                final_display.contains("ParameterizedHistogram histogram_quantile"),
+                "`{query}`: the split must carry the per-point parameter: {final_display}"
+            ),
+            "histogram_fraction(time() / 150, time() / 75 + 0.5, sum by (le) (rate(some_metric[5m])))" =>
+            {
+                assert!(
+                    final_display.contains("ParameterizedHistogram histogram_fraction"),
+                    "`{query}`: the split must carry the per-point parameters: {final_display}"
+                )
+            }
+            _ => {}
+        }
         let partial = partial_below(final_node).expect("the final node reads a partial producer");
         // The physical final must accept the producer's state and classify its own output fields.
         let input = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
@@ -4418,12 +4438,42 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             "100 / sum(some_metric)" => &["field_0", "timestamp"],
             "-sum(some_metric)" => &["field_0", "timestamp"],
             "abs(sum(some_metric)) * 2" => &["field_0", "timestamp"],
+            "histogram_quantile(time() / 150, sum by (le) (rate(some_metric[5m])))" => {
+                &["field_0", "timestamp"]
+            }
+            "histogram_fraction(time() / 150, time() / 75 + 0.5, sum by (le) (rate(some_metric[5m])))" => {
+                &["field_0", "timestamp"]
+            }
             _ => panic!("missing exact native schema expectation for `{query}`"),
         };
         assert_eq!(
             expected_names,
             sorted_column_names(&plan).as_slice(),
             "exact native output columns for `{query}`"
+        );
+    }
+}
+
+/// `topk` over a split aggregate needs a whole-vector boundary whether its `k` is bound or answered
+/// per point, so the two forms take the same route: native, and not split.
+#[tokio::test]
+async fn native_fused_topk_above_aggregate_declines_the_split_in_every_form() {
+    for query in [
+        // The literal `k` binds a constant `TopK` op, which `split` refuses above the cut.
+        "topk(3, sum(some_metric))",
+        // A per-point `k` ranks the same whole vector, so it refuses for the same reason rather
+        // than becoming the one admitted form.
+        "topk(time() / 1000, sum(some_metric))",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` must stay native: {display}"
+        );
+        assert!(
+            find_final_split(&plan).is_none(),
+            "`{query}` must not split: {display}"
         );
     }
 }

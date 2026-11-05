@@ -6664,6 +6664,26 @@ fn histogram_over_sum_tree(group: Grouping, function: HistogramFunction) -> Nati
     .unwrap()
 }
 
+/// The same histogram over the same fold, with its parameters evaluated at every grid point instead
+/// of bound as constants: `histogram_quantile(<parameter>, sum by (...) (rate(x[5m])))`.
+fn histogram_parameterized_over_sum(
+    histogram: NativeTree,
+    parameters: Vec<NativeNode>,
+) -> NativeTree {
+    let NativeExpr::Vector { input, op } = &histogram.root().expr else {
+        unreachable!("`histogram_over_sum_tree` builds a literal histogram")
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: input.clone(),
+            op: op.clone(),
+            parameters,
+        },
+        output: histogram.root().output.clone(),
+    })
+    .expect("a parameterized histogram over the same fold is a legal tree")
+}
+
 fn histogram_routing() -> SeriesRouting {
     SeriesRouting::CanonicalLabelsExcept(
         ["le", "__name__", "__type__", "__unit__"]
@@ -6831,6 +6851,100 @@ fn histogram_split_allows_single_owner_routing_label_rewrites() {
             );
         }
     }
+}
+
+#[test]
+fn histogram_split_carries_a_per_point_parameter() {
+    let grid = grid();
+    let base = histogram_over_sum_tree(
+        Grouping::By(Arc::from([Arc::from("le")])),
+        HistogramFunction::Quantile(0.99),
+    );
+    // `histogram_quantile(time() / 150, sum by (le) (rate(x[5m])))`, with the parameter bound the
+    // way the compiler binds a per-point argument: the evaluation time broadcast over a constant.
+    let eval_time = NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let divisor = NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value: 150.0 }),
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let parameter = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(eval_time),
+            right: Box::new(divisor),
+            matching: BinaryMatching {
+                op: BinaryOp::Div,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let tree = histogram_parameterized_over_sum(base.clone(), vec![parameter.clone()]);
+    let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME)
+        .unwrap_or_else(|error| panic!("a per-point parameter must split, not fail: {error}"))
+        .unwrap_or_else(|| {
+            panic!(
+                "a per-point constant parameter must split: {}",
+                tree.to_string()
+            )
+        });
+    assert!(matches!(
+        &partial.root().expr,
+        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
+    ));
+    let NativeExpr::ParameterizedHistogram {
+        input,
+        op,
+        parameters,
+    } = &final_tree.root().expr
+    else {
+        panic!(
+            "the parameterized histogram must run above the Final aggregate: {}",
+            final_tree.to_string()
+        );
+    };
+    assert_eq!(
+        &BoundVectorOp::Histogram(HistogramFunction::Quantile(0.99)),
+        op
+    );
+    assert!(matches!(
+        &input.expr,
+        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final
+    ));
+    // The parameter is carried untouched: it reads no series, so it means the same above the cut.
+    assert_eq!(vec![parameter], *parameters);
+
+    // A parameter that reads the series the split reads has no source above the cut, so it must
+    // decline rather than be answered from the merged values: `histogram_quantile(scalar(sum(
+    // rate(x[5m]))), sum by (le) (rate(x[5m])))`, whose parameter holds the window the prefix reads.
+    let NativeExpr::Vector {
+        input: aggregate, ..
+    } = &base.root().expr
+    else {
+        unreachable!("`histogram_over_sum_tree` builds a literal histogram")
+    };
+    let NativeExpr::Aggregate { input: window, .. } = &aggregate.expr else {
+        unreachable!("`histogram_over_sum_tree` folds the rate window")
+    };
+    let scalar_of_window = NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: window.clone(),
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let reading = histogram_parameterized_over_sum(base, vec![scalar_of_window]);
+    assert!(
+        FusedSeries::split_aggregate(&reading, TIME)
+            .unwrap()
+            .is_none(),
+        "`histogram_quantile(scalar(sum(rate(x[5m]))), sum by (le) (rate(x[5m])))` must decline: {}",
+        reading.to_string()
+    );
 }
 
 #[test]
