@@ -342,10 +342,7 @@ impl PromPlanner {
         // a range function and the math functions over it into one tree: offered any later, the
         // expression has already been split into the nodes those functions would have shared. A
         // shape it does not accept is planned by the existing path exactly as if it were not here.
-        if let Some(plan) = planner
-            .try_plan_native_fused(&stmt.expr, query_engine_state)
-            .await?
-        {
+        if let Some(plan) = planner.try_plan_native_fused(&stmt.expr).await? {
             return planner.strip_tsid_column(plan);
         }
         let plan = planner
@@ -1381,10 +1378,8 @@ impl PromPlanner {
                     self.native_fused && native::hybrid_binary_admitted(*op, modifier, lhs, rhs);
                 let native = if native_pair {
                     match (
-                        self.try_plan_native_operand(lhs, query_engine_state)
-                            .await?,
-                        self.try_plan_native_operand(rhs, query_engine_state)
-                            .await?,
+                        self.try_plan_native_operand(lhs).await?,
+                        self.try_plan_native_operand(rhs).await?,
                     ) {
                         (Some(left), Some(right)) => Some((left, right)),
                         _ => None,
@@ -2465,10 +2460,7 @@ impl PromPlanner {
             ANALYZE_NODE_NAME
             | ANALYZE_VERBOSE_NODE_NAME
             | EXPLAIN_NODE_NAME
-            | EXPLAIN_VERBOSE_NODE_NAME => {
-                self.try_plan_native_fused(&children[0], query_engine_state)
-                    .await?
-            }
+            | EXPLAIN_VERBOSE_NODE_NAME => self.try_plan_native_fused(&children[0]).await?,
             _ => None,
         };
         let plan = match native_plan {

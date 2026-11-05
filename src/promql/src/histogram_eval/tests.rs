@@ -907,3 +907,56 @@ fn native_histogram_functions_refuse_a_series_that_does_not_fit_the_schema() {
     let wider = fields(&["value", "other"]);
     assert!(map_native_histogram(NativeHistogramFunction::Count, &wider, &input).is_err());
 }
+
+/// Metadata is part of histogram identity even though the outputs later drop it. Pooling the
+/// buckets first would hide overlapping outputs and give wrong values for disjoint outputs.
+#[test]
+fn classic_histograms_keep_metadata_identity_until_after_evaluation() {
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(0, 1_000, 2).unwrap()).unwrap(),
+        )),
+    });
+    for metadata in ["__name__", "__type__", "__unit__"] {
+        let build = |second_point: usize| {
+            let mut buckets = Vec::new();
+            for (identity, point, first) in [("a", 0, 1.0_f64), ("b", second_point, 3.0_f64)] {
+                for (le, count) in [("1", first), ("+Inf", 4.0_f64)] {
+                    let labels = Labels::from([
+                        (metadata.to_string(), identity.to_string()),
+                        ("job".to_string(), "api".to_string()),
+                        ("le".to_string(), le.to_string()),
+                    ]);
+                    buckets.push(
+                        mixed_series(
+                            &schema,
+                            &labels,
+                            &BTreeMap::from([(point, count.to_bits())]),
+                            &BTreeMap::new(),
+                        )
+                        .unwrap(),
+                    );
+                }
+            }
+            buckets
+        };
+        let disjoint =
+            evaluate_histograms(HistogramFunction::Quantile(0.5), &schema, &build(1)).unwrap();
+        let points = points_by_labels(disjoint);
+        let values = &points[&Labels::from([("job".to_string(), "api".to_string())])];
+        assert_eq!(f64::from_bits(values[&0]), 1.0, "{metadata}");
+        assert!(
+            (f64::from_bits(values[&1]) - 2.0 / 3.0).abs() < 1e-12,
+            "{metadata}"
+        );
+        let error = evaluate_histograms(HistogramFunction::Quantile(0.5), &schema, &build(0));
+        assert!(
+            error.is_err(),
+            "overlapping metadata-distinct outputs must collide: {metadata}"
+        );
+    }
+}

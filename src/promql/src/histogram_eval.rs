@@ -47,7 +47,12 @@ use crate::grid_series::{
 };
 use crate::map::validate_grid_series;
 
-const BUCKET_LABEL: &str = "le";
+pub(crate) const BUCKET_LABEL: &str = "le";
+
+/// Histogram inputs that can produce the same output must meet at one partition. The kernel
+/// still groups by metadata before removing it, so distinct histograms are not mixed together.
+pub(crate) const HISTOGRAM_ROUTING_EXCLUDED_LABELS: [&str; 4] =
+    [BUCKET_LABEL, "__name__", "__type__", "__unit__"];
 
 /// `histogram_quantile` or `histogram_fraction` with its constant arguments.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]

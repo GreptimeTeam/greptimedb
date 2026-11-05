@@ -65,6 +65,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::SessionContext;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent, StateSeries};
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
     LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, pack_raw_series_chunk,
@@ -86,16 +87,19 @@ use super::{
     series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
-use crate::extension_plan::aggregate_exchange::state_schema;
+use crate::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+use crate::histogram_eval::HistogramFunction;
 use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
+    BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr,
+    NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use common_query::series_frame::series_frame_ordering;
+use common_query::series_frame::unpack_aggregate_state;
 
 /// The query every tree here is compiled from.
 const PROMQL: &str = "rate(x[5m])";
@@ -861,14 +865,14 @@ fn binding_of(
     tags: Vec<String>,
 ) -> FusedSeriesBinding {
     FusedSeriesBinding {
-        grid: tree
-            .root()
-            .output
-            .samples()
-            .expect("this tree produces samples")
-            .eval_grid
-            .clone()
-            .expect("this tree's output is evaluated on a grid"),
+        grid: match &tree.root().output {
+            NativeType::Samples(schema) => schema
+                .eval_grid
+                .clone()
+                .expect("this tree's output is evaluated on a grid"),
+            NativeType::AggregateState(state) => Arc::clone(&state.grid),
+            NativeType::Scalar(grid) => Arc::clone(grid),
+        },
         metric_name: Some(Arc::from(METRIC)),
         time_index: TIME.to_string(),
         tags,
@@ -912,6 +916,58 @@ fn host_label_decode() -> LabelDecodeSpec {
 fn keyed_frame_schema_of(schema: &SeriesSchema) -> SchemaRef {
     series_frame_schema(schema, FrameLabelMode::Key, Some(&host_label_decode()))
         .expect("key labels are a frame")
+}
+
+fn state_tree(stage: AggregateStage, input: NativeType) -> NativeTree {
+    let state = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from(JOB)])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+        accumulators: raw_schema().fields.clone(),
+        grid: grid(),
+    });
+    let child_type = if stage == AggregateStage::Partial {
+        NativeType::Samples(Arc::new(SeriesSchema {
+            fields: raw_schema().fields.clone(),
+            eval_grid: Some(grid()),
+        }))
+    } else {
+        input
+    };
+    let state_input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: child_type.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: child_type,
+    };
+    let output = match stage {
+        AggregateStage::Partial => NativeType::AggregateState(state),
+        AggregateStage::Final | AggregateStage::Complete => {
+            NativeType::Samples(Arc::new(SeriesSchema {
+                fields: raw_schema().fields.clone(),
+                eval_grid: Some(grid()),
+            }))
+        }
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(state_input),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new([Arc::from(JOB)])),
+                stage,
+            },
+        },
+        output,
+    })
+    .expect("aggregate stage binding is valid")
+}
+
+fn canonical_state_frame_schema(tree: &NativeTree) -> datafusion::common::DFSchemaRef {
+    let schema = super::state_frame_output_schema(tree).unwrap();
+    Arc::new(datafusion::common::DFSchema::try_from(schema).unwrap())
 }
 
 fn canonical_frame_schema(tree: &NativeTree) -> datafusion::common::DFSchemaRef {
@@ -1356,11 +1412,17 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     let projected_decoded = FusedSeries::deserialize(&projected_bytes).unwrap();
     assert_eq!(projected_decoded.schema(), projected.schema());
 
+    // A state-exporting producer never crosses the wire: the frame's state content has no wire
+    // form, so the producer stays on the machine that reads the samples.
     let partial = partial_node(AggregateKind::Sum);
-    let partial_decoded = FusedSeries::deserialize(&partial.serialize().unwrap()).unwrap();
-    assert_eq!(partial_decoded.partial_fold(), partial.partial_fold());
-    assert_eq!(partial_decoded.binding().tags, partial.binding().tags);
-    assert_eq!(partial_decoded.schema(), partial.schema());
+    assert!(
+        partial
+            .serialize()
+            .unwrap_err()
+            .to_string()
+            .contains("exporting aggregate state"),
+        "a state-exporting producer must be refused by the serializer"
+    );
     let mut bad_version = bytes.clone();
     bad_version[..4].copy_from_slice(&99u32.to_le_bytes());
     assert!(
@@ -1379,6 +1441,46 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     let mut trailing = bytes.clone();
     trailing.push(0);
     assert!(FusedSeries::deserialize(&trailing).is_err());
+}
+
+/// A payload written under another version is refused by its version, before its body is read.
+///
+/// The body here is the current payload's body with the version field set to a number this reader
+/// does not accept: it decodes cleanly under the current reader, which is exactly what makes it a
+/// control. A reader that checked the version only after decoding would accept it and hand back a
+/// node whose fields were read at the wrong offsets; this asserts the version is what answers, by
+/// name.
+#[test]
+fn fused_series_envelope_refuses_the_older_payload_version_before_reading_it() {
+    let tree = rate_tree();
+    let declared = canonical_frame_schema(&tree);
+    let bound = binding(&tree);
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree,
+        bound,
+        vec![input_plan(frame_schema())],
+        declared,
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let bytes = node.serialize().unwrap();
+    assert_eq!(
+        super::FUSED_SERIES_ENVELOPE_VERSION.to_le_bytes(),
+        bytes[..4],
+        "the version is the payload's first field"
+    );
+
+    // The control: the same body under the accepted version decodes.
+    assert!(FusedSeries::deserialize(&bytes).is_ok());
+
+    let mut old = bytes.clone();
+    old[..4].copy_from_slice(&2u32.to_le_bytes());
+    let message = FusedSeries::deserialize(&old).unwrap_err().to_string();
+    assert!(
+        message.contains("version") && message.contains('2'),
+        "the version must be what is reported, not a field read at the wrong offset: {message}"
+    );
 }
 
 /// The `SeriesFrame` node of [`rate_tree`] declaring `tags` as its labels.
@@ -1410,7 +1512,7 @@ fn mutate_envelope_payload(
     mutate(&mut payload);
     let changed = postcard::to_stdvec(&payload).unwrap();
     let mut result = Vec::with_capacity(8 + changed.len());
-    result.extend(3u32.to_le_bytes());
+    result.extend(super::FUSED_SERIES_ENVELOPE_VERSION.to_le_bytes());
     result.extend((changed.len() as u32).to_le_bytes());
     result.extend(changed);
     result
@@ -1578,32 +1680,48 @@ fn series_frame_decode_rejects_schema_mismatch() {
         fields.push(Arc::new(Field::new("extra", DataType::Utf8, true)));
         payload.output_schema = Schema::new(fields);
     });
-    assert_decode_error(&wrong, "does not match the evaluated frame layout");
+    assert_decode_error(&wrong, "SeriesFrame schema does not match");
 }
 
 #[test]
-fn partial_decode_rejects_format_schema_and_tag_order_mismatch() {
-    let tree = rate_tree();
-    let node = FusedSeries::try_new_partial(
+fn state_export_decode_rejects_schema_and_format_mismatch() {
+    let tree = partial_tree(rate_tree(), AggregateKind::Sum, &[HOST, JOB]);
+    let node = FusedSeries::try_new_state_export(
         Arc::from(PROMQL),
         tree.clone(),
-        partial_binding_of(&tree, &[HOST, JOB]),
+        binding_of(&tree, raw_schema(), vec![HOST.to_string(), JOB.to_string()]),
         vec![input_plan(frame_schema())],
-        partial_op(AggregateKind::Sum, &[HOST, JOB]),
     )
     .unwrap();
-    let bytes = node.serialize().unwrap();
+    // A state exporter is refused by the serializer, so its decode-time contracts are exercised
+    // through a payload that says what a state exporter's payload would say.
+    let bytes = mutate_envelope_payload(
+        &envelope_node_with_tags(vec![HOST.into(), NAME.into()])
+            .serialize()
+            .unwrap(),
+        |payload| {
+            payload.tree = node.tree().clone();
+            payload.output_schema = node.schema().as_arrow().clone();
+            payload.format = FusedOutputFormat::SeriesFrame;
+        },
+    );
+    assert_eq!(
+        FusedSeries::deserialize(&bytes).unwrap().tree(),
+        node.tree()
+    );
+
     let wrong_schema = mutate_envelope_payload(&bytes, |payload| {
         let mut fields = payload.output_schema.fields().to_vec();
         fields.swap(0, 1);
         payload.output_schema = Schema::new(fields);
     });
-    assert_decode_error(&wrong_schema, "does not match state schema");
+    assert_decode_error(&wrong_schema, "SeriesFrame schema does not match");
 
+    // Exported state has no row layout, so a payload that claims rows is refused.
     let wrong_format = mutate_envelope_payload(&bytes, |payload| {
-        payload.format = FusedOutputFormat::SeriesFrame;
+        payload.format = FusedOutputFormat::PlainRows;
     });
-    assert_decode_error(&wrong_format, "partial FusedSeries must use PlainRows");
+    assert_decode_error(&wrong_format, "Partial stage requires SeriesFrame output");
 }
 
 #[test]
@@ -2018,8 +2136,11 @@ fn rows(batches: &[RecordBatch]) -> Vec<Row> {
 }
 
 /// The canonical label set these tests collide on, as the runtime renders it in its refusal.
+///
+/// The wording is Prometheus' own for this defect - a vector holding two series under one label set -
+/// and the label set is rendered the way the reader writes it, without the empty value.
 const DUPLICATE_LABEL_SET: &str =
-    "the node produces two series under the label set [(\"host\", \"web-1\")]";
+    "vector cannot contain metrics with the same labelset {host=\"web-1\"}";
 
 /// Two raw series that are already one Prometheus identity are refused by the runtime that would
 /// have to answer both.
@@ -3226,15 +3347,6 @@ async fn physical_plan_accepts_scalar_root_without_sources() {
     assert_eq!(1, count(&metrics, "native.root.completed_series"));
     assert_eq!(0, count(&metrics, "native.root.input_batches"));
     assert_eq!(0, count(&metrics, "native.root.input_samples"));
-    let partial_error = FusedSeries::try_new_partial(
-        Arc::from("4"),
-        scalar_tree(grid(), 4.0),
-        binding,
-        vec![],
-        partial_op(AggregateKind::Sum, &[]),
-    )
-    .expect_err("scalar roots cannot be partial folds");
-    assert!(partial_error.to_string().contains("one raw child"));
 }
 
 #[tokio::test]
@@ -4512,6 +4624,52 @@ fn labelled_chunk(
 }
 
 /// The `by (grouped_by)` aggregate of `kind` that the scope side of a split aggregate exports.
+fn partial_tree(prefix: NativeTree, kind: AggregateKind, grouped_by: &[&str]) -> NativeTree {
+    let input = prefix.root().clone();
+    let schema = match &input.output {
+        NativeType::Samples(schema) => Arc::clone(schema),
+        _ => panic!("partial needs samples"),
+    };
+    let fields = schema.fields.clone();
+    let grid = schema
+        .eval_grid
+        .clone()
+        .expect("partial input is evaluated");
+    let (state_kind, components) =
+        crate::native::plan::aggregate_state_binding(kind).expect("mergeable aggregate");
+    let state = Arc::new(AggregateStateSchema {
+        group: Grouping::By(
+            grouped_by
+                .iter()
+                .map(|label| Arc::from(*label))
+                .collect::<Vec<_>>()
+                .into(),
+        ),
+        kind: state_kind,
+        components: components.into(),
+        accumulators: fields,
+        grid,
+    });
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(input),
+            op: BoundAggregate {
+                kind,
+                group: Grouping::By(
+                    grouped_by
+                        .iter()
+                        .map(|label| Arc::from(*label))
+                        .collect::<Vec<_>>()
+                        .into(),
+                ),
+                stage: AggregateStage::Partial,
+            },
+        },
+        output: NativeType::AggregateState(state),
+    })
+    .unwrap()
+}
+
 fn partial_op(kind: AggregateKind, grouped_by: &[&str]) -> BoundAggregate {
     let labels: Vec<Arc<str>> = grouped_by.iter().map(|label| Arc::from(*label)).collect();
     BoundAggregate {
@@ -4521,30 +4679,23 @@ fn partial_op(kind: AggregateKind, grouped_by: &[&str]) -> BoundAggregate {
     }
 }
 
-/// The binding of the prefix tree, declaring `tags` as the node's labels.
-fn partial_binding_of(tree: &NativeTree, tags: &[&str]) -> FusedSeriesBinding {
-    binding_of(
-        tree,
-        raw_schema(),
-        tags.iter().map(|tag| (*tag).to_string()).collect(),
-    )
-}
-
 /// The logical node that runs the prefix and exports `kind`'s state, grouped by `host`.
 ///
 /// The prefix's one raw input is bound to source `0`, which is the only child the node carries: a
 /// state export is per partition of that one scan, not a second source.
 fn partial_node(kind: AggregateKind) -> FusedSeries {
     let tree = rate_tree();
-    let binding = partial_binding_of(&tree, &[HOST]);
-    FusedSeries::try_new_partial(
+    let tree = partial_tree(tree, kind, &[HOST]);
+    let schema = canonical_state_frame_schema(&tree);
+    FusedSeries::try_new_with_format(
         Arc::from(PROMQL),
-        tree,
-        binding,
+        tree.clone(),
+        binding_of(&tree, raw_schema(), vec![HOST.to_string()]),
         vec![input_plan(frame_schema())],
-        partial_op(kind, &[HOST]),
+        schema,
+        FusedOutputFormat::SeriesFrame,
     )
-    .expect("the binding matches the prefix tree")
+    .expect("the binding matches the partial tree")
 }
 
 /// The physical node that runs `tree` and exports `op`'s per-partition state over `input`.
@@ -4556,13 +4707,18 @@ fn partial_plan(
     op: BoundAggregate,
     tags: &[&str],
 ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-    let binding = partial_binding_of(&tree, tags);
-    FusedSeries::try_new_partial(
+    let tree = partial_tree(tree, op.kind, tags);
+    FusedSeries::try_new_with_format(
         Arc::from(PROMQL),
-        tree,
-        binding,
+        tree.clone(),
+        binding_of(
+            &tree,
+            raw_schema(),
+            tags.iter().map(|s| s.to_string()).collect(),
+        ),
         vec![input_plan(frame_schema())],
-        op,
+        canonical_state_frame_schema(&tree),
+        FusedOutputFormat::SeriesFrame,
     )?
     .to_execution_plan(vec![(
         input,
@@ -4571,46 +4727,95 @@ fn partial_plan(
     )])
 }
 
-/// The one state batch a partition exports, with the schema `state`.
-async fn state_of(
-    exec: &Arc<dyn ExecutionPlan>,
-    partition: usize,
-    state: &SchemaRef,
-) -> RecordBatch {
-    let context = SessionContext::default().task_ctx();
-    let batches = exec
-        .execute(partition, Arc::clone(&context))
-        .expect("the partition exists")
+/// Reads the output state frames for one partition and validates their declared binding.
+async fn state_batches(exec: &Arc<dyn ExecutionPlan>, partition: usize) -> Vec<RecordBatch> {
+    exec.execute(partition, SessionContext::default().task_ctx())
+        .unwrap()
         .try_collect::<Vec<_>>()
         .await
-        .expect("the partition's fold ends");
-    assert_eq!(
-        1,
-        batches.len(),
-        "one partition exports one state batch: {:?}",
-        batches
-            .iter()
-            .map(RecordBatch::num_rows)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(state.as_ref(), batches[0].schema().as_ref());
-    batches.into_iter().next().unwrap()
+        .unwrap()
 }
 
-/// The `tag_0` values of one state batch, which are the group's first declared label.
-fn group_label(state: &SchemaRef, batch: &RecordBatch) -> Vec<Option<String>> {
-    batch
-        .column_by_name(state.field(1).name())
-        .expect("the state carries the group label")
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("a group label is text")
+/// Decodes state-frame batches into per-series states, checking their declaration on the way.
+///
+/// A state frame has no flat accumulator column - each aggregate field is one
+/// `List<Struct<component...>>` - so a reader of its values goes through the decoder, which is the
+/// same path the `Final` half takes.
+async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateSeries> {
+    let schema = batches
+        .first()
+        .expect("a state-exporting node answers at least one batch")
+        .schema();
+    let declaration = SeriesFrameDeclaration::parse(schema.as_ref()).unwrap();
+    assert_eq!(FrameContent::AggregateState, declaration.content());
+    let series = Arc::new(declaration.series().clone());
+    let state = Arc::new(declaration.aggregate_state().unwrap().to_owned());
+    let decoded = unpack_aggregate_state(
+        Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::iter(batches.into_iter().map(Ok)),
+        )),
+        Some(state),
+        Some(series),
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    decoded
         .iter()
-        .map(|value| value.map(ToOwned::to_owned))
+        .map(|batch| batch.to_state_series().unwrap())
         .collect()
 }
 
-/// A partial fold exports one state batch per partition, and two partitions may fold one group.
+/// State is keyed by the cut aggregate's grouping, not by the tags its scan was bound with.
+///
+/// The scan below the fold declares `host` while the aggregate groups by `job` alone, so the exported
+/// series carry the group's `job` and not its input's `host`: the key a merge folds on is the
+/// aggregate's own output labels, not the columns its input happened to be bound with. Exporting
+/// state under the scan's tags would instead split groups the aggregate keeps apart.
+#[tokio::test]
+async fn a_state_export_keys_its_labels_by_the_cut_aggregate_grouping() {
+    let tree = partial_tree(rate_tree(), AggregateKind::Sum, &[JOB]);
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        // The scan is bound with `host`; the aggregate groups by `job`.
+        binding_of(&tree, raw_schema(), vec![HOST.to_string()]),
+        vec![input_plan(frame_schema())],
+        canonical_state_frame_schema(&tree),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("the scan's tags need not equal the cut's grouping labels");
+    let labels = [(HOST, "web-0"), (JOB, "shared")];
+    let rows = series_samples(1.0);
+    let exec = node
+        .to_execution_plan(vec![(
+            memory_exec(vec![frame(&labelled_chunk("web-0", &labels, &rows, true))]),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )])
+        .expect("the state export is executable");
+    let states = decode_state_batches(state_batches(&exec, 0).await).await;
+    let tags = states
+        .first()
+        .expect("the state export answers at least one series")
+        .metric
+        .tags();
+    assert_eq!(
+        Some("shared"),
+        tags.iter()
+            .find(|tag| tag.name.as_ref() == JOB)
+            .map(|tag| tag.value.as_ref()),
+        "the exported state carries the grouping label the cut folds on"
+    );
+    assert!(
+        tags.iter().all(|tag| tag.name.as_ref() != HOST),
+        "the scan's tag is not the state's key: {tags:?}"
+    );
+}
+
+/// A Partial root exports state-frame batches per partition, and two partitions may fold one group.
 ///
 /// The two partitions hold series whose *prefix* labels differ (`host="web-0"` and `host="web-1"`)
 /// while the aggregate groups by `job` alone, so both fold into the one group `job="shared"`. That
@@ -4618,7 +4823,7 @@ fn group_label(state: &SchemaRef, batch: &RecordBatch) -> Vec<Option<String>> {
 /// both partitions' states. The first partition's series also arrives in two chunks, so the fold has
 /// to keep what it folded between them.
 #[tokio::test]
-async fn a_partial_fold_exports_state_from_every_partition() {
+async fn a_partial_root_exports_state_frames_from_every_partition() {
     let rows = series_samples(1.0);
     let first = [(HOST, "web-0"), (JOB, "shared")];
     let second = [(HOST, "web-1"), (JOB, "shared")];
@@ -4647,22 +4852,99 @@ async fn a_partial_fold_exports_state_from_every_partition() {
         exec.properties().output_partitioning().partition_count(),
         "the node's partition count is its input's"
     );
-    let state = state_schema(&[JOB.to_string()]);
-    assert_eq!(state, exec.schema(), "the node declares the state layout");
+    assert_eq!(
+        canonical_state_frame_schema(&partial_tree(rate_tree(), AggregateKind::Count, &[JOB]))
+            .as_arrow(),
+        exec.schema().as_ref()
+    );
 
     for partition in 0..2 {
-        let batch = state_of(&exec, partition, &state).await;
-        assert_eq!(
-            GRID_LEN as usize,
-            batch.num_rows(),
-            "the group has one row per grid point, whichever chunks its series arrived in"
+        let batches = state_batches(&exec, partition).await;
+        let declaration = SeriesFrameDeclaration::parse(batches[0].schema().as_ref()).unwrap();
+        assert_eq!(FrameContent::AggregateState, declaration.content());
+        let schema = Arc::new(SeriesSchema {
+            fields: raw_schema().fields.clone(),
+            eval_grid: Some(grid()),
+        });
+        let binding = Arc::new(
+            datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                AggregateStateKind::Count,
+                vec![StateComponent::Count],
+            )
+            .unwrap(),
         );
+        let decoded = unpack_aggregate_state(
+            Box::pin(RecordBatchStreamAdapter::new(
+                batches[0].schema(),
+                futures::stream::iter(batches.into_iter().map(Ok)),
+            )),
+            Some(binding.clone()),
+            Some(schema),
+        )
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+        assert!(!decoded.is_empty());
+        let batch = decoded[0].to_state_series().unwrap();
         assert_eq!(
-            vec![Some("shared".to_string()); GRID_LEN as usize],
-            group_label(&state, &batch),
-            "the exported rows name the group they were folded into"
+            Some("shared"),
+            batch
+                .metric
+                .tags()
+                .iter()
+                .find(|tag| tag.name.as_ref() == JOB)
+                .map(|tag| tag.value.as_ref())
         );
+        assert_eq!(GRID_LEN as usize, batch.time.len());
+        assert_eq!(1, batch.states.len());
+        assert!(batch.states[0].iter().all(Option::is_some));
+        assert_eq!(AggregateStateKind::Count, binding.kind);
+        assert_eq!(vec![StateComponent::Count], binding.components.as_ref());
     }
+}
+
+/// A state export releases everything it held: when drained, and when the consumer drops it early.
+///
+/// This is lifecycle coverage, not the regression for the producer hand-off: other reservations are
+/// alive at the same moment, so a positive figure here would not by itself prove the batch is the
+/// charged one. `a_handed_over_state_chunk_keeps_its_charge_until_it_is_dropped` owns that claim.
+#[tokio::test]
+async fn a_state_export_releases_its_charge_on_drain_and_on_early_drop() {
+    const GROUPS: usize = 600;
+    let rows = series_samples(1.0);
+    let chunks = (0..GROUPS)
+        .map(|index| {
+            let host = format!("h{index}");
+            let labels = [(HOST, host.as_str())];
+            labelled_chunk(&host, &labels, &rows, true)
+        })
+        .collect::<Vec<_>>();
+    let exec = partial_plan(
+        rate_tree(),
+        memory_exec(frames(&chunks)),
+        partial_op(AggregateKind::Count, &[HOST]),
+        &[HOST],
+    )
+    .expect("a rate tree with a partial count is executable");
+
+    // Draining: the last batch and the execution behind it release everything.
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let mut stream = exec.execute(0, task_context(&pool)).unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(
+        first.num_rows() > 0,
+        "the exporter answers a batch once the builder reaches its row limit"
+    );
+    stream.try_for_each(|_| async { Ok(()) }).await.unwrap();
+    assert_eq!(0, pool.reserved(), "a drained export holds nothing");
+
+    // Dropping mid-export: the batches the packer never read go with the stream.
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let mut stream = exec.execute(0, task_context(&pool)).unwrap();
+    stream.next().await.unwrap().unwrap();
+    drop(stream);
+    assert_eq!(0, pool.reserved(), "a dropped export holds nothing");
 }
 
 /// Prefix series of one label set on disjoint grid points are legal in state mode.
@@ -4673,7 +4955,7 @@ async fn a_partial_fold_exports_state_from_every_partition() {
 /// own samples fall inside that window. The two fragments are spaced for exactly that: the early one
 /// answers at 300s alone, the late one at 540s alone, and neither answers where the other does.
 #[tokio::test]
-async fn disjoint_prefix_points_across_partitions_export_state() {
+async fn disjoint_partial_state_points_across_partitions() {
     let labels = [(HOST, "web")];
     // Sample `0` would fall outside the left-open window of grid point 300s, so both of these do.
     let early = [(SAMPLE_STEP, 60.0), (2 * SAMPLE_STEP, 120.0)];
@@ -4690,88 +4972,28 @@ async fn disjoint_prefix_points_across_partitions_export_state() {
     )
     .expect("a rate tree with a partial sum is executable");
 
-    let state = state_schema(&[HOST.to_string()]);
     for partition in 0..2 {
-        let batch = state_of(&exec, partition, &state).await;
-        assert!(
-            group_label(&state, &batch)
-                .iter()
-                .flatten()
-                .all(|value| value == "web"),
-            "each partition's state names the group it folded"
-        );
+        let batches = state_batches(&exec, partition).await;
+        assert!(!batches.is_empty());
+        let batch = &batches[0];
+        assert!(batch.num_rows() > 0);
     }
-}
-
-/// Each stream owns its exported-state reservation until that stream ends, even while the plan
-/// stays alive and another execution of the same plan still holds its own state.
-#[tokio::test]
-async fn an_exported_state_batch_stays_charged_until_its_stream_ends() {
-    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
-    let context = task_context(&pool);
-    let exec = partial_plan(
-        rate_tree(),
-        memory_exec(vec![frame(&series_chunk(
-            "web-0",
-            &series_samples(1.0),
-            true,
-        ))]),
-        partial_op(AggregateKind::Sum, &[HOST]),
-        &[HOST],
-    )
-    .expect("a rate tree with a partial sum is executable");
-    let mut first = exec
-        .execute(0, Arc::clone(&context))
-        .expect("the first execution's partition exists");
-    let mut second = exec
-        .execute(0, Arc::clone(&context))
-        .expect("the second execution's partition exists");
-    let first_batches = (&mut first)
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("the first partition's fold ends");
-    let second_batches = (&mut second)
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("the second partition's fold ends");
-    assert_eq!(1, first_batches.len(), "one state batch per execution");
-    assert_eq!(1, second_batches.len(), "one state batch per execution");
-    assert!(pool.reserved() > 0, "both exported states are charged");
-
-    drop(first);
-    assert!(
-        pool.reserved() > 0,
-        "dropping one stream preserves the other stream's reservation while the plan lives"
-    );
-    drop(second);
-    assert_eq!(
-        0,
-        pool.reserved(),
-        "dropping both streams releases their reservations even though the plan remains alive"
-    );
-    assert_eq!(
-        1,
-        first_batches.len(),
-        "the first batches are still the test's"
-    );
-    assert_eq!(
-        1,
-        second_batches.len(),
-        "the second batches are still the test's"
-    );
 }
 
 /// A partial node keeps its mode when an optimizer rebuilds it, and another aggregate is another
 /// node.
 #[test]
-fn a_partial_mode_survives_rebuilding_and_is_compared() {
+fn a_partial_tree_survives_rebuilding_and_compares_by_tree() {
     let node = partial_node(AggregateKind::Sum);
-    assert!(node.partial_fold().is_some(), "the fixture exports state");
+    assert!(
+        matches!(node.tree().root().output, NativeType::AggregateState(_)),
+        "tree exports state"
+    );
     let rebuilt = node
         .with_exprs_and_inputs(Vec::new(), vec![input_plan(frame_schema())])
         .expect("the rebuilt node is legal");
     assert!(
-        matches!(rebuilt.partial_fold(), Some(op) if op.kind == AggregateKind::Sum),
+        matches!(rebuilt.tree().root().output, NativeType::AggregateState(_)),
         "rebuilding the node dropped the aggregate it exports"
     );
     assert_eq!(node, rebuilt);
@@ -4779,22 +5001,6 @@ fn a_partial_mode_survives_rebuilding_and_is_compared() {
     let counted = partial_node(AggregateKind::Count);
     assert_ne!(node, counted, "another aggregate is another computation");
     assert_ne!(Some(std::cmp::Ordering::Equal), node.partial_cmp(&counted));
-}
-
-/// A prefix tree that itself reads across series is refused: every partition would fold a part.
-#[test]
-fn a_prefix_that_reads_across_series_is_refused() {
-    let tree = aggregate_tree();
-    let binding = binding(&tree);
-    let error = FusedSeries::try_new_partial(
-        Arc::from(PROMQL),
-        tree,
-        binding,
-        vec![input_plan(frame_schema())],
-        partial_op(AggregateKind::Sum, &[HOST]),
-    )
-    .expect_err("a prefix that folds a group per partition is not a per-series prefix");
-    assert!(error.to_string().contains("reads across"), "{error}");
 }
 
 /// `constant <op> vector`, bound the way the compiler binds a scalar broadcast: the constant on the
@@ -4847,80 +5053,29 @@ async fn a_constant_broadcast_prefix_exports_the_values_the_constant_computes() 
     )
     .expect("a per-series broadcast is a prefix one partition evaluates on its own");
 
-    let state = state_schema(&[]);
-    let batch = state_of(&exec, 0, &state).await;
-    let values = batch
-        .column_by_name("value")
-        .expect("the state carries the accumulator")
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("an accumulator is Float64");
-    let values: Vec<Option<f64>> = values.iter().collect();
+    // The state is a frame whose fields are `List<Struct<component...>>`, so its values are read
+    // through the decoder rather than off a flat column.
+    let batches = state_batches(&exec, 0).await;
+    let decoded = decode_state_batches(batches).await;
+    let values: Vec<Option<f64>> = decoded
+        .iter()
+        .flat_map(|batch| {
+            (0..batch.time.len())
+                .map(|position| {
+                    batch
+                        .states
+                        .first()
+                        .and_then(|field| field.get(position).copied().flatten())
+                        .map(|state| state.value)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(GRID_LEN as usize, values.len());
     assert_eq!(
         vec![Some(9.0); GRID_LEN as usize],
         values,
         "every grid point holds `10 - 1`, the larger of the two series' values"
-    );
-}
-
-/// A partial fold that fails after valid input exports no state and releases its reservation.
-#[tokio::test]
-async fn a_failed_input_exports_no_partial_state() {
-    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
-    let context = task_context(&pool);
-    let dropped = Arc::new(AtomicBool::new(false));
-    let schema = frame_schema();
-    let batches = one_series_frames();
-    let source = staged(schema.clone(), {
-        let dropped = Arc::clone(&dropped);
-        move || {
-            Box::pin(
-                StagedStream::new(schema.clone(), batches.clone())
-                    .error("the source failed")
-                    .dropped(&dropped),
-            )
-        }
-    });
-    let exec = partial_plan(
-        rate_tree(),
-        source,
-        partial_op(AggregateKind::Sum, &[HOST]),
-        &[HOST],
-    )
-    .expect("a rate tree with a partial sum is executable");
-    assert_eq!(
-        1,
-        exec.properties().output_partitioning().partition_count(),
-        "the node's partition count is its input's"
-    );
-    let mut stream = exec
-        .execute(0, Arc::clone(&context))
-        .expect("the node executes");
-    match stream.next().await {
-        Some(Err(error)) => assert!(
-            error.to_string().contains("the source failed"),
-            "reported another error: {error}"
-        ),
-        other => panic!("a failed input exported state: {other:?}"),
-    }
-    assert!(
-        dropped.load(Ordering::SeqCst),
-        "the failed stream retains its upstream input"
-    );
-    assert_eq!(
-        0,
-        pool.reserved(),
-        "failure releases the prefix fold's reservation while the error stream remains held"
-    );
-    drop(stream);
-
-    let error = match exec.execute(1, Arc::clone(&context)) {
-        Ok(_) => panic!("a partition the input does not have is answered"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("partition"),
-        "refused for another reason: {error}"
     );
 }
 
@@ -5081,6 +5236,129 @@ async fn mixed_raw_and_evaluated_inputs_execute_with_source_local_decoders() {
     });
     assert_eq!(10, actual.len());
     assert_eq!(expected, actual);
+}
+
+#[test]
+fn final_aggregate_state_input_constructs_with_evaluated_schema() {
+    let state = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from(JOB)])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+        accumulators: raw_schema().fields.clone(),
+        grid: grid(),
+    });
+    let tree = state_tree(AggregateStage::Final, NativeType::AggregateState(state));
+    let schema = canonical_frame_schema(&tree);
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        schema.clone(),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("Final accepts an aggregate-state input binding");
+    assert_eq!(schema.as_arrow(), node.schema().as_arrow());
+}
+
+#[test]
+fn partial_aggregate_declares_state_frame_schema() {
+    let tree = state_tree(
+        AggregateStage::Partial,
+        NativeType::Samples(Arc::new(SeriesSchema {
+            fields: raw_schema().fields.clone(),
+            eval_grid: Some(grid()),
+        })),
+    );
+    let state_schema = canonical_state_frame_schema(&tree);
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        state_schema,
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("Partial declares its aggregate-state frame layout");
+    assert_eq!(
+        canonical_state_frame_schema(&tree).as_arrow(),
+        node.schema().as_arrow()
+    );
+
+    let error = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        output_schema().to_dfschema_ref().unwrap(),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect_err("a wrong declaration is refused");
+    let message = error.to_string();
+    assert!(message.contains("declared"), "{message}");
+    assert!(message.contains("expected"), "{message}");
+}
+
+#[test]
+fn final_root_refuses_samples_binding() {
+    let result = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    output: NativeType::Samples(Arc::new(SeriesSchema {
+                        fields: raw_schema().fields.clone(),
+                        eval_grid: Some(grid()),
+                    })),
+                    source_index: 0,
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: NativeType::Samples(Arc::new(SeriesSchema {
+                    fields: raw_schema().fields.clone(),
+                    eval_grid: Some(grid()),
+                })),
+            }),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new([Arc::from(JOB)])),
+                stage: AggregateStage::Final,
+            },
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields: raw_schema().fields.clone(),
+            eval_grid: Some(grid()),
+        })),
+    });
+    assert!(
+        result.is_err(),
+        "Final requires state, not evaluated samples"
+    );
+}
+
+#[test]
+fn repeated_source_with_state_and_samples_is_refused() {
+    let state = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from(JOB)])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+        accumulators: raw_schema().fields.clone(),
+        grid: grid(),
+    });
+    let state_input = BoundInput {
+        output: NativeType::AggregateState(state),
+        source_index: 0,
+        ordering: SeriesOrdering::Contiguous,
+    };
+    let samples_input = BoundInput {
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields: raw_schema().fields.clone(),
+            eval_grid: Some(grid()),
+        })),
+        source_index: 0,
+        ordering: SeriesOrdering::Contiguous,
+    };
+    let error =
+        super::collect_source_schemas_from_inputs(vec![&state_input, &samples_input]).unwrap_err();
+    assert!(error.to_string().contains("disagrees on input kind"));
 }
 
 /// Frame output is planned from the evaluated root and is emitted without flattening to rows.
@@ -5274,22 +5552,43 @@ async fn series_frame_rate_matches_plain_rows_bitwise() {
     );
 }
 
-/// The partial-state node keeps its state schema and explain annotation, independently of output format.
+/// An empty Partial input ends cleanly while retaining the declared state-frame schema.
 #[tokio::test]
-async fn partial_fold_keeps_plain_rows_state_export() {
-    let node = partial_node(AggregateKind::Sum);
-    assert_eq!(FusedOutputFormat::PlainRows, node.format);
-    let exec = plan_of(node, memory_exec(one_series_frames())).unwrap();
-    let state = state_schema(&[HOST.to_string()]);
-    assert_eq!(state.as_ref(), exec.schema().as_ref());
-    assert!(
-        displayable(exec.as_ref())
-            .indent(false)
-            .to_string()
-            .contains("partial state:")
+async fn partial_empty_input_yields_valid_empty_state_frame_stream() {
+    let tree = partial_tree(rate_tree(), AggregateKind::Sum, &[HOST]);
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        canonical_state_frame_schema(&tree),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let exec = plan_of(node, memory_exec(Vec::new())).unwrap();
+    let batches = state_batches(&exec, 0).await;
+    assert!(batches.is_empty());
+    assert_eq!(
+        canonical_state_frame_schema(&partial_tree(rate_tree(), AggregateKind::Sum, &[HOST]))
+            .as_arrow(),
+        exec.schema().as_ref()
     );
-    let batch = state_of(&exec, 0, &state).await;
-    assert_eq!(state.as_ref(), batch.schema().as_ref());
+}
+
+#[tokio::test]
+async fn partial_root_requires_frame_output() {
+    let prefix = rate_tree();
+    let tree = partial_tree(prefix, AggregateKind::Sum, &[HOST]);
+    let error = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        canonical_state_frame_schema(&tree),
+        FusedOutputFormat::PlainRows,
+    )
+    .expect_err("Partial rows output is refused");
+    assert!(error.to_string().contains("Partial stage"));
 }
 
 /// `EXPLAIN` says nothing extra about the row table and names the frame output.
@@ -5423,9 +5722,10 @@ fn a_series_frame_refuses_a_root_it_cannot_carry() {
         "the refusal says what the root is: {error}"
     );
 
-    // The partial mode is a different output entirely, so a frame format cannot even be asked for.
+    // The partial half of a split is a frame, not a row table: the state it exports has no row
+    // layout, so the node that runs it is built with the frame format.
     assert_eq!(
-        FusedOutputFormat::PlainRows,
+        FusedOutputFormat::SeriesFrame,
         partial_node(AggregateKind::Sum).format
     );
 }
@@ -5993,4 +6293,621 @@ async fn duplicate_evidence_allows_same_key_at_disjoint_steps_across_partitions(
     );
     let errors = partitioned_duplicate_verdict(exec).await;
     assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// The bound shape of `histogram_quantile(0.99, sum by (...) (rate(x[5m])))`.
+fn histogram_over_sum_tree(group: Grouping, function: HistogramFunction) -> NativeTree {
+    let rate = rate_tree();
+    let output = rate.root().output.clone();
+    let aggregate = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(rate.root().clone()),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group,
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: output.clone(),
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(aggregate),
+            op: BoundVectorOp::Histogram(function),
+        },
+        output,
+    })
+    .unwrap()
+}
+
+fn histogram_routing() -> SeriesRouting {
+    SeriesRouting::CanonicalLabelsExcept(
+        ["le", "__name__", "__type__", "__unit__"]
+            .into_iter()
+            .map(Arc::from)
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+#[test]
+fn histogram_over_sum_splits_and_declares_complete_bucket_routing() {
+    for function in [
+        HistogramFunction::Quantile(0.99),
+        HistogramFunction::Fraction {
+            lower: 0.0,
+            upper: 1.0,
+        },
+    ] {
+        for group in [
+            Grouping::By(Arc::from([Arc::from("le")])),
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            Grouping::Without(Arc::from([Arc::from(HOST)])),
+        ] {
+            let tree = histogram_over_sum_tree(group.clone(), function);
+            let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME)
+                .unwrap()
+                .expect("histogram over sum must split");
+            assert!(matches!(
+                &partial.root().expr,
+                NativeExpr::Aggregate { op, .. }
+                    if op.stage == AggregateStage::Partial && op.group == group
+            ));
+            assert!(matches!(
+                partial.root().output,
+                NativeType::AggregateState(_)
+            ));
+            let NativeExpr::Vector {
+                input,
+                op: BoundVectorOp::Histogram(actual),
+            } = &final_tree.root().expr
+            else {
+                panic!("the histogram must be above the Final aggregate");
+            };
+            assert_eq!(*actual, function);
+            assert!(matches!(
+                &input.expr,
+                NativeExpr::Aggregate { op, .. }
+                    if op.stage == AggregateStage::Final && op.group == group
+            ));
+            let node = FusedSeries::try_new_with_format(
+                Arc::from("histogram over sum"),
+                final_tree.clone(),
+                binding(&final_tree),
+                vec![input_plan(
+                    canonical_state_frame_schema(&partial).inner().clone(),
+                )],
+                canonical_frame_schema(&final_tree),
+                FusedOutputFormat::SeriesFrame,
+            )
+            .unwrap();
+            let logical = LogicalPlan::Extension(datafusion::logical_expr::Extension {
+                node: Arc::new(node),
+            });
+            let display = logical.display_indent().to_string();
+            assert!(
+                display.lines().next().unwrap().ends_with(
+                    " (state routing: canonical labels except [\"le\", \"__name__\", \"__type__\", \"__unit__\"])"
+                ),
+                "{display}"
+            );
+        }
+    }
+}
+
+#[test]
+fn histogram_split_declines_only_rewrites_that_change_the_routing_key() {
+    let group = Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)]));
+    let base = histogram_over_sum_tree(group, HistogramFunction::Quantile(0.99));
+    for (dst, accepted) in [
+        ("le", true),
+        ("__type__", true),
+        ("zone", true),
+        (JOB, false),
+    ] {
+        let NativeExpr::Vector { input, op } = &base.root().expr else {
+            unreachable!()
+        };
+        let mapped = NativeNode {
+            expr: NativeExpr::Map {
+                input: input.clone(),
+                op: BoundMap {
+                    ops: vec![MapOp::Label(Arc::new(
+                        LabelRewrite::join(dst, "", &[HOST]).unwrap(),
+                    ))]
+                    .into(),
+                },
+            },
+            output: input.output.clone(),
+        };
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Vector {
+                input: Box::new(mapped),
+                op: op.clone(),
+            },
+            output: base.root().output.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            FusedSeries::split_aggregate(&tree, TIME).unwrap().is_some(),
+            accepted,
+            "{dst}"
+        );
+    }
+}
+
+#[test]
+fn histogram_split_allows_single_owner_routing_label_rewrites() {
+    for (group, accepted) in [
+        (Grouping::By(Arc::from([Arc::from("le")])), true),
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from("__type__")])),
+            true,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            false,
+        ),
+        (Grouping::Without(Arc::from([Arc::from(HOST)])), false),
+    ] {
+        let base = histogram_over_sum_tree(group.clone(), HistogramFunction::Quantile(0.99));
+        let NativeExpr::Vector { input, op } = &base.root().expr else {
+            unreachable!()
+        };
+        for before_histogram in [true, false] {
+            // Rewriting the routing label from `le` can assign different keys to sibling buckets.
+            let map = |input: NativeNode| NativeNode {
+                output: input.output.clone(),
+                expr: NativeExpr::Map {
+                    input: Box::new(input),
+                    op: BoundMap {
+                        ops: vec![MapOp::Label(Arc::new(
+                            LabelRewrite::join(JOB, "", &["le"]).unwrap(),
+                        ))]
+                        .into(),
+                    },
+                },
+            };
+            let root = if before_histogram {
+                NativeNode {
+                    expr: NativeExpr::Vector {
+                        input: Box::new(map((**input).clone())),
+                        op: op.clone(),
+                    },
+                    output: base.root().output.clone(),
+                }
+            } else {
+                map(base.root().clone())
+            };
+            let tree = NativeTree::try_new(root).unwrap();
+            assert_eq!(
+                FusedSeries::split_aggregate(&tree, TIME).unwrap().is_some(),
+                accepted,
+                "group {group:?}, before histogram: {before_histogram}"
+            );
+        }
+    }
+}
+
+#[test]
+fn histogram_final_replaces_incompatible_state_router() {
+    for (group, old_width, target_width, required_width, old_policy, reuse) in [
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            4,
+            4,
+            4,
+            SeriesRouting::CanonicalLabels,
+            false,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            4,
+            8,
+            8,
+            SeriesRouting::CanonicalLabels,
+            false,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+            4,
+            8,
+            8,
+            histogram_routing(),
+            false,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le")])),
+            1,
+            8,
+            1,
+            SeriesRouting::CanonicalLabels,
+            true,
+        ),
+        (
+            Grouping::By(Arc::from([Arc::from("le")])),
+            4,
+            8,
+            1,
+            SeriesRouting::CanonicalLabels,
+            false,
+        ),
+    ] {
+        let tree = histogram_over_sum_tree(group, HistogramFunction::Quantile(0.5));
+        let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
+        let partial_node = FusedSeries::try_new_state_export(
+            Arc::from("partial"),
+            partial.clone(),
+            binding(&partial),
+            vec![input_plan(frame_schema())],
+        )
+        .unwrap();
+        let producer = partial_node
+            .to_execution_plan(vec![(
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            )])
+            .unwrap();
+        let old_router = Arc::new(
+            SeriesRepartitionExec::try_new_with_routing(
+                Arc::clone(&producer),
+                old_width,
+                old_policy.clone(),
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+        let final_node = FusedSeries::try_new_with_format(
+            Arc::from("final"),
+            final_tree.clone(),
+            binding(&final_tree),
+            vec![input_plan(
+                canonical_state_frame_schema(&partial).inner().clone(),
+            )],
+            canonical_frame_schema(&final_tree),
+            FusedOutputFormat::SeriesFrame,
+        )
+        .unwrap();
+        let build = |input| {
+            final_node
+                .to_execution_plan_with_parallelism(
+                    vec![(input, RawLabelSource::Explicit, SeriesOrdering::Contiguous)],
+                    target_width,
+                )
+                .unwrap()
+        };
+        let plan = build(Arc::clone(&old_router));
+        let child = plan.children()[0];
+        let router = child.downcast_ref::<SeriesRepartitionExec>().unwrap();
+        assert_eq!(router.outputs(), required_width);
+        if reuse {
+            assert_eq!(router.routing_policy(), &old_policy);
+            assert!(
+                Arc::ptr_eq(child, &old_router),
+                "a single-owner router is reused regardless of policy"
+            );
+        } else {
+            assert_eq!(router.routing_policy(), &histogram_routing());
+            assert!(!Arc::ptr_eq(child, &old_router), "old router is replaced");
+        }
+        assert!(
+            Arc::ptr_eq(router.children()[0], &producer),
+            "the only router reads the original state producer directly"
+        );
+        let correct_router = Arc::clone(child);
+        let reused = build(Arc::clone(&correct_router));
+        assert!(
+            Arc::ptr_eq(reused.children()[0], &correct_router),
+            "a router with the required width and policy is reused"
+        );
+    }
+}
+
+#[tokio::test]
+async fn histogram_split_routes_whole_state_batches_and_preserves_each_bound() {
+    for with_job in [false, true] {
+        let group: Arc<[Arc<str>]> = if with_job {
+            Arc::from([Arc::from("le"), Arc::from(JOB)])
+        } else {
+            Arc::from([Arc::from("le")])
+        };
+        let tree = histogram_over_sum_tree(Grouping::By(group), HistogramFunction::Quantile(0.5));
+        let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
+        let partitions = vec![
+            frames(&[
+                labelled_chunk(
+                    "a-1",
+                    &[("le", "1"), (JOB, "api")],
+                    &series_samples(1.0),
+                    true,
+                ),
+                labelled_chunk(
+                    "a-inf",
+                    &[("le", "+Inf"), (JOB, "api")],
+                    &series_samples(4.0),
+                    true,
+                ),
+            ]),
+            frames(&[
+                labelled_chunk(
+                    "b-1",
+                    &[("le", "1"), (JOB, "api")],
+                    &series_samples(2.0),
+                    true,
+                ),
+                labelled_chunk(
+                    "b-inf",
+                    &[("le", "+Inf"), (JOB, "api")],
+                    &series_samples(4.0),
+                    true,
+                ),
+            ]),
+        ];
+        let partial_node = FusedSeries::try_new_state_export(
+            Arc::from("partial"),
+            partial.clone(),
+            binding(&partial),
+            vec![input_plan(frame_schema())],
+        )
+        .unwrap();
+        let make_partial = || {
+            partial_node
+                .to_execution_plan(vec![(
+                    memory_exec_partitioned(partitions.clone()),
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous,
+                )])
+                .unwrap()
+        };
+        let partial_exec = make_partial();
+        for partition in 0..2 {
+            let states = decode_state_batches(state_batches(&partial_exec, partition).await).await;
+            let bounds: std::collections::BTreeMap<_, _> = states
+                .iter()
+                .map(|state| {
+                    (
+                        state.metric.get("le").unwrap().to_string(),
+                        state.states[0][0].unwrap().value,
+                    )
+                })
+                .collect();
+            let expected = if partition == 0 {
+                (1.0, 4.0)
+            } else {
+                (2.0, 4.0)
+            };
+            assert_eq!(
+                bounds,
+                std::collections::BTreeMap::from([
+                    ("1".to_string(), expected.0),
+                    ("+Inf".to_string(), expected.1),
+                ])
+            );
+        }
+        let final_node = FusedSeries::try_new_with_format(
+            Arc::from("final"),
+            final_tree.clone(),
+            binding(&final_tree),
+            vec![input_plan(
+                canonical_state_frame_schema(&partial).inner().clone(),
+            )],
+            canonical_frame_schema(&final_tree),
+            FusedOutputFormat::SeriesFrame,
+        )
+        .unwrap();
+        let execute = |width| {
+            // Region exit is a one-output state router, which forwards whole packed batches.
+            let region = Arc::new(SeriesRepartitionExec::try_new(make_partial(), 1).unwrap());
+            final_node
+                .to_execution_plan_with_parallelism(
+                    vec![(region, RawLabelSource::Explicit, SeriesOrdering::Contiguous)],
+                    width,
+                )
+                .unwrap()
+        };
+        let parallel = execute(8);
+        let child = parallel.children()[0];
+        if with_job {
+            let router = child.downcast_ref::<SeriesRepartitionExec>().unwrap();
+            assert_eq!(router.outputs(), 8);
+            assert_eq!(router.routing_policy(), &histogram_routing());
+        } else {
+            assert_eq!(
+                parallel
+                    .properties()
+                    .output_partitioning()
+                    .partition_count(),
+                1
+            );
+        }
+        let decode = |batches: Vec<RecordBatch>| async move {
+            let schema = batches[0].schema();
+            unpack_evaluated_series(
+                Box::pin(RecordBatchStreamAdapter::new(
+                    schema,
+                    futures::stream::iter(batches.into_iter().map(Ok)),
+                )),
+                None,
+            )
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+        };
+        let got = decode(
+            collect(parallel, SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let baseline = decode(
+            collect(execute(1), SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let values = |series: &[(Series, bool)]| {
+            series
+                .iter()
+                .flat_map(|(series, _)| {
+                    series
+                        .fields
+                        .get(0)
+                        .unwrap()
+                        .iter()
+                        .filter_map(|sample| match sample {
+                            datatypes::series::samples::SampleRef::Float(v) => Some(v),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&got), values(&baseline));
+        // Sum per bound is 3 and 8; 0.5 * 8 lies in the infinite bucket and yields the
+        // highest finite bound, 1. Pooling the bounds into one sum would have no histogram.
+        assert_eq!(values(&got), vec![1.0; GRID_LEN as usize]);
+    }
+}
+
+#[tokio::test]
+async fn histogram_split_colocates_metadata_distinct_results_before_their_merge() {
+    let grouping = Grouping::By(
+        ["le", JOB, "__type__", "__unit__"]
+            .into_iter()
+            .map(Arc::from)
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    let instant = instant_of(0, &grid());
+    let output = instant.output.clone();
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Aggregate {
+                    input: Box::new(instant),
+                    op: BoundAggregate {
+                        kind: AggregateKind::Sum,
+                        group: grouping,
+                        stage: AggregateStage::Complete,
+                    },
+                },
+                output: output.clone(),
+            }),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+        },
+        output,
+    })
+    .unwrap();
+    let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
+    let build = |overlap: bool| {
+        let mut partitions = vec![Vec::new(), Vec::new()];
+        for (partition, kind) in ["a", "b"].into_iter().enumerate() {
+            let timestamps = if overlap || partition == 0 {
+                vec![GRID_START]
+            } else {
+                vec![GRID_START + GRID_STEP]
+            };
+            for (le, value) in [("1", if partition == 0 { 1.0 } else { 3.0 }), ("+Inf", 4.0)] {
+                let key = format!("{kind}-{le}");
+                let item = chunk_of(
+                    &raw_schema(),
+                    &key,
+                    metric(
+                        &[
+                            ("le", le),
+                            (JOB, "api"),
+                            ("__type__", kind),
+                            ("__unit__", kind),
+                        ],
+                        Some(METRIC),
+                    ),
+                    &timestamps,
+                    vec![vec![Some(value)]],
+                    true,
+                );
+                partitions[partition].push(frame(&item));
+            }
+        }
+        let partial_node = FusedSeries::try_new_state_export(
+            Arc::from("partial"),
+            partial.clone(),
+            binding(&partial),
+            vec![input_plan(frame_schema())],
+        )
+        .unwrap();
+        let partial_exec = partial_node
+            .to_execution_plan(vec![(
+                memory_exec_partitioned(partitions),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            )])
+            .unwrap();
+        let final_node = FusedSeries::try_new_with_format(
+            Arc::from("final"),
+            final_tree.clone(),
+            binding(&final_tree),
+            vec![input_plan(
+                canonical_state_frame_schema(&partial).inner().clone(),
+            )],
+            canonical_frame_schema(&final_tree),
+            FusedOutputFormat::SeriesFrame,
+        )
+        .unwrap();
+        final_node
+            .to_execution_plan_with_parallelism(
+                vec![(
+                    partial_exec,
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous,
+                )],
+                8,
+            )
+            .unwrap()
+    };
+    let output = collect(build(false), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let schema = output[0].schema();
+    let series = unpack_evaluated_series(
+        Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::iter(output.into_iter().map(Ok)),
+        )),
+        None,
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    let mut values = series
+        .iter()
+        .flat_map(|(series, _)| {
+            assert_eq!(series.metric.get(JOB), Some("api"));
+            assert_eq!(series.metric.get("__type__"), None);
+            assert_eq!(series.metric.get("__unit__"), None);
+            series
+                .time
+                .positions()
+                .zip(series.fields.get(0).unwrap().iter())
+                .map(|((point, _), sample)| {
+                    let datatypes::series::samples::SampleRef::Float(value) = sample else {
+                        panic!("float expected")
+                    };
+                    (point, value)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    values.sort_by_key(|(point, _)| *point);
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0], (0, 1.0));
+    assert_eq!(values[1].0, 1);
+    assert!((values[1].1 - 2.0 / 3.0).abs() < 1e-12);
+    assert!(
+        collect(build(true), SessionContext::default().task_ctx())
+            .await
+            .is_err(),
+        "overlapping metadata-distinct histograms must collide, not mix buckets"
+    );
 }

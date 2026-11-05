@@ -43,7 +43,7 @@ use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{Samples, SeriesFields, SeriesSchema};
 use futures::stream::BoxStream;
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use snafu::Location;
 use snafu::{IntoError, ResultExt};
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
@@ -164,6 +164,27 @@ impl RawSeriesStream for RawStream {
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
     }
+}
+
+/// Restores the label-bearing key after an identity-only merge has established
+/// ordering and finality. The resolver must preserve identity and key ordering.
+pub(crate) fn with_primary_keys(
+    stream: SendableRawSeriesStream,
+    resolve: impl Fn(Buffer) -> Result<Buffer, BoxedError> + Send + Sync + 'static,
+) -> SendableRawSeriesStream {
+    Box::pin(RawStream {
+        schema: stream.schema().clone(),
+        label_source: stream.label_source().clone(),
+        label_decode_spec: stream.label_decode_spec().cloned(),
+        ordering: stream.ordering(),
+        inner: Box::pin(stream.and_then(move |mut chunk| {
+            let key = resolve(chunk.primary_key.clone());
+            async move {
+                chunk.primary_key = key?;
+                Ok(chunk)
+            }
+        })),
+    })
 }
 
 /// Rows accumulated before the residual predicates are evaluated over one record.
