@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bytes::{Buf, BufMut};
 use common_datasource::compression::CompressionType;
-use common_telemetry::warn;
+use common_telemetry::debug;
 use object_store::{Entry, ObjectStore};
 use snafu::ResultExt;
 use store_api::ManifestVersion;
@@ -39,21 +38,14 @@ pub(crate) async fn get_from_cache_decoded(
     match compress_type.decode(raw.as_slice()).await {
         Ok(data) => Some(data),
         Err(error) => {
-            warn!(error; "Failed to decode cached manifest {}, removing entry", key);
+            debug!(
+                "Failed to decode cached manifest {}, removing entry: {}",
+                key, error
+            );
             cache.remove(key).await;
             None
         }
     }
-}
-
-/// Caches the object-store payload verbatim, before decompression.
-pub(crate) async fn put_to_cache(cache: Option<&ManifestCache>, key: String, data: impl Buf) {
-    let Some(cache) = cache else {
-        return;
-    };
-    let mut bytes = Vec::with_capacity(data.remaining());
-    bytes.put(data);
-    cache.put_file(key, bytes).await
 }
 
 /// Removes a manifest file from cache.
@@ -71,12 +63,8 @@ pub(crate) async fn write_and_put_cache(
     path: &str,
     data: Vec<u8>,
 ) -> Result<()> {
-    // Clone data for cache before writing, only if cache is enabled.
-    let cache_data = if cache.is_some() {
-        Some(data.clone())
-    } else {
-        None
-    };
+    // Clone only when caching is enabled; retain the owner for the cache write.
+    let cache_data = cache.map(|cache| (cache, data.clone()));
 
     // Write to object store
     object_store
@@ -86,8 +74,8 @@ pub(crate) async fn write_and_put_cache(
         .context(OpenDalSnafu)?;
 
     // Put to cache if we cloned the data
-    if let Some(data) = cache_data {
-        put_to_cache(cache, path.to_string(), data.as_slice()).await;
+    if let Some((cache, data)) = cache_data {
+        cache.put_file(path.to_string(), data).await;
     }
 
     Ok(())

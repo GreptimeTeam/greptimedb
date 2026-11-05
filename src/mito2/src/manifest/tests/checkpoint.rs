@@ -1094,7 +1094,7 @@ async fn manifest_cache_write_through_survives_reopen(#[case] compression: Compr
     let local = ObjectStore::new(Fs::default().root(cache_dir.path().to_str().unwrap())).unwrap();
     let cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
     // Use a relative prefix, matching production keys and the recovered index.
-    let options = RegionManifestOptions {
+    let mut options = RegionManifestOptions {
         manifest_dir: "region/".to_string(),
         object_store: remote,
         compress_type: compression,
@@ -1126,8 +1126,8 @@ async fn manifest_cache_write_through_survives_reopen(#[case] compression: Compr
     let usage = writer.manifest_usage();
     drop(writer);
     drop(cache);
-    let mut options = options;
-    options.manifest_cache = None;
+    // Release the final old cache handle before recovering a new index.
+    drop(options.manifest_cache.take());
     let cache = ManifestCache::new(local, ReadableSize::mb(32), None, true).await;
     assert!(
         cache.get(&key).await.is_some(),

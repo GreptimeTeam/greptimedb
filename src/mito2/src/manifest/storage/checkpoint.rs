@@ -27,7 +27,7 @@ use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, OpenDalSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
 };
 use crate::manifest::storage::size_tracker::Tracker;
-use crate::manifest::storage::utils::{get_from_cache_decoded, put_to_cache, write_and_put_cache};
+use crate::manifest::storage::utils::{get_from_cache_decoded, write_and_put_cache};
 use crate::manifest::storage::{
     FALL_BACK_COMPRESS_TYPE, LAST_CHECKPOINT_FILE, checkpoint_checksum, checkpoint_file, gen_path,
     verify_checksum,
@@ -127,7 +127,9 @@ impl<T: Tracker> CheckpointStorage<T> {
                 // set the checkpoint size
                 self.size_tracker.record(version, checkpoint_size as u64);
                 // Add to cache
-                put_to_cache(self.manifest_cache.as_ref(), path, checkpoint).await;
+                if let Some(cache) = &self.manifest_cache {
+                    cache.put_file(path, checkpoint.to_vec()).await;
+                }
                 Ok(Some(decompress_data))
             }
             Err(e) => {
@@ -170,12 +172,9 @@ impl<T: Tracker> CheckpointStorage<T> {
                                 verify_checksum(&decompress_data, metadata.checksum)?;
                                 self.size_tracker.record(version, checkpoint_size as u64);
                                 // Add fallback to cache
-                                put_to_cache(
-                                    self.manifest_cache.as_ref(),
-                                    fall_back_path,
-                                    checkpoint,
-                                )
-                                .await;
+                                if let Some(cache) = &self.manifest_cache {
+                                    cache.put_file(fall_back_path, checkpoint.to_vec()).await;
+                                }
                                 Ok(Some(decompress_data))
                             }
                             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),

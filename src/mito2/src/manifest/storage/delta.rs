@@ -31,7 +31,7 @@ use crate::error::{
 };
 use crate::manifest::storage::size_tracker::Tracker;
 use crate::manifest::storage::utils::{
-    get_from_cache_decoded, put_to_cache, sort_manifests, write_and_put_cache,
+    get_from_cache_decoded, sort_manifests, write_and_put_cache,
 };
 use crate::manifest::storage::{
     FETCH_MANIFEST_PARALLELISM, delta_file, file_compress_type, file_version, gen_path,
@@ -242,7 +242,9 @@ impl<T: Tracker> DeltaStorage<T> {
                 })?;
 
             // Add to cache
-            put_to_cache(self.manifest_cache.as_ref(), cache_key.to_string(), bytes).await;
+            if let Some(cache) = &self.manifest_cache {
+                cache.put_file(cache_key.to_string(), bytes.to_vec()).await;
+            }
 
             Ok((*v, data))
         });

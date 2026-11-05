@@ -827,36 +827,54 @@ mod tests {
         assert!(entries.is_empty());
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CacheSource {
+        WriteThrough,
+        RemoteFill,
+        LegacyDecoded,
+        Truncated,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum PayloadKind {
+        Delta,
+        Checkpoint { checksum: bool },
+    }
+
     // Exercise both representations left by older versions, as well as new writes
-    // and remote fills. Each iteration recovers the persistent cache index.
+    // and remote fills. Truncation only applies to compression envelopes.
     #[rstest::rstest]
-    #[case::write_through("write")]
-    #[case::remote_fill("remote")]
-    #[case::legacy_decoded("legacy")]
-    #[case::truncated("truncated")]
+    #[case::write_through_uncompressed(CacheSource::WriteThrough, CompressionType::Uncompressed)]
+    #[case::write_through_gzip(CacheSource::WriteThrough, CompressionType::Gzip)]
+    #[case::write_through_zstd(CacheSource::WriteThrough, CompressionType::Zstd)]
+    #[case::write_through_xz(CacheSource::WriteThrough, CompressionType::Xz)]
+    #[case::write_through_bzip2(CacheSource::WriteThrough, CompressionType::Bzip2)]
+    #[case::remote_fill_uncompressed(CacheSource::RemoteFill, CompressionType::Uncompressed)]
+    #[case::remote_fill_gzip(CacheSource::RemoteFill, CompressionType::Gzip)]
+    #[case::remote_fill_zstd(CacheSource::RemoteFill, CompressionType::Zstd)]
+    #[case::remote_fill_xz(CacheSource::RemoteFill, CompressionType::Xz)]
+    #[case::remote_fill_bzip2(CacheSource::RemoteFill, CompressionType::Bzip2)]
+    #[case::legacy_decoded_uncompressed(CacheSource::LegacyDecoded, CompressionType::Uncompressed)]
+    #[case::legacy_decoded_gzip(CacheSource::LegacyDecoded, CompressionType::Gzip)]
+    #[case::legacy_decoded_zstd(CacheSource::LegacyDecoded, CompressionType::Zstd)]
+    #[case::legacy_decoded_xz(CacheSource::LegacyDecoded, CompressionType::Xz)]
+    #[case::legacy_decoded_bzip2(CacheSource::LegacyDecoded, CompressionType::Bzip2)]
+    #[case::truncated_gzip(CacheSource::Truncated, CompressionType::Gzip)]
+    #[case::truncated_zstd(CacheSource::Truncated, CompressionType::Zstd)]
+    #[case::truncated_xz(CacheSource::Truncated, CompressionType::Xz)]
+    #[case::truncated_bzip2(CacheSource::Truncated, CompressionType::Bzip2)]
     #[tokio::test]
     async fn test_manifest_cache_payload(
-        #[case] source: &str,
-        #[values(
-            CompressionType::Uncompressed,
-            CompressionType::Gzip,
-            CompressionType::Zstd,
-            CompressionType::Xz,
-            CompressionType::Bzip2
-        )]
-        compression: CompressionType,
-        #[values(false, true)] checkpoint: bool,
-        #[values(false, true)] checksum: bool,
+        #[case] source: CacheSource,
+        #[case] compression: CompressionType,
+        #[values(PayloadKind::Delta, PayloadKind::Checkpoint { checksum: false }, PayloadKind::Checkpoint { checksum: true })]
+        payload: PayloadKind,
     ) {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         use common_base::readable_size::ReadableSize;
         use object_store::layers::mock::MockLayerBuilder;
 
-        if source == "truncated" && compression == CompressionType::Uncompressed {
-            // Uncompressed payloads have no compression envelope to validate.
-            return;
-        }
         let remote_dir = create_temp_dir("manifest-cache-remote");
         let cache_dir = create_temp_dir("manifest-cache-local");
         let remote =
@@ -880,27 +898,27 @@ mod tests {
             remote.clone(),
             compression,
             Default::default(),
-            (source != "remote").then(|| cache.clone()),
+            (source != CacheSource::RemoteFill).then(|| cache.clone()),
         );
         let data = br#"{"manifest":"persistent cache payload"}"#;
         let key = gen_path(
             "region/manifest/",
-            &if checkpoint {
+            &if matches!(payload, PayloadKind::Checkpoint { .. }) {
                 checkpoint_file(3)
             } else {
                 delta_file(3)
             },
             compression,
         );
-        if checkpoint {
+        if matches!(payload, PayloadKind::Checkpoint { .. }) {
             store.save_checkpoint(3, data).await.unwrap();
         } else {
             store.save(3, data, false).await.unwrap();
         }
         let encoded = remote.read(&key).await.unwrap().to_vec();
-        if source == "legacy" {
+        if source == CacheSource::LegacyDecoded {
             cache.put_file(key.clone(), data.to_vec()).await;
-        } else if source == "truncated" {
+        } else if source == CacheSource::Truncated {
             cache
                 .put_file(key.clone(), encoded[..encoded.len() / 2].to_vec())
                 .await;
@@ -909,7 +927,7 @@ mod tests {
         for iteration in 0..2 {
             drop(cache);
             cache = ManifestCache::new(local.clone(), ReadableSize::mb(32), None, true).await;
-            if source != "remote" || iteration > 0 {
+            if source != CacheSource::RemoteFill || iteration > 0 {
                 assert!(
                     cache.get(&key).await.is_some(),
                     "cache recovery missed {key}"
@@ -923,7 +941,7 @@ mod tests {
                 Some(cache.clone()),
             );
             let before = reads.load(Ordering::Relaxed);
-            let actual = if checkpoint {
+            let actual = if let PayloadKind::Checkpoint { checksum } = payload {
                 let metadata = CheckpointMetadata {
                     size: data.len(),
                     version: 3,
@@ -946,9 +964,10 @@ mod tests {
             // repeated cache misses. Check both the bytes and remote read count.
             assert_eq!(encoded, cache.get_file(&key).await.unwrap());
             let must_refill = iteration == 0
-                && (source == "remote"
+                && (source == CacheSource::RemoteFill
                     || (compression != CompressionType::Uncompressed
-                        && (source == "legacy" || source == "truncated")));
+                        && (source == CacheSource::LegacyDecoded
+                            || source == CacheSource::Truncated)));
             assert_eq!(
                 usize::from(must_refill),
                 reads.load(Ordering::Relaxed) - before
