@@ -448,9 +448,6 @@ enum RewriterStatus {
 struct PlanRewriter {
     /// Whether the whole plan encodes, allowing per-node checks to be skipped.
     whole_plan_encodable: bool,
-    /// In-process root shapes can contain the `Final` half of a split aggregate, which folds every
-    /// partition's state and so is kept above the region boundary by the commutativity check.
-    skip_in_process_encodability: bool,
     /// Whether an in-process root fused plan was recognized for placement-gate evaluation.
     in_process_fused_root: bool,
     /// Current level in the tree
@@ -640,10 +637,8 @@ impl PlanRewriter {
         let whole_plan_encodable = DFLogicalSubstraitConvertor
             .encode(plan, DefaultSerializer)
             .is_ok();
-        let skip_in_process_encodability = in_process_fused_root && !whole_plan_encodable;
         Self {
             in_process_fused_root,
-            skip_in_process_encodability,
             whole_plan_encodable,
             ..Default::default()
         }
@@ -677,8 +672,7 @@ impl PlanRewriter {
         // When the root does not encode, the plan holds at least one node that has to stay
         // on the frontend and only the per-node check locates it.
         //
-        if !self.skip_in_process_encodability
-            && !self.whole_plan_encodable
+        if !self.whole_plan_encodable
             && let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer)
         {
             debug!(
