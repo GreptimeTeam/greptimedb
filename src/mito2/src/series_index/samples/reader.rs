@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datatypes::arrow::array::{
@@ -31,6 +32,7 @@ use tokio::sync::OnceCell;
 
 use crate::cache::columnar::{self as metadata_cache, MetadataCache};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result, SerdeJsonSnafu};
+use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesFormatReader, SamplesReadRequest};
 use crate::series_index::samples::codec;
@@ -220,6 +222,7 @@ impl SamplesFormatReader for SamplesReader {
         let parts = self.parts.clone();
         Ok(Box::pin(async_stream::try_stream! {
             let _handle = handle;
+            let mut metrics = ColumnarReadMetrics::default();
             if empty { return; }
             let mut previous: Option<BlockOrder> = None;
             let mut adjacent = true;
@@ -232,6 +235,7 @@ impl SamplesFormatReader for SamplesReader {
                     store.reader_with(&path).concurrent(8).gap(0).await.context(OpenDalSnafu)
                 }).await?;
                 let size = part.file_size;
+                let metadata_started = Instant::now();
                 let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
                 let header = read_part_range(reader, 0, metadata::HEADER_SIZE).await?;
                 metadata::validate_header(&header)?;
@@ -241,6 +245,7 @@ impl SamplesFormatReader for SamplesReader {
                 }).await?;
                 require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
                 let root = load_metadata_page(cache.as_ref(), reader, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &manifest).await?;
+                metrics.add_elapsed("columnar_metadata_wall", metadata_started.elapsed());
                 let (mut active, children) = match root.as_ref() { Page::Leaf(_) => (Some(root.clone()), Vec::new()), Page::Internal(children) => (None, children.clone()) };
                 let mut children = children.into_iter(); let mut row_count = 0u64; let mut block_count = 0u64;
                 let mut payload_position = metadata::HEADER_SIZE;
@@ -248,7 +253,10 @@ impl SamplesFormatReader for SamplesReader {
                     let page = if let Some(page) = active.take() { page } else {
                         let Some(child) = children.next() else { break; };
                         if !matches(child.bounds, &request) { adjacent = false; continue; }
-                        load_metadata_page(cache.as_ref(), reader, (&path, size), &child, 1, trailer.payload_end, &manifest).await?
+                        let started = Instant::now();
+                        let page = load_metadata_page(cache.as_ref(), reader, (&path, size), &child, 1, trailer.payload_end, &manifest).await?;
+                        metrics.add_elapsed("columnar_metadata_wall", started.elapsed());
+                        page
                     };
                     let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in sample depth-two tree"))? };
                     for block in blocks {
@@ -261,9 +269,15 @@ impl SamplesFormatReader for SamplesReader {
                             payload_position = column.payload.end()?;
                         }
                         let batch = if matches(block.bounds(), &request) {
-                            read_block(reader, block, &manifest, &request, &projection, projected.clone()).await?
+                            *metrics.counts.entry("blocks").or_default() += 1;
+                            *metrics.counts.entry("decoded_rows").or_default() += u64::from(block.rows);
+                            read_block(reader, block, &manifest, &request, &projection, projected.clone(), &mut metrics).await?
                         } else { None };
-                        if let Some((batch, _reservation)) = batch { yield batch; }
+                        if let Some((batch, _reservation)) = batch {
+                            *metrics.counts.entry("batches").or_default() += 1;
+                            *metrics.counts.entry("output_rows").or_default() += batch.num_rows() as u64;
+                            yield batch;
+                        }
                         previous = Some(block.order()); adjacent = true;
                     }
                 }
@@ -371,6 +385,7 @@ async fn read_block(
     request: &SamplesReadRequest,
     projection: &[usize],
     schema: SchemaRef,
+    metrics: &mut ColumnarReadMetrics,
 ) -> Result<Option<(RecordBatch, Option<MemoryReservation>)>> {
     let boundary = request.start.is_some_and(|start| start > block.min)
         || request.end.is_some_and(|end| end <= block.max);
@@ -410,10 +425,11 @@ async fn read_block(
     }
     let mut buffers = HashMap::new();
     if boundary {
-        fetch_columns(reader, &[&block.columns[0]], &mut buffers).await?;
+        fetch_columns(reader, &[&block.columns[0]], &mut buffers, metrics).await?;
     } else {
-        fetch_columns(reader, &columns, &mut buffers).await?;
+        fetch_columns(reader, &columns, &mut buffers, metrics).await?;
     }
+    let decode_started = Instant::now();
     let mut selected: Vec<usize> = (0..block.rows as usize).collect();
     let mut times = None;
     if needs_time {
@@ -435,17 +451,20 @@ async fn read_block(
                 && request.end.is_none_or(|end| (values[i] as i64) < end)
         });
         if selected.is_empty() {
+            metrics.add_elapsed("columnar_decode", decode_started.elapsed());
             return Ok(None);
         }
         times = Some(values);
     }
+    metrics.add_elapsed("columnar_decode", decode_started.elapsed());
     if boundary {
         let remaining = columns
             .into_iter()
             .filter(|column| column.role != 1)
             .collect::<Vec<_>>();
-        fetch_columns(reader, &remaining, &mut buffers).await?;
+        fetch_columns(reader, &remaining, &mut buffers, metrics).await?;
     }
+    let decode_started = Instant::now();
     let mut arrays: BTreeMap<usize, ArrayRef> = BTreeMap::new();
     // Visit columns in physical order, regardless of requested output order.
     let mut sorted = projection.to_vec();
@@ -518,15 +537,14 @@ async fn read_block(
                 .ok_or_else(|| invalid("missing sample projected column"))
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(Some((
-        RecordBatch::try_new_with_options(
-            schema,
-            output,
-            &RecordBatchOptions::new().with_row_count(Some(selected.len())),
-        )
-        .context(NewRecordBatchSnafu)?,
-        reservation,
-    )))
+    let batch = RecordBatch::try_new_with_options(
+        schema,
+        output,
+        &RecordBatchOptions::new().with_row_count(Some(selected.len())),
+    )
+    .context(NewRecordBatchSnafu)?;
+    metrics.add_elapsed("columnar_decode", decode_started.elapsed());
+    Ok(Some((batch, reservation)))
 }
 
 async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes::Bytes> {
@@ -550,6 +568,7 @@ async fn fetch_columns(
     reader: &Reader,
     columns: &[&Column],
     buffers: &mut HashMap<u64, bytes::Bytes>,
+    metrics: &mut ColumnarReadMetrics,
 ) -> Result<()> {
     if columns.is_empty() {
         return Ok(());
@@ -558,7 +577,14 @@ async fn fetch_columns(
         .iter()
         .map(|column| Ok(column.payload.offset..column.payload.end()?))
         .collect::<Result<Vec<_>>>()?;
+    *metrics.counts.entry("column_ranges").or_default() += ranges.len() as u64;
+    *metrics.bytes.entry("requested").or_default() +=
+        ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+    let started = Instant::now();
     let fetched = reader.fetch(ranges).await.context(OpenDalSnafu)?;
+    metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
+    *metrics.bytes.entry("fetched").or_default() +=
+        fetched.iter().map(|b| b.len() as u64).sum::<u64>();
     require(
         fetched.len() == columns.len(),
         "sample fetch response count mismatch",

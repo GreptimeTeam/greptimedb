@@ -396,6 +396,17 @@ async fn prepared_sources_share_discovery_and_read_independently() {
     let source = a.unwrap().unwrap();
     assert!(Arc::ptr_eq(&source, &b.unwrap().unwrap()));
     assert_eq!(2, source.num_series());
+    let prepared = scanner.prepared.source.get().unwrap().as_ref().unwrap();
+    let merge_schema = prepared.sample_schema.as_ref().unwrap();
+    assert!(merge_schema.index_of("tag_0").is_err());
+    assert!(
+        merge_schema
+            .index_of(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+            .is_err()
+    );
+    assert!(merge_schema.index_of(DATA_SCHEMA_TSID_COLUMN_NAME).is_err());
+    assert_eq!(1, prepared.raw.predicates.len()); // Only the field predicate remains.
+
     assert!(
         !reads
             .lock()
@@ -1044,6 +1055,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         context: source.context.clone(),
         labels: source.labels.clone(),
         raw: source.raw.clone(),
+        sample_schema: source.sample_schema.clone(),
         candidates: source.candidates.clone(),
         metrics: source.metrics.clone(),
         reservation: source.reservation.clone(),
@@ -1825,5 +1837,125 @@ async fn series_pushdown_skips_unrelated_table_payloads() {
         .unwrap();
     assert!(selected.is_empty());
     assert!(reads.lock().unwrap().len() < full_reads);
+    engine.stop().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::last_row(false)]
+#[case::last_non_null(true)]
+#[tokio::test]
+async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null: bool) {
+    let (_env, engine, region) = fixture().await;
+    if last_non_null {
+        // A newer null in the first field must recover the older value across SSTs.
+        let metadata = region.version().metadata.clone();
+        engine
+            .handle_request(
+                region.region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: vec![
+                            ColumnSchema {
+                                column_name: "__primary_key".into(),
+                                datatype: ColumnDataType::Binary as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "ts".into(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "field_0".into(),
+                                datatype: ColumnDataType::Float64 as i32,
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            },
+                        ],
+                        rows: vec![api::v1::Row {
+                            values: vec![
+                                api::v1::Value {
+                                    value_data: Some(ValueData::BinaryValue(
+                                        new_sparse_primary_key(&["a", "x"], &metadata, 10, 0),
+                                    )),
+                                },
+                                api::v1::Value {
+                                    value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                                },
+                                api::v1::Value { value_data: None },
+                            ],
+                        }],
+                    },
+                    skip_wal: false,
+                    hint: Some(api::v1::WriteHint {
+                        primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+                    }),
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        flush_region(&engine, region.region_id, None).await;
+    }
+    build(&engine, &region).await;
+    let cases = [
+        (col("tag_0").eq(lit("a")), true),
+        (col("tag_0").is_null().or(col("tag_0").eq(lit(""))), true),
+        (
+            col("tag_0").eq(lit("a")).or(col("field_0").gt(lit(0.0))),
+            false,
+        ),
+        (col("field_0").gt(lit(0.0)), true),
+        (
+            col("tag_0").eq(lit("a")).and(col("field_0").gt(lit(0.0))),
+            true,
+        ),
+    ];
+    for (predicate, identity_only) in cases {
+        let mut results = Vec::new();
+        for format in [SelectedFormat::Legacy, SelectedFormat::Columnar] {
+            let mut input = scan_input(
+                &region,
+                region.series_index_store.clone().unwrap(),
+                format,
+                (0..region.version().metadata.column_metadatas.len()).collect(),
+            );
+            if last_non_null {
+                input.merge_mode = crate::region::options::MergeMode::LastNonNull;
+            }
+            input.predicate =
+                PredicateGroup::new(&region.version().metadata, std::slice::from_ref(&predicate))
+                    .unwrap();
+            let scanner = SeriesScan::new(input, false);
+            let binding = labels(scanner.metadata());
+            let chunks = scanner
+                .scan_series_partition(
+                    &QueryScanContext::default(),
+                    &ExecutionPlanMetricsSet::new(),
+                    0,
+                    &binding,
+                )
+                .unwrap()
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            if format == SelectedFormat::Columnar {
+                let prepared = scanner
+                    .prepared
+                    .source
+                    .get()
+                    .expect("columnar source must be prepared");
+                assert_eq!(
+                    identity_only,
+                    prepared.as_ref().unwrap().sample_schema.is_some()
+                );
+            }
+            results.push(rows(&chunks));
+        }
+        assert_eq!(results[0], results[1]);
+    }
     engine.stop().await.unwrap();
 }

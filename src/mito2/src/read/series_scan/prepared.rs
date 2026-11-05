@@ -32,7 +32,7 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::buffer::{Buffer, OffsetBuffer};
 use datatypes::arrow::compute::{cast, filter_record_batch};
-use datatypes::arrow::datatypes::{Schema, UInt32Type};
+use datatypes::arrow::datatypes::{Schema, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::SeriesOrdering;
 use datatypes::value::{Value, ValueRef};
@@ -275,6 +275,7 @@ fn series_read_request(schema: &Schema, predicate: Option<&Predicate>) -> Series
 struct Candidate {
     id: MetricSeriesId,
     key: Buffer,
+    merge_key: Buffer,
     tags: HashMap<u32, Option<String>>,
 }
 
@@ -282,6 +283,7 @@ struct ColumnarPreparedSource {
     context: Arc<StreamContext>,
     labels: RawLabelSource,
     raw: Arc<RawScanPreparation>,
+    sample_schema: Option<SchemaRef>,
     candidates: Arc<Vec<Candidate>>,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
     metrics: PartitionMetrics,
@@ -297,6 +299,9 @@ impl ColumnarPreparedSource {
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
     ) -> Result<Self> {
+        let _prepare_timer = crate::metrics::READ_STAGE_ELAPSED
+            .with_label_values(&["columnar_prepare_wall"])
+            .start_timer();
         let input = &context.input;
         let metadata = input.region_metadata();
         let index = input
@@ -360,7 +365,7 @@ impl ColumnarPreparedSource {
             );
             let mut filters = Vec::new();
             if let Some(predicate) = input.predicate_group().predicate() {
-                for expr in predicate.exprs() {
+                for expr in predicate.exprs().iter().flat_map(split_conjunction) {
                     if expr
                         .column_refs()
                         .iter()
@@ -423,6 +428,7 @@ impl ColumnarPreparedSource {
                     codec
                         .encode_internal(id.table_id, id.tsid, &mut key)
                         .map_err(|e| invalid(e.to_string()))?;
+                    let merge_key_len = key.len();
                     codec
                         .encode_to_vec(
                             tags.iter().map(|(id, _)| {
@@ -452,11 +458,14 @@ impl ColumnarPreparedSource {
                     reservation
                         .try_grow(bytes)
                         .map_err(|e| invalid(e.to_string()))?;
+                    let key = Buffer::from(key);
+                    let merge_key = key.slice_with_length(0, merge_key_len);
                     candidates.insert(
                         id,
                         Candidate {
                             id,
-                            key: Buffer::from(key),
+                            key,
+                            merge_key,
                             tags: values,
                         },
                     );
@@ -465,10 +474,13 @@ impl ColumnarPreparedSource {
         }
         let mut candidates: Vec<_> = candidates.into_values().collect();
         candidates.sort_unstable_by(|a, b| a.key.as_slice().cmp(b.key.as_slice()));
+        let mut raw = raw;
+        let sample_schema = sample_merge_schema(&context, &mut raw)?;
         Ok(Self {
             context,
             labels,
             raw: Arc::new(raw),
+            sample_schema,
             candidates: Arc::new(candidates),
             samples: Arc::new(samples),
             metrics,
@@ -502,6 +514,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
             return Err(BoxedError::new(invalid("series range out of bounds")));
         }
         let context = self.context.clone();
+        let sample_schema = self.sample_schema.clone();
         let candidates = self.candidates.clone();
         let samples = self.samples.clone();
         let metrics = self.metrics.clone();
@@ -519,6 +532,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                 let range = range.clone();
                 let context = context.clone();
                 let reader = reader.clone();
+                let sample_schema = sample_schema.clone();
                 sources.push(Box::pin(async_stream::try_stream! {
                     let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&context.input.scan_memory_pool);
                     // Account for the ID selection retained by the samples reader, including
@@ -526,6 +540,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     let selection_bytes = range.len() * (std::mem::size_of::<MetricSeriesId>() + 64);
                     reservation.try_grow(selection_bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
                     let ids = candidates[range.clone()].iter().map(|c| c.id).collect::<BTreeSet<_>>();
+                    let mut stage_metrics = crate::metrics::ColumnarReadMetrics::default();
                     let mut batches = reader.read(SamplesReadRequest {
                         projection: sample_projection(&reader.schema(), &context),
                         memory_pool: Some(context.input.scan_memory_pool.clone()),
@@ -551,8 +566,10 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                             while end < batch.num_rows() && tables.value(end) == id.table_id && tsids.value(end) == id.tsid {
                                 end += 1;
                             }
-                            let flat = sample_to_flat(batch.slice(offset, end - offset), &candidates[ordinal], &context)?;
+                            let started = std::time::Instant::now();
+                            let flat = sample_to_flat(batch.slice(offset, end - offset), &candidates[ordinal], &context, sample_schema.as_ref())?;
                             let flat = filter_visibility(flat, &context)?;
+                            stage_metrics.add_elapsed("columnar_sample_adapt", started.elapsed());
                             offset = end;
                             if flat.num_rows() == 0 { continue; }
                             let bytes = flat.get_array_memory_size();
@@ -563,14 +580,18 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     }
                 }));
             }
-            let mut merged = SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), false, 1).await?;
+            let mut merged = if let Some(schema) = sample_schema {
+                SeqScan::merge_flat_sources(&context, sources, Some(&metrics), false, schema, 0).await?
+            } else {
+                SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), false, 1).await?
+            };
             while let Some(batch) = merged.try_next().await? {
                 if batch.num_rows() > 0 {
                     yield ScanBatch::RecordBatch(batch);
                 }
             }
         };
-        Ok(raw::make_stream(
+        let stream = raw::make_stream(
             Box::pin(stream),
             self.raw.schema.clone(),
             self.labels.clone(),
@@ -578,16 +599,97 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
             self.metrics.clone(),
             self.raw.predicates.clone(),
             SeriesOrdering::KeyThenTime,
-        ))
+        );
+        if self.sample_schema.is_none() {
+            return Ok(stream);
+        }
+        let candidates = self.candidates.clone();
+        let reservation = self.reservation.clone();
+        Ok(raw::with_primary_keys(stream, move |key| {
+            // The resolver can outlive the exhausted sample stream.
+            let _reservation = &reservation;
+            let ordinal = candidates
+                .binary_search_by(|candidate| candidate.merge_key.as_slice().cmp(key.as_slice()))
+                .map_err(|_| BoxedError::new(invalid("unknown merged series identity")))?;
+            Ok(candidates[ordinal].key.clone())
+        }))
     }
+}
+
+/// Omits tags only when every predicate is enforced either on the series index
+/// or on sample columns. Conjunctions can be separated; mixed disjunctions
+/// retain the ordinary flat adapter.
+fn sample_merge_schema(
+    context: &StreamContext,
+    raw: &mut RawScanPreparation,
+) -> Result<Option<SchemaRef>> {
+    let metadata = context.input.region_metadata();
+    let full = context.input.mapper.input_arrow_schema(false);
+    let projection: Vec<_> = full
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, field)| {
+            let tag = metadata
+                .column_by_name(field.name())
+                .is_some_and(|column| column.semantic_type == SemanticType::Tag);
+            (!tag).then_some(i)
+        })
+        .collect();
+    let schema = Arc::new(full.project(&projection).context(ComputeArrowSnafu)?);
+    let mut predicates = Vec::new();
+    if let Some(predicate) = context.input.predicate_group().predicate() {
+        for expr in predicate.exprs().iter().flat_map(split_conjunction) {
+            let columns = expr.column_refs();
+            if columns.iter().all(|column| {
+                metadata
+                    .column_by_name(&column.name)
+                    .is_some_and(|column| column.semantic_type == SemanticType::Tag)
+            }) {
+                // prepare() applies this complete expression to every series-index batch.
+                continue;
+            }
+            if !columns
+                .iter()
+                .all(|column| schema.index_of(&column.name).is_ok())
+            {
+                return Ok(None);
+            }
+            predicates.push(
+                Predicate::to_physical_expr(expr, &schema).map_err(|e| invalid(e.to_string()))?,
+            );
+        }
+    }
+    let fields = raw
+        .fields
+        .iter()
+        .map(|(index, data_type)| {
+            projection
+                .iter()
+                .position(|old| old == index)
+                .map(|index| (index, data_type.clone()))
+                .ok_or_else(|| invalid("sample merge is missing a selected field"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    raw.fields = fields;
+    raw.predicates = predicates;
+    Ok(Some(schema))
 }
 
 fn sample_to_flat(
     batch: RecordBatch,
     candidate: &Candidate,
     context: &StreamContext,
+    sample_schema: Option<&SchemaRef>,
 ) -> Result<RecordBatch> {
-    let schema = context.input.mapper.input_arrow_schema(false);
+    let schema = sample_schema
+        .cloned()
+        .unwrap_or_else(|| context.input.mapper.input_arrow_schema(false));
+    let key = if sample_schema.is_some() {
+        &candidate.merge_key
+    } else {
+        &candidate.key
+    };
     let metadata = context.input.region_metadata();
     let mut arrays = Vec::<ArrayRef>::new();
     for field in schema.fields() {
@@ -599,13 +701,13 @@ fn sample_to_flat(
                         OffsetBuffer::new(
                             vec![
                                 0,
-                                i32::try_from(candidate.key.len()).map_err(|_| {
+                                i32::try_from(key.len()).map_err(|_| {
                                     invalid("series key exceeds Arrow offset limit")
                                 })?,
                             ]
                             .into(),
                         ),
-                        candidate.key.clone(),
+                        key.clone(),
                         None,
                     )),
                 )
