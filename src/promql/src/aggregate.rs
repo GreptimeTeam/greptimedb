@@ -101,6 +101,33 @@ pub struct FloatAggregator {
     retained: usize,
 }
 
+/// Whether `op` asks only whether a sample is present, so a histogram is a contribution rather
+/// than a payload it would have to fold.
+///
+/// Prometheus counts every present sample for `count`, and answers `1` per non-empty group for
+/// `group`, whatever the sample's type is. Every other aggregate reads the value, and a native
+/// histogram has no float for it to read.
+fn counts_presence(op: AggregateOp) -> bool {
+    matches!(op, AggregateOp::Count | AggregateOp::Group)
+}
+
+/// Checks a series for the aggregate `op` folds, and returns its evaluated axis.
+///
+/// The payload check is per operation: an aggregate that counts presence accepts a histogram,
+/// while one that folds values still refuses it here rather than reading a float that is not
+/// there.
+pub(crate) fn validate_aggregate_series<'a>(
+    schema: &SeriesSchema,
+    series: &'a Series,
+    op: AggregateOp,
+) -> Result<&'a TimeAxis> {
+    if counts_presence(op) {
+        validate_grid_series(schema, series)
+    } else {
+        validate_float_series(schema, series)
+    }
+}
+
 impl FloatAggregator {
     pub fn try_new(
         schema: &Arc<SeriesSchema>,
@@ -166,7 +193,7 @@ impl FloatAggregator {
         series: &Series,
         mut budget: impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
-        validate_float_series(&self.schema, series)?;
+        validate_aggregate_series(&self.schema, series, self.op)?;
         let existing_bytes = self.state_bytes();
         let grouping_workspace = grouping_workspace_bytes(&series.metric);
         let mut workspace_bytes =
@@ -933,8 +960,21 @@ impl Group {
                     )?;
                     block = index / BLOCK_POINTS;
                 }
-                if let SampleRef::Float(sample) = sample {
-                    pending.push((index % BLOCK_POINTS, sample));
+                match sample {
+                    SampleRef::Missing => {}
+                    SampleRef::Float(sample) => pending.push((index % BLOCK_POINTS, sample)),
+                    SampleRef::Histogram(_) => match op {
+                        // `count` and `group` ask whether a sample is present, not which payload
+                        // it carries, so a histogram is one contribution. The value is a
+                        // placeholder: `FloatState` counts the contributions for `count` and only
+                        // records that it saw one for `group`.
+                        AggregateOp::Count | AggregateOp::Group => {
+                            pending.push((index % BLOCK_POINTS, 1.0))
+                        }
+                        // Every other aggregate is validated as float-only before it folds, so a
+                        // histogram reaching one of them is a defect, not a query.
+                        _ => unreachable!("only count and group fold histogram samples"),
+                    },
                 }
             }
             retained = self.update_block(
