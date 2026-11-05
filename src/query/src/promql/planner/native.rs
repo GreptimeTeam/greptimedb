@@ -66,7 +66,6 @@ use promql::native::plan::{
     NativeExpr, NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series,
     uniform_field_kind,
 };
-use promql::range_eval::{RangeWindow, subquery_grid};
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
 use promql_parser::parser::value::ValueType;
@@ -81,8 +80,8 @@ use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
-    InfoInput, compile_selectors_with_grid, compile_statement, compile_statement_with_grid,
-    info_input, statement_grid,
+    InfoInput, compile_selectors_with_grid, compile_statement_with_grid, info_input,
+    statement_grid, subquery_child_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
@@ -522,45 +521,24 @@ impl PromPlanner {
         // The subquery root's inner expression is compiled on the child grid, with the statement
         // left untouched: `@ start()` and `@ end()` inside it resolve against the statement's own
         // bounds, not against the child's. A statement whose grid cannot be built is not one this
-        // route can evaluate, so it keeps the existing plan.
-        let mut explicit_grid = None;
-        let effective_expr = if let Some(subquery) = subquery_root {
+        // route can evaluate, so it keeps the existing plan. The child grid is the compiler's own
+        // derivation, so both halves of the route agree on the step, the range and the anchor.
+        let child_grid = if let Some(subquery) = subquery_root {
             let Ok(outer) = statement_grid(&stmt) else {
                 return Ok(None);
             };
-            let anchor_ms = self.at_ref_time(&subquery.at, &None)?;
-            let offset_ms = subquery
-                .offset
-                .as_ref()
-                .map(|offset| match offset {
-                    promql_parser::parser::Offset::Pos(duration) => duration.as_millis() as i64,
-                    promql_parser::parser::Offset::Neg(duration) => -(duration.as_millis() as i64),
-                })
-                .unwrap_or(0);
-            let window = RangeWindow {
-                range_ms: subquery.range.as_millis() as i64,
-                offset_ms,
-                anchor_ms,
-                modifier: None,
-            };
-            let step_ms = subquery
-                .step
-                .as_ref()
-                .map(|step| step.as_millis() as i64)
-                .unwrap_or(DEFAULT_SUBQUERY_STEP_MS);
-            let spec =
-                subquery_grid(outer.spec(), window, step_ms).context(DataFusionPlanningSnafu)?;
-            let Some(spec) = spec else {
+            let Some(child) =
+                subquery_child_grid(&stmt, &outer, subquery).context(DataFusionPlanningSnafu)?
+            else {
                 return Ok(None);
             };
-            explicit_grid = Some(Arc::new(
-                EvalGrid::try_deferred(spec)
-                    .map_err(|error| DataFusionError::Plan(error.to_string()))
-                    .context(DataFusionPlanningSnafu)?,
-            ));
-            subquery.expr.as_ref()
+            Some(child.grid)
         } else {
-            &stmt.expr
+            None
+        };
+        let effective_expr = match subquery_root {
+            Some(subquery) => subquery.expr.as_ref(),
+            None => &stmt.expr,
         };
         let mut selectors = Vec::new();
         if !collect_selectors(&stmt, effective_expr, &mut selectors) {
@@ -570,16 +548,17 @@ impl PromPlanner {
         // for comes back as `NotImplemented`, which is a decline below. A second list of names here
         // refused expressions the compiler does fold - a call under an aggregate was admitted while
         // the same call on its own was not - so there is one place that decides.
-        let Ok(grid) = statement_grid(&stmt) else {
+        let Ok(statement) = statement_grid(&stmt) else {
             return Ok(None);
         };
+        // The one grid every lowering path below binds: a subquery root is compiled on its child
+        // grid, and the rows it publishes carry that grid, so the split, the boundary and the
+        // segment nodes have to publish on it too rather than on the statement's.
+        let grid = child_grid.unwrap_or(statement);
         if selectors.is_empty() {
             let mut compile_stmt = stmt.clone();
             compile_stmt.expr = effective_expr.clone();
-            let tree = match match &explicit_grid {
-                Some(grid) => compile_statement_with_grid(&compile_stmt, Arc::clone(grid)),
-                None => compile_statement(&compile_stmt),
-            } {
+            let tree = match compile_statement_with_grid(&compile_stmt, Arc::clone(&grid)) {
                 Ok(tree) => tree,
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
@@ -612,14 +591,11 @@ impl PromPlanner {
             // A data-free tree reads no input, so every field it answers is a float.
             let output_schema =
                 fused_output_schema(&values, &output_tags, &time_index, FieldKind::Float)?;
-            let output_schema = fused_output_schema(&values, &output_tags, &time_index)?;
-            // A subquery root is compiled on its child grid, and that is the grid its rows carry.
-            let publish_grid = explicit_grid.clone().unwrap_or_else(|| Arc::clone(&grid));
             let node = FusedSeries::try_new(
                 Arc::from(prom_expr.to_string()),
                 tree,
                 FusedSeriesBinding {
-                    grid: publish_grid,
+                    grid: Arc::clone(&grid),
                     time_index,
                     tags: Vec::new(),
                     metric_name: None,
@@ -991,7 +967,7 @@ impl PromPlanner {
                 Ok(Arc::clone(schema))
             },
             NATIVE_ORDERING,
-            explicit_grid.clone().unwrap_or_else(|| grid.clone()),
+            Arc::clone(&grid),
         ) {
             Ok(v) => v,
             // The compiler refusing a shape is this route declining it.
@@ -1351,7 +1327,7 @@ impl PromPlanner {
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
-                let publish_grid = fused_publish_grid(final_tree.root(), &grid);
+                let publish_grid = Arc::clone(&grid);
                 let node = plan_split_aggregate(
                     Arc::from(prom_expr.to_string()),
                     partial,
@@ -1448,11 +1424,9 @@ impl PromPlanner {
         } else {
             (tags, metric)
         };
-        // A subquery root is compiled on its child grid, which is the grid its rows carry, so the
-        // binding follows that grid rather than the statement's.
-        let publish_grid = explicit_grid
-            .clone()
-            .unwrap_or_else(|| fused_publish_grid(tree.root(), &grid));
+        // Every lowering path above publishes on the same grid the tree was compiled on, so the
+        // binding is that grid rather than a per-shape choice.
+        let publish_grid = Arc::clone(&grid);
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
             tree,
@@ -1960,7 +1934,13 @@ fn cut_segments(node: &NativeNode, canonical_segmentation: bool) -> Segment {
 }
 
 /// The grid one `FusedSeries` publishes on. A root that is a window over an evaluated input - a
-/// subquery - produces on that window's own output grid; every other node is on the statement's.
+/// subquery - produces on that window's own output grid; every other node is on the grid its tree
+/// was compiled on.
+///
+/// Every lowering path in this planner binds the one effective grid (the subquery's child grid for a
+/// matrix root, the statement's grid otherwise), so for a window root this answers that same grid;
+/// it stays because an evaluated-input segment is built from a subtree whose root is the window, and
+/// the builder needs the window's declared output grid rather than the caller's copy.
 fn fused_publish_grid(root: &NativeNode, statement_grid: &Arc<EvalGrid>) -> Arc<EvalGrid> {
     match &root.expr {
         NativeExpr::Window { op, .. } => Arc::clone(&op.output_grid),
@@ -2595,12 +2575,11 @@ async fn segment_tree(
         )
     };
     let (segment_metric, segment_time_index) = segment_binding(&current_source_ids);
-    let publish_grid = fused_publish_grid(parent.root(), grid);
     let Ok(plan) = FusedSeries::try_new_with_format(
         Arc::from(prom_expr.to_string()),
         parent,
         FusedSeriesBinding {
-            grid: publish_grid,
+            grid: Arc::clone(grid),
             time_index: segment_time_index,
             tags: tags.to_vec(),
             metric_name: segment_metric,
@@ -2615,9 +2594,6 @@ async fn segment_tree(
         node: Arc::new(plan),
     })))
 }
-
-/// The step a subquery without one takes, as `subquery_window` in the compiler defaults it.
-const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
 
 /// The moment `millis` milliseconds from the Unix epoch, on whichever side of it that lands.
 ///
