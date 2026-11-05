@@ -2441,8 +2441,13 @@ fn scan_operand(node: &NativeNode) -> bool {
 /// `count_over_time` over a histogram stays eligible.
 fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
     match &node.expr {
+        // An aggregate folds float state, so it is refused unless the kind entering it is
+        // provably a float. "Cannot name it" is not "not a histogram": a canonical merge
+        // (`label_replace` collapsing a label) and a set operation both hand on the samples they
+        // were given without the walk describing them, and reading that silence as float is what
+        // admitted `sum(label_replace(h, ...))` to a native fold over histograms.
         NativeExpr::Aggregate { input, .. } => {
-            input.output_field_kind(input_kind) == Some(FieldKind::Histogram)
+            !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float))
                 || aggregate_reads_histogram(input, input_kind)
         }
         NativeExpr::Input(_)

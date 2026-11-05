@@ -7706,6 +7706,47 @@ async fn native_histogram_plan(query: &str) -> String {
 /// the canonical histogram struct, and the row conversion then refused the floats it was handed.
 /// The kind therefore comes from the uncut root, which is what these two statements pin - both
 /// answer floats, and `on (__name__)` is what makes them segment.
+/// An aggregate is admitted only when the kind entering it is provably a float.
+///
+/// The canonicalization pass inserts a merge under an aggregate when a label rewrite can give two
+/// series one label set, and the kind walk does not describe that node. Reading "cannot name it" as
+/// "not a histogram" admitted `sum(label_replace(h, "tag_0", "x", "tag_0", ".*"))` to a native fold
+/// over histograms, which the runtime then refuses sample by sample. The same silence covers a set
+/// operation, so both stay on the existing plan.
+#[tokio::test]
+async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
+    for query in [
+        "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+        "sum(some_metric or some_metric)",
+        "sum(some_metric and some_metric)",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} ran a native fold over histograms: {}",
+            plan.display_indent_schema()
+        );
+    }
+    // The reverse case: a float the walk can name still splits. What enters this aggregate is a
+    // window's count, not a histogram, and no canonical merge sits between them. (A rewrite stays
+    // conservative: the merge the canonicalization pass inserts is not described by the walk, so
+    // `sum(label_replace(histogram_count(h), ...))` keeps the existing plan along with the shapes
+    // above.)
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "sum(count_over_time(some_metric[5m]))",
+        true,
+        table_provider,
+    )
+    .await;
+    assert!(
+        find_final_split(&plan).is_some(),
+        "the float prefix no longer splits natively: {}",
+        plan.display_indent_schema()
+    );
+}
+
 #[tokio::test]
 async fn a_segmented_parent_answers_the_kind_of_the_uncut_root() {
     for (query, histogram) in [
