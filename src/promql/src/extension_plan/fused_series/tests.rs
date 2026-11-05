@@ -83,7 +83,7 @@ use store_api::storage::RegionId;
 mod frame_output;
 
 use super::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
+    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
     series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
@@ -3826,7 +3826,10 @@ fn a_chunk_of_several_runs_converts_its_own_rows_only() {
     // The columns of `output_schema`, in its order: the field, the two tags, then the time.
     let batch = series_to_record_batch(
         &[
-            OutputColumn::Field(0),
+            OutputColumn::Field {
+                index: 0,
+                kind: FieldKind::Float,
+            },
             OutputColumn::Tag(0),
             OutputColumn::Tag(1),
             OutputColumn::Time,

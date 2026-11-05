@@ -1425,6 +1425,9 @@ async fn build_test_native_histogram_table_provider_with_marker(
     let schema = Arc::new(Schema::new(columns));
     let table_meta = TableMetaBuilder::empty()
         .schema(schema)
+        // A real native-histogram table is served by Mito, which is what the native raw-series
+        // admission checks before offering this route.
+        .engine(MITO_ENGINE.to_string())
         .primary_key_indices((0..tag_count).collect())
         .value_indices(vec![tag_count + 1])
         .next_column_id(1024)
@@ -2995,12 +2998,13 @@ async fn native_fused_engine_without_raw_series_falls_back() {
     );
 }
 
-/// A value field the raw-series readers cannot both serve keeps the existing plan.
+/// A value field the raw-series readers cannot serve keeps the existing plan.
 ///
-/// The region's preflight serves numeric columns and native histograms, while the columnar
-/// series-index samples the scan may be read through store `Float64` fields only, and the logical
-/// plan cannot tell which reader the region prepares. So only `Float64` is admitted; a bare
-/// selector over any other field type answered normally before this route existed.
+/// The route admits two kinds: a `Float64`, which every reader serves, and the canonical native
+/// histogram struct, which the ordinary scan reads while the columnar samples - `Float64` only -
+/// are skipped for that selection. Everything else, including numeric types the columnar samples
+/// do not store, has no raw representation and keeps the existing plan; a bare selector over such
+/// a field answered normally before this route existed.
 #[tokio::test]
 async fn native_fused_unsupported_field_type_falls_back() {
     for field_type in [
@@ -7689,6 +7693,270 @@ async fn native_histogram_plan(query: &str) -> String {
     .await
     .unwrap();
     plan.display_indent_schema().to_string()
+}
+
+/// A native histogram statement runs on the native route: the producer exports the canonical
+/// histogram struct column, not a float column, and the plan names no legacy histogram fold.
+/// A segmented parent is typed by the kind the statement's own root answers.
+///
+/// Segmentation replaces every cut prefix with an input leaf that carries already-evaluated
+/// samples. Re-deriving the parent's kind by walking that rewritten tree reads each leaf as the
+/// kind its scan carried, so a float-producing histogram prefix declares a histogram column while
+/// its values are floats: `count_over_time(h[5m]) + on (__name__) count_over_time(h[5m])` announced
+/// the canonical histogram struct, and the row conversion then refused the floats it was handed.
+/// The kind therefore comes from the uncut root, which is what these two statements pin - both
+/// answer floats, and `on (__name__)` is what makes them segment.
+/// An aggregate is admitted only when the kind entering it is provably a float.
+///
+/// The canonicalization pass inserts a merge under an aggregate when a label rewrite can give two
+/// series one label set, and the kind walk does not describe that node. Reading "cannot name it" as
+/// "not a histogram" admitted `sum(label_replace(h, "tag_0", "x", "tag_0", ".*"))` to a native fold
+/// over histograms, which the runtime then refuses sample by sample. The same silence covers a set
+/// operation, so both stay on the existing plan.
+#[tokio::test]
+async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
+    for query in [
+        "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+        "sum(some_metric or some_metric)",
+        "sum(some_metric and some_metric)",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} ran a native fold over histograms: {}",
+            plan.display_indent_schema()
+        );
+    }
+    // The reverse case: a float the walk can name still splits. What enters this aggregate is a
+    // window's count, not a histogram, and no canonical merge sits between them. (A rewrite stays
+    // conservative: the merge the canonicalization pass inserts is not described by the walk, so
+    // `sum(label_replace(histogram_count(h), ...))` keeps the existing plan along with the shapes
+    // above.)
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "sum(count_over_time(some_metric[5m]))",
+        true,
+        table_provider,
+    )
+    .await;
+    assert!(
+        find_final_split(&plan).is_some(),
+        "the float prefix no longer splits natively: {}",
+        plan.display_indent_schema()
+    );
+}
+
+/// A label rewrite does not make a float answer fall back.
+///
+/// The canonicalization pass wraps a collapsed rewrite in a merge, which the kind walk used to
+/// leave undescribed. "Cannot name it" then read as "possibly a histogram", so
+/// `label_replace(histogram_count(h), ...)` and its aggregated form kept the existing plan even
+/// though both answer floats. The walk now names a merge (it concatenates samples of one field)
+/// and a set operation (its sides agree on the kind), so those statements stay on the route while
+/// a histogram that really does enter an aggregate still keeps the existing plan.
+#[tokio::test]
+async fn a_label_rewrite_keeps_a_float_answer_on_the_route() {
+    for query in [
+        "label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\")",
+        "sum(label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query} left the route instead of answering: {display}"));
+        let field = fused
+            .schema()
+            .field_with_unqualified_name(greptime_native_histogram())
+            .unwrap_or_else(|_| panic!("{query} published no field column: {display}"));
+        assert_eq!(
+            &ArrowDataType::Float64,
+            field.data_type(),
+            "{query} declared a histogram column for a float answer: {display}"
+        );
+    }
+    // A histogram answer standing on a canonical merge is out of this route's reach for now: the
+    // canonical boundary carrying histogram frames is the follow-up's subject. Both orderings
+    // count - the merge at the root, and a merge below a map that answers floats - because a merge
+    // anywhere in the tree is a boundary that would carry histograms.
+    for query in [
+        "label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")",
+        "histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+        "sum(histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} took a histogram answer through the canonical boundary: {}",
+            plan.display_indent_schema()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_segmented_parent_answers_the_kind_of_the_uncut_root() {
+    for (query, histogram) in [
+        (
+            "count_over_time(some_metric[5m]) + on (__name__) count_over_time(some_metric[5m])",
+            false,
+        ),
+        (
+            "histogram_count(some_metric) + on (__name__) histogram_count(some_metric)",
+            false,
+        ),
+        // The same segmentation over a tree that does answer histograms keeps the histogram
+        // column, which is what tells the two derivations apart: a kind forced to `Float` would
+        // pass the two cases above and fail this one.
+        ("some_metric * 2 + on (__name__) some_metric * 2", true),
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| {
+            panic!("{query} left the native route instead of segmenting: {display}")
+        });
+        let field = fused
+            .schema()
+            .field_with_unqualified_name(greptime_native_histogram())
+            .unwrap_or_else(|_| panic!("{query} published no field column: {display}"));
+        let expected = if histogram {
+            native_histogram_value_type().as_arrow_type()
+        } else {
+            ArrowDataType::Float64
+        };
+        assert_eq!(
+            &expected,
+            field.data_type(),
+            "{query} declared the wrong column kind: {display}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_histogram_selector_plans_a_native_producer() {
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider("some_metric", true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    assert!(display.contains("FusedSeries: "), "{display}");
+    assert!(!display.contains("HistogramFold:"), "{display}");
+    let fused = find_fused_series(&plan).expect("the statement plans to a native producer");
+    // The output field column is the canonical native histogram struct.
+    let field = fused
+        .schema()
+        .field_with_unqualified_name(greptime_native_histogram())
+        .expect("the producer reports the histogram field");
+    assert_eq!(
+        &native_histogram_value_type().as_arrow_type(),
+        field.data_type(),
+        "{display}"
+    );
+}
+
+/// A histogram reaching an aggregate keeps the existing plan wherever that aggregate sits.
+///
+/// The gate this pins cannot look at the root alone: `sum(h) * 2` has a binary root, and admitting
+/// it ran the per-partition producer's float-only fold, which every histogram sample fails at
+/// execution. The value entering each aggregate is what decides, so an operator above one does not
+/// hide it.
+#[tokio::test]
+async fn histogram_into_an_aggregate_keeps_the_existing_plan_below_any_operator() {
+    for query in [
+        "sum(some_metric)",
+        "sum(some_metric) * 2",
+        "sum(some_metric) / 2",
+        "-sum(some_metric)",
+        "avg(some_metric) + 1",
+        "sum(sum(some_metric))",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} ran a native fold over histograms: {}",
+            plan.display_indent_schema()
+        );
+    }
+}
+
+/// An aggregate over a float produced from histograms still runs natively.
+///
+/// `count_over_time` answers a count per window, so what the aggregate folds is floats even though
+/// the series it reads are histograms. The gate asks what kind enters each aggregate, so this stays
+/// on the route while `sum(h)` and `sum(rate(h[5m]))` do not.
+#[tokio::test]
+async fn a_float_prefix_over_histograms_aggregates_natively() {
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "sum(count_over_time(some_metric[5m]))",
+        true,
+        table_provider,
+    )
+    .await;
+    // A natively answered aggregate is the split: a partial producer exports state and the final
+    // fused node above the state router folds it, so the plan holds a fused node and no legacy
+    // histogram fold.
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "the statement left the native route: {}",
+        plan.display_indent_schema()
+    );
+}
+
+/// A histogram statement runs natively as soon as no aggregate consumes it.
+///
+/// This is the admission the route gained: the field's own type decides, so a selector, a range
+/// function that answers histograms and scalar arithmetic over them all run here, while an
+/// aggregate that would fold them keeps the existing plan. `rate` is in the histogram-answering
+/// set, so `sum(rate(h[5m]))` is refused by the same rule as `sum(h)`.
+#[tokio::test]
+async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
+    for query in [
+        "some_metric",
+        "rate(some_metric[5m])",
+        "sum_over_time(some_metric[5m])",
+        "some_metric * 2",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "{query} left the native route: {}",
+            plan.display_indent_schema()
+        );
+    }
+    // `rate` answers histograms, so an aggregate over it folds histograms and keeps the existing
+    // plan; the float-answering prefix case is covered by the kind walk, not by this statement.
+    for query in ["sum(some_metric)", "sum(rate(some_metric[5m]))"] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} ran a native fold over histograms: {}",
+            plan.display_indent_schema()
+        );
+    }
+}
+
+/// An instant selection over a native histogram keeps the histogram, so its output column stays the
+/// canonical struct rather than becoming a float.
+#[tokio::test]
+async fn native_histogram_instant_selection_keeps_the_histogram_column() {
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan =
+        build_native_fused_plan_with_provider("some_metric offset 1m", true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan).expect("the statement plans to a native producer");
+    let field = fused
+        .schema()
+        .field_with_unqualified_name(greptime_native_histogram())
+        .expect("the producer reports the histogram field");
+    assert_eq!(
+        &native_histogram_value_type().as_arrow_type(),
+        field.data_type(),
+        "{display}"
+    );
 }
 
 #[tokio::test]

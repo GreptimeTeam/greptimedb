@@ -48,6 +48,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
+use common_query::native_histogram::{
+    NativeHistogram, Span, build_histogram_array, native_histogram_value_type,
+};
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use common_query::series_frame::{
     SendableEvaluatedSeriesStream, SendableStateSeriesStream, ensure_frame_matches_label_source,
     pack_aggregate_state, pack_evaluated_series, series_frame_ordering, unpack_aggregate_state,
@@ -72,10 +76,12 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
+use datatypes::data_type::DataType as _;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, SeriesFrameDeclaration, aggregate_state_frame_schema,
 };
+use datatypes::series::histogram::{BucketSideView, HistogramView};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
@@ -1890,13 +1896,25 @@ fn validate_physical_tree(
     Ok((schemas, source_kinds, root_kind))
 }
 
+/// The sample kind an output field column carries.
+///
+/// A field's samples are floats or native histograms: the raw frame keeps those two payloads apart,
+/// and a field never mixes them. The kind decides the Arrow column the conversion writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldKind {
+    /// One `Float64` cell per row.
+    Float,
+    /// One canonical native histogram `Struct` per row.
+    Histogram,
+}
+
 /// Where one output column of [`FusedSeriesExec`] comes from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OutputColumn {
     /// The evaluation grid timestamps of the current chunk.
     Time,
     /// Series field by index in the bound series schema.
-    Field(usize),
+    Field { index: usize, kind: FieldKind },
     /// Declared logical tag by index in the caller-supplied tag list.
     Tag(usize),
 }
@@ -2006,12 +2024,19 @@ pub(crate) fn classify_output(
                     "duplicate field column {name:?} in FusedSeriesExec output schema"
                 )));
             }
-            if field.data_type() != &DataType::Float64 {
+            // A field holds floats or the canonical native histogram struct; anything else has no
+            // conversion, and the plan that names it is refused here rather than at the first row.
+            let kind = if field.data_type() == &DataType::Float64 {
+                FieldKind::Float
+            } else if field.data_type() == &native_histogram_value_type().as_arrow_type() {
+                FieldKind::Histogram
+            } else {
                 return Err(DataFusionError::Plan(format!(
-                    "field column {name:?} of FusedSeriesExec must be Float64, got {:?}",
+                    "field column {name:?} of FusedSeriesExec must be Float64 or a native \
+                     histogram, got {:?}",
                     field.data_type()
                 )));
-            }
+            };
             // A grid point inside the statement's interval can have no value in this field.
             if !field.is_nullable() {
                 return Err(DataFusionError::Plan(format!(
@@ -2019,7 +2044,7 @@ pub(crate) fn classify_output(
                      point can be missing"
                 )));
             }
-            classification.push(OutputColumn::Field(index));
+            classification.push(OutputColumn::Field { index, kind });
             continue;
         }
         if let Some(index) = tags.iter().position(|tag| tag == name) {
@@ -2700,7 +2725,7 @@ impl ExecutionPlan for FusedSeriesExec {
             evidence: Arc::clone(evidence),
             active: true,
         });
-        let state = match NativeExecutionState::try_new(
+        let mut state = match NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
             evidence.clone(),
@@ -2713,6 +2738,19 @@ impl ExecutionPlan for FusedSeriesExec {
                 return Err(error);
             }
         };
+        // The planner registers the query's collector in the session's `ConfigOptions.extensions`
+        // rather than the separate `SessionConfig` container, so it is read from where it was
+        // written. The HTTP entry point holds a strong reference to that same collector for the life
+        // of the response; a query without one - an internal execution, or a caller that never
+        // asked for annotations - simply records nothing.
+        if let Some(collector) = context
+            .session_config()
+            .options()
+            .extensions
+            .get::<PromqlAnnotationCollector>()
+        {
+            state.set_annotations(Some(collector.clone()));
+        }
         state.register_metrics(&self.metric, partition);
         let mut streams: Vec<futures::stream::BoxStream<'static, Result<FusedFeed, BoxedError>>> =
             Vec::new();
@@ -2930,7 +2968,7 @@ pub(crate) fn series_to_record_batch(
                 timestamps.clone(),
                 None,
             ))),
-            OutputColumn::Field(index) => {
+            OutputColumn::Field { index, kind } => {
                 let samples = series.fields.get(*index).ok_or_else(|| {
                     DataFusionError::Execution(format!(
                         "evaluated series has no field at index {index}"
@@ -2942,7 +2980,7 @@ pub(crate) fn series_to_record_batch(
                         samples.len()
                     )));
                 }
-                columns.push(field_column(samples)?);
+                columns.push(field_column(samples, *kind)?);
             }
             OutputColumn::Tag(index) => {
                 // `__name__` resolves to the metric name, every other tag through the label set.
@@ -2959,17 +2997,25 @@ pub(crate) fn series_to_record_batch(
     Ok(RecordBatch::try_new(output_schema.clone(), columns)?)
 }
 
-/// Converts one evaluated series field into one `Float64` column.
+/// Converts one evaluated series field into the column `kind` names.
 ///
 /// Dense float samples are reused as they are: the array already carries exactly the right nulls
 /// and keeps NaN a value, so copying it through `Samples::iter()` would only cost an allocation
-/// and a re-encode. Chunked samples go through the iterator, and histograms have no float column.
-fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
+/// and a re-encode. Histograms are gathered into the canonical struct column, one payload per row
+/// and null where the grid point has no sample.
+fn field_column(samples: &Samples, kind: FieldKind) -> DataFusionResult<ArrayRef> {
+    match kind {
+        FieldKind::Float => float_column(samples),
+        FieldKind::Histogram => histogram_column(samples),
+    }
+}
+
+fn float_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
     match samples.dense() {
         Some(DenseSamplesRef::Float(values)) => Ok(Arc::new(values.clone())),
         Some(DenseSamplesRef::Histogram(_)) | Some(DenseSamplesRef::Mixed(_)) => {
-            Err(DataFusionError::NotImplemented(
-                "FusedSeriesExec cannot output histogram samples".into(),
+            Err(DataFusionError::Execution(
+                "a Float64 output column cannot carry histogram samples".into(),
             ))
         }
         None => {
@@ -2978,8 +3024,8 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
                 .map(|sample| match sample {
                     SampleRef::Float(value) => Ok(Some(value)),
                     SampleRef::Missing => Ok(None),
-                    SampleRef::Histogram(_) => Err(DataFusionError::NotImplemented(
-                        "FusedSeriesExec cannot output histogram samples".into(),
+                    SampleRef::Histogram(_) => Err(DataFusionError::Execution(
+                        "a Float64 output column cannot carry histogram samples".into(),
                     )),
                 })
                 .collect::<DataFusionResult<Vec<_>>>()?;
@@ -3003,6 +3049,56 @@ enum FusedChunk {
 struct FusedFeed {
     source: usize,
     chunk: FusedChunk,
+}
+
+/// The native histogram column of one evaluated field.
+///
+/// The column is the canonical native-histogram struct - the layout the Prometheus response reads
+/// and the one every classic histogram kernel already emits - built by the same encoder those
+/// kernels use. A row whose grid point has no sample is null.
+fn histogram_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
+    let mut values: Vec<Option<NativeHistogram>> = Vec::with_capacity(samples.len());
+    for sample in samples.iter() {
+        match sample {
+            SampleRef::Histogram(view) => values.push(Some(canonical_histogram(&view))),
+            SampleRef::Missing => values.push(None),
+            SampleRef::Float(_) => {
+                return Err(DataFusionError::Execution(
+                    "a native histogram output column cannot carry float samples".into(),
+                ));
+            }
+        }
+    }
+    Ok(build_histogram_array(&values))
+}
+
+/// One evaluated histogram in the canonical query-time form.
+///
+/// A [`HistogramView`] borrows spans and buckets out of a shared table; the canonical form owns
+/// them, which is what the output column holds.
+fn canonical_histogram(view: &HistogramView<'_>) -> NativeHistogram {
+    let span = |side: &BucketSideView<'_>| {
+        side.span_offsets
+            .iter()
+            .copied()
+            .zip(side.span_lengths.iter().copied())
+            .map(|(offset, length)| Span { offset, length })
+            .collect::<Vec<_>>()
+    };
+    NativeHistogram {
+        schema: view.schema,
+        zero_threshold: view.zero_threshold,
+        sum: view.sum,
+        reset_hint: view.reset_hint,
+        start_timestamp: view.start_timestamp,
+        custom_values: view.custom_values.to_vec(),
+        positive_spans: span(&view.positive),
+        negative_spans: span(&view.negative),
+        count: view.count,
+        zero_count: view.zero_count,
+        positive_buckets: view.positive.buckets.to_vec(),
+        negative_buckets: view.negative.buckets.to_vec(),
+    }
 }
 
 /// The batches one execution of [`FusedSeriesExec`] yields.

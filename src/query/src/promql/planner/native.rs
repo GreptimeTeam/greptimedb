@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
+use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
@@ -49,17 +50,18 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
+use datatypes::data_type::DataType as _;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
+    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
     input_locality, matching_operands_drop_key, tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
     BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series,
+    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series, uniform_field_kind,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
@@ -232,6 +234,7 @@ impl PromPlanner {
         prom_expr: &PromExpr,
         logical_scan_id: &mut Option<u32>,
         logical_ids_differ: &mut bool,
+        statement_kind: &mut Option<FieldKind>,
     ) -> Result<Option<PreparedInput>> {
         let (Some(metric), Some(time)) = (
             self.ctx.table_name.clone(),
@@ -368,16 +371,27 @@ impl PromPlanner {
         if selector_count > 1 && table_meta.partition_column_names().next().is_some() {
             return Ok(None);
         }
-        // The region's columnar series-index samples, one of the readers this scan may be
-        // served by, store `Float64` fields only, and the logical plan cannot tell which
-        // reader arrives. So every field has to be `Float64`: an integer, a `Float32`, a
-        // decimal, a string or a native histogram field keeps the existing plan, which the
-        // physical layer still serves.
-        if !fields.iter().all(|field| {
-            Self::field_column_type(input.schema(), field) == Some(&ArrowDataType::Float64)
-        }) {
+        // This route declares one output column per field, so every field it binds carries
+        // one kind: `Float64`, or the canonical native histogram struct. A field of any
+        // other type - an integer, a `Float32`, a decimal, a string - keeps the existing
+        // plan, and so does a statement whose fields disagree: one column cannot carry two
+        // kinds.
+        //
+        // `Float64` fields are answered by the columnar series-index reader when a region
+        // prepares one. A histogram field is not: the logical plan cannot tell which reader
+        // a region will prepare, so such a selection falls back to the ordinary scan, whose
+        // converter already turns the persisted struct into histogram samples.
+        let Some(field_kind) = uniform_field_kind(
+            fields
+                .iter()
+                .map(|field| Self::field_column_type(input.schema(), field)),
+        ) else {
+            return Ok(None);
+        };
+        if statement_kind.is_some_and(|kind| kind != field_kind) {
             return Ok(None);
         }
+        *statement_kind = Some(field_kind);
         let series_schema = Arc::new(SeriesSchema {
             fields: fields
                 .iter()
@@ -477,7 +491,9 @@ impl PromPlanner {
             } else {
                 DEFAULT_TIME_INDEX_COLUMN.to_string()
             };
-            let output_schema = fused_output_schema(&values, &output_tags, &time_index)?;
+            // A data-free tree reads no input, so every field it answers is a float.
+            let output_schema =
+                fused_output_schema(&values, &output_tags, &time_index, FieldKind::Float)?;
             let node = FusedSeries::try_new(
                 Arc::from(prom_expr.to_string()),
                 tree,
@@ -506,6 +522,9 @@ impl PromPlanner {
             // carried a different id. See the `cross_table` use below.
             let mut logical_scan_id: Option<u32> = None;
             let mut logical_ids_differ = false;
+            // The kind every bound field carries. A statement declares one column per field, so
+            // selectors that disagree have no column to declare and keep the existing plan.
+            let mut statement_kind: Option<FieldKind> = None;
             for selector in &selectors {
                 self.ctx = original_context.clone();
                 // These matchers are alternatives the one scan below the node cannot represent, so the
@@ -619,6 +638,7 @@ impl PromPlanner {
                                 prom_expr,
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
+                                &mut statement_kind,
                             )
                             .await?
                         else {
@@ -715,6 +735,7 @@ impl PromPlanner {
                         prom_expr,
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
+                        &mut statement_kind,
                     )
                     .await?
                 else {
@@ -722,11 +743,18 @@ impl PromPlanner {
                 };
                 prepared.push(one);
             }
-            Ok(Some((prepared, single_input_context, logical_ids_differ)))
+            Ok(Some((
+                prepared,
+                single_input_context,
+                logical_ids_differ,
+                statement_kind,
+            )))
         }
         .await;
         self.ctx = original_context;
-        let Some((mut prepared, single_input_context, logical_ids_differ)) = preparation? else {
+        let Some((mut prepared, single_input_context, logical_ids_differ, statement_kind)) =
+            preparation?
+        else {
             return Ok(None);
         };
         // Selectors over one table share one region, so the node runs there over every scan. When
@@ -983,6 +1011,33 @@ impl PromPlanner {
         if any_partitioned && contains_canonical_merge(root) {
             return Ok(None);
         }
+        // The kind the tree's root answers with, which every output column follows. It is not the
+        // kind the inputs carry: `count_over_time`, `histogram_count` and `timestamp` reduce a
+        // histogram to a float, while a selector, a histogram-answering range function and a label
+        // rewrite pass it on.
+        //
+        // Only a histogram statement can answer a histogram column, so only then does the walk
+        // have to name one; a float statement keeps the float schema it always had, and a shape
+        // whose kind cannot be named keeps the existing plan rather than declaring a column the
+        // first batch might not fill.
+        let root_kind = match statement_kind {
+            Some(FieldKind::Histogram) => {
+                // A histogram answer standing on a canonical merge would run through the canonical
+                // boundary carrying histogram frames, a pairing nothing exercises yet. The
+                // follow-up that teaches the aggregate state to hold histograms owns it, and until
+                // then the statement keeps the existing plan - its answer, not its semantics, is
+                // out of this route's reach. Every merge counts, not only a root one: a merge below
+                // a float-producing map is still a boundary that would carry histograms.
+                if merge_answers_histogram(root, FieldKind::Histogram) {
+                    return Ok(None);
+                }
+                match root.output_field_kind(FieldKind::Histogram) {
+                    Some(root_kind) => root_kind,
+                    None => return Ok(None),
+                }
+            }
+            Some(FieldKind::Float) | None => FieldKind::Float,
+        };
         // The split is only ever a one-child plan: it exports each partition's leaf state and merges
         // them above the region. A tree over two metric logical tables of ONE physical table is not
         // split, because a node whose locality is `SinglePartition` normalizes every input to one
@@ -1003,6 +1058,16 @@ impl PromPlanner {
         // tree multi-input, and the one execution above then reads the Mito input through its own
         // raw source as well.
         let multi_input = selectors.len() > 1 && logical_ids_differ;
+        // The aggregate split folds float state, and the multi-input node reads several scans, so
+        // a histogram keeps the existing plan for both rather than running a tree whose output the
+        // runtime could not finish. The kind entering each aggregate is what decides, not the
+        // shape of the root: `sum(h) * 2` has a binary root and would otherwise hide the aggregate
+        // under it.
+        if let Some(kind @ FieldKind::Histogram) = statement_kind
+            && (multi_input || aggregate_reads_histogram(root, kind))
+        {
+            return Ok(None);
+        }
         // A multi-input tree skips the split below, so the refusals the split makes for reasons that
         // are not about what the runtime computes have to be made here.
         //
@@ -1049,6 +1114,7 @@ impl PromPlanner {
                 &time,
                 &tags,
                 &metric,
+                root_kind,
             )
         {
             return Ok(Some((plan, single_input_context)));
@@ -1073,9 +1139,16 @@ impl PromPlanner {
                 None
             };
             if let Some((partial, final_tree)) = split {
-                // The partial stage may introduce labels before aggregation. The final
-                // tree consumes state, so derive output columns from the complete tree.
-                let Some(output_schema) = Self::fused_root_schema(&tree, &source_tags, &time)
+                // The split's output is the suffix's, and the state it exports is float: the gate
+                // above already declines a histogram entering an aggregate, and this declines a
+                // histogram answer whose aggregate sits elsewhere, because the merge folds float
+                // state. The partial stage may introduce labels before aggregation, so the columns
+                // come from the complete tree rather than from the suffix alone.
+                if root_kind != FieldKind::Float {
+                    return Ok(None);
+                }
+                let Some(output_schema) =
+                    Self::fused_root_schema(&tree, &source_tags, &time, root_kind)
                 else {
                     return Ok(None);
                 };
@@ -1121,6 +1194,7 @@ impl PromPlanner {
                 &segment_metric,
                 FusedOutputFormat::PlainRows,
                 contains_canonical_merge(root),
+                root_kind,
             ))
             .await?;
             if let Some(plan) = plan {
@@ -1160,7 +1234,7 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        let output_schema = fused_output_schema(&root_fields, &output_tags, &time)?;
+        let output_schema = fused_output_schema(&root_fields, &output_tags, &time, root_kind)?;
         // Across tables the region scans are bound by their `RawSeriesSource` children, and this is
         // also the binding a node over more than one input needs: such a node reads frames that
         // already carry their own labels, so it binds neither tags nor one metric name of its own -
@@ -1204,6 +1278,7 @@ impl PromPlanner {
         tree: &NativeTree,
         source_tags: &[Vec<String>],
         time: &str,
+        root_kind: FieldKind,
     ) -> Option<DFSchemaRef> {
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
@@ -1218,7 +1293,12 @@ impl PromPlanner {
         if !columns.clone().all(|name| column_names.insert(name)) {
             return None;
         }
-        fused_output_schema(&root_fields, &output_tags, time).ok()
+        // The kind is the one the statement's own root answers, derived before segmentation cut
+        // anything. It cannot be recomputed here: a cut prefix is replaced by an input leaf whose
+        // samples are already evaluated, so walking this tree would read every such leaf as the
+        // kind its scan carried. `count_over_time(h[5m]) + on (__name__) ...` answers floats, and
+        // its replaced leaf carries floats, while the scan below was a histogram.
+        fused_output_schema(&root_fields, &output_tags, time, root_kind).ok()
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -1360,6 +1440,22 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
     !sources.is_empty()
+}
+
+/// Whether any canonical merge in `node` answers with histogram samples, given the kind its input
+/// carries.
+///
+/// A merge collects the pieces of one label set and hands on the samples it was given, so its answer
+/// kind is its child's. A histogram answer standing on a merge would travel through the canonical
+/// boundary carrying histogram frames, a pairing no execution exercises yet: the planner keeps such
+/// a statement on the existing plan until that pairing is covered, and it has to look at every
+/// merge, not only a root one.
+fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
+    (matches!(node.expr, NativeExpr::Merge { .. })
+        && node.output_field_kind(input_kind) == Some(FieldKind::Histogram))
+        || node_children(&node.expr)
+            .into_iter()
+            .any(|child| merge_answers_histogram(child, input_kind))
 }
 
 /// Whether the merge producer's entire prefix can run on each scan partition independently.
@@ -1600,6 +1696,7 @@ fn canonical_boundary_plan(
     time_index: &str,
     tags: &[String],
     metric: &Option<Arc<str>>,
+    root_kind: FieldKind,
 ) -> Option<LogicalPlan> {
     let (plan, _) = canonical_boundary_stages(
         prom_expr,
@@ -1611,6 +1708,7 @@ fn canonical_boundary_plan(
         tags,
         metric,
         FusedOutputFormat::PlainRows,
+        root_kind,
     )?;
     Some(plan)
 }
@@ -1630,6 +1728,7 @@ fn canonical_boundary_stages(
     tags: &[String],
     metric: &Option<Arc<str>>,
     format: FusedOutputFormat,
+    root_kind: FieldKind,
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let NativeExpr::Merge { input } = &tree.root().expr else {
         return None;
@@ -1647,7 +1746,7 @@ fn canonical_boundary_stages(
         .map(|field| field.name.to_string())
         .collect::<Vec<_>>();
     let output_tags = fused_output_tags(tree.root(), source_tags)?;
-    let output_schema = fused_output_schema(&fields, &output_tags, time_index).ok()?;
+    let output_schema = fused_output_schema(&fields, &output_tags, time_index, root_kind).ok()?;
 
     // The producer: the statement's own tree, run per partition, exporting a frame.
     let producer = FusedSeries::try_new_canonical_producer(
@@ -1737,6 +1836,7 @@ fn build_evaluated_segment(
     per_source: &[(Option<Arc<str>>, String, Vec<String>)],
     grid: &Arc<EvalGrid>,
     time_index: &str,
+    root_kind: FieldKind,
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
@@ -1796,6 +1896,7 @@ fn build_evaluated_segment(
             &[],
             &None,
             FusedOutputFormat::SeriesFrame,
+            root_kind,
         )?;
         return Some((plan, tags));
     }
@@ -1934,6 +2035,7 @@ async fn segment_tree(
     metric: &Option<Arc<str>>,
     format: FusedOutputFormat,
     canonical_segmentation: bool,
+    root_kind: FieldKind,
 ) -> Result<Option<LogicalPlan>> {
     if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
         return Ok(None);
@@ -2003,6 +2105,7 @@ async fn segment_tree(
                     metric,
                     FusedOutputFormat::SeriesFrame,
                     canonical_segmentation,
+                    root_kind,
                 ))
                 .await?;
                 match plan {
@@ -2032,6 +2135,7 @@ async fn segment_tree(
                     per_source,
                     grid,
                     time_index,
+                    root_kind,
                 )
             });
             let Some((plan, cut_tags)) = built else {
@@ -2106,6 +2210,7 @@ async fn segment_tree(
             tags,
             metric,
             format,
+            root_kind,
         )
         .map(|(plan, _)| plan));
     }
@@ -2119,7 +2224,8 @@ async fn segment_tree(
     }
     let output_schema = match format {
         FusedOutputFormat::PlainRows => {
-            let Some(schema) = PromPlanner::fused_root_schema(&parent, &child_tags, time_index)
+            let Some(schema) =
+                PromPlanner::fused_root_schema(&parent, &child_tags, time_index, root_kind)
             else {
                 return Ok(None);
             };
@@ -2201,11 +2307,20 @@ fn native_root_fields(node: &NativeNode) -> Option<Vec<String>> {
 /// `Float64`, because a grid point inside the statement's interval can have no sample; and a tag is
 /// a nullable `Utf8`, because a range function drops the metric name and a series can be missing a
 /// label entirely.
+/// The output schema of a fused node: its time index, one column per field, then its tags.
+///
+/// `field_kind` says what a field column carries. The physical conversion reads the same kind off
+/// this schema and dispatches on it, so the schema and the batch it describes cannot disagree.
 fn fused_output_schema(
     fields: &[String],
     tags: &[String],
     time_index: &str,
+    field_kind: FieldKind,
 ) -> Result<DFSchemaRef> {
+    let field_type = match field_kind {
+        FieldKind::Float => ArrowDataType::Float64,
+        FieldKind::Histogram => native_histogram_value_type().as_arrow_type(),
+    };
     let mut columns = Vec::with_capacity(fields.len() + tags.len() + 1);
     columns.push((
         None,
@@ -2216,10 +2331,7 @@ fn fused_output_schema(
         )),
     ));
     for name in fields {
-        columns.push((
-            None,
-            Arc::new(Field::new(name, ArrowDataType::Float64, true)),
-        ));
+        columns.push((None, Arc::new(Field::new(name, field_type.clone(), true))));
     }
     for name in tags {
         columns.push((None, Arc::new(Field::new(name, ArrowDataType::Utf8, true))));
@@ -2346,6 +2458,52 @@ pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
 
 fn scan_operand(node: &NativeNode) -> bool {
     pointwise_operand(node) || independent_scan_pair(node)
+}
+
+/// Whether any aggregate in `node` consumes histogram samples, wherever it sits in the tree.
+///
+/// The walk asks each aggregate what kind enters it rather than what the tree's root answers,
+/// because an operator above an aggregate hides it: `sum(h) * 2` has a binary root. Only a
+/// histogram entering an aggregate is refused; a float-producing prefix such as
+/// `count_over_time` over a histogram stays eligible.
+fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
+    match &node.expr {
+        // An aggregate folds float state, so it is refused unless the kind entering it is
+        // provably a float. "Cannot name it" is not "not a histogram": a canonical merge
+        // (`label_replace` collapsing a label) and a set operation both hand on the samples they
+        // were given without the walk describing them, and reading that silence as float is what
+        // admitted `sum(label_replace(h, ...))` to a native fold over histograms.
+        NativeExpr::Aggregate { input, .. } => {
+            !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float))
+                || aggregate_reads_histogram(input, input_kind)
+        }
+        NativeExpr::Input(_)
+        | NativeExpr::Scalar(_)
+        | NativeExpr::EvalTime { .. }
+        | NativeExpr::VectorOf { .. } => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Vector { input, .. } => aggregate_reads_histogram(input, input_kind),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            aggregate_reads_histogram(input, input_kind)
+                || parameters
+                    .iter()
+                    .any(|node| aggregate_reads_histogram(node, input_kind))
+        }
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            aggregate_reads_histogram(left, input_kind)
+                || aggregate_reads_histogram(right, input_kind)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            aggregate_reads_histogram(base, input_kind)
+                || aggregate_reads_histogram(info, input_kind)
+        }
+    }
 }
 
 /// Whether every plan is a scan of one table. Filters, projections and bounds are
@@ -2955,8 +3113,8 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        ArrowDataType, ArrowTimeUnit, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY, NativeType,
-        collect_selectors, cut_segments, fused_output_schema, hybrid_binary_admitted,
+        ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
+        NativeType, collect_selectors, cut_segments, fused_output_schema, hybrid_binary_admitted,
         independent_scan_pair, native_output_tags, native_promql_requested, scan_time_filter,
     };
 
@@ -3436,6 +3594,7 @@ mod tests {
             &["v0".to_string(), "v1".to_string()],
             &["zone".to_string(), "host".to_string()],
             "ts",
+            FieldKind::Float,
         )
         .unwrap();
         assert_eq!(

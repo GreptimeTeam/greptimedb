@@ -31,6 +31,7 @@ mod tests;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesLabels;
 use datatypes::series::histogram::HistogramView;
@@ -102,6 +103,15 @@ pub fn evaluate_histograms(
     function: HistogramFunction,
     schema: &Arc<SeriesSchema>,
     series: &[Series],
+) -> Result<Vec<Series>> {
+    evaluate_histograms_with_annotations(function, schema, series, None)
+}
+
+pub(crate) fn evaluate_histograms_with_annotations(
+    function: HistogramFunction,
+    schema: &Arc<SeriesSchema>,
+    series: &[Series],
+    collector: Option<&PromqlAnnotationCollector>,
 ) -> Result<Vec<Series>> {
     // The groups in the order their first member arrived, so the result is in one order on every
     // run, as `merge_same_labelset` keeps it.
@@ -207,7 +217,16 @@ pub fn evaluate_histograms(
                 });
                 // A native histogram and classic buckets of one label set conflict.
                 *value = match (native, classic_buckets.is_empty()) {
-                    (Some(_), false) | (None, true) => None,
+                    (Some(_), false) => {
+                        if let Some(collector) = collector {
+                            collector.record_warning(format!("{}: native histogram and classic buckets both present; dropping both", match function {
+                                HistogramFunction::Quantile(_) => "histogram_quantile",
+                                HistogramFunction::Fraction { .. } => "histogram_fraction",
+                            }));
+                        }
+                        None
+                    }
+                    (None, true) => None,
                     (Some(h), true) => Some(match function {
                         HistogramFunction::Quantile(q) => {
                             native::quantile(q, &h, &mut native_buckets)?

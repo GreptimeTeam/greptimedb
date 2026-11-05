@@ -43,8 +43,9 @@ pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_sp
 #[cfg(feature = "test-utils")]
 pub use fused_series::is_canonical_producer_exec;
 pub use fused_series::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesStream,
-    InputLocality, input_locality, matching_operands_drop_key, tree_source_fields,
+    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec,
+    FusedSeriesStream, InputLocality, input_locality, matching_operands_drop_key,
+    tree_source_fields,
 };
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
