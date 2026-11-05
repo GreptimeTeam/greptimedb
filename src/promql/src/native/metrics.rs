@@ -19,8 +19,8 @@
 //! counters and gauges, not the nodes that recorded them.
 //!
 //! The name carries the node's position in the runtime tree: the whole native tree registers into
-//! the one [`ExecutionPlanMetricsSet`] the enclosing physical operator (`FusedSeriesExec` or
-//! `AggregateFinalizeExec`) owns, and the reader aggregates by name, so two nodes of a kind sharing
+//! the one [`ExecutionPlanMetricsSet`] the enclosing physical operator (`FusedSeriesExec`) owns, and
+//! the reader aggregates by name, so two nodes of a kind sharing
 //! a name would be summed into a single figure. What a consumer can rely on is the grammar
 //! `native.<path>.<metric>` with the suffixes of [`NodeMetric::ALL`]: splitting off the final
 //! component leaves the metric, and the path before it keys the node within that operator. That key

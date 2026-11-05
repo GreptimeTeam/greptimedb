@@ -80,7 +80,7 @@ use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, ListArray, StringArray,
     StructArray, UInt32Array, UInt64Array,
 };
-use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
+use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::compute::{concat, take};
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -88,6 +88,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{InvalidSeriesSnafu, Result};
+use crate::series::aggregate_state::{
+    AggregateStateSchema, AggregateStateValues, StateComponent, StateFieldsBatch, StateSeries,
+};
 use crate::series::histogram::{HistogramBatch, fields as histogram_fields};
 use crate::series::raw::{RawSeriesChunk, RawTimestamps};
 use crate::series::samples::{
@@ -105,12 +108,26 @@ const GRID: &str = "greptime.series.grid";
 const LABEL_DECODE: &str = "greptime.series.label_decode";
 /// Metadata key of the producer ordering carried by a complete frame declaration.
 const ORDERING: &str = "greptime.series.ordering";
+/// Metadata key naming the aggregate whose accumulator a state frame carries.
+const AGGREGATE_KIND: &str = "greptime.series.aggregate.kind";
+/// Metadata key listing the accumulator components a state frame carries, in column order.
+const AGGREGATE_COMPONENTS: &str = "greptime.series.aggregate.components";
 
 /// Every `greptime.series.*` key a frame this revision writes may carry.
 ///
 /// Frame schemas carry an explicit `contiguous` default; streaming producers may replace it with
 /// their stronger guarantee.
-const RESERVED_KEYS: [&str; 7] = [LAYOUT, CONTENT, LABELS, TIME, GRID, LABEL_DECODE, ORDERING];
+const RESERVED_KEYS: [&str; 9] = [
+    LAYOUT,
+    CONTENT,
+    LABELS,
+    TIME,
+    GRID,
+    LABEL_DECODE,
+    ORDERING,
+    AGGREGATE_KIND,
+    AGGREGATE_COMPONENTS,
+];
 
 /// The only layout this revision writes and reads.
 ///
@@ -125,14 +142,24 @@ pub const FRAME_LAYOUT_VERSION: &str = "v2";
 /// reader refuses to guess at, while the layout versions the column and metadata set around it.
 pub const LABEL_DECODE_VERSION: u32 = 1;
 
-/// What one frame's rows hold: raw samples with their own timestamps, or evaluated samples
-/// addressed on the grid the frame declares.
+/// What one frame's rows hold.
+///
+/// The content decides the row layout, the time mode and the payload columns together, so a frame
+/// states it once and every other declaration is derived from it rather than chosen separately.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameContent {
     /// Samples read from storage, each row carrying the timestamps it was read at.
     Raw,
     /// Values computed on an evaluation grid, each row carrying the grid positions it holds.
     Evaluated,
+    /// Partial aggregate accumulator state, addressed on the grid the frame declares.
+    ///
+    /// A state row is not a query value: it names a group and the positions it has contributions
+    /// at, and its payload carries the accumulator components that aggregate declared. It is
+    /// addressed like an evaluated row because a group's state lives at the same grid positions a
+    /// value would, but the two are not interchangeable — a consumer that folds values must refuse
+    /// state, and one that merges state must refuse values.
+    AggregateState,
 }
 
 impl FrameContent {
@@ -141,6 +168,7 @@ impl FrameContent {
         match self {
             Self::Raw => "raw",
             Self::Evaluated => "evaluated",
+            Self::AggregateState => "aggregate_state",
         }
     }
 
@@ -149,6 +177,7 @@ impl FrameContent {
         match text.as_bytes() {
             b"raw" => Some(Self::Raw),
             b"evaluated" => Some(Self::Evaluated),
+            b"aggregate_state" => Some(Self::AggregateState),
             _ => None,
         }
     }
@@ -162,7 +191,7 @@ impl FrameContent {
     const fn time_text(self) -> &'static str {
         match self {
             Self::Raw => "timestamps",
-            Self::Evaluated => "grid_spans",
+            Self::Evaluated | Self::AggregateState => "grid_spans",
         }
     }
 
@@ -170,7 +199,7 @@ impl FrameContent {
     const fn time_member(self) -> &'static str {
         match self {
             Self::Raw => "timestamps",
-            Self::Evaluated => "spans",
+            Self::Evaluated | Self::AggregateState => "spans",
         }
     }
 }
@@ -409,7 +438,7 @@ pub fn series_frame_schema(
             )]
             .into(),
         ),
-        FrameContent::Evaluated => DataType::Struct(
+        FrameContent::Evaluated | FrameContent::AggregateState => DataType::Struct(
             vec![Field::new(
                 "spans",
                 list(
@@ -517,6 +546,57 @@ pub fn series_frame_schema(
     )))
 }
 
+/// Builds an aggregate state frame schema with explicit labels and a declared grid.
+pub fn aggregate_state_frame_schema(
+    state: &AggregateStateSchema,
+    schema: &SeriesSchema,
+    labels: FrameLabelMode,
+) -> Result<SchemaRef> {
+    if schema.eval_grid.is_none() {
+        return invalid_series("an aggregate state frame needs an evaluation grid");
+    }
+    if labels != FrameLabelMode::Explicit {
+        return invalid_series("an aggregate state frame requires explicit labels");
+    }
+    let components: Fields = state
+        .components
+        .iter()
+        .map(|component| {
+            let (ty, nullable) = match component {
+                StateComponent::IncrementalMean => (DataType::Boolean, true),
+                _ => (DataType::Float64, true),
+            };
+            Field::new(component.as_str(), ty, nullable)
+        })
+        .collect();
+    let member = DataType::List(Arc::new(Field::new(
+        "item",
+        DataType::Struct(components),
+        true,
+    )));
+    let fields: Fields = schema
+        .fields
+        .iter()
+        .map(|field| Field::new(field.name.as_ref(), member.clone(), false))
+        .collect();
+    let mut ordinary = series_frame_schema(schema, labels, None)?;
+    let mut metadata = ordinary.metadata().clone();
+    metadata.insert(
+        CONTENT.to_string(),
+        FrameContent::AggregateState.as_str().to_string(),
+    );
+    metadata.insert(
+        TIME.to_string(),
+        FrameContent::AggregateState.time_text().to_string(),
+    );
+    metadata.insert(AGGREGATE_KIND.to_string(), state.kind.as_str().to_string());
+    metadata.insert(AGGREGATE_COMPONENTS.to_string(), state.components_text());
+    let mut columns = ordinary.fields().to_vec();
+    columns[3] = Field::new("fields", DataType::Struct(fields), false).into();
+    ordinary = Arc::new(Schema::new_with_metadata(columns, metadata));
+    Ok(ordinary)
+}
+
 /// Builds the typed schema for a raw frame, refusing a series schema with an evaluation grid.
 ///
 /// A key frame is unreadable without its description, so this constructor serves explicit-label
@@ -561,8 +641,10 @@ fn parse_grid(text: &str) -> Result<Arc<EvalGrid>> {
 #[derive(Clone, Debug)]
 pub struct SeriesFrameDeclaration {
     series: SeriesSchema,
+    content: FrameContent,
     labels: FrameLabelMode,
     label_decode: Option<LabelDecodeSpec>,
+    aggregate_state: Option<crate::series::aggregate_state::AggregateStateSchema>,
 }
 
 fn validate_ordering(schema: &Schema, content: FrameContent) -> Result<()> {
@@ -622,6 +704,40 @@ impl SeriesFrameDeclaration {
                 return Err(err("an evaluated frame must declare its evaluation grid"));
             }
             (FrameContent::Evaluated, Some(text)) => Some(parse_grid(text)?),
+            (FrameContent::AggregateState, None) => {
+                return Err(err(
+                    "an aggregate state frame must declare its evaluation grid",
+                ));
+            }
+            (FrameContent::AggregateState, Some(text)) => Some(parse_grid(text)?),
+        };
+        let has_kind = schema.metadata().contains_key(AGGREGATE_KIND);
+        let has_components = schema.metadata().contains_key(AGGREGATE_COMPONENTS);
+        let aggregate_state = match content {
+            FrameContent::AggregateState => {
+                if !has_kind || !has_components {
+                    return Err(err(
+                        "an aggregate state frame must declare kind and components",
+                    ));
+                }
+                if schema.metadata().contains_key(LABEL_DECODE) {
+                    return Err(err(
+                        "an aggregate state frame cannot carry a label decode description",
+                    ));
+                }
+                Some(AggregateStateSchema::from_text(
+                    schema.metadata()[AGGREGATE_KIND].as_str(),
+                    schema.metadata()[AGGREGATE_COMPONENTS].as_str(),
+                )?)
+            }
+            FrameContent::Raw | FrameContent::Evaluated => {
+                if has_kind || has_components {
+                    return Err(err(
+                        "raw or evaluated frames cannot carry aggregate state metadata",
+                    ));
+                }
+                None
+            }
         };
         let label_decode = match schema.metadata().get(LABEL_DECODE) {
             None => None,
@@ -670,6 +786,8 @@ impl SeriesFrameDeclaration {
             ));
         }
         Ok(Self {
+            content,
+            aggregate_state,
             series: SeriesSchema {
                 fields: members
                     .iter()
@@ -691,10 +809,12 @@ impl SeriesFrameDeclaration {
 
     /// What the frame's rows hold.
     pub fn content(&self) -> FrameContent {
-        match self.series.eval_grid {
-            Some(_) => FrameContent::Evaluated,
-            None => FrameContent::Raw,
-        }
+        self.content
+    }
+
+    /// The validated accumulator kind and component layout, present only on state frames.
+    pub fn aggregate_state(&self) -> Option<&AggregateStateSchema> {
+        self.aggregate_state.as_ref()
     }
 
     /// How the frame names its series.
@@ -734,6 +854,13 @@ impl FrameShape {
             None => FrameContent::Raw,
         };
         Self { content, labels }
+    }
+
+    fn aggregate_state(labels: FrameLabelMode) -> Self {
+        Self {
+            content: FrameContent::AggregateState,
+            labels,
+        }
     }
 }
 
@@ -782,6 +909,28 @@ impl SeriesFrameBuilder {
             schema: schema.clone(),
             frame_schema: series_frame_schema(schema, labels, decode)?,
             shape: FrameShape::of(schema, labels),
+            max_rows,
+            max_bytes: max_bytes.min(i32::MAX as usize),
+            rows: Vec::new(),
+            bytes: 0,
+        })
+    }
+
+    /// Creates a bounded builder for validated aggregate state rows.
+    pub fn try_new_aggregate_state(
+        state: &AggregateStateSchema,
+        schema: &SeriesSchema,
+        labels: FrameLabelMode,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<Self> {
+        if max_rows == 0 || max_bytes == 0 {
+            return invalid_series("series frame limits must be nonzero");
+        }
+        Ok(Self {
+            schema: schema.clone(),
+            frame_schema: aggregate_state_frame_schema(state, schema, labels)?,
+            shape: FrameShape::aggregate_state(labels),
             max_rows,
             max_bytes: max_bytes.min(i32::MAX as usize),
             rows: Vec::new(),
@@ -885,6 +1034,7 @@ enum ChunkWalk {
     Raw(RawWalk),
     /// An evaluated chunk: absolute grid positions, carried as runs.
     Evaluated(EvaluatedWalk),
+    State(StateWalk),
 }
 
 /// The walk state of one raw chunk.
@@ -899,6 +1049,13 @@ struct RawWalk {
     offsets: Vec<usize>,
     /// How many timestamps have been consumed.
     pos: usize,
+}
+
+struct StateWalk {
+    series: StateSeries,
+    is_last: bool,
+    runs: Vec<GridRun>,
+    done: bool,
 }
 
 /// The walk state of one evaluated chunk.
@@ -1000,6 +1157,79 @@ impl SeriesFrameCursor {
         })
     }
 
+    /// Validates and walks one aggregate state chunk.
+    pub fn try_new_aggregate_state(
+        state: &AggregateStateSchema,
+        schema: &SeriesSchema,
+        series: StateSeries,
+        is_last: bool,
+    ) -> Result<Self> {
+        if schema.eval_grid.is_none() {
+            return invalid_series("an aggregate state chunk needs an evaluation grid");
+        }
+        if series.states.len() != schema.fields.len()
+            || series
+                .states
+                .iter()
+                .any(|field| field.len() != series.time.len())
+        {
+            return invalid_series("aggregate state field shape mismatch");
+        }
+        if series.time.grid().map(|grid| grid.spec())
+            != schema.eval_grid.as_ref().map(|grid| grid.spec())
+        {
+            return invalid_series("aggregate state chunk grid does not match schema");
+        }
+        let mut states = series.states;
+        // A position is carried when some field of it was folded, which is what the axis says. When
+        // every position is carried - the shape a fold produces whenever each group has a sample at
+        // each of its points - the axis and the states are already the ones this walk reads, so
+        // nothing is rebuilt. Deciding that first keeps the common case free of a mask, a position
+        // list and a second axis.
+        let every_position_carried = state.kind
+            == crate::series::aggregate_state::AggregateStateKind::Group
+            || (0..series.time.len()).all(|row| states.iter().any(|field| field[row].is_some()));
+        let time = if every_position_carried {
+            series.time
+        } else {
+            let contributing = (0..series.time.len())
+                .map(|row| states.iter().any(|field| field[row].is_some()))
+                .collect::<Vec<_>>();
+            let carried = series
+                .time
+                .positions()
+                .filter_map(|(position, row)| contributing[row].then_some(position))
+                .collect::<Vec<_>>();
+            let spans = positions_to_spans(&carried);
+            for field in &mut states {
+                let mut row = 0;
+                field.retain(|_| {
+                    let keep = contributing[row];
+                    row += 1;
+                    keep
+                });
+            }
+            TimeAxis::from_grid_spans(series.time.grid().expect("validated grid").clone(), spans)?
+        };
+        let runs: Vec<GridRun> = time.runs().collect();
+        let series = StateSeries {
+            metric: series.metric,
+            time,
+            states,
+        };
+        Ok(Self {
+            schema: schema.clone(),
+            shape: FrameShape::aggregate_state(FrameLabelMode::Explicit),
+            walk: ChunkWalk::State(StateWalk {
+                series,
+                is_last,
+                runs,
+                done: false,
+            }),
+            pending: None,
+        })
+    }
+
     /// Appends rows to the builder until one batch is ready or this chunk is exhausted.
     ///
     /// `None` means the cursor is exhausted; calling again returns `None` without touching the
@@ -1040,7 +1270,34 @@ impl SeriesFrameCursor {
         match &mut self.walk {
             ChunkWalk::Raw(walk) => walk.next_row(),
             ChunkWalk::Evaluated(walk) => walk.next_row(available_bytes),
+            ChunkWalk::State(walk) => walk.next_row(),
         }
+    }
+}
+
+impl StateWalk {
+    fn next_row(&mut self) -> Result<Option<FrameRow>> {
+        if self.done {
+            return Ok(None);
+        }
+        self.done = true;
+        let states = std::mem::take(&mut self.series.states);
+        let time = RowTime::Spans(
+            self.runs
+                .iter()
+                .map(|run| GridSpan::new(run.position, run.len))
+                .collect(),
+        );
+        let mut row = FrameRow {
+            key: None,
+            metric: Some(self.series.metric.clone()),
+            is_last: self.is_last,
+            time,
+            payload: RowPayload::States(states),
+            bytes: 0,
+        };
+        row.bytes = measure_row(&row)?;
+        Ok(Some(row))
     }
 }
 
@@ -1081,7 +1338,7 @@ impl RawWalk {
             metric: chunk.metric.clone(),
             is_last: chunk.is_last && *pos + take == chunk.time.len(),
             time: RowTime::Timestamps(time_axis.slice(*pos, take)),
-            samples,
+            payload: RowPayload::Samples(samples),
             bytes: 0,
         };
         row.bytes = measure_row(&row)?;
@@ -1130,7 +1387,7 @@ impl EvaluatedWalk {
                 metric: Some(series.metric.clone()),
                 is_last: *is_last,
                 time: RowTime::Spans(Vec::new()),
-                samples,
+                payload: RowPayload::Samples(samples),
                 bytes: 0,
             };
             row.bytes = measure_row(&row)?;
@@ -1188,7 +1445,7 @@ impl EvaluatedWalk {
                     metric: Some(series.metric.clone()),
                     is_last: *is_last && next_run + 1 == runs.len() && take == remaining,
                     time: RowTime::Spans(vec![GridSpan::new(current.position + next_offset, take)]),
-                    samples: Vec::new(),
+                    payload: RowPayload::Samples(Vec::new()),
                     bytes: 0,
                 };
                 candidate.bytes = add_checked(measure_row(&candidate)?, sample_growth)?;
@@ -1217,12 +1474,16 @@ impl EvaluatedWalk {
             }
         }
         if let Some(row) = &mut row {
-            row.samples = series
-                .fields
-                .iter()
-                .enumerate()
-                .map(|(index, field)| segment(field, segments[index])?.slice(offsets[index], total))
-                .collect::<Result<Vec<_>>>()?;
+            row.payload = RowPayload::Samples(
+                series
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, field)| {
+                        segment(field, segments[index])?.slice(offsets[index], total)
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
         }
         *run = next_run;
         *offset = next_offset;
@@ -1283,8 +1544,13 @@ struct FrameRow {
     is_last: bool,
     /// The positions this row's samples are addressed at.
     time: RowTime,
-    samples: Vec<Samples>,
+    payload: RowPayload,
     bytes: usize,
+}
+
+enum RowPayload {
+    Samples(Vec<Samples>),
+    States(Vec<Vec<Option<AggregateStateValues>>>),
 }
 
 /// How one row addresses the time of its samples.
@@ -1384,6 +1650,16 @@ fn histogram_table_charge(values: &HistogramSamples) -> Result<usize> {
     Ok(bytes)
 }
 
+fn state_charges(fields: &[Vec<Option<AggregateStateValues>>]) -> Result<usize> {
+    fields.iter().try_fold(0usize, |bytes, values| {
+        let mut charge = FIELD_CHARGE;
+        for _ in values.iter().flatten() {
+            charge = add_checked(charge, 8 * 4 + 1)?;
+        }
+        add_checked(bytes, charge)
+    })
+}
+
 fn sample_charges(samples: &[Samples]) -> Result<usize> {
     samples.iter().try_fold(0usize, |bytes, sample| {
         add_checked(bytes, sample_charge(sample)?)
@@ -1419,7 +1695,13 @@ fn measure_row(row: &FrameRow) -> Result<usize> {
             mul_checked(spans.len(), 2)?,
         )?,
     };
-    bytes = add_checked(bytes, sample_charges(&row.samples)?)?;
+    bytes = add_checked(
+        bytes,
+        match &row.payload {
+            RowPayload::Samples(samples) => sample_charges(samples)?,
+            RowPayload::States(fields) => state_charges(fields)?,
+        },
+    )?;
     if let Some(metric) = &row.metric {
         if let Some(name) = metric.name() {
             checked_offset(name.len())?;
@@ -1522,7 +1804,7 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
             let times = list_array(&time_lengths, time_child, time_item.as_ref().clone(), None)?;
             struct_array(time_fields.clone(), vec![Arc::new(times)])?
         }
-        FrameContent::Evaluated => {
+        FrameContent::Evaluated | FrameContent::AggregateState => {
             let DataType::Struct(span_fields) = time_item.data_type() else {
                 return invalid_series("grid span schema mismatch");
             };
@@ -1572,6 +1854,130 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
         }
     };
 
+    if shape.content == FrameContent::AggregateState {
+        // A state frame's per-field list carries one item per grid position the row holds, and an
+        // item is absent exactly where that field has no contribution at that position. The
+        // absence lives on the item — the child struct's validity — not on the list's own
+        // validity, which is per row: a row always has a list, with zero or more items in it.
+        let mut field_arrays: Vec<ArrayRef> = Vec::with_capacity(field_types.len());
+        for (index, field) in field_types.iter().enumerate() {
+            let mut lengths = Vec::with_capacity(count);
+            let mut positions = 0usize;
+            for row in rows {
+                let RowPayload::States(fields) = &row.payload else {
+                    return invalid_series("state frame row carries sample payload");
+                };
+                let values = fields
+                    .get(index)
+                    .ok_or_else(|| err("state field count mismatch"))?;
+                if values.len() != row.time.len()? {
+                    return invalid_series("state list length mismatch");
+                }
+                lengths.push(values.len());
+                positions = add_checked(positions, values.len())?;
+            }
+
+            let item = match field.data_type() {
+                DataType::List(item) => item,
+                _ => return invalid_series("state field schema mismatch"),
+            };
+            let DataType::Struct(components) = item.data_type() else {
+                return invalid_series("state list item is not a component struct");
+            };
+            // Absence lives on the item, so the child struct's validity is one flag per position.
+            // A row of a state frame always carries states; a caller that hands in the wrong payload
+            // is refused here rather than panicking inside an iterator.
+            let mut present = Vec::with_capacity(positions);
+            for row in rows {
+                let RowPayload::States(fields) = &row.payload else {
+                    return invalid_series("state frame row carries sample payload");
+                };
+                present.extend(fields[index].iter().map(Option::is_some));
+            }
+            debug_assert_eq!(present.len(), positions);
+
+            // Every component of a field is absent at exactly the same positions - the field's own -
+            // so they share the one mask, which the child struct already needs.
+            let nulls = present
+                .iter()
+                .any(|present| !present)
+                .then(|| NullBuffer::from(present.clone()));
+            let arrays: Vec<ArrayRef> = components
+                .iter()
+                .map(|component| {
+                    let component_name = component.name();
+                    let array: ArrayRef = match component_name.as_str() {
+                        "value" | "mean" | "compensation" | "count" => {
+                            let mut floats = Vec::with_capacity(positions);
+                            for row in rows {
+                                let RowPayload::States(fields) = &row.payload else {
+                                    return invalid_series(
+                                        "state frame row carries sample payload",
+                                    );
+                                };
+                                for value in &fields[index] {
+                                    // A missing position's value is unreadable, so it holds the same
+                                    // zero a null slot has always held here.
+                                    floats.push(value.map_or(0.0, |state| {
+                                        match component_name.as_str() {
+                                            "value" => state.value,
+                                            "mean" => state.mean,
+                                            "compensation" => state.compensation,
+                                            "count" => state.count,
+                                            _ => unreachable!(),
+                                        }
+                                    }));
+                                }
+                            }
+                            Arc::new(Float64Array::new(ScalarBuffer::from(floats), nulls.clone()))
+                        }
+                        "incremental_mean" => {
+                            let mut booleans = Vec::with_capacity(positions);
+                            for row in rows {
+                                let RowPayload::States(fields) = &row.payload else {
+                                    return invalid_series(
+                                        "state frame row carries sample payload",
+                                    );
+                                };
+                                booleans.extend(fields[index].iter().map(|value| {
+                                    value.is_some_and(|state| state.incremental_mean)
+                                }));
+                            }
+                            Arc::new(BooleanArray::new(
+                                BooleanBuffer::from(booleans),
+                                nulls.clone(),
+                            ))
+                        }
+                        _ => return invalid_series("unknown state component"),
+                    };
+                    Ok(array)
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let child = if components.is_empty() {
+                Arc::new(StructArray::new_empty_fields(
+                    positions,
+                    Some(NullBuffer::from(present)),
+                )) as ArrayRef
+            } else {
+                Arc::new(
+                    StructArray::try_new(
+                        components.clone(),
+                        arrays,
+                        Some(NullBuffer::from(present)),
+                    )
+                    .map_err(|error| err(error.to_string()))?,
+                ) as ArrayRef
+            };
+            // The list itself is valid for every row: absence is an absent item, never an absent
+            // list, so a reader can tell "this field holds nothing here" from "this row has no
+            // list at all".
+            let list = list_array(&lengths, child, item.as_ref().clone(), None)?;
+            field_arrays.push(Arc::new(list) as ArrayRef);
+        }
+        let fields = struct_array(field_types.clone(), field_arrays)?;
+        return assemble_frame_batch(schema, shape, rows, time, fields);
+    }
     let mut empty_table: Option<ArrayRef> = None;
     let mut field_arrays = Vec::with_capacity(field_types.len());
     for (index, field) in field_types.iter().enumerate() {
@@ -1602,12 +2008,13 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
         let mut table_parts: Vec<ArrayRef> = Vec::new();
         let mut histogram_valid = Vec::with_capacity(count);
         for row in rows {
-            let dense = row
-                .samples
-                .get(index)
-                .ok_or_else(|| err("raw frame row field count mismatch"))?
-                .dense()
-                .ok_or_else(|| err("sample segment is not dense"))?;
+            let dense = match &row.payload {
+                RowPayload::Samples(samples) => samples.get(index),
+                _ => return invalid_series("sample frame row carries state payload"),
+            }
+            .ok_or_else(|| err("raw frame row field count mismatch"))?
+            .dense()
+            .ok_or_else(|| err("sample segment is not dense"))?;
             match dense {
                 DenseSamplesRef::Float(values) => {
                     float_lengths.push(values.len());
@@ -1689,7 +2096,23 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
         )?) as ArrayRef);
     }
     let fields = struct_array(field_types.clone(), field_arrays)?;
+    assemble_frame_batch(schema, shape, rows, time, fields)
+}
 
+/// Builds the batch from the parts every content shares: the key, finality, time and field
+/// columns, plus the labels an explicit frame carries.
+///
+/// Keeping the assembly in one place is what makes a state row and an evaluated row leave the
+/// encoder under the same column order and the same options; only how their field columns were
+/// built differs, and that is decided before this call.
+fn assemble_frame_batch(
+    schema: &SchemaRef,
+    shape: FrameShape,
+    rows: &[FrameRow],
+    time: StructArray,
+    fields: StructArray,
+) -> Result<RecordBatch> {
+    let count = rows.len();
     let mut columns: Vec<ArrayRef> = vec![
         Arc::new(binary_array(rows, shape)?),
         Arc::new(BooleanArray::from(
@@ -1805,6 +2228,20 @@ const HISTOGRAM_TABLE_CHARGE: usize = 28;
 /// Item widths of histogram table list columns `7..=13`, in that order.
 const HISTOGRAM_LIST_WIDTHS: [usize; 7] = [8, 4, 4, 8, 4, 4, 8];
 
+fn positions_to_spans(positions: &[usize]) -> Vec<GridSpan> {
+    let mut spans: Vec<GridSpan> = Vec::new();
+    for position in positions {
+        if let Some(last) = spans.last_mut()
+            && last.start() + last.len() == *position
+        {
+            *last = GridSpan::new(last.start(), last.len() + 1);
+            continue;
+        }
+        spans.push(GridSpan::new(*position, 1));
+    }
+    spans
+}
+
 fn list_array(
     lengths: &[usize],
     values: ArrayRef,
@@ -1876,6 +2313,111 @@ fn mul_checked(len: usize, width: usize) -> Result<usize> {
         .ok_or_else(|| err("raw series frame offset overflow"))
 }
 
+/// One decoded state row retaining Arrow handles for its per-field state columns.
+///
+/// The arrays remain columnar so consumers can read typed components in place rather than building
+/// a nested accumulator tree. Null list items remain field-local absence, not numeric zero.
+pub struct StateFrameRow {
+    metric: SeriesLabels,
+    time: TimeAxis,
+    is_last: bool,
+    fields: StructArray,
+    state: AggregateStateSchema,
+}
+
+impl StateFrameRow {
+    /// Complete group identity for this row.
+    pub fn metric(&self) -> &SeriesLabels {
+        &self.metric
+    }
+    /// Grid positions carried by this row.
+    pub fn time(&self) -> &TimeAxis {
+        &self.time
+    }
+    /// Whether this row closes its producer-local chunk chain.
+    pub fn is_last(&self) -> bool {
+        self.is_last
+    }
+    /// Columnar state arrays validated against the declared aggregate layout.
+    pub fn fields(&self) -> Result<StateFieldsBatch> {
+        StateFieldsBatch::try_from_arrow(self.fields.clone(), &self.state)
+    }
+
+    /// The export-side form of this row: one group, its carried positions, and its per-field state.
+    ///
+    /// This is the dual of `decode_aggregate_state`: it reads the row's columnar arrays back into the
+    /// form a producer hands to `pack_aggregate_state`. Absence stays per field — a null item is
+    /// `None` for that field at that position, never a zero and never promoted to a sibling field.
+    pub fn to_state_series(&self) -> Result<StateSeries> {
+        let fields = self.fields()?;
+        let mut states = Vec::with_capacity(fields.len());
+        for field in 0..fields.len() {
+            let mut values = Vec::with_capacity(self.time.len());
+            for position in 0..self.time.len() {
+                if !fields.is_present(field, position)? {
+                    values.push(None);
+                    continue;
+                }
+                let mut value = AggregateStateValues::default();
+                for &component in fields.components() {
+                    match component {
+                        StateComponent::Value => {
+                            value.value = state_float(&fields, field, component, position)?
+                        }
+                        StateComponent::Mean => {
+                            value.mean = state_float(&fields, field, component, position)?
+                        }
+                        StateComponent::Compensation => {
+                            value.compensation = state_float(&fields, field, component, position)?
+                        }
+                        StateComponent::Count => {
+                            value.count = state_float(&fields, field, component, position)?
+                        }
+                        StateComponent::IncrementalMean => {
+                            value.incremental_mean = fields
+                                .field_bool_values(field, component)?
+                                .and_then(|array| {
+                                    (!array.is_null(position)).then(|| array.value(position))
+                                })
+                                .ok_or_else(|| {
+                                    InvalidSeriesSnafu {
+                                        reason: "present aggregate state has a missing component"
+                                            .to_string(),
+                                    }
+                                    .build()
+                                })?;
+                        }
+                    }
+                }
+                values.push(Some(value));
+            }
+            states.push(values);
+        }
+        Ok(StateSeries {
+            metric: self.metric.clone(),
+            time: self.time.clone(),
+            states,
+        })
+    }
+}
+
+fn state_float(
+    fields: &StateFieldsBatch,
+    field: usize,
+    component: StateComponent,
+    position: usize,
+) -> Result<f64> {
+    fields
+        .field_values(field, component)?
+        .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+        .ok_or_else(|| {
+            InvalidSeriesSnafu {
+                reason: "present aggregate state has a missing component".to_string(),
+            }
+            .build()
+        })
+}
+
 /// Reuses one prepared frame schema while decoding all batches of a stream.
 ///
 /// The decoder is built from the schema a consumer expects and then checks every batch against it:
@@ -1886,6 +2428,7 @@ pub struct SeriesFrameDecoder {
     schema: SeriesSchema,
     shape: FrameShape,
     expected: SchemaRef,
+    aggregate_state: Option<AggregateStateSchema>,
 }
 
 impl SeriesFrameDecoder {
@@ -1895,11 +2438,175 @@ impl SeriesFrameDecoder {
         labels: FrameLabelMode,
         decode: Option<&LabelDecodeSpec>,
     ) -> Result<Self> {
+        let shape = FrameShape::of(schema, labels);
         Ok(Self {
             schema: schema.clone(),
-            shape: FrameShape::of(schema, labels),
+            shape,
             expected: series_frame_schema(schema, labels, decode)?,
+            aggregate_state: None,
         })
+    }
+
+    /// Builds a decoder for the declared aggregate state and its grid-addressed series fields.
+    pub fn try_new_aggregate_state(
+        state: &AggregateStateSchema,
+        schema: &SeriesSchema,
+        labels: FrameLabelMode,
+    ) -> Result<Self> {
+        if schema.eval_grid.is_none() {
+            return invalid_series("an aggregate state decoder requires an evaluation grid");
+        }
+        Ok(Self {
+            schema: schema.clone(),
+            shape: FrameShape::aggregate_state(labels),
+            expected: aggregate_state_frame_schema(state, schema, labels)?,
+            aggregate_state: Some(state.clone()),
+        })
+    }
+
+    /// Reads only the explicit labels of each aggregate-state row.
+    ///
+    /// This validates the declared frame schema and label columns without inspecting time or state.
+    pub fn decode_aggregate_state_labels(&self, batch: &RecordBatch) -> Result<Vec<SeriesLabels>> {
+        if self.shape.labels != FrameLabelMode::Explicit {
+            return invalid_series("aggregate state routing requires explicit labels");
+        }
+        let cols = batch.columns();
+        let names = down::<StringArray>(&cols[4], "name")?;
+        let labels = down::<ListArray>(&cols[5], "labels")?;
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            if labels.is_null(row) {
+                return invalid_series("null required aggregate state label");
+            }
+            let values = labels.value(row);
+            let label_struct = down::<StructArray>(&values, "labels")?;
+            if label_struct.null_count() != 0 {
+                return invalid_series("null label struct element");
+            }
+            let label_names = down::<StringArray>(label_struct.column(0), "label names")?;
+            let label_values = down::<StringArray>(label_struct.column(1), "label values")?;
+            if label_names.null_count() != 0 || label_values.null_count() != 0 {
+                return invalid_series("null label element");
+            }
+            let tags = (0..label_names.len())
+                .map(|i| Label {
+                    name: Arc::from(label_names.value(i)),
+                    value: Arc::from(label_values.value(i)),
+                })
+                .collect();
+            // An aggregation drops the metric name, and the frame says so by leaving it null. That
+            // is an identity with no name, not a malformed row.
+            let name = (!names.is_null(row)).then(|| Arc::from(names.value(row)));
+            rows.push(SeriesLabels::try_new(name, tags)?);
+        }
+        Ok(rows)
+    }
+
+    /// Decodes one aggregate-state row without materializing its accumulator values.
+    pub fn decode_aggregate_state(&self, batch: &RecordBatch) -> Result<Vec<StateFrameRow>> {
+        let state = self
+            .aggregate_state
+            .as_ref()
+            .ok_or_else(|| err("decoder has no aggregate state declaration"))?;
+        if batch.schema().as_ref() != self.expected.as_ref() {
+            return invalid_series("aggregate state frame schema mismatch");
+        }
+        validate_ordering(batch.schema().as_ref(), FrameContent::AggregateState)?;
+        let cols = batch.columns();
+        let lasts = down::<BooleanArray>(&cols[1], "is_last")?;
+        let time = down::<StructArray>(&cols[2], "time")?;
+        let fields = down::<StructArray>(&cols[3], "fields")?;
+        let names = down::<StringArray>(&cols[4], "name")?;
+        let labels = down::<ListArray>(&cols[5], "labels")?;
+        let grid = self
+            .schema
+            .eval_grid
+            .clone()
+            .ok_or_else(|| err("an aggregate state frame needs an evaluation grid"))?;
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            if lasts.is_null(row) || time.is_null(row) || fields.is_null(row) || labels.is_null(row)
+            {
+                return invalid_series("null required aggregate state parent");
+            }
+            let spans_array = down::<ListArray>(time.column(0), "spans")?;
+            if spans_array.is_null(row) {
+                return invalid_series("null aggregate state spans");
+            }
+            let spans_values = spans_array.value(row);
+            let spans_struct = down::<StructArray>(&spans_values, "spans")?;
+            if spans_struct.null_count() != 0 {
+                return invalid_series("null aggregate state span");
+            }
+            let starts = down::<UInt64Array>(spans_struct.column(0), "span starts")?;
+            let lengths = down::<UInt64Array>(spans_struct.column(1), "span lengths")?;
+            let mut spans = Vec::with_capacity(starts.len());
+            for index in 0..starts.len() {
+                let start = usize::try_from(starts.value(index))
+                    .map_err(|_| err("grid span start exceeds the supported range"))?;
+                let len = usize::try_from(lengths.value(index))
+                    .map_err(|_| err("grid span length exceeds the supported range"))?;
+                if len == 0 {
+                    return invalid_series("grid spans must not be empty");
+                }
+                spans.push(GridSpan::new(start, len));
+            }
+            let axis = TimeAxis::from_grid_spans(grid.clone(), spans)?;
+            let label_values = labels.value(row);
+            let label_struct = down::<StructArray>(&label_values, "labels")?;
+            if label_struct.null_count() != 0 {
+                return invalid_series("null label struct element");
+            }
+            let label_names = down::<StringArray>(label_struct.column(0), "label names")?;
+            let label_values = down::<StringArray>(label_struct.column(1), "label values")?;
+            if label_names.null_count() != 0 || label_values.null_count() != 0 {
+                return invalid_series("null label element");
+            }
+            let tags = (0..label_names.len())
+                .map(|i| Label {
+                    name: Arc::from(label_names.value(i)),
+                    value: Arc::from(label_values.value(i)),
+                })
+                .collect();
+            let metric = SeriesLabels::try_new(
+                (!names.is_null(row)).then(|| Arc::from(names.value(row))),
+                tags,
+            )?;
+            let row_fields = fields.slice(row, 1);
+            let validated = StateFieldsBatch::try_from_arrow(row_fields.clone(), state)?;
+            if validated.len() != self.schema.fields.len() {
+                return invalid_series("aggregate state field count mismatch");
+            }
+            for field in 0..validated.len() {
+                let items = validated
+                    .field(field)
+                    .ok_or_else(|| err("null state field list"))?;
+                if items.len() != axis.len() {
+                    return invalid_series("state list length does not match carried positions");
+                }
+                if state.kind != crate::series::aggregate_state::AggregateStateKind::Group {
+                    for component in 0..state.components.len() {
+                        let values = items.column(component);
+                        for position in 0..items.len() {
+                            if !items.is_null(position) && values.is_null(position) {
+                                return invalid_series(
+                                    "present state item has a missing component",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            rows.push(StateFrameRow {
+                metric,
+                time: axis,
+                is_last: lasts.value(row),
+                fields: row_fields,
+                state: state.clone(),
+            });
+        }
+        Ok(rows)
     }
 
     /// Decodes all rows of one batch as raw chunks.
@@ -1917,7 +2624,10 @@ impl SeriesFrameDecoder {
                 .key
                 .ok_or_else(|| err("a raw frame row carries no key"))?;
             let time = RawTimestamps::try_new(timestamps)?;
-            let fields = SeriesFields::try_from_vec(row.samples)?;
+            let RowPayload::Samples(samples) = row.payload else {
+                return invalid_series("raw frame row carries state payload");
+            };
+            let fields = SeriesFields::try_from_vec(samples)?;
             out.push(RawSeriesChunk::try_new(
                 &self.schema,
                 key,
@@ -1964,7 +2674,10 @@ impl SeriesFrameDecoder {
                     "an evaluated chunk without positions must close its series",
                 );
             }
-            let fields = SeriesFields::try_from_vec(row.samples)?;
+            let RowPayload::Samples(samples) = row.payload else {
+                return invalid_series("evaluated frame row carries state payload");
+            };
+            let fields = SeriesFields::try_from_vec(samples)?;
             out.push((
                 Series::try_new(&self.schema, metric, time, fields)?,
                 row.is_last,
@@ -2041,7 +2754,7 @@ impl SeriesFrameDecoder {
                     }
                     RowTime::Timestamps(tv.values().clone())
                 }
-                FrameContent::Evaluated => {
+                FrameContent::Evaluated | FrameContent::AggregateState => {
                     let typed = down::<ListArray>(time_struct.column(0), "spans")?;
                     if typed.is_null(row) {
                         return invalid_series("null required evaluated frame parent");
@@ -2154,7 +2867,7 @@ impl SeriesFrameDecoder {
                 metric,
                 is_last: lasts.value(row),
                 time,
-                samples: decoded,
+                payload: RowPayload::Samples(decoded),
                 bytes: 0,
             });
         }
@@ -2206,4 +2919,126 @@ fn err(reason: impl Into<String>) -> crate::error::Error {
 
 fn arrow<T>(result: std::result::Result<T, arrow::error::ArrowError>) -> Result<T> {
     result.map_err(|e| err(e.to_string()))
+}
+
+#[cfg(test)]
+mod aggregate_state_contribution_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::series::aggregate_state::{
+        AggregateStateKind as Kind, AggregateStateValues as Values, StateComponent as Component,
+    };
+    use crate::series::samples::FieldSpec;
+
+    fn schema(len: usize) -> SeriesSchema {
+        SeriesSchema {
+            fields: ["a", "b"]
+                .into_iter()
+                .map(|name| FieldSpec {
+                    name: Arc::from(name),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            eval_grid: Some(Arc::new(
+                EvalGrid::try_new(GridSpec::try_new(0, 1, len as u64).unwrap()).unwrap(),
+            )),
+        }
+    }
+
+    fn cursor(
+        kind: Kind,
+        schema: &SeriesSchema,
+        spans: Vec<GridSpan>,
+        states: Vec<Vec<Option<Values>>>,
+    ) -> SeriesFrameCursor {
+        let components = match kind {
+            Kind::Group => vec![],
+            _ => vec![Component::Value, Component::Compensation],
+        };
+        let state = AggregateStateSchema::try_new(kind, components).unwrap();
+        SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            schema,
+            StateSeries {
+                metric: SeriesLabels::try_new(None, vec![]).unwrap(),
+                time: TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap(),
+                states,
+            },
+            true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sparse_rows_are_filtered_and_group_keeps_all_rows() {
+        let schema = schema(12);
+        let sparse = cursor(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 5), GridSpan::new(7, 4)],
+            vec![
+                vec![
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                vec![
+                    None,
+                    None,
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                    Some(Values::default()),
+                    None,
+                    None,
+                ],
+            ],
+        );
+        let ChunkWalk::State(walk) = sparse.walk else {
+            panic!("expected state walk")
+        };
+        assert_eq!(
+            walk.series.time.positions().collect::<Vec<_>>(),
+            vec![(1, 0), (3, 1), (4, 2), (8, 3)]
+        );
+        assert_eq!(
+            walk.series
+                .time
+                .runs()
+                .map(|run| (run.position, run.len))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (3, 2), (8, 1)]
+        );
+        assert_eq!(
+            walk.series.states[0],
+            vec![Some(Values::default()), None, Some(Values::default()), None]
+        );
+        assert_eq!(
+            walk.series.states[1],
+            vec![None, Some(Values::default()), None, Some(Values::default())]
+        );
+
+        let group = cursor(
+            Kind::Group,
+            &schema,
+            vec![GridSpan::new(2, 3), GridSpan::new(8, 2)],
+            vec![vec![None; 5], vec![None; 5]],
+        );
+        let ChunkWalk::State(walk) = group.walk else {
+            panic!("expected state walk")
+        };
+        assert_eq!(
+            walk.series.time.positions().collect::<Vec<_>>(),
+            vec![(2, 0), (3, 1), (4, 2), (8, 3), (9, 4)]
+        );
+        assert_eq!(walk.series.states, vec![vec![None; 5], vec![None; 5]]);
+    }
 }

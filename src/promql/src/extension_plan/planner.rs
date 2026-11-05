@@ -29,9 +29,8 @@ use store_api::region_engine::RawLabelSource;
 use table::table::scan::{RegionScanExec, SeriesScanExec};
 
 use crate::extension_plan::{
-    Absent, AggregateFinalize, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate,
-    RangeManipulate, RawSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize,
-    UnionDistinctOn,
+    Absent, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate, RangeManipulate,
+    RawSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 
 pub struct PromExtensionPlanner;
@@ -85,13 +84,6 @@ impl ExtensionPlanner for PromExtensionPlanner {
                 session.config_options().execution.target_partitions,
             )
             .map(Some)
-        } else if let Some(node) = node.as_any().downcast_ref::<AggregateFinalize>() {
-            // The merge runs where every partition's state arrives, so its own input is the plan
-            // that exports them.
-            let Some(input) = physical_inputs.first() else {
-                return Ok(None);
-            };
-            Ok(Some(node.to_execution_plan(Arc::clone(input))?))
         } else {
             Ok(None)
         }
