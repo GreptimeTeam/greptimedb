@@ -811,6 +811,8 @@ async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
     assert_eq!(2, manager.checkpointer().last_checkpoint_version());
 }
 
+/// Retention runs inside the checkpoint task, so waiting for task completion also
+/// makes logical size accounting observable to the assertions below.
 async fn wait_for_manifest_checkpoint(manager: &RegionManifestManager) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while manager.checkpointer().is_doing_checkpoint() {

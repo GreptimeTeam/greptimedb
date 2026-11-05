@@ -133,7 +133,9 @@ impl SizeTracker {
 
     fn record(&self, key: FileKey, size: u64) {
         let mut inventory = self.inventory.write().unwrap();
-        // A read started before checkpoint publication must not resurrect old entries.
+        // Manifest versions are monotonic: deltas at or below the checkpoint watermark
+        // are superseded, even if a read started before publication finishes afterward.
+        // Such a late read must not resurrect old entries.
         if inventory
             .checkpoint_version
             .is_some_and(|version| match key {

@@ -389,6 +389,7 @@ impl ManifestObjectStore {
 
     /// Load the latest checkpoint.
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
+    /// Also applies the checkpoint retention rule to the tracked size.
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let checkpoint = self.checkpoint_storage.load_last_checkpoint().await?;
         if let Some((version, _)) = &checkpoint {
@@ -416,6 +417,8 @@ impl ManifestObjectStore {
             return Ok(());
         };
         if metadata.version > replayed_version {
+            // Pruning now would stop counting deltas still in this follower's recovery set.
+            // Retention applies once replay covers this version or sync installs the checkpoint.
             return Ok(());
         }
         if !self.size_tracker.contains_checkpoint(metadata.version) {

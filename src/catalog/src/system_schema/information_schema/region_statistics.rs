@@ -79,6 +79,8 @@ const INIT_CAPACITY: usize = 42;
 ///   deltas (compressed when enabled), excluding staging and `_last_checkpoint`.
 ///   Older files retained on disk, including failed deletions, are not counted.
 ///   Followers update this estimate on sync; metadata read failures can leave it stale.
+///   Promotion does not refresh it, so an incomplete estimate can persist without
+///   further syncs or checkpoints.
 /// - `sst_size`: The sst data files size in bytes.
 /// - `index_size`: The sst index files size in bytes.
 /// - `engine`: The engine type.
