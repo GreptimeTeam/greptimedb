@@ -1279,12 +1279,13 @@ impl PromPlanner {
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
+                let publish_grid = fused_publish_grid(final_tree.root(), &grid);
                 let node = plan_split_aggregate(
                     Arc::from(prom_expr.to_string()),
                     partial,
                     final_tree,
                     FusedSeriesBinding {
-                        grid,
+                        grid: publish_grid,
                         time_index: time.clone(),
                         tags,
                         metric_name: metric,
@@ -1374,11 +1375,12 @@ impl PromPlanner {
         } else {
             (tags, metric)
         };
+        let publish_grid = fused_publish_grid(tree.root(), &grid);
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
             tree,
             FusedSeriesBinding {
-                grid,
+                grid: publish_grid,
                 time_index: time,
                 tags,
                 metric_name: metric,
@@ -1637,9 +1639,15 @@ fn exportable(node: &NativeNode) -> bool {
 /// scan width, and every global consumer sees the canonical boundary below it. A pointwise wrapper
 /// of a global consumer is cut as well, so it cannot hide that consumer from recursive lowering.
 fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
+    // A window over an evaluated input answers per series on its own grid, so it can be cut and
+    // published as a segment even where its locality is not the global gather a raw window would
+    // need. Without this, a subquery over a raw selection has no segment to build.
+    let evaluated_window =
+        matches!(&node.expr, NativeExpr::Window { op, .. } if op.input_grid.is_some());
     if !exportable(node)
         || matches!(node.expr, NativeExpr::Input(_))
         || (!canonical_segmentation
+            && !evaluated_window
             && matches!(input_locality(node), InputLocality::SinglePartition))
     {
         return false;
@@ -1870,6 +1878,15 @@ fn cut_segments(node: &NativeNode, canonical_segmentation: bool) -> Segment {
         node: rewritten,
         sources,
         cut,
+    }
+}
+
+/// The grid one `FusedSeries` publishes on. A root that is a window over an evaluated input - a
+/// subquery - produces on that window's own output grid; every other node is on the statement's.
+fn fused_publish_grid(root: &NativeNode, statement_grid: &Arc<EvalGrid>) -> Arc<EvalGrid> {
+    match &root.expr {
+        NativeExpr::Window { op, .. } => Arc::clone(&op.output_grid),
+        _ => Arc::clone(statement_grid),
     }
 }
 
@@ -2120,11 +2137,12 @@ fn build_evaluated_segment(
     }
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
     let frame = DFSchema::try_from(frame.as_ref().clone()).ok()?;
+    let publish_grid = fused_publish_grid(tree.root(), grid);
     let plan = FusedSeries::try_new_with_format(
         Arc::from("segment"),
         tree,
         FusedSeriesBinding {
-            grid: Arc::clone(grid),
+            grid: publish_grid,
             time_index: time_index.to_string(),
             tags: output_tags.clone(),
             metric_name: None,
@@ -2168,6 +2186,13 @@ fn build_inner_segment(
         .collect::<Option<Vec<_>>>()?;
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
     let output_tags = native_output_tags(tree.root(), &source_tags)?;
+    // A segment whose root is a window over an evaluated input - a subquery - produces on that
+    // window's own output grid, not on the statement's. Every other segment is bound on the
+    // statement's grid, as before.
+    let segment_grid = match &tree.root().expr {
+        NativeExpr::Window { op, .. } => Arc::clone(&op.output_grid),
+        _ => Arc::clone(grid),
+    };
     let (inputs, metric, time_index, tags) = if let [index] = sources.as_slice() {
         let (metric, time_index, tags) = per_source.get(*index)?;
         (scans, metric.clone(), time_index.clone(), tags.clone())
@@ -2209,7 +2234,7 @@ fn build_inner_segment(
         Arc::from("segment"),
         tree,
         FusedSeriesBinding {
-            grid: Arc::clone(grid),
+            grid: segment_grid,
             time_index: time_index.clone(),
             tags: tags.clone(),
             metric_name: metric.clone(),
@@ -2251,7 +2276,13 @@ fn segment_tree(
     root_kind: FieldKind,
     remote_raw_boundary: bool,
 ) -> Result<Option<LogicalPlan>> {
-    if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
+    // A window over an evaluated input is answered series by series too: its input's own locality
+    // decides whether the tree needs gathering, because the window folds one series at a time on
+    // whatever grid that input is evaluated on. Without this, a subquery window whose inner
+    // selection is partition-local would read as a global gather and no segment could be built.
+    if !matches!(input_locality(tree.root()), InputLocality::SinglePartition)
+        && !matches!(&tree.root().expr, NativeExpr::Window { op, .. } if op.input_grid.is_some())
+    {
         return Ok(None);
     }
     // A segment boundary has to carry something, and the only thing it can carry is a per-series
@@ -2259,6 +2290,10 @@ fn segment_tree(
     // such subtree inside it has nothing to cut, and cutting anything else - an aggregate's own
     // state, a constant - is either impossible or a plain recomputation of the same work in one
     // more node. Cutting on locality alone would accept one here.
+    //
+    // An evaluated-input window is not one of those consumers: it folds one series at a time on
+    // its own grid, so a root that is one can be cut and published on that grid. `cut_as_segment`
+    // admits it on the same terms below.
     // A grouping by `__name__` keeps that label while the fused node's declared columns cannot
     // name it. With multiple sources, groups differing only by metric name would therefore be
     // reported under one label set. A single-source tree cannot merge distinct metric-name groups
@@ -2273,10 +2308,12 @@ fn segment_tree(
     let mut first_iteration = true;
     let mut changed = false;
     loop {
+        // An evaluated-input window is cut by its own shape, not by the gather a raw window needs.
         if !matches!(
             input_locality(current_tree.root()),
             InputLocality::SinglePartition
-        ) {
+        ) && !matches!(&current_tree.root().expr, NativeExpr::Window { op, .. } if op.input_grid.is_some())
+        {
             break;
         }
         let segment = cut_segments(current_tree.root(), canonical_segmentation);
@@ -2472,11 +2509,12 @@ fn segment_tree(
         )
     };
     let (segment_metric, segment_time_index) = segment_binding(&current_source_ids);
+    let publish_grid = fused_publish_grid(parent.root(), grid);
     let Ok(plan) = FusedSeries::try_new_with_format(
         Arc::from(prom_expr.to_string()),
         parent,
         FusedSeriesBinding {
-            grid: Arc::clone(grid),
+            grid: publish_grid,
             time_index: segment_time_index,
             tags: tags.to_vec(),
             metric_name: segment_metric,
@@ -2604,10 +2642,20 @@ fn plan_split_aggregate(
         )))
         .context(DataFusionPlanningSnafu);
     }
+    // The partial tree publishes aggregate state on the cut aggregate's grid, which is not
+    // necessarily the statement's when the suffix re-grids the values - a subquery above the cut
+    // produces on its own grid. The final tree's binding is the one the caller derived for it.
+    let partial_binding = FusedSeriesBinding {
+        grid: match &partial.root().output {
+            NativeType::AggregateState(state) => Arc::clone(&state.grid),
+            _ => Arc::clone(&binding.grid),
+        },
+        ..binding.clone()
+    };
     let partial = FusedSeries::try_new_state_export(
         Arc::clone(&promql),
         partial,
-        binding.clone(),
+        partial_binding,
         vec![rawinput],
     )
     .context(DataFusionPlanningSnafu)?;
@@ -3327,6 +3375,11 @@ fn collect_selectors<'a>(
                 };
         }
         PromExpr::Subquery(_) => return false,
+        // A subquery evaluates its expression on its own grid; its selectors are prepared like any
+        // other, each with the scan bounds `raw_scan_bounds` derives from its own range and step.
+        PromExpr::Subquery(subquery) => {
+            return collect_selectors(stmt, &subquery.expr, out);
+        }
         _ => {}
     }
     true

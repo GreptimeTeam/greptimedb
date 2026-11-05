@@ -5501,17 +5501,17 @@ async fn native_fused_preparation_decline_preserves_legacy_plan() {
     );
 }
 
+/// A subquery is planned natively: it is a window over an evaluated input, which the split and
+/// the segment machinery both understand, so it no longer keeps the existing plan.
 #[tokio::test]
-async fn native_fused_subquery_falls_back_to_legacy_plan() {
+async fn native_fused_subquery_plans_natively() {
     for query in [
         "rate(some_metric[5m:1m])",
         "rate(rate(some_metric[5m:1m])[10m:1m])",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
-        assert!(!display.contains("FusedSeries"), "{query}: {display}");
-        let legacy = build_native_fused_plan(query, false).await;
-        assert_eq!(display, legacy.display_indent().to_string(), "{query}");
+        assert!(display.contains("FusedSeries"), "{query}: {display}");
     }
 }
 
