@@ -24,6 +24,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
 use datatypes::series::{Label, SeriesLabels};
 use promql::evaluated::EvaluatedChunk;
+use promql::extension_plan::FieldKind;
 use promql::map::MathOp;
 use promql::map_time::DateFunction;
 use promql::native::execute::{InputId, NativeExecutionState, NativeExecutor};
@@ -723,6 +724,7 @@ fn anchored_instant_selector_binds_scan_bounds() {
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap();
         let (_, op) = root_instant(&compiled.tree);
@@ -1706,6 +1708,7 @@ fn a_two_vector_operation_binds_one_input_per_selector() {
         &eval_stmt("a + b"),
         &|_| Ok(raw_schema()),
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap_or_else(|error| panic!("`a + b` was refused: {error}"));
     assert_eq!(compiled.inputs.len(), 2);
@@ -1817,6 +1820,7 @@ fn vector_binary_matching_binds_labels_cardinality_fills_and_bool() {
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let (_, _, matching) = binary_parts(compiled.tree.root());
@@ -1841,6 +1845,7 @@ fn vector_binary_matching_keeps_ignoring_and_group_left_separate() {
         &eval_stmt("a / ignoring(instance) group_left(host) b"),
         &|_| Ok(raw_schema()),
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap();
     let (_, _, matching) = binary_parts(compiled.tree.root());
@@ -1869,6 +1874,7 @@ fn set_operators_bind_their_operator_and_labels() {
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         assert_eq!(compiled.inputs.len(), 2, "{query}");
@@ -1883,6 +1889,7 @@ fn set_operators_bind_their_operator_and_labels() {
         &eval_stmt("abs(rate(x[5m]) and on(job) sum by (job) (up)) * 2"),
         &|_| Ok(raw_schema()),
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap();
     let (vector, _, _) = binary_parts(compiled.tree.root());
@@ -1916,6 +1923,7 @@ fn a_set_operation_refuses_a_fill_value_and_several_fields() {
         }),
         &|_| Ok(raw_schema()),
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .expect_err("a fill value on `and` compiled");
     assert!(
@@ -1933,6 +1941,7 @@ fn a_set_operation_refuses_a_fill_value_and_several_fields() {
                 })
             },
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .expect_err(&format!("`{query}` over {fields:?} fields compiled"));
         let expected = format!("{} and {} fields", fields.0, fields.1);
@@ -1963,6 +1972,7 @@ fn info_binds_its_info_metric_after_the_base() {
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let [base_input, info_input] = &compiled.inputs[..] else {
@@ -2067,6 +2077,7 @@ fn info_selects_its_info_series_at_the_shared_reference_time() {
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let info = &compiled.inputs.last().unwrap().requirement;
@@ -2099,6 +2110,7 @@ fn info_refuses_info_metrics_it_cannot_read_as_one_table() {
                 })
             },
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .expect_err(&format!("`{query}` compiled"));
         assert!(
@@ -2204,6 +2216,7 @@ fn a_varying_scalar_is_broadcast_where_it_was_written() {
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
         .tree
@@ -2231,6 +2244,7 @@ fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
     };
@@ -5220,6 +5234,7 @@ fn timestamp_anchored_selector_retains_offset_and_ordinary_selection_keeps_it() 
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap_or_else(|error| panic!("{query}: {error}"));
         let requirement = &compiled.inputs[0].requirement;
@@ -5247,6 +5262,7 @@ fn selector_requirements_capture_bounds_and_source_occurrence() {
             Ok(raw_schema())
         },
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap();
     assert_eq!(compiled.inputs.len(), 1);
@@ -5298,8 +5314,13 @@ fn selector_scan_bounds_cover_instant_ranges_anchors_and_overflow() {
         if query == "x" {
             stmt.lookback_delta = Duration::from_secs(5);
         }
-        let tree = compile_selectors(&stmt, &|_| Ok(raw_schema()), SeriesOrdering::KeyThenTime)
-            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        let tree = compile_selectors(
+            &stmt,
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
+        )
+        .unwrap_or_else(|e| panic!("{query}: {e}"));
         assert_eq!(
             tree.inputs[0].requirement.raw_scan_bounds().unwrap(),
             expected,
@@ -5309,8 +5330,13 @@ fn selector_scan_bounds_cover_instant_ranges_anchors_and_overflow() {
 
     let mut zero = eval_stmt("x");
     zero.lookback_delta = Duration::ZERO;
-    let tree =
-        compile_selectors(&zero, &|_| Ok(raw_schema()), SeriesOrdering::KeyThenTime).unwrap();
+    let tree = compile_selectors(
+        &zero,
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
+    )
+    .unwrap();
     assert_eq!(
         tree.inputs[0].requirement.raw_scan_bounds().unwrap(),
         (0, 100_000, true)
@@ -5367,6 +5393,7 @@ fn subquery_selector_bounds_use_inner_grid_and_selector_offset() {
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap_or_else(|e| panic!("{query}: {e}"));
         let req = &compiled.inputs[0].requirement;
@@ -5389,6 +5416,7 @@ fn selector_binding_callback_error_is_returned_once() {
             Err(DataFusionError::Plan("bind failed".into()))
         },
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap_err();
     assert_eq!(calls.get(), 1);
@@ -5403,6 +5431,7 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             &eval_stmt(query),
             &|_| Ok(raw_schema()),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap();
         validate_inputs(compiled.tree.root(), &compiled.inputs).unwrap();
@@ -5411,6 +5440,7 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
         &eval_stmt("x * 2"),
         &|_| Ok(raw_schema()),
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap();
     let original = compiled.inputs[0].clone();
@@ -5511,12 +5541,14 @@ fn validate_inputs_accepts_distinct_occurrences_sharing_a_schema() {
         &eval_stmt("x"),
         &|_| Ok(Arc::clone(&schema)),
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap();
     let scalar_tree = compile_selectors(
         &eval_stmt("x + 1"),
         &|_| Ok(Arc::clone(&schema)),
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap();
     let NativeExpr::Binary { matching, .. } = &scalar_tree.tree.root().expr else {
@@ -5556,8 +5588,70 @@ fn selector_binding_callback_receives_matchers_once() {
             Ok(raw_schema())
         },
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .unwrap();
     assert_eq!(calls.get(), 1);
     assert_eq!(compiled.inputs.len(), 1);
+}
+
+/// An aggregate binds the kind its direct input answers with, not the kind its source carries.
+///
+/// The kind is what says which state layout the aggregate keeps, so a compile that cannot name it
+/// refuses the aggregate instead of binding one from a guess: `sum` over a histogram keeps a
+/// histogram state, and reading an unknown kind as a float would compute the wrong thing.
+#[test]
+fn an_aggregate_binds_the_kind_its_direct_input_answers_with() {
+    let bound = |query: &str, source: Option<FieldKind>| {
+        compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+            source,
+        )
+        .map(|compiled| {
+            let NativeExpr::Aggregate { op, .. } = &compiled.tree.root().expr else {
+                panic!("`{query}` is not an aggregate");
+            };
+            op.field_kind
+        })
+    };
+    // A selection passes the source kind on, so the aggregate over it folds that kind's payload -
+    // and so does a rate over histograms, which answers a histogram of its own.
+    for query in ["sum(h)", "avg(h)", "sum(rate(h[5m]))"] {
+        assert_eq!(
+            bound(query, Some(FieldKind::Histogram)).unwrap(),
+            FieldKind::Histogram,
+            "{query}"
+        );
+        assert_eq!(
+            bound(query, Some(FieldKind::Float)).unwrap(),
+            FieldKind::Float,
+            "{query}"
+        );
+    }
+    // An operator between the two decides for itself: these both answer a float built from
+    // histograms, so the aggregate over them folds floats.
+    for query in ["sum(count_over_time(h[5m]))", "sum(histogram_count(h))"] {
+        assert_eq!(
+            bound(query, Some(FieldKind::Histogram)).unwrap(),
+            FieldKind::Float,
+            "{query}"
+        );
+    }
+    // A shape whose samples this walk does not describe cannot be holding a histogram when nothing
+    // in the tree reads a histogram source, so the aggregate binds the numeric state it always did.
+    assert_eq!(
+        bound("sum(clamp(h, 1, 2))", Some(FieldKind::Float)).unwrap(),
+        FieldKind::Float
+    );
+    assert_eq!(bound("sum(vector(1))", None).unwrap(), FieldKind::Float);
+    // With histogram sources that silence is not float: the same shape is refused rather than bound
+    // from a guess, and the planner keeps the existing plan for it.
+    let error = bound("sum(clamp(h, 1, 2))", Some(FieldKind::Histogram))
+        .expect_err("an unnameable input over a histogram source must not bind");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error:?}"
+    );
 }

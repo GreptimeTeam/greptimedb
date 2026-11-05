@@ -44,6 +44,7 @@ use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, is_metric_name_field};
 use datatypes::series::SeriesOrdering;
+use promql::extension_plan::FieldKind;
 use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
 };
@@ -3799,6 +3800,7 @@ async fn native_fused_deeper_than_64_is_not_a_legacy_join() {
         &build_eval_stmt(&query),
         &|_| Ok(Arc::clone(&schema)),
         SeriesOrdering::KeyThenTime,
+        Some(FieldKind::Float),
     )
     .expect("a tree deeper than 64 compiles");
     fn depth(node: &NativeNode) -> usize {

@@ -31,7 +31,10 @@ use std::sync::Arc;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::series::SeriesLabels;
-use datatypes::series::histogram::{CounterResetHint, HistogramBatchBuilder, HistogramView};
+use datatypes::series::aggregate_state::{HistogramState, StatePayload};
+use datatypes::series::histogram::{
+    CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
+};
 use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{GridSpan, TimeAxis};
 
@@ -332,6 +335,11 @@ impl FloatAggregator {
     /// Number of groups currently retained by this fold.
     pub(crate) fn groups(&self) -> usize {
         self.groups.len()
+    }
+
+    /// The evidence the fold recorded, for the node that finishes the answer to report.
+    pub(crate) fn evidence_summary(&self) -> HistogramEvidence {
+        evidence_summary(&self.groups)
     }
 
     /// Bytes reserved for this fold, using bounded allowances for its maps and group payloads.
@@ -1505,6 +1513,258 @@ impl HistogramAccumulator {
         self.evidence.custom_bounds_reconciled |= outcome.custom_bounds_reconciled;
         Ok(())
     }
+}
+
+impl HistogramAccumulator {
+    /// This position's state as the frame payload a `Partial` hands over.
+    ///
+    /// The payload is the fold's own state, not its answer: a sum exports the running sum and the
+    /// compensation beside it, and folding the compensation in belongs to the merge that finishes the
+    /// answer. An average exports whichever value it is keeping -- the sum it still adds to, or the
+    /// mean it switched to -- with the count and the mode flag that say how to read them.
+    ///
+    /// A poisoned position exports the empty placeholders the state layout reserves for it: it
+    /// answers nothing, and the merge reads its evidence, not its buckets.
+    fn payload(&self, op: AggregateOp) -> Result<StatePayload> {
+        if self.evidence.poisoned {
+            let empty = self.value.empty_like();
+            return Ok(StatePayload::Histogram(Box::new(HistogramState {
+                value: histogram_batch(&empty)?,
+                compensation: histogram_batch(&empty)?,
+                count: 0.0,
+                incremental_mean: false,
+                poisoned: true,
+                incompatible_layout: self.evidence.incompatible_layout,
+                custom_bounds_reconciled: self.evidence.custom_bounds_reconciled,
+                counter_reset_seen: self.evidence.counter_reset_seen,
+                not_counter_reset_seen: self.evidence.not_counter_reset_seen,
+            })));
+        }
+        let switched = self.mean.is_some();
+        let value = match op {
+            // A sum's state is its running sum: adding the compensation in is the merge's job.
+            AggregateOp::Sum => &self.value,
+            AggregateOp::Avg if switched => self.mean.as_ref().expect("checked above"),
+            AggregateOp::Avg => &self.value,
+            op => unreachable!("{op:?} does not fold a histogram payload"),
+        };
+        let compensation = self
+            .compensation
+            .clone()
+            .unwrap_or_else(|| value.new_compensation());
+        Ok(StatePayload::Histogram(Box::new(HistogramState {
+            value: histogram_batch(value)?,
+            compensation: histogram_batch(&compensation)?,
+            // A sum's state declares no count and no mean mode, so both stay at their defaults: the
+            // payload cannot claim a component its kind does not carry.
+            count: if op == AggregateOp::Avg {
+                self.count
+            } else {
+                0.0
+            },
+            incremental_mean: switched && op == AggregateOp::Avg,
+            poisoned: false,
+            incompatible_layout: self.evidence.incompatible_layout,
+            custom_bounds_reconciled: self.evidence.custom_bounds_reconciled,
+            counter_reset_seen: self.evidence.counter_reset_seen,
+            not_counter_reset_seen: self.evidence.not_counter_reset_seen,
+        })))
+    }
+
+    /// The state a decoded payload carries, as the merge keeps it.
+    fn from_payload(op: AggregateOp, payload: &HistogramState) -> Result<Self> {
+        let value = decoded_histogram(&payload.value)?;
+        let compensation = decoded_histogram(&payload.compensation)?;
+        let switched = op == AggregateOp::Avg && payload.incremental_mean;
+        Ok(Self {
+            // An average that switched keeps its mean in the mean slot; the sum it switched from is
+            // not part of the state it exported, so the value slot holds the mean too.
+            value: value.clone(),
+            compensation: Some(compensation),
+            mean: switched.then_some(value),
+            count: payload.count,
+            evidence: HistogramEvidence {
+                poisoned: payload.poisoned,
+                incompatible_layout: payload.incompatible_layout,
+                custom_bounds_reconciled: payload.custom_bounds_reconciled,
+                counter_reset_seen: payload.counter_reset_seen,
+                not_counter_reset_seen: payload.not_counter_reset_seen,
+            },
+        })
+    }
+
+    /// Merges another partition's state into this position's.
+    ///
+    /// The rules are the design's: a sum adds both sides' values and then both sides' compensations
+    /// into the live value, and an average either adds its sums the same way -- when that stays
+    /// finite -- or continues in mean mode from the means and the counts, dividing before it adds.
+    /// Poison is sticky, and both sides' evidence is kept whatever the outcome of the arithmetic.
+    fn merge_state(&mut self, op: AggregateOp, other: &HistogramState) -> Result<()> {
+        self.evidence.poisoned |= other.poisoned;
+        self.evidence.incompatible_layout |= other.incompatible_layout;
+        self.evidence.custom_bounds_reconciled |= other.custom_bounds_reconciled;
+        self.evidence.counter_reset_seen |= other.counter_reset_seen;
+        self.evidence.not_counter_reset_seen |= other.not_counter_reset_seen;
+        if self.evidence.poisoned {
+            // A poisoned point answers nothing, so there is no value to merge into it.
+            return Ok(());
+        }
+        let right = decoded_histogram(&other.value)?;
+        let right_compensation = decoded_histogram(&other.compensation)?;
+        // Two partitions can each be valid on their own and still disagree: one folded exponential
+        // buckets, the other custom ones. The fold removes such a point when both layouts meet
+        // inside one partition, so the merge reports it the same way instead of letting the add
+        // refuse the layouts and fail the whole statement.
+        let left_uses_custom = match &self.mean {
+            Some(mean) => mean.uses_custom_buckets(),
+            None => self.value.uses_custom_buckets(),
+        };
+        if left_uses_custom != right.uses_custom_buckets() {
+            self.evidence.poisoned = true;
+            self.evidence.incompatible_layout = true;
+            return Ok(());
+        }
+        match op {
+            AggregateOp::Sum => self.merge_sum(right, right_compensation),
+            AggregateOp::Avg => self.merge_avg(
+                right,
+                right_compensation,
+                other.count,
+                other.incremental_mean,
+            ),
+            op => unreachable!("{op:?} does not merge a histogram payload"),
+        }
+    }
+
+    /// Merges two sums: both values and then both compensations go into the live value.
+    ///
+    /// The receiver stays the live value for both adds -- the compensation's unit follows the value's
+    /// -- so the second add folds the other side's compensation into the sum this state carries, not
+    /// into the compensation the first add returned.
+    fn merge_sum(
+        &mut self,
+        right: FloatHistogram,
+        right_compensation: FloatHistogram,
+    ) -> Result<()> {
+        let left_compensation = self
+            .compensation
+            .take()
+            .expect("a folding position keeps its compensation");
+        let (compensation, first) = self.value.kahan_add(&right, Some(left_compensation))?;
+        let (compensation, second) = self
+            .value
+            .kahan_add(&right_compensation, Some(compensation))?;
+        self.compensation = Some(compensation);
+        self.evidence.custom_bounds_reconciled |=
+            first.custom_bounds_reconciled || second.custom_bounds_reconciled;
+        Ok(())
+    }
+
+    /// Merges an average: the sums add while they stay finite, and otherwise the means and their
+    /// counts do.
+    fn merge_avg(
+        &mut self,
+        right: FloatHistogram,
+        right_compensation: FloatHistogram,
+        right_count: f64,
+        right_is_mean: bool,
+    ) -> Result<()> {
+        let left_is_mean = self.mean.is_some();
+        let left_count = self.count;
+        let total = left_count + right_count;
+        let left_value = if left_is_mean {
+            self.mean.clone().expect("checked above")
+        } else {
+            self.value.clone()
+        };
+        let left_compensation = self
+            .compensation
+            .clone()
+            .unwrap_or_else(|| left_value.new_compensation());
+        if !left_is_mean && !right_is_mean {
+            // Sum and sum: steps 1-2 on a copy of the left sum. The trial is what decides the mode,
+            // and a reconciliation it reports counts whether or not it is kept.
+            let mut trial = left_value.clone();
+            let (compensation, first) = trial.kahan_add(&right, Some(left_compensation.clone()))?;
+            let (compensation, second) =
+                trial.kahan_add(&right_compensation, Some(compensation))?;
+            self.evidence.custom_bounds_reconciled |=
+                first.custom_bounds_reconciled || second.custom_bounds_reconciled;
+            if !trial.has_overflow() {
+                self.value = trial;
+                self.compensation = Some(compensation);
+                self.count = total;
+                return Ok(());
+            }
+        }
+        // The mean path, written so that no intermediate product or sum can overflow: each side
+        // becomes a mean, its count becomes a weight, and the weighted means are scaled before they
+        // are added -- with their compensations scaled the same way, because the compensation's unit
+        // is the value's.
+        let weight_left = left_count / total;
+        let weight_right = right_count / total;
+        let mut left_mean = left_value;
+        let mut left_mean_compensation = left_compensation;
+        if !left_is_mean {
+            left_mean.div(left_count);
+            left_mean_compensation.div(left_count);
+        }
+        let mut right_mean = right;
+        let mut right_mean_compensation = right_compensation;
+        if !right_is_mean {
+            right_mean.div(right_count);
+            right_mean_compensation.div(right_count);
+        }
+        left_mean.mul(weight_left);
+        left_mean_compensation.mul(weight_left);
+        right_mean.mul(weight_right);
+        right_mean_compensation.mul(weight_right);
+        let (compensation, first) =
+            left_mean.kahan_add(&right_mean, Some(left_mean_compensation))?;
+        let (compensation, second) =
+            left_mean.kahan_add(&right_mean_compensation, Some(compensation))?;
+        self.value = left_mean.clone();
+        self.mean = Some(left_mean);
+        self.compensation = Some(compensation);
+        self.count = total;
+        self.evidence.custom_bounds_reconciled |=
+            first.custom_bounds_reconciled || second.custom_bounds_reconciled;
+        Ok(())
+    }
+}
+
+/// One histogram as the frame payload's own one-row batch.
+fn histogram_batch(histogram: &FloatHistogram) -> Result<Arc<HistogramBatch>> {
+    let mut builder = HistogramBatchBuilder::new();
+    histogram.push_to(&mut builder)?;
+    builder.finish().map_err(external)
+}
+
+/// The histogram a payload component carries.
+fn decoded_histogram(batch: &HistogramBatch) -> Result<FloatHistogram> {
+    let view = batch.view(0).ok_or_else(|| {
+        DataFusionError::Execution("a histogram state component carries no histogram".into())
+    })?;
+    FloatHistogram::try_from_view(&view)
+}
+
+/// The evidence a fold or a merge has to report, once, wherever it finishes.
+///
+/// A poisoned point suppresses its own reconciliation bit: the point answers nothing, so reporting
+/// that its bounds were reconciled would report a reconciliation of an answer that is not there.
+/// Everything else is reported if any point recorded it, which is what makes the message set the same
+/// whichever order the partitions were merged in.
+fn evidence_summary(groups: &[Group]) -> HistogramEvidence {
+    let mut summary = HistogramEvidence::default();
+    for accumulator in groups.iter().flat_map(|group| group.histograms.values()) {
+        let evidence = accumulator.evidence;
+        summary.poisoned |= evidence.poisoned;
+        summary.incompatible_layout |= evidence.incompatible_layout;
+        summary.counter_reset_seen |= evidence.counter_reset_seen;
+        summary.not_counter_reset_seen |= evidence.not_counter_reset_seen;
+        summary.custom_bounds_reconciled |= evidence.custom_bounds_reconciled && !evidence.poisoned;
+    }
+    summary
 }
 
 /// Bytes one histogram position holds: every histogram it keeps, with buckets, bounds and spans.

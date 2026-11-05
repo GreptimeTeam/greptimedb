@@ -1203,6 +1203,11 @@ impl PromPlanner {
             },
             NATIVE_ORDERING,
             Arc::clone(&grid),
+            // The kind the sources carry, which a histogram-folding aggregate's state depends on.
+            // It is known here - the binding loop above reads it off the table's own fields - and
+            // passed rather than guessed: an aggregate over a kind this compile cannot name is
+            // refused below, not bound as a float.
+            statement_kind,
         ) {
             Ok(v) => v,
             // The compiler refusing a shape is this route declining it.
@@ -1488,7 +1493,7 @@ impl PromPlanner {
                 if merge_answers_histogram(root, FieldKind::Histogram) {
                     return Ok(None);
                 }
-                match root.output_field_kind(FieldKind::Histogram) {
+                match root.output_field_kind(Some(FieldKind::Histogram)) {
                     Some(root_kind) => root_kind,
                     None => return Ok(None),
                 }
@@ -2109,7 +2114,7 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
 /// merge, not only a root one.
 fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
     (matches!(node.expr, NativeExpr::Merge { .. })
-        && node.output_field_kind(input_kind) == Some(FieldKind::Histogram))
+        && node.output_field_kind(Some(input_kind)) == Some(FieldKind::Histogram))
         || node_children(&node.expr)
             .into_iter()
             .any(|child| merge_answers_histogram(child, input_kind))
@@ -3230,7 +3235,10 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
             // keeps the existing plan after this check instead of folding here.
             let folds_payload = matches!(op.kind, AggregateKind::Sum | AggregateKind::Avg);
             (folds_payload
-                && !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float)))
+                && !matches!(
+                    input.output_field_kind(Some(input_kind)),
+                    Some(FieldKind::Float)
+                ))
                 || aggregate_reads_histogram(input, input_kind)
         }
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
@@ -4244,6 +4252,7 @@ mod tests {
             &statement,
             &|_| Ok(Arc::clone(&schema)),
             SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
         )
         .unwrap()
         .tree

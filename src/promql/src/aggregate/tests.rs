@@ -3124,3 +3124,374 @@ fn avg_keeps_tracking_the_mean_after_the_switch() {
     assert_eq!(value.count, 0.5, "(1 + 1 + 0 + 0) / 4");
     assert_eq!(side_buckets(&value.positive), vec![(0, 0.5)]);
 }
+
+/// The state a fold over `input` exports for a merge.
+fn partial_state(
+    op: AggregateOp,
+    schema: &Arc<SeriesSchema>,
+    input: &[Series],
+) -> PartialAggregate {
+    let mut aggregator = FloatAggregator::try_new(schema, op, Grouping::By(&[])).unwrap();
+    for series in input {
+        aggregator.update(series).unwrap();
+    }
+    aggregator.finish_partial().unwrap()
+}
+
+/// The answer a merge of `partials` reports, in merge order.
+fn merged_answer(
+    op: AggregateOp,
+    schema: &Arc<SeriesSchema>,
+    partials: &[PartialAggregate],
+) -> Vec<Series> {
+    let mut merger = FloatMerger::try_new(schema, op).unwrap();
+    for partial in partials {
+        merger.merge(partial.clone()).unwrap();
+    }
+    merger.finish().unwrap()
+}
+
+/// The evidence the merge of `partials` recorded, in merge order.
+fn merged_evidence(
+    op: AggregateOp,
+    schema: &Arc<SeriesSchema>,
+    partials: &[PartialAggregate],
+) -> HistogramEvidence {
+    let mut merger = FloatMerger::try_new(schema, op).unwrap();
+    for partial in partials {
+        merger.merge(partial.clone()).unwrap();
+    }
+    merger.evidence_summary()
+}
+
+/// Compares two answers' scalar fields and buckets within a relative tolerance.
+///
+/// A merge reassociates the additions, so it differs from the serial fold in the last bits; the
+/// fixtures are chosen so nothing but those bits differs.
+fn assert_histogram_close(actual: &HistogramView<'_>, expected: &HistogramView<'_>) {
+    let close =
+        |actual: f64, expected: f64| (actual - expected).abs() <= 1e-12 * expected.abs().max(1.0);
+    assert_eq!(actual.schema, expected.schema);
+    assert!(
+        close(actual.sum, expected.sum),
+        "sum {} != {}",
+        actual.sum,
+        expected.sum
+    );
+    assert!(
+        close(actual.count, expected.count),
+        "count {} != {}",
+        actual.count,
+        expected.count
+    );
+    assert!(
+        close(actual.zero_count, expected.zero_count),
+        "zero count {} != {}",
+        actual.zero_count,
+        expected.zero_count
+    );
+    let actual_buckets = side_buckets(&actual.positive);
+    let expected_buckets = side_buckets(&expected.positive);
+    assert_eq!(actual_buckets.len(), expected_buckets.len());
+    for ((actual_index, actual_count), (expected_index, expected_count)) in
+        actual_buckets.iter().zip(&expected_buckets)
+    {
+        assert_eq!(actual_index, expected_index);
+        assert!(
+            close(*actual_count, *expected_count),
+            "bucket {actual_index}: {actual_count} != {expected_count}"
+        );
+    }
+}
+
+/// Two partitions' sums merge into the answer one fold over both partitions' samples gives.
+#[test]
+fn merging_two_partials_answers_the_sum_the_one_fold_answers() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let sample =
+        |sum: f64| histogram_sample(0, &[(0, 1.0)], &[], 1.0, sum, CounterResetHint::Unknown);
+    let first = [
+        histogram_series(&schema, "a", vec![(0, sample(1.0))]),
+        histogram_series(&schema, "b", vec![(0, sample(2.0))]),
+    ];
+    let second = [
+        histogram_series(&schema, "c", vec![(0, sample(3.0))]),
+        histogram_series(&schema, "d", vec![(0, sample(4.0))]),
+    ];
+    let both: Vec<Series> = first.iter().chain(&second).cloned().collect();
+    let left = partial_state(AggregateOp::Sum, &schema, &first);
+    let right = partial_state(AggregateOp::Sum, &schema, &second);
+    let merged = merged_answer(AggregateOp::Sum, &schema, &[left, right]);
+    let complete = aggregate_answer(&schema, &both, AggregateOp::Sum);
+    assert_histogram_close(
+        &answered_histogram(&merged[0], 0, 0),
+        &answered_histogram(&complete, 0, 0),
+    );
+    assert_eq!(answered_histogram(&merged[0], 0, 0).sum, 10.0);
+    assert_eq!(answered_histogram(&merged[0], 0, 0).count, 4.0);
+}
+
+/// One partition that switched to a mean and one that is still summing merge into the answer one
+/// fold over both partitions' samples gives.
+#[test]
+fn merging_a_mean_partial_with_a_sum_partial_answers_the_one_fold() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let large = || histogram_sample(0, &[(0, 1.0)], &[], 1.0, 1e308, CounterResetHint::Unknown);
+    let nothing = || histogram_sample(0, &[], &[], 0.0, 0.0, CounterResetHint::Unknown);
+    // The first partition's second sample overflows its sum, so it exports a mean; the second
+    // partition never switches.
+    let first = [
+        histogram_series(&schema, "a", vec![(0, large())]),
+        histogram_series(&schema, "b", vec![(0, large())]),
+    ];
+    let second = [
+        histogram_series(&schema, "c", vec![(0, nothing())]),
+        histogram_series(&schema, "d", vec![(0, nothing())]),
+    ];
+    let both: Vec<Series> = first.iter().chain(&second).cloned().collect();
+    let left = partial_state(AggregateOp::Avg, &schema, &first);
+    let right = partial_state(AggregateOp::Avg, &schema, &second);
+    let left_payload = left.groups[0].states[0][0]
+        .as_ref()
+        .and_then(StatePayload::histogram)
+        .expect("a histogram state");
+    assert!(
+        left_payload.incremental_mean,
+        "the first partition switched"
+    );
+    let right_payload = right.groups[0].states[0][0]
+        .as_ref()
+        .and_then(StatePayload::histogram)
+        .expect("a histogram state");
+    assert!(
+        !right_payload.incremental_mean,
+        "the second partition did not"
+    );
+
+    let merged = merged_answer(AggregateOp::Avg, &schema, &[left, right]);
+    let complete = aggregate_answer(&schema, &both, AggregateOp::Avg);
+    let merged_value = answered_histogram(&merged[0], 0, 0);
+    assert_histogram_close(&merged_value, &answered_histogram(&complete, 0, 0));
+    assert!(merged_value.sum.is_finite());
+    assert_eq!(
+        merged_value.sum,
+        1e308 / 2.0,
+        "two of four samples observed 1e308"
+    );
+}
+
+/// An average whose two partitions each hold one `1e308` still averages to a finite `1e308`: the
+/// merged sums would overflow, so the merge goes through its mean path.
+#[test]
+fn merging_two_overflowing_partials_answers_a_finite_mean() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let large = || histogram_sample(0, &[(0, 1.0)], &[], 1.0, 1e308, CounterResetHint::Unknown);
+    let left = partial_state(
+        AggregateOp::Avg,
+        &schema,
+        &[histogram_series(&schema, "a", vec![(0, large())])],
+    );
+    let right = partial_state(
+        AggregateOp::Avg,
+        &schema,
+        &[histogram_series(&schema, "b", vec![(0, large())])],
+    );
+    let merged = merged_answer(AggregateOp::Avg, &schema, &[left, right]);
+    let value = answered_histogram(&merged[0], 0, 0);
+    assert!(value.sum.is_finite(), "a mean of finite sums is finite");
+    assert_eq!(value.sum, 1e308, "(1e308 + 1e308) / 2");
+    assert_eq!(value.count, 1.0);
+}
+
+/// A poisoned partition poisons the point whatever the other partition holds, and a poisoned point
+/// answers nothing.
+#[test]
+fn a_poisoned_partial_poisons_the_merged_point() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let exponential = || histogram_sample(0, &[(0, 1.0)], &[], 1.0, 2.0, CounterResetHint::Unknown);
+    let custom = || {
+        histogram_sample(
+            CUSTOM_BUCKETS,
+            &[(0, 1.0)],
+            &[1.0],
+            1.0,
+            3.0,
+            CounterResetHint::Unknown,
+        )
+    };
+    let poisoned = partial_state(
+        AggregateOp::Sum,
+        &schema,
+        &[
+            histogram_series(&schema, "a", vec![(0, exponential())]),
+            histogram_series(&schema, "b", vec![(0, custom())]),
+        ],
+    );
+    let legal = partial_state(
+        AggregateOp::Sum,
+        &schema,
+        &[histogram_series(&schema, "c", vec![(0, exponential())])],
+    );
+    for order in [
+        [poisoned.clone(), legal.clone()],
+        [legal.clone(), poisoned.clone()],
+    ] {
+        let merged = merged_answer(AggregateOp::Sum, &schema, &order);
+        assert!(
+            merged.is_empty(),
+            "a poisoned point answers nothing, whichever side poisoned it"
+        );
+        let evidence = merged_evidence(AggregateOp::Sum, &schema, &order);
+        assert!(evidence.poisoned);
+        assert!(evidence.incompatible_layout);
+    }
+}
+
+/// Which partition arrived first does not change what the merge reports: a reconciliation between
+/// two partitions is reported whichever way the pair is merged.
+#[test]
+fn the_merged_evidence_does_not_depend_on_the_merge_order() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    // Each partition folds one custom-bucket sample, so neither reconciles anything by itself: the
+    // flag can only come from the merge.
+    let left = partial_state(
+        AggregateOp::Sum,
+        &schema,
+        &[histogram_series(
+            &schema,
+            "a",
+            vec![(
+                0,
+                histogram_sample(
+                    CUSTOM_BUCKETS,
+                    &[(0, 1.0), (1, 2.0)],
+                    &[1.0, 2.0],
+                    3.0,
+                    4.0,
+                    CounterResetHint::Unknown,
+                ),
+            )],
+        )],
+    );
+    let right = partial_state(
+        AggregateOp::Sum,
+        &schema,
+        &[histogram_series(
+            &schema,
+            "b",
+            vec![(
+                0,
+                histogram_sample(
+                    CUSTOM_BUCKETS,
+                    &[(0, 1.0)],
+                    &[1.0, 3.0],
+                    1.0,
+                    2.0,
+                    CounterResetHint::Unknown,
+                ),
+            )],
+        )],
+    );
+    let forward = merged_evidence(AggregateOp::Sum, &schema, &[left.clone(), right.clone()]);
+    let backward = merged_evidence(AggregateOp::Sum, &schema, &[right, left]);
+    assert!(forward.custom_bounds_reconciled, "{forward:?}");
+    assert_eq!(forward, backward, "the evidence is order independent");
+}
+
+/// Two partitions can each be valid and still disagree on the bucket family: neither partial is
+/// poisoned, so the merge is where the incompatibility first shows. It removes the point and
+/// reports it, exactly as the fold does when both layouts meet inside one partition -- it does not
+/// let the add refuse the layouts and fail the statement.
+#[test]
+fn a_merge_of_two_valid_partials_with_different_layouts_removes_the_point() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    for op in [AggregateOp::Sum, AggregateOp::Avg] {
+        let exponential = partial_state(
+            op,
+            &schema,
+            &[histogram_series(
+                &schema,
+                "a",
+                vec![(
+                    0,
+                    histogram_sample(0, &[(0, 1.0)], &[], 1.0, 2.0, CounterResetHint::Unknown),
+                )],
+            )],
+        );
+        let custom = partial_state(
+            op,
+            &schema,
+            &[histogram_series(
+                &schema,
+                "a",
+                vec![(
+                    0,
+                    histogram_sample(
+                        CUSTOM_BUCKETS,
+                        &[(0, 1.0)],
+                        &[1.0, 3.0],
+                        1.0,
+                        2.0,
+                        CounterResetHint::Unknown,
+                    ),
+                )],
+            )],
+        );
+        // Each partial on its own is a valid answer.
+        assert!(!merged_evidence(op, &schema, std::slice::from_ref(&exponential)).poisoned);
+        assert!(!merged_evidence(op, &schema, std::slice::from_ref(&custom)).poisoned);
+        for order in [
+            [exponential.clone(), custom.clone()],
+            [custom.clone(), exponential.clone()],
+        ] {
+            let evidence = merged_evidence(op, &schema, &order);
+            assert!(
+                evidence.poisoned,
+                "{op:?} kept a point whose two partitions disagree on the bucket family: {evidence:?}"
+            );
+            assert!(evidence.incompatible_layout, "{op:?}: {evidence:?}");
+        }
+    }
+}
+
+/// A sum state declares no mean mode and no count, so its export cannot claim otherwise: the kind's
+/// own component list is what a state frame accepts, and it has neither component.
+#[test]
+fn a_sum_partial_export_cannot_claim_a_mean_mode() {
+    let schema = schema_with_grid_len(&["value"], 1);
+    let input = [histogram_series(
+        &schema,
+        "a",
+        vec![(
+            0,
+            histogram_sample(0, &[(0, 1.0)], &[], 1.0, 2.0, CounterResetHint::Unknown),
+        )],
+    )];
+    let partial = partial_state(AggregateOp::Sum, &schema, &input);
+    let payload = partial.groups[0].states[0][0]
+        .as_ref()
+        .and_then(StatePayload::histogram)
+        .expect("a histogram state");
+    assert!(!payload.incremental_mean);
+    assert_eq!(payload.count, 0.0);
+    // And the layout cannot be declared with the component it would need.
+    let components = crate::native::plan::aggregate_state_binding(
+        crate::native::plan::AggregateKind::Sum,
+        crate::extension_plan::FieldKind::Histogram,
+    )
+    .expect("a histogram sum binds state")
+    .1;
+    assert!(
+        !components.contains(&datatypes::series::aggregate_state::StateComponent::IncrementalMean)
+    );
+    let mut claimed = components.clone();
+    claimed.push(datatypes::series::aggregate_state::StateComponent::IncrementalMean);
+    assert!(
+        datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+            datatypes::series::aggregate_state::AggregateStateKind::HistogramSum,
+            claimed,
+        )
+        .is_err(),
+        "a sum state cannot declare a mean mode"
+    );
+}
