@@ -727,27 +727,32 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Initializes one partition's raw series before its first chunk is packed.
     ///
     /// The optional entrypoint for a caller that must publish something derived from the partition's
-    /// finished initialization (its candidate key range) before any payload. The returned future
-    /// resolves the same scanner-wide preparation [`Self::prepare_series`] shares, creates the
-    /// reader, and reports the conservative range of the candidates that reader's slice covers. It
-    /// is owned and `'static`: it does not borrow the scanner, and awaiting it never holds a scanner
-    /// lock.
+    /// finished initialization (its candidate key range) before any payload. The decision whether
+    /// the source offers this form is made here, synchronously: `Some` hands back an owned future
+    /// that resolves the same scanner-wide preparation [`Self::prepare_series`] shares, creates the
+    /// reader, and reports the conservative range of the candidates that reader's slice covers. The
+    /// future is owned and `'static`: it does not borrow the scanner, and awaiting it never holds a
+    /// scanner lock.
     ///
-    /// `None` means this source offers no initialized form and the caller keeps
-    /// [`Self::scan_series_partition`] unchanged, carrying no range. `None` is not an absence claim
-    /// about keys, not an end of stream, and never an error; a source that starts work must report
-    /// through the future's result instead. A range a source reports describes the candidates its
-    /// own slice selected; ordinal order and the mapping from ordinals to scan partitions belong to
-    /// a concrete source and are not properties of [`PreparedSeriesSource`].
+    /// `None` means, decided before anything starts, that this source offers no initialized form:
+    /// the caller keeps [`Self::scan_series_partition`] unchanged, carrying no range, and captures
+    /// that stream itself while it still owns the caller's call, not later on a task it spawned.
+    /// Returning `None` must not start work, because a caller may drop the initialization it got
+    /// back without ever polling it. `None` is not an absence claim about keys and not an end of
+    /// stream; a source that has selected this entrypoint reports whatever goes wrong through the
+    /// future's result, so a failure is never mistaken for the fallback. A range a source reports
+    /// describes the candidates its own slice selected; ordinal order and the mapping from ordinals
+    /// to scan partitions belong to a concrete source and are not properties of
+    /// [`PreparedSeriesSource`].
     fn initialize_series_partition(
         &self,
         _ctx: &QueryScanContext,
         _metrics_set: &ExecutionPlanMetricsSet,
         _partition: usize,
         _label_source: &RawLabelSource,
-    ) -> futures::future::BoxFuture<'static, Result<Option<InitializedRawSeriesScan>, BoxedError>>
+    ) -> Option<futures::future::BoxFuture<'static, Result<InitializedRawSeriesScan, BoxedError>>>
     {
-        Box::pin(async { Ok(None) })
+        None
     }
 
     /// Prepares scanner-wide candidates once for independent ordinal-range reads.

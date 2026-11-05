@@ -124,6 +124,72 @@ pub(crate) fn candidate_assignment_rounds() -> usize {
     CANDIDATE_ASSIGNMENT_ROUNDS.load(Ordering::Relaxed)
 }
 
+/// Receiver bookkeeping shared by one scan's candidate distributor and every receiver it hands out.
+///
+/// `active` is the production count: it starts at the number of receivers in the list the
+/// distributor feeds, and [`CandidateReceiver::drop`] takes a receiver out of it whenever the
+/// holder goes away, polled or not. The distributor stops once it reaches zero, which is the
+/// scanner's side of "the read is over".
+///
+/// Tests count handovers (`captured`) and [`CandidateReceiver::drop`]s (`released`) on this same
+/// shared object, so the evidence belongs to the scan that produced it instead of to the process:
+/// a scanner keeps its own counts while other scans hand receivers over concurrently. Both counters
+/// are compiled out of production builds, leaving the production shape of this type unchanged.
+struct CandidateReceiverState {
+    /// Receivers of this scan that no holder has dropped yet.
+    active: AtomicUsize,
+    /// Test-only number of receivers handed over to a partition stream.
+    #[cfg(test)]
+    captured: AtomicUsize,
+    /// Test-only number of receivers dropped by the holder that took them.
+    #[cfg(test)]
+    released: AtomicUsize,
+}
+
+impl CandidateReceiverState {
+    /// Bookkeeping for a scanner whose distributor has not created its receivers yet.
+    fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            #[cfg(test)]
+            captured: AtomicUsize::new(0),
+            #[cfg(test)]
+            released: AtomicUsize::new(0),
+        }
+    }
+
+    /// Marks the receivers of a freshly created receiver list as live.
+    fn start(&self, receivers: usize) {
+        self.active.store(receivers, Ordering::Relaxed);
+    }
+}
+
+/// Test-only handle on the candidate receiver counts of one scanner.
+///
+/// The handle shares the scanner's bookkeeping, so it can be read before the scanner is handed to an
+/// execution plan and after the streams its partitions produced are gone.
+#[cfg(test)]
+pub(crate) struct CandidateReceiverCounts {
+    state: Arc<CandidateReceiverState>,
+}
+
+#[cfg(test)]
+impl CandidateReceiverCounts {
+    /// Returns `(captured, released)` candidate assignment receivers of this scanner.
+    ///
+    /// A capture is the handover of one partition's receiver out of the scanner and into the stream
+    /// that reads it, in [`SeriesScan::scan_two_phase_batch_in_partition`]; it happens while the
+    /// caller still owns the call, so an initialized partition has captured its receiver before
+    /// anything polls it. A captured receiver is released when the stream holding it goes away,
+    /// polled or not; an uncaptured one stays in the scanner until the scanner itself is dropped.
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        (
+            self.state.captured.load(Ordering::Relaxed),
+            self.state.released.load(Ordering::Relaxed),
+        )
+    }
+}
+
 /// Legacy data receivers for output partitions.
 type LegacyReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
 
@@ -141,7 +207,7 @@ struct RawScanPreparation {
 
 struct CandidateReceiver {
     receiver: mpsc::UnboundedReceiver<Result<SeriesReaderInput>>,
-    active_receivers: Arc<AtomicUsize>,
+    state: Arc<CandidateReceiverState>,
 }
 
 impl CandidateReceiver {
@@ -152,8 +218,13 @@ impl CandidateReceiver {
 
 impl Drop for CandidateReceiver {
     fn drop(&mut self) {
-        let previous = self.active_receivers.fetch_sub(1, Ordering::Relaxed);
+        let previous = self.state.active.fetch_sub(1, Ordering::Relaxed);
         debug_assert!(previous > 0);
+        // Test-only: this is the moment the distributor can learn that a partition has no reader
+        // left; see `should_fetch_candidates`. The count lives in the same shared object as the
+        // scan's distributor, so concurrent scans do not add to it.
+        #[cfg(test)]
+        self.state.released.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -198,6 +269,12 @@ pub struct SeriesScan {
     legacy_receivers: Mutex<LegacyReceiverList>,
     /// Candidate assignment receivers for each partition.
     candidate_receivers: Mutex<CandidateReceiverList>,
+    /// Bookkeeping this scan shares with its candidate distributor and the receivers it hands out.
+    ///
+    /// It is created here, before the distributor exists, so tests can hold a handle on it while the
+    /// scanner itself is owned elsewhere; a reset replaces it, so receivers of an earlier distributor
+    /// keep counting against the object they were created with.
+    candidate_receiver_state: Arc<CandidateReceiverState>,
     /// Metrics for each partition.
     /// The scanner only sets in query and keeps it empty during compaction.
     metrics_list: Arc<PartitionMetricsList>,
@@ -243,6 +320,7 @@ impl SeriesScan {
             pruner,
             legacy_receivers: Mutex::new(Vec::new()),
             candidate_receivers: Mutex::new(Vec::new()),
+            candidate_receiver_state: Arc::new(CandidateReceiverState::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
         }
     }
@@ -655,6 +733,11 @@ impl SeriesScan {
         let mut receiver = self.candidate_receivers.lock().unwrap()[partition]
             .take()
             .context(ScanMultiTimesSnafu { partition })?;
+        // Test-only: the receiver above is now owned by this stream, before it is polled.
+        #[cfg(test)]
+        self.candidate_receiver_state
+            .captured
+            .fetch_add(1, Ordering::Relaxed);
         let stream_ctx = self.stream_ctx.clone();
         let partition_ranges = self
             .properties
@@ -747,15 +830,17 @@ impl SeriesScan {
             return;
         }
 
-        let (senders, receivers, active_receivers) =
-            new_candidate_channel_list(self.properties.num_partitions());
+        let (senders, receivers) = new_candidate_channel_list(
+            self.properties.num_partitions(),
+            self.candidate_receiver_state.clone(),
+        );
         let mut distributor = SeriesCandidateDistributor {
             stream_ctx: self.stream_ctx.clone(),
             range_semaphore: Arc::new(Semaphore::new(self.properties.num_partitions())),
             partitions: self.properties.partitions.clone(),
             pruner: self.pruner.clone(),
             senders,
-            active_receivers,
+            receivers: self.candidate_receiver_state.clone(),
             metrics_set: metrics_set.clone(),
             metrics_list: self.metrics_list.clone(),
             explain_verbose,
@@ -850,10 +935,15 @@ fn new_legacy_channel_list(num_partitions: usize) -> (SenderList, LegacyReceiver
     (SenderList::new(senders), receivers)
 }
 
+/// Creates one candidate assignment channel per partition over the scan's shared `state`.
+///
+/// Every receiver shares the scanner's [`CandidateReceiverState`], so the distributor of one scan,
+/// the receivers it feeds, and the counters a test reads all belong to that scan.
 fn new_candidate_channel_list(
     num_partitions: usize,
-) -> (CandidateSenderList, CandidateReceiverList, Arc<AtomicUsize>) {
-    let active_receivers = Arc::new(AtomicUsize::new(num_partitions));
+    state: Arc<CandidateReceiverState>,
+) -> (CandidateSenderList, CandidateReceiverList) {
+    state.start(num_partitions);
     let (senders, receivers) = (0..num_partitions)
         .map(|_| {
             // Partition streams can be consumed sequentially. A bounded channel for an unpolled
@@ -862,12 +952,12 @@ fn new_candidate_channel_list(
             let (sender, receiver) = mpsc::unbounded_channel();
             let receiver = CandidateReceiver {
                 receiver,
-                active_receivers: active_receivers.clone(),
+                state: state.clone(),
             };
             (Some(sender), Some(receiver))
         })
         .unzip();
-    (senders, receivers, active_receivers)
+    (senders, receivers)
 }
 
 /// The ordinal slice of a prepared source that one scan partition reads.
@@ -1034,23 +1124,29 @@ impl RegionScanner for SeriesScan {
     /// rather than on the first poll of a packed stream. The range is computed from the slice's
     /// first and last selected candidates, so it is fixed before the caller seals a schema.
     ///
-    /// `Ok(None)` means the prepared-columnar reader is not selected for this binding - ordinary
-    /// storage sources, memtables, and incomplete coverage - and the caller keeps
-    /// `scan_series_partition` with its existing behavior and carries no range.
+    /// `None` means, decided here and synchronously, that the prepared-columnar reader is not
+    /// selected for this binding - ordinary storage sources, memtables, and incomplete coverage -
+    /// so the caller keeps `scan_series_partition` with its existing behavior and carries no range.
+    /// Nothing has been read or reserved when that happens, exactly like the preflight that took the
+    /// same decision, so a caller that drops this answer without polling it drops nothing else.
+    ///
+    /// A partition this scanner did not prepare is this source's own failure, not an unsupported
+    /// binding: it is reported through the future, because a caller that got `Some` must not fall
+    /// back to a different entrypoint over it.
     fn initialize_series_partition(
         &self,
         ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
         label_source: &RawLabelSource,
-    ) -> futures::future::BoxFuture<'static, Result<Option<InitializedRawSeriesScan>, BoxedError>>
+    ) -> Option<futures::future::BoxFuture<'static, Result<InitializedRawSeriesScan, BoxedError>>>
     {
         let prepared = match self.prepared_partition(ctx, metrics_set, partition, label_source) {
             Ok(Some(prepared)) => prepared,
-            Ok(None) => return Box::pin(async { Ok(None) }),
-            Err(error) => return Box::pin(async move { Err(error) }),
+            Ok(None) => return None,
+            Err(error) => return Some(Box::pin(async move { Err(error) })),
         };
-        Box::pin(async move {
+        Some(Box::pin(async move {
             let source = prepared.prepared.await?.ok_or_else(|| {
                 BoxedError::new(
                     InvalidRecordBatchSnafu {
@@ -1062,8 +1158,8 @@ impl RegionScanner for SeriesScan {
             let range = partition_series_range(source.num_series(), prepared.partitions, partition);
             let key_range = partition_key_range(source.as_ref(), &range)?;
             let stream = source.read_series(range)?;
-            Ok(Some(InitializedRawSeriesScan { stream, key_range }))
-        })
+            Ok(InitializedRawSeriesScan { stream, key_range })
+        }))
     }
 
     fn prepare_series(
@@ -1156,6 +1252,9 @@ impl RegionScanner for SeriesScan {
         };
         self.legacy_receivers.lock().unwrap().clear();
         self.candidate_receivers.lock().unwrap().clear();
+        // The cleared receivers keep the bookkeeping they were created with; the next distributor
+        // starts over on a fresh one.
+        self.candidate_receiver_state = Arc::new(CandidateReceiverState::new());
         self.metrics_list = Arc::new(PartitionMetricsList::default());
     }
 
@@ -1214,6 +1313,16 @@ impl SeriesScan {
     /// Returns the scan mode for tests.
     pub(crate) fn mode(&self) -> &'static str {
         self.mode.as_str()
+    }
+
+    /// Returns a handle on this scanner's candidate receiver counts.
+    ///
+    /// The counts belong to this scanner, so a test can assert on them exactly while other scans in
+    /// the same process hand their receivers over.
+    pub(crate) fn candidate_receiver_counts(&self) -> CandidateReceiverCounts {
+        CandidateReceiverCounts {
+            state: self.candidate_receiver_state.clone(),
+        }
     }
 }
 
@@ -1442,7 +1551,8 @@ struct SeriesCandidateDistributor {
     partitions: Vec<Vec<PartitionRange>>,
     pruner: Arc<Pruner>,
     senders: CandidateSenderList,
-    active_receivers: Arc<AtomicUsize>,
+    /// The receivers this distributor feeds, shared with the scanner that created them.
+    receivers: Arc<CandidateReceiverState>,
     metrics_set: ExecutionPlanMetricsSet,
     metrics_list: Arc<PartitionMetricsList>,
     explain_verbose: bool,
@@ -1533,7 +1643,7 @@ impl SeriesCandidateDistributor {
     }
 
     fn should_fetch_candidates(&self) -> bool {
-        self.active_receivers.load(Ordering::Relaxed) > 0
+        self.receivers.active.load(Ordering::Relaxed) > 0
     }
 
     fn send_error(&mut self, error: Error) {
@@ -1857,14 +1967,15 @@ mod tests {
 
     #[test]
     fn candidate_distributor_stops_after_all_receivers_close() {
-        let (_senders, mut receivers, active_receivers) = new_candidate_channel_list(2);
-        assert_eq!(2, active_receivers.load(Ordering::Relaxed));
+        let state = Arc::new(CandidateReceiverState::new());
+        let (_senders, mut receivers) = new_candidate_channel_list(2, state.clone());
+        assert_eq!(2, state.active.load(Ordering::Relaxed));
 
         drop(receivers[0].take());
-        assert_eq!(1, active_receivers.load(Ordering::Relaxed));
+        assert_eq!(1, state.active.load(Ordering::Relaxed));
 
         drop(receivers[1].take());
-        assert_eq!(0, active_receivers.load(Ordering::Relaxed));
+        assert_eq!(0, state.active.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

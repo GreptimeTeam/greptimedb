@@ -666,8 +666,12 @@ pub type RawSeriesInitializationFuture =
     futures::future::BoxFuture<'static, DfResult<DfSendableRecordBatchStream>>;
 
 /// The scanner's owned initialization of one partition, or `None` when it offers no such form.
+///
+/// The scanner decides synchronously which of the two it is: `Some` is work it has taken on and
+/// reports through the future, `None` means the ordinary entrypoint stays the stream and the caller
+/// captures it itself.
 type RawScannerInitializationFuture =
-    futures::future::BoxFuture<'static, Result<Option<InitializedRawSeriesScan>, BoxedError>>;
+    Option<futures::future::BoxFuture<'static, Result<InitializedRawSeriesScan, BoxedError>>>;
 
 /// What one partition needs after its initialization resolves to pack and wrap its stream.
 struct PartitionTail {
@@ -816,8 +820,13 @@ impl SeriesScanExec {
     ///
     /// A scanner that offers no initialized form keeps `scan_series_partition`'s stream unchanged
     /// and declares no key range; that is the same stream an ordinary execution packs, not a
-    /// reduced capability. Errors are the scan's own and are reported here, never replayed through
-    /// another entrypoint.
+    /// reduced capability. That stream is captured here, synchronously, and the future this method
+    /// returns already owns it: a caller that drops the future without polling it - a router that
+    /// fails or is cancelled before the task it spawned reads it - still releases the stream and
+    /// every reader, receiver and reservation behind it. Deferring that capture to the task would
+    /// leave a scanner that the caller still holds owning the partition's receiver, and the read
+    /// feeding it alive, until the whole plan goes away. Errors are the scan's own and are reported
+    /// here, never replayed through another entrypoint.
     pub fn initialize_partition(
         &self,
         partition: usize,
@@ -827,18 +836,27 @@ impl SeriesScanExec {
             Ok(tail) => tail,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
-        let initialization = tail.initialize();
+        let initialization = match tail.initialize() {
+            Some(initialization) => initialization,
+            // The source offers no initialized form, so its ordinary entrypoint is the stream and
+            // no range is claimed. The capture is part of this call, not of the returned future:
+            // what it creates is owned by the future from here on, whether or not anyone polls it.
+            None => {
+                let raw = match tail.ordinary() {
+                    Ok(raw) => raw,
+                    Err(error) => return Box::pin(async move { Err(error) }),
+                };
+                return match tail.finish(raw, None) {
+                    Ok(stream) => Box::pin(std::future::ready(Ok(stream))),
+                    Err(error) => Box::pin(async move { Err(error) }),
+                };
+            }
+        };
         Box::pin(async move {
-            let (raw, key_range) = match initialization
+            let initialized = initialization
                 .await
-                .map_err(|error| DataFusionError::External(Box::new(error)))?
-            {
-                Some(initialized) => (initialized.stream, initialized.key_range),
-                // The source offers no initialized form, so its ordinary entrypoint is the stream
-                // and no range is claimed.
-                None => (tail.ordinary()?, None),
-            };
-            tail.finish(raw, key_range)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?;
+            tail.finish(initialized.stream, initialized.key_range)
         })
     }
 
@@ -912,9 +930,10 @@ impl SeriesScanExec {
 impl PartitionTail {
     /// Captures the scanner's initialized partition, if it offers one.
     ///
-    /// The capture is synchronous and holds the scanner lock only for the call itself; the returned
+    /// The capture is synchronous and holds the scanner lock only for the call itself; a returned
     /// future is owned and is awaited after the lock is released. A scanner without an initialized
-    /// form is not an error: `None` means the ordinary entrypoint stays the stream.
+    /// form answers `None` here, before doing any work, and the caller captures the ordinary
+    /// stream itself while it still owns the call.
     fn initialize(&self) -> RawScannerInitializationFuture {
         let ctx = QueryScanContext {
             explain_verbose: self.scan.explain_verbose,

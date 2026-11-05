@@ -2005,9 +2005,9 @@ async fn initialized_partition(
 ) -> (Option<RawSeriesKeyRange>, Vec<RawSeriesChunk>) {
     let initialized = scan
         .initialize_series_partition(ctx, metrics, partition, binding)
+        .expect("the prepared reader offers an initialized form")
         .await
-        .expect("the initialized entrypoint exists")
-        .expect("the prepared reader offers an initialized form");
+        .expect("the initialized partition resolves");
     let chunks = initialized
         .stream
         .try_collect::<Vec<_>>()
@@ -2172,8 +2172,6 @@ async fn unsupported_coverage_keeps_the_ordinary_reader_and_no_initialization() 
     assert!(
         legacy_format
             .initialize_series_partition(&ctx, &metrics, 0, &binding)
-            .await
-            .unwrap()
             .is_none(),
         "a scanner without the columnar reader offers no initialized form"
     );
@@ -2193,8 +2191,6 @@ async fn unsupported_coverage_keeps_the_ordinary_reader_and_no_initialization() 
     assert!(
         columnar
             .initialize_series_partition(&ctx, &metrics, 0, &binding)
-            .await
-            .unwrap()
             .is_none(),
         "an unindexed SST is not covered by the prepared reader"
     );
@@ -2208,6 +2204,189 @@ async fn unsupported_coverage_keeps_the_ordinary_reader_and_no_initialization() 
             .unwrap()
             .is_empty(),
         "the ordinary reader reads the uncovered SST"
+    );
+    engine.stop().await.unwrap();
+}
+
+/// A raw partition's ordinary fallback owns its receiver from the moment it is initialized.
+///
+/// The prepared form hands back an owned future, so a caller can start every input before it spawns
+/// the task that polls it. The ordinary fallback has no such future to own the work: its stream is
+/// created by the initialization call, and the initialization handed to the task must already hold
+/// it rather than look it up when it is first polled. Otherwise a router that initializes all of its
+/// inputs and then fails - or is cancelled - before any of its tasks run leaves the scanner it still
+/// holds owning those receivers, and the distributor feeding them keeps reading the region behind a
+/// plan nobody is going to finish.
+///
+/// The interleaving below is that router without its routing: initialize both ordinary partitions,
+/// read one to the end, drop the sibling un-polled and the read with it, and keep the plan. The
+/// scanner's receiver counts are the evidence, so nothing here waits on a timer - a released
+/// receiver is a receiver released.
+///
+/// The counts belong to the scanner under test, not to the process, so they are exact: a scanner
+/// keeps its own evidence while other scans hand their receivers over in the same test process.
+#[tokio::test]
+async fn ordinary_fallback_initialization_owns_its_receiver_before_it_is_polled() {
+    let (_env, engine, region) = fixture_with(true).await;
+    // The fixture's own flushed rows, and then series on both sides of the series id range its
+    // assignment splits on, so each of the two partitions owns rows. Every timestamp is distinct,
+    // so a partition's rows can be compared before and after the interleaving.
+    let mut expected = vec![(1000, 1.0), (2000, 1.0)];
+    for (index, tsid) in [
+        0u64,
+        1,
+        2,
+        3,
+        u64::MAX - 3,
+        u64::MAX - 2,
+        u64::MAX - 1,
+        u64::MAX,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for offset in 0..2i64 {
+            let time = (index as i64 + 1) * 100 + offset;
+            let value = (index + 1) as f64;
+            write(&engine, &region, tsid, time, Some(value)).await;
+            expected.push((time, value));
+        }
+    }
+    flush_region(&engine, region.region_id, None).await;
+    // Every row is flushed behind a series index that was never built, so the prepared reader is
+    // not selected and the ordinary reader has to answer for all of them. The fixture pins the
+    // region's SSTs only, so a row left in the memtable is outside this scan's ranges.
+    expected.sort_unstable_by_key(|(time, _)| *time);
+
+    let store = region.series_index_store.clone().unwrap();
+    let new_scan = || {
+        let projection = (0..region.version().metadata.column_metadatas.len()).collect();
+        SeriesScan::new(
+            scan_input(&region, store.clone(), SelectedFormat::Columnar, projection),
+            true,
+        )
+    };
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let mut scan = new_scan();
+    assert_eq!("two_phase", scan.mode.as_str());
+    let binding = labels(scan.metadata());
+    // Every range belongs to exactly one output partition: a partition reads the union of the
+    // scan's ranges, so handing the same range to both partitions would read every row twice and
+    // the series a partition owns would arrive twice per chunk.
+    let ranges = scan.properties().partitions[0].clone();
+    let partition_ranges = vec![
+        ranges.iter().step_by(2).copied().collect::<Vec<_>>(),
+        ranges
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .copied()
+            .collect::<Vec<_>>(),
+    ];
+    scan.prepare(PrepareRequest::default().with_ranges(partition_ranges.clone()))
+        .unwrap();
+    assert_eq!(2, scan.properties().num_partitions());
+    // Preflight keeps the ordinary path, so the initialized form is refused before any work.
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        scan.initialize_series_partition(&ctx, &metrics, 0, &binding)
+            .is_none(),
+        "an ordinary partition has no initialized form to poll"
+    );
+
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    // The scanner's own receiver counts, taken before the plan takes ownership of it.
+    let receivers = scan.candidate_receiver_counts();
+    let plan = Arc::new(RegionScanExec::new(Box::new(scan), request, None).unwrap())
+        .try_to_series_scan(binding.clone())
+        .unwrap()
+        .expect("the ordinary fallback keeps the raw path available");
+    assert_eq!(
+        (0, 0),
+        receivers.counts(),
+        "a scanner starts with no receiver handed over, whatever other scans are doing"
+    );
+
+    // The router's start: every input is initialized before a task exists to poll any of them.
+    let first = plan.initialize_partition(0, Arc::new(TaskContext::default()));
+    let sibling = plan.initialize_partition(1, Arc::new(TaskContext::default()));
+    assert_eq!(
+        (2, 0),
+        receivers.counts(),
+        "each ordinary partition must own its receiver before anything polls it"
+    );
+
+    // One partition is read to the end; the sibling is never polled at all.
+    let frames = first.await.expect("the ordinary initialization resolves");
+    let mut initialization_rows = samples(
+        &unpack_raw_series(frames, Some(plan.series_schema().clone()))
+            .expect("the packed frames keep the raw declaration")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the ordinary reader reads its partition"),
+    );
+    initialization_rows.sort_unstable_by_key(|(time, _)| *time);
+    drop(sibling);
+
+    // The plan is still retained here, and every receiver its initializations captured is gone.
+    assert_eq!(
+        (2, 2),
+        receivers.counts(),
+        "dropping the initializations must release every receiver they captured"
+    );
+
+    // A bounded read of the same rows, with the abandoned plan still alive: no receiver left in it
+    // can hold the region's read open, and the rows are the ones the interrupted read returned.
+    let per_partition = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut control = new_scan();
+        control
+            .prepare(PrepareRequest::default().with_ranges(partition_ranges.clone()))
+            .unwrap();
+        let binding = labels(control.metadata());
+        let mut per_partition = Vec::new();
+        for partition in 0..2 {
+            let chunks = control
+                .scan_series_partition(&ctx, &metrics, partition, &binding)
+                .unwrap()
+                .expect("the ordinary reader still answers")
+                .try_collect::<Vec<_>>()
+                .await
+                .expect("the ordinary reader reads its partition");
+            let mut rows = samples(&chunks);
+            rows.sort_unstable_by_key(|(time, _)| *time);
+            per_partition.push(rows);
+        }
+        per_partition
+    })
+    .await
+    .expect("the retained plan does not hold the region's read open");
+    let mut control_all = per_partition[0].clone();
+    control_all.extend(per_partition[1].clone());
+    control_all.sort_unstable_by_key(|(time, _)| *time);
+    assert_eq!(expected, control_all, "every row is still read once");
+    assert!(
+        !initialization_rows.is_empty(),
+        "the initialized partition owns rows"
+    );
+    assert_eq!(
+        per_partition[0], initialization_rows,
+        "the interleaved read returned the rows its partition owns"
+    );
+    // The control scanner is a different scanner: it handed over and released its own receivers,
+    // and none of that reached the counts of the scanner under test.
+    assert_eq!(
+        (2, 2),
+        receivers.counts(),
+        "another scanner's receivers are not counted against this one"
     );
     engine.stop().await.unwrap();
 }
@@ -2237,7 +2416,9 @@ async fn initialized_partition_keeps_its_own_source_and_range_across_reset() {
     drop(source);
 
     // Two partitions: this execution owns the second ordinal. It is started, not awaited.
-    let started = scan.initialize_series_partition(&ctx, &metrics, 1, &binding);
+    let started = scan
+        .initialize_series_partition(&ctx, &metrics, 1, &binding)
+        .expect("the prepared reader keeps its initialized form across a reset");
     // Replace the preparation and the partition count before the execution is awaited.
     scan.reset_state();
     scan.prepare(PrepareRequest::default().with_ranges(vec![ranges, vec![], vec![]]))
@@ -2245,8 +2426,7 @@ async fn initialized_partition_keeps_its_own_source_and_range_across_reset() {
 
     let initialized = started
         .await
-        .expect("the started execution is not invalidated by a later reset")
-        .expect("the started execution keeps its initialized form");
+        .expect("the started execution is not invalidated by a later reset");
     let old_range = initialized
         .key_range
         .expect("the old slice has a candidate");
