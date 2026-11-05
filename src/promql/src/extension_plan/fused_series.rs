@@ -57,6 +57,7 @@ use common_query::series_frame::{
     pack_aggregate_state, pack_evaluated_series, series_frame_ordering, unpack_aggregate_state,
     unpack_evaluated_series, unpack_raw_series,
 };
+use common_recordbatch::adapter::{NATIVE_TREE_METRIC, NativeTreeMetric, NativeTreeMetrics};
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
@@ -70,7 +71,9 @@ use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
+};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
@@ -95,6 +98,7 @@ use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
+use crate::native::metrics::{NodeMetricsSnapshot, is_node_metric};
 use crate::native::plan::{
     AggregateStage, Grouping, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
     reads_across_series,
@@ -2142,8 +2146,11 @@ pub struct FusedSeriesExec {
     output_schema: SchemaRef,
     /// The evidence claimed by this plan's output partitions.
     duplicate_evidence: Mutex<EvidenceClaims>,
-    /// Per-node metrics, registered by each execution of the tree.
-    metric: ExecutionPlanMetricsSet,
+    /// Per-node metrics, registered by each execution of the tree, and the tree itself.
+    ///
+    /// Shared with the tree's own registration, which reads these figures when a reader asks for
+    /// the tree: that reader outlives this borrow, and must never keep the set alive.
+    metric: Arc<ExecutionPlanMetricsSet>,
     format: FusedOutputFormat,
     matching_parallelism: Option<usize>,
     /// Whether this node is a partition-local canonical producer.
@@ -2153,6 +2160,25 @@ pub struct FusedSeriesExec {
     canonical_producer_for_test: bool,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
+}
+
+/// Registers the tree `tree` runs as one of the metrics `metric` holds.
+///
+/// What is registered reads the tree when it is asked for, because a node's figures are only final
+/// once the tree ran, and `ANALYZE` reads them after it did. The reader holds `metric` weakly: the
+/// set holds the reader, so a strong handle would keep the set alive for as long as the reader.
+fn register_tree_metric(tree: &Arc<NativeTree>, metric: &Arc<ExecutionPlanMetricsSet>) {
+    let tree = Arc::clone(tree);
+    let figures = Arc::downgrade(metric);
+    MetricBuilder::new(metric).build(MetricValue::Custom {
+        name: NATIVE_TREE_METRIC.into(),
+        value: Arc::new(NativeTreeMetric::new(move || {
+            let Some(figures) = figures.upgrade() else {
+                return NativeTreeMetrics::default();
+            };
+            NativeTreeMetrics::from(tree.report(&NodeMetricsSnapshot::read(&figures)))
+        })),
+    });
 }
 
 fn preserves_partition_identity(node: &NativeNode) -> bool {
@@ -2528,6 +2554,8 @@ impl FusedSeriesExec {
                     input.properties().boundedness
                 }),
         ));
+        let metric = Arc::new(ExecutionPlanMetricsSet::new());
+        register_tree_metric(&tree, &metric);
         Ok(Self {
             promql,
             tree,
@@ -2542,7 +2570,7 @@ impl FusedSeriesExec {
                 evidence: None,
                 claimed: Vec::new(),
             }),
-            metric: ExecutionPlanMetricsSet::new(),
+            metric,
             properties,
             format,
             matching_parallelism,
@@ -2555,6 +2583,20 @@ impl FusedSeriesExec {
     /// The name this node is shown under.
     pub const fn name() -> &'static str {
         "FusedSeriesExec"
+    }
+
+    /// The figures the tree this node runs recorded, keyed by the path each node registered under.
+    fn node_metrics(&self) -> NodeMetricsSnapshot {
+        NodeMetricsSnapshot::read(&self.metric)
+    }
+
+    /// Every registration this node's tree made, exactly as it was registered.
+    ///
+    /// [`Self::metrics`] leaves these out because a flat set cannot say which node recorded what;
+    /// this is the same set unfiltered, for a reader that keys by name - the names are
+    /// `native.<path>.<metric>` (see [`crate::native::metrics`]).
+    pub fn node_metric_set(&self) -> MetricsSet {
+        self.metric.clone_inner()
     }
 }
 
@@ -2571,14 +2613,19 @@ impl std::fmt::Debug for FusedSeriesExec {
 }
 
 impl DisplayAs for FusedSeriesExec {
-    /// The query, then the tree it compiles to: the tree is rendered by [`NativeTree`]'s own
-    /// `Display`, so `EXPLAIN` and the node's metrics name the same nodes.
+    /// The query, then the tree it compiles to, one line per node.
+    ///
+    /// Each node's own figures are read from the metrics this node registered, so a statement that
+    /// never ran - every plain `EXPLAIN`, verbose included - draws the tree without them. That is
+    /// the whole difference between `EXPLAIN` and `ANALYZE` here: nothing switches it on.
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)?;
+        write!(f, "FusedSeriesExec: {}", self.promql)?;
+        // On the operator's own line, where the logical node also puts it: a second line would read
+        // as another node beside the tree this one draws.
         if self.format == FusedOutputFormat::SeriesFrame {
-            write!(f, "\noutput: series_frame")?;
+            write!(f, " (output: series_frame)")?;
         }
-        Ok(())
+        write!(f, "\n{}", self.tree.display_with(&self.node_metrics()))
     }
 }
 
@@ -2587,8 +2634,24 @@ impl ExecutionPlan for FusedSeriesExec {
         Self::name()
     }
 
+    /// The metrics this node records itself, which is none of its tree's.
+    ///
+    /// A [`MetricsSet`] is a flat, name-keyed bag: reporting the tree's figures through it would
+    /// attribute every node's figures to this node, because the reader cannot tell them apart. Each
+    /// node reports its own on its own line instead - and, as data, through the tree this node
+    /// registers as [`NativeTreeMetric`] - so they are left out here and this node reports only what
+    /// an operator of its own would add.
     fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metric.clone_inner())
+        let mut own = MetricsSet::new();
+        for metric in self.metric.clone_inner().iter() {
+            // The tree is not a figure of this node: it is what the node runs, reported on its own
+            // (see `NativeTreeMetric`), so it stays here rather than being flattened into a number.
+            let tree = matches!(metric.value(), MetricValue::Custom { .. });
+            if tree || !is_node_metric(metric.value().name()) {
+                own.push(Arc::clone(metric));
+            }
+        }
+        Some(own)
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

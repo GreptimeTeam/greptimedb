@@ -30,7 +30,7 @@
 mod aggregate;
 pub mod batch;
 pub mod canonicalize;
-mod display;
+pub mod display;
 pub mod execute;
 pub mod metrics;
 pub mod plan;

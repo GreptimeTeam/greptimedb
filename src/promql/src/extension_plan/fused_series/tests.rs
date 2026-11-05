@@ -83,8 +83,8 @@ use store_api::storage::RegionId;
 mod frame_output;
 
 use super::{
-    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
-    series_to_record_batch,
+    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, OutputColumn,
+    POLL_BUDGET, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::{SeriesRepartitionExec, SeriesRouting};
@@ -2419,6 +2419,21 @@ fn assert_series_rates(rows: &[Row], rates: &[(f64, &str)]) {
     }
 }
 
+/// The figures the fused node at the top of `plan` registered, exactly as the tree registered them.
+fn node_metric_set(plan: &Arc<dyn ExecutionPlan>) -> MetricsSet {
+    plan.downcast_ref::<FusedSeriesExec>()
+        .expect("the plan under test is one fused node")
+        .node_metric_set()
+}
+
+/// How many figures - as opposed to structure, such as the tree a node runs - `metrics` holds.
+fn node_figures(metrics: &MetricsSet) -> usize {
+    metrics
+        .iter()
+        .filter(|metric| !matches!(metric.value(), MetricValue::Custom { .. }))
+        .count()
+}
+
 fn count(metrics: &MetricsSet, name: &str) -> usize {
     match metrics.sum_by_name(name) {
         Some(MetricValue::Count { count, .. }) => count.value(),
@@ -2457,11 +2472,11 @@ fn fmt_as_prints_the_native_tree() {
     );
     // A distinctive line of the compiled tree: the window's bound range, offset, anchor and grid.
     assert!(
-        text.contains("root Window rate [300000ms] offset 0 anchor - on grid 300000/60000x5"),
+        text.contains("  Window: rate [300000ms] offset 0 anchor - on grid 300000/60000x5"),
         "the node line carries the tree it runs: {text}"
     );
     assert!(
-        text.contains("input Input raw samples"),
+        text.contains("    Input: raw samples"),
         "the node line carries the tree's source: {text}"
     );
 }
@@ -2524,9 +2539,7 @@ async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
 
     // The source closed the series on exactly one chunk, and the window saw exactly that one
     // closing: one `is_last`, not one per input batch.
-    let metrics = exec
-        .metrics()
-        .expect("the node reports its runtime's metrics");
+    let metrics = node_metric_set(&exec);
     assert_eq!(1, count(&metrics, "native.root.input.completed_series"));
     assert_eq!(1, count(&metrics, "native.root.completed_series"));
 }
@@ -3599,7 +3612,7 @@ async fn physical_plan_accepts_scalar_root_without_sources() {
     drop(early_batch);
     assert_eq!(0, drop_pool.reserved());
     assert!(exec.execute(1, task_context(&pool)).is_err());
-    let metrics = exec.metrics().unwrap();
+    let metrics = node_metric_set(&exec);
     assert_eq!(1, count(&metrics, "native.root.output_batches"));
     assert_eq!(
         GRID_LEN as usize,
@@ -3759,9 +3772,7 @@ async fn an_empty_input_runs_the_tree_and_yields_no_rows() {
         .expect("a tree with no series in it still closes");
     assert!(rows(&batches).is_empty(), "{:?}", rows(&batches));
     // The run closed on no series, so nothing was completed and nothing was decided.
-    let metrics = exec
-        .metrics()
-        .expect("the node reports its runtime's metrics");
+    let metrics = node_metric_set(&exec);
     assert_eq!(0, count(&metrics, "native.root.completed_series"));
     assert_eq!(0, count(&metrics, "native.root.input.completed_series"));
 }
@@ -4704,9 +4715,7 @@ async fn a_rebuilt_node_reports_only_its_own_execution() {
         first_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
         "the series is answered at every grid position"
     );
-    let original = exec
-        .metrics()
-        .expect("the node reports its runtime's metrics");
+    let original = node_metric_set(&exec);
     assert_eq!(1, count(&original, "native.root.completed_series"));
 
     // Rebuilt over a fresh input of the same frames, the way an optimizer replaces a child.
@@ -4716,13 +4725,12 @@ async fn a_rebuilt_node_reports_only_its_own_execution() {
             ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
         )
         .expect("the node rebuilds over another input");
-    // No execution of the rebuilt node has run, so it registered no handles to report.
-    let before = rebuilt
-        .metrics()
-        .expect("a plan that has not run reports an empty set rather than none");
+    // No execution of the rebuilt node has run, so it registered no figures to report: the only
+    // entry is the tree it runs, which is structure rather than a figure.
+    let before = node_metric_set(&rebuilt);
     assert_eq!(
         0,
-        before.iter().count(),
+        node_figures(&before),
         "the rebuilt node inherited an execution's metrics"
     );
     // Rebuilding does not reset the node it was built from.
@@ -4733,16 +4741,12 @@ async fn a_rebuilt_node_reports_only_its_own_execution() {
         .expect("the rebuilt node runs");
     assert_eq!(first_rows, rows(&rebuilt_batches));
 
-    let after = rebuilt
-        .metrics()
-        .expect("the rebuilt node reports the execution it ran");
+    let after = node_metric_set(&rebuilt);
     assert_eq!(1, count(&after, "native.root.completed_series"));
     assert_eq!(1, count(&after, "native.root.input.completed_series"));
     // One execution's set, not two: a copy of the original's roots would answer 2 here.
     assert_eq!(original.iter().count(), after.iter().count());
-    let retained = exec
-        .metrics()
-        .expect("the original keeps the handles its execution registered");
+    let retained = node_metric_set(&exec);
     assert_eq!(original.iter().count(), retained.iter().count());
     assert_eq!(1, count(&retained, "native.root.completed_series"));
     assert_eq!(1, count(&retained, "native.root.input.completed_series"));
@@ -4768,16 +4772,14 @@ async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
     // metrics are read: the reads below happen while an execution is alive.
     assert!(futures::poll!(stream.next()).is_pending());
 
-    let first = exec
-        .metrics()
-        .expect("the metrics are registered before the run");
+    let first = node_metric_set(&exec);
     let names = |metrics: &MetricsSet| -> Vec<String> {
         metrics
             .iter()
             .map(|metric| metric.value().name().to_string())
             .collect()
     };
-    let second = exec.metrics().expect("metrics can be read repeatedly");
+    let second = node_metric_set(&exec);
     assert_eq!(
         names(&first),
         names(&second),
@@ -4800,9 +4802,7 @@ async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
     drop(stream);
     // What the execution recorded is still readable once it is gone, and nothing it held is charged
     // any more.
-    let after = exec
-        .metrics()
-        .expect("the handles outlive the execution they were registered for");
+    let after = node_metric_set(&exec);
     assert_eq!(
         names(&first),
         names(&after),
@@ -4832,16 +4832,14 @@ async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
     // A second execution of the same plan registers its own tree's handles. It is dropped without
     // being polled, so what it adds is its own counters at zero -- the first execution's figures are
     // untouched -- and no part of the tree it built outlives it.
-    let registered = after.iter().count();
+    let registered = node_figures(&after);
     let second_stream = exec
         .execute(0, task_context(&pool))
         .expect("the plan runs a second time");
     drop(second_stream);
-    let twice = exec
-        .metrics()
-        .expect("the metrics of both executions are read");
+    let twice = node_metric_set(&exec);
     assert_eq!(
-        twice.iter().count(),
+        node_figures(&twice),
         registered * 2,
         "the second execution did not register its own node handles"
     );
@@ -4860,8 +4858,8 @@ async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
     assert_eq!(0, pool.reserved(), "the dropped executions hold no bytes");
 
     // Reading both executions' metrics is still a read: the same entries come back.
-    let again = exec.metrics().expect("metrics can be read repeatedly");
-    assert_eq!(twice.iter().count(), again.iter().count());
+    let again = node_metric_set(&exec);
+    assert_eq!(node_figures(&twice), node_figures(&again));
     for (early, late) in twice.iter().zip(again.iter()) {
         assert!(
             Arc::ptr_eq(early, late),
