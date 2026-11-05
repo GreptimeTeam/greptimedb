@@ -17,10 +17,11 @@ use std::fmt::Debug;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use tonic::codegen::http;
 
 use crate::error::{self, Result};
+use crate::metasrv::Metasrv;
 
 /// Returns a 200 response with a text body.
 pub fn to_text_response(text: &str) -> Result<http::Response<String>> {
@@ -75,4 +76,15 @@ where
     fn into_response(self) -> Response {
         (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
     }
+}
+
+/// Uses the same leadership predicate as the metasrv gRPC procedure service.
+pub(crate) fn ensure_leader(metasrv: &Metasrv) -> Result<()> {
+    ensure!(
+        metasrv.is_leader(),
+        error::IsNotLeaderSnafu {
+            node_addr: metasrv.options().grpc.server_addr.clone(),
+        }
+    );
+    Ok(())
 }
