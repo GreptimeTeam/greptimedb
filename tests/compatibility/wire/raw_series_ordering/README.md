@@ -1,7 +1,7 @@
 # Raw-series ordering schema metadata compatibility
 
-`v2_metadata.json` is a hand-authored, frozen set of Arrow schema metadata maps
-for the v2 series frame. It records the established layout/content/labels/time
+`v1_metadata.json` is a hand-authored, frozen set of Arrow schema metadata maps
+for the series frame, whose layout marker is the single `v1` this engine writes. It records the established layout/content/labels/time
 metadata and mandatory ordering entry, for raw frames and for evaluated ones.
 The Rust unit test parses these literal maps through `series_frame_ordering` and
 through `SeriesFrameDeclaration::parse`; the fixture is not produced by the
@@ -17,7 +17,7 @@ cargo nextest run -p common-query -E 'test(series_frame)'
 
 The fixture proves that missing ordering metadata and unknown values are rejected,
 the two original values decode, and that a whole declaration is accepted or
-refused consistently with its layout and content: a `v3` layout, an unregistered
+refused consistently with its layout and content: a `v2` layout, an unregistered
 `greptime.series.*` key, a raw frame that declares a grid, and any content/time or
 content/labels contradiction are refusals. Evaluated declarations use explicit
 `contiguous` ordering; streaming round trips for evaluated frames are covered by

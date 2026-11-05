@@ -2,7 +2,7 @@
   {
     "name": "key_frame_declares_dense_description",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -14,7 +14,7 @@
   {
     "name": "key_frame_declares_sparse_description",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -26,7 +26,7 @@
   {
     "name": "missing_description_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -37,7 +37,7 @@
   {
     "name": "unknown_version_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -49,7 +49,7 @@
   {
     "name": "missing_field_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -61,7 +61,7 @@
   {
     "name": "unknown_field_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -73,7 +73,7 @@
   {
     "name": "wrong_field_type_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -85,7 +85,7 @@
   {
     "name": "unlisted_logical_tag_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -97,7 +97,7 @@
   {
     "name": "explicit_frame_with_description_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
@@ -109,7 +109,7 @@
   {
     "name": "malformed_json_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -121,7 +121,7 @@
   {
     "name": "wrong_layout_rejected",
     "metadata": {
-      "greptime.series.layout": "v3",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -133,7 +133,7 @@
   {
     "name": "unregistered_reserved_metadata_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -146,7 +146,7 @@
   {
     "name": "evaluated_with_timestamps_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "evaluated",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
@@ -158,7 +158,7 @@
   {
     "name": "evaluated_with_key_labels_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "evaluated",
       "greptime.series.labels": "key",
       "greptime.series.time": "grid_spans",
@@ -171,7 +171,7 @@
   {
     "name": "raw_with_grid_rejected",
     "metadata": {
-      "greptime.series.layout": "v2",
+      "greptime.series.layout": "v1",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",

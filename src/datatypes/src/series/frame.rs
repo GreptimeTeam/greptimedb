@@ -33,9 +33,10 @@
 //! Packing accumulates bounded multi-row batches: [`SeriesFrameCursor`] walks one validated chunk
 //! and [`SeriesFrameBuilder`] emits rows directly as Arrow arrays once a row or estimated byte bound
 //! is reached. Decoding reuses one prepared
-//! schema per stream through [`SeriesFrameDecoder`]. The column layout and existing metadata stay
-//! on the `v2` contract. Raw frames may also declare `greptime.series.ordering=interleaved`; older
-//! readers that do not recognize this ordering reject it. A key-encoded frame declares a versioned
+//! schema per stream through [`SeriesFrameDecoder`]. Column layout, metadata, and wire strings stay
+//! on the single `v1` contract. Raw frames may also declare `greptime.series.ordering=interleaved`;
+//! older readers that do not recognize this ordering reject it. A key-encoded frame declares a
+//! versioned
 //! [`LabelDecodeSpec`] so its labels can be decoded from the received schema alone, and an evaluated
 //! frame declares its [`GridSpec`] once instead of repeating timestamps.
 //!
@@ -130,12 +131,14 @@ const RESERVED_KEYS: [&str; 9] = [
     AGGREGATE_COMPONENTS,
 ];
 
-/// The only layout this revision writes and reads.
+/// The layout marker every frame this engine writes carries.
 ///
-/// A frame declaring any other value is refused instead of decoded: the sample representation of an
-/// unreleased format is not worth a second decoder, and silently guessing would turn a format change
-/// into wrong values.
-pub const FRAME_LAYOUT_VERSION: &str = "v2";
+/// It stays at one value: the frame is the native path's internal transport and has never shipped,
+/// so there is no released layout to tell apart from this one. A reader that meets another marker
+/// refuses the frame instead of guessing at it - the check is what turns a stale producer into an
+/// error rather than into wrong values - but the marker itself does not move when the layout
+/// changes, because two binaries of one workspace are built from one revision.
+pub const FRAME_LAYOUT_VERSION: &str = "v1";
 
 /// Version of the label decode description this revision writes and reads.
 ///
