@@ -1664,18 +1664,6 @@ fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
     Some(state_owners(group, histogram))
 }
 
-/// Whether the state a split exports can need more than one owner.
-///
-/// This is the test [`state_routing`] answers with [`StateGroup::Grouped`], asked by the planner
-/// that decides how many state hops a split takes: a cut whose group is one group is finished by
-/// the merge above the producers, so its split keeps one hop, while a cut that can have more than
-/// one group folds its exported state once more - per owner - before that merge finalizes it.
-pub fn state_needs_several_owners(root: &NativeNode) -> bool {
-    state_cut(root).is_some_and(|(_, group, histogram)| {
-        state_owners(group, histogram).0 == StateGroup::Grouped
-    })
-}
-
 /// Whether `root` finalizes the state it reads: the suffix the split admits sits above a `Final`.
 ///
 /// Only the operations [`split`](crate::native::split::split) actually admits above the cut are

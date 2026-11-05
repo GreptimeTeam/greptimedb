@@ -900,16 +900,18 @@ fn a_reducer_above_the_producer_chain_is_not_an_in_process_final() {
     );
 }
 
-/// A closed plan keeps the encoding checks for its state nodes: the exception is what admits them,
-/// so without in-process transport the plan is still refused as a whole.
+/// A two-level split encodes, and the transport only decides where its nodes may run.
+///
+/// The state-exporting and state-reading halves carry their frame layout, so the plan has a wire
+/// form. In-process transport is a placement exception, not an encoding prerequisite.
 #[test]
-fn a_closed_two_level_split_keeps_the_encoding_refusal() {
+fn a_two_level_split_encodes_with_or_without_in_process_transport() {
     let split = split_aggregate_plan(test_table_scan("t"), SplitDepth::Two);
     assert!(
         DFLogicalSubstraitConvertor
             .encode(&split, DefaultSerializer)
-            .is_err(),
-        "a state-exporting node has no wire form: {split}"
+            .is_ok(),
+        "the split's state frames are encodable: {split}"
     );
 
     let closed = PlanRewriter::new(&split, false);
@@ -918,16 +920,15 @@ fn a_closed_two_level_split_keeps_the_encoding_refusal() {
         "a closed plan is not the in-process exception"
     );
     assert!(
-        !closed.whole_plan_encodable,
-        "a closed plan keeps the encodability gate: its state nodes have no wire form"
+        closed.whole_plan_encodable,
+        "a closed two-level split encodes on its own"
     );
 
     let in_process = PlanRewriter::new(&split, true);
     assert!(in_process.in_process_fused_root, "{split}");
     assert!(
-        !in_process.whole_plan_encodable,
-        "the admitted chain has no wire form either: the in-process exception, not an encoding, is \
-         what carries it"
+        in_process.whole_plan_encodable,
+        "the admitted chain encodes on its own now"
     );
 }
 

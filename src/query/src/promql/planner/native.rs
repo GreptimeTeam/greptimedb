@@ -20,10 +20,9 @@
 //! folds across series - an aggregate - is split instead: its per-series prefix and a `Partial`
 //! aggregate run in a `FusedSeries` producer, a `SeriesRepartitionExec` routes that state, and a
 //! second `FusedSeries` runs the `Final` aggregate over it, because a region holds only part of a
-//! group. A cut whose groups can need more than one owner folds that state once more before the
-//! merge: a router carries the producer's state to a reducer, the reducer folds state into state,
-//! and a second router carries that to the merge. A cut whose groups are one group is finished by
-//! the merge wherever the state lands, so it keeps the one-hop plan. Declining is the normal answer:
+//! group. The planner cuts one state hop, so the merge finalizes the producer's state; a second
+//! hop - a `PartialReduce` folding state into state - stays part of the split's own API but is not
+//! planned here. Declining is the normal answer:
 //! every shape the compiler does not accept, and every query this route cannot bind to a scan
 //! faithfully, keeps the plan the existing planner builds.
 //!
@@ -62,7 +61,7 @@ use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
     RawSeriesSource, SplitDepth, SplitTrees, input_locality, matching_operands_drop_key,
-    state_needs_several_owners, tree_source_fields,
+    tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -1267,19 +1266,10 @@ impl PromPlanner {
             // the wire that is the raw series source, and the partial/final halves stay on the
             // frontend above the regions, so per-series work keeps the scan width.
             //
-            // How many state hops the split takes follows the cut's ownership, not a caller's
-            // choice: a cut that can need more than one owner puts a `PartialReduce` between the
-            // two halves, so each owner folds the state it is routed before the merge finalizes it,
-            // while a cut whose groups are one group is finished by that merge wherever the state
-            // lands and keeps the one-hop plan. The question is the one the state router asks of
-            // the same aggregate, so both hops route by the group the merge finalizes by.
+            // Keep the default split to one state hop; explicit callers can request
+            // `SplitDepth::Two`.
             let split = if !multi_input && selectors.len() == 1 {
-                let depth = if state_needs_several_owners(tree.root()) {
-                    SplitDepth::Two
-                } else {
-                    SplitDepth::One
-                };
-                FusedSeries::split_aggregate(&tree, &time, depth)
+                FusedSeries::split_aggregate(&tree, &time, SplitDepth::One)
                     .context(DataFusionPlanningSnafu)?
             } else {
                 None
@@ -3337,10 +3327,9 @@ mod tests {
 
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
-        NATIVE_SPLIT_REDUCE_EXTENSION_KEY, NativeType, collect_selectors, cut_segments,
-        fused_output_schema, hybrid_binary_admitted, independent_scan_pair, native_output_tags,
-        native_promql_requested, native_raw_plan_bounds_region_reads, native_split_reduce_requested,
-        scan_time_filter,
+        NativeType, collect_selectors, cut_segments, fused_output_schema, hybrid_binary_admitted,
+        independent_scan_pair, native_output_tags, native_promql_requested,
+        native_raw_plan_bounds_region_reads, scan_time_filter,
     };
 
     #[test]
