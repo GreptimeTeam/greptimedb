@@ -187,12 +187,17 @@ pub(crate) fn split(
         | NativeExpr::Timestamp { input }
         | NativeExpr::Vector { input, .. }
         | NativeExpr::VectorOf { input }
-        | NativeExpr::ParameterizedMap { input, .. } => match split(input, fields, time_index)? {
-            Some(_) => Err(declined(
-                "an aggregate under an operation that reads evaluated values",
-            )),
-            None => Ok(None),
-        },
+        | NativeExpr::ScalarOf { input }
+        | NativeExpr::ParameterizedMap { input, .. }
+        | NativeExpr::ParameterizedTopK { input, .. }
+        | NativeExpr::ParameterizedHistogram { input, .. } => {
+            match split(input, fields, time_index)? {
+                Some(_) => Err(declined(
+                    "an aggregate under an operation that reads evaluated values",
+                )),
+                None => Ok(None),
+            }
+        }
         NativeExpr::Binary {
             left,
             right,
@@ -286,8 +291,15 @@ pub(crate) fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input } => raw_fields(input),
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => raw_fields(input),
             NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => raw_fields(input).or_else(|| parameters.iter().find_map(raw_fields)),
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => raw_fields(input).or_else(|| raw_fields(parameter)),
+            NativeExpr::ParameterizedHistogram {
                 input, parameters, ..
             } => raw_fields(input).or_else(|| parameters.iter().find_map(raw_fields)),
             NativeExpr::Binary { left, right, .. }

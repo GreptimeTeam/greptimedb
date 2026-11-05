@@ -1253,7 +1253,8 @@ fn same_source(node: &NativeNode) -> Option<usize> {
         }
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
-        | NativeExpr::Timestamp { input } => same_source(input),
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::ScalarOf { input } => same_source(input),
         NativeExpr::Map { input, op }
             if !op
                 .ops
@@ -1263,6 +1264,26 @@ fn same_source(node: &NativeNode) -> Option<usize> {
             same_source(input)
         }
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } if parameters.iter().all(|parameter| {
+            matches!(
+                parameter.expr,
+                NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. }
+            )
+        }) =>
+        {
+            same_source(input)
+        }
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } if matches!(
+            parameter.expr,
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. }
+        ) =>
+        {
+            same_source(input)
+        }
+        NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } if parameters.iter().all(|parameter| {
             matches!(
@@ -1310,7 +1331,9 @@ fn same_source(node: &NativeNode) -> Option<usize> {
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
         | NativeExpr::Map { .. }
-        | NativeExpr::ParameterizedMap { .. } => None,
+        | NativeExpr::ParameterizedMap { .. }
+        | NativeExpr::ParameterizedTopK { .. }
+        | NativeExpr::ParameterizedHistogram { .. } => None,
     }
 }
 
@@ -1441,8 +1464,15 @@ fn needs_vector_matching(node: &NativeNode) -> bool {
         | NativeExpr::VectorOf { input }
         | NativeExpr::Merge { input }
         | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. } => needs_vector_matching(input),
+        | NativeExpr::Vector { input, .. }
+        | NativeExpr::ScalarOf { input } => needs_vector_matching(input),
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => needs_vector_matching(input) || parameters.iter().any(needs_vector_matching),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => needs_vector_matching(input) || needs_vector_matching(parameter),
+        NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => needs_vector_matching(input) || parameters.iter().any(needs_vector_matching),
         NativeExpr::Set { left, right, .. } => {
@@ -1546,14 +1576,24 @@ fn tree_inputs_for_locality(root: &NativeNode) -> Vec<&crate::native::plan::Boun
             | NativeExpr::VectorOf { input }
             | NativeExpr::Merge { input }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => visit(input, inputs),
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::ScalarOf { input } => visit(input, inputs),
             NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            }
+            | NativeExpr::ParameterizedHistogram {
                 input, parameters, ..
             } => {
                 visit(input, inputs);
                 for parameter in parameters {
                     visit(parameter, inputs);
                 }
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                visit(input, inputs);
+                visit(parameter, inputs);
             }
             NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 visit(left, inputs);
@@ -1586,6 +1626,12 @@ fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
                 input,
                 histogram || matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)),
             ),
+            // A parameterized histogram is a histogram suffix too: its function folds the bounds of
+            // one histogram, so every bound has to meet where it runs.
+            NativeExpr::ParameterizedHistogram { input, op, .. } => find(
+                input,
+                histogram || matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)),
+            ),
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
@@ -1593,6 +1639,8 @@ fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::VectorOf { input }
             | NativeExpr::ParameterizedMap { input, .. }
+            | NativeExpr::ScalarOf { input }
+            | NativeExpr::ParameterizedTopK { input, .. }
             | NativeExpr::Aggregate { input, .. } => find(input, histogram),
             NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 find(left, histogram).or_else(|| find(right, histogram))
@@ -1743,14 +1791,24 @@ fn partitioned_window_sources(node: &NativeNode) -> DataFusionResult<Vec<usize>>
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::VectorOf { input } => visit(input, sources)?,
+            | NativeExpr::VectorOf { input }
+            | NativeExpr::ScalarOf { input } => visit(input, sources)?,
             NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            }
+            | NativeExpr::ParameterizedHistogram {
                 input, parameters, ..
             } => {
                 visit(input, sources)?;
                 for parameter in parameters {
                     visit(parameter, sources)?;
                 }
+            }
+            NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                visit(input, sources)?;
+                visit(parameter, sources)?;
             }
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }

@@ -1550,12 +1550,19 @@ fn node_children(expr: &NativeExpr) -> Vec<&NativeNode> {
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. } => vec![input],
+        | NativeExpr::Vector { input, .. }
+        | NativeExpr::ScalarOf { input } => vec![input],
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        }
+        | NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => std::iter::once(input.as_ref())
             .chain(parameters.iter())
             .collect(),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => vec![input, parameter],
         NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
             vec![left, right]
         }
@@ -1594,6 +1601,21 @@ fn with_node_children(
             op: *op,
             parameters: (0..parameters.len()).map(|_| next()).collect(),
         },
+        NativeExpr::ScalarOf { .. } => NativeExpr::ScalarOf {
+            input: Box::new(next()),
+        },
+        NativeExpr::ParameterizedTopK { op, .. } => NativeExpr::ParameterizedTopK {
+            input: Box::new(next()),
+            op: op.clone(),
+            parameter: Box::new(next()),
+        },
+        NativeExpr::ParameterizedHistogram { op, parameters, .. } => {
+            NativeExpr::ParameterizedHistogram {
+                input: Box::new(next()),
+                op: op.clone(),
+                parameters: (0..parameters.len()).map(|_| next()).collect(),
+            }
+        }
         NativeExpr::Timestamp { .. } => NativeExpr::Timestamp {
             input: Box::new(next()),
         },
@@ -2890,6 +2912,20 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
         NativeExpr::ParameterizedMap { input, .. } => {
             Some(without_metric_name(native_output_tags(input, source_tags)?))
         }
+        // `scalar()` reports one value and no labels, like the scalar it produces.
+        NativeExpr::ScalarOf { .. } => Some(Vec::new()),
+        // Ranking keeps each selected series' own labels, and its parameter is a scalar.
+        NativeExpr::ParameterizedTopK { input, .. } => native_output_tags(input, source_tags),
+        // A parameterized histogram function drops the bucket bound and the metadata labels, as its
+        // bound counterpart does; its parameters are scalars and carry no labels.
+        NativeExpr::ParameterizedHistogram { input, .. } => native_output_tags(input, source_tags)
+            .map(|tags| {
+                tags.into_iter()
+                    .filter(|tag| {
+                        tag != "le" && tag != "__name__" && tag != "__type__" && tag != "__unit__"
+                    })
+                    .collect()
+            }),
         NativeExpr::Vector { input, op } => match op {
             BoundVectorOp::TopK { .. }
             | BoundVectorOp::LimitK { .. }
@@ -3086,8 +3122,15 @@ fn depends_on_input_order(node: &NativeNode) -> bool {
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. } => depends_on_input_order(input),
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::ScalarOf { input } => depends_on_input_order(input),
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => depends_on_input_order(input) || depends_on_input_order(parameter),
+        NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
         NativeExpr::Vector { input, op } => {
@@ -3123,6 +3166,9 @@ fn groups_by_metric_name(node: &NativeNode) -> bool {
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
         | NativeExpr::VectorOf { .. } => false,
+        // `scalar()` answers one value with no labels at all, so a grouping by the metric name
+        // below it cannot leave two groups under one label set: the walk stops there.
+        NativeExpr::ScalarOf { .. } => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Merge { input }
         | NativeExpr::Window { input, .. }
@@ -3132,6 +3178,12 @@ fn groups_by_metric_name(node: &NativeNode) -> bool {
             grouping_names_metric(op) || groups_by_metric_name(input)
         }
         NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
+        NativeExpr::ParameterizedTopK {
+            input, parameter, ..
+        } => groups_by_metric_name(input) || groups_by_metric_name(parameter),
+        NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
         NativeExpr::Vector { input, op } => {
@@ -3181,11 +3233,15 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
                 }
         }
         // An aggregate folds a group, a vector operation reads the whole vector, and a bare input or
-        // scalar is not a per-series evaluation.
+        // scalar is not a per-series evaluation. A parameterized topk or histogram reads the whole
+        // vector, and `scalar()` answers from it.
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
         | NativeExpr::VectorOf { .. }
+        | NativeExpr::ScalarOf { .. }
+        | NativeExpr::ParameterizedTopK { .. }
+        | NativeExpr::ParameterizedHistogram { .. }
         | NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
@@ -3422,7 +3478,22 @@ mod tests {
                 | NativeExpr::Window { input, .. }
                 | NativeExpr::Merge { input }
                 | NativeExpr::Map { input, .. }
-                | NativeExpr::Timestamp { input } => collect(input, sources),
+                | NativeExpr::Timestamp { input }
+                | NativeExpr::ScalarOf { input } => collect(input, sources),
+                NativeExpr::ParameterizedTopK {
+                    input, parameter, ..
+                } => {
+                    collect(input, sources);
+                    collect(parameter, sources);
+                }
+                NativeExpr::ParameterizedHistogram {
+                    input, parameters, ..
+                } => {
+                    collect(input, sources);
+                    for parameter in parameters {
+                        collect(parameter, sources);
+                    }
+                }
                 NativeExpr::Binary { left, right, .. }
                 | NativeExpr::Set { left, right, .. }
                 | NativeExpr::Info {

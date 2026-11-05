@@ -220,6 +220,36 @@ fn rewrite(node: &NativeNode, source_tags: &[Vec<String>]) -> DfResult<NativeNod
         NativeExpr::VectorOf { input } => NativeExpr::VectorOf {
             input: Box::new(rewrite(input, source_tags)?),
         },
+        // `scalar()` answers from the whole vector: a series that arrives in pieces would be seen
+        // as several samples, so the pieces are collected where they still hold their samples.
+        NativeExpr::ScalarOf { input } => NativeExpr::ScalarOf {
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
+        },
+        // `topk` ranks the whole vector, so it counts canonical series; its parameter is a scalar,
+        // rewritten but never collected - a scalar carries no label set.
+        NativeExpr::ParameterizedTopK {
+            input,
+            op,
+            parameter,
+        } => NativeExpr::ParameterizedTopK {
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
+            op: op.clone(),
+            parameter: Box::new(rewrite(parameter, source_tags)?),
+        },
+        // A histogram function folds the bucket series of one histogram, so overlapping fragments
+        // must not reach it; its parameters are scalars and only need rewriting.
+        NativeExpr::ParameterizedHistogram {
+            input,
+            op,
+            parameters,
+        } => NativeExpr::ParameterizedHistogram {
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
+            op: op.clone(),
+            parameters: parameters
+                .iter()
+                .map(|parameter| rewrite(parameter, source_tags))
+                .collect::<DfResult<Vec<_>>>()?,
+        },
     };
     Ok(NativeNode {
         expr,

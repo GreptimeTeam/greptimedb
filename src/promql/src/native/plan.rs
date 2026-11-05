@@ -125,6 +125,19 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
         // Its parameters are scalars, which carry no labels, so what the node reports are its
         // input's labels.
         NativeExpr::ParameterizedMap { input, .. } => fused_output_tags(input, source_tags),
+        // `scalar()` reports one value and no labels, like the scalar it produces.
+        NativeExpr::ScalarOf { .. } => Some(Vec::new()),
+        // Its parameter is a scalar, which carries no labels, and ranking keeps each selected
+        // series' own labels.
+        NativeExpr::ParameterizedTopK { input, .. } => fused_output_tags(input, source_tags),
+        // A parameterized histogram function folds the bucket series that share the other labels
+        // into one series and drops `le` along with the metadata labels, exactly as its bound
+        // counterpart does. Its parameters are scalars and carry no labels.
+        NativeExpr::ParameterizedHistogram { input, .. } => {
+            let mut tags = fused_output_tags(input, source_tags)?;
+            tags.retain(|tag| tag != LE_LABEL && !PROMQL_METADATA_LABELS.contains(&tag.as_str()));
+            Some(tags)
+        }
         // An aggregate reports the grouping labels its input carries: `by(...)` keeps exactly the
         // ones it names, and `without(...)` keeps the rest and drops the metric name, as Prometheus
         // does.
@@ -950,9 +963,15 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
-        | NativeExpr::ParameterizedMap { input, .. } => {
+        | NativeExpr::ParameterizedMap { input, .. }
+        | NativeExpr::ParameterizedTopK { input, .. } => {
             duplicates_canonical_labels(input, source_tags)
         }
+        // `scalar()` answers one value, which names no label set at all.
+        NativeExpr::ScalarOf { .. } => false,
+        // The histogram functions fold the bucket series of one histogram into one series, so two
+        // pieces of one label set cannot survive them.
+        NativeExpr::ParameterizedHistogram { .. } => false,
         // A rewrite writes a caller-chosen destination label, so two series can end under one set -
         // but only if that label was one of the input's, because writing a label no series carries
         // leaves every series' identity distinct. `map_writes_existing_label` is that question, and
@@ -1824,6 +1843,13 @@ pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
         // A map can rewrite labels, so two series can end under one label set and the runtime
         // records what it wrote in an `Emitted` table.
         NativeExpr::Map { .. } | NativeExpr::ParameterizedMap { .. } => Some(false),
+        // `topk` hands back the series it read with their labels, so the input's answer is its own -
+        // exactly as for the bound operation.
+        NativeExpr::ParameterizedTopK { input, .. } => unifies_its_own_contributions(input),
+        // A histogram function groups its rows by label set itself, so it emits one series per set.
+        NativeExpr::ParameterizedHistogram { .. } => Some(true),
+        // `scalar()` answers one value per point, which is not several series.
+        NativeExpr::ScalarOf { .. } => Some(true),
         // A timestamp reports a position under the metric name dropped.
         NativeExpr::Timestamp { .. } => Some(false),
         NativeExpr::Binary {

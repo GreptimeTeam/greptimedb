@@ -4184,14 +4184,24 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
                 | NativeExpr::Timestamp { input }
                 | NativeExpr::Vector { input, .. }
                 | NativeExpr::Aggregate { input, .. }
+                | NativeExpr::ScalarOf { input }
                 | NativeExpr::VectorOf { input } => child(input),
                 NativeExpr::ParameterizedMap {
+                    input, parameters, ..
+                }
+                | NativeExpr::ParameterizedHistogram {
                     input, parameters, ..
                 } => {
                     child(input);
                     for parameter in parameters.iter() {
                         child(parameter);
                     }
+                }
+                NativeExpr::ParameterizedTopK {
+                    input, parameter, ..
+                } => {
+                    child(input);
+                    child(parameter);
                 }
                 NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                     child(left);
