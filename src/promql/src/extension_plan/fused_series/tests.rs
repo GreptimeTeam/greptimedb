@@ -6887,12 +6887,7 @@ fn histogram_split_carries_a_per_point_parameter() {
     let tree = histogram_parameterized_over_sum(base.clone(), vec![parameter.clone()]);
     let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME)
         .unwrap_or_else(|error| panic!("a per-point parameter must split, not fail: {error}"))
-        .unwrap_or_else(|| {
-            panic!(
-                "a per-point constant parameter must split: {}",
-                tree.to_string()
-            )
-        });
+        .unwrap_or_else(|| panic!("a per-point constant parameter must split: {tree}"));
     assert!(matches!(
         &partial.root().expr,
         NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
@@ -6903,10 +6898,7 @@ fn histogram_split_carries_a_per_point_parameter() {
         parameters,
     } = &final_tree.root().expr
     else {
-        panic!(
-            "the parameterized histogram must run above the Final aggregate: {}",
-            final_tree.to_string()
-        );
+        panic!("the parameterized histogram must run above the Final aggregate: {final_tree}");
     };
     assert_eq!(
         &BoundVectorOp::Histogram(HistogramFunction::Quantile(0.99)),
@@ -6942,8 +6934,7 @@ fn histogram_split_carries_a_per_point_parameter() {
         FusedSeries::split_aggregate(&reading, TIME)
             .unwrap()
             .is_none(),
-        "`histogram_quantile(scalar(sum(rate(x[5m]))), sum by (le) (rate(x[5m])))` must decline: {}",
-        reading.to_string()
+        "`histogram_quantile(scalar(sum(rate(x[5m]))), sum by (le) (rate(x[5m])))` must decline: {reading}"
     );
 }
 
