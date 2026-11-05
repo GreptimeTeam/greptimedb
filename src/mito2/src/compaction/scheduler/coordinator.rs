@@ -47,16 +47,18 @@ pub(crate) struct ReadyUnit {
     input_bytes: u64,
     /// Execution future that owns the reserved input leases.
     job: Job,
-    /// Runs only after `job` and its resources are dropped, on every path:
-    /// admission, withdrawal, executor rejection, panic and shutdown.
+    /// Dispatched after `job` and its resources are dropped for accepted units,
+    /// including withdrawal, executor rejection, panic and shutdown draining.
+    /// Rejection by a closed coordinator drops this future without running it.
     completion: Job,
 }
 
 impl ReadyUnit {
-    /// Creates ready work.
+    /// Creates ready work whose job owns the reserved inputs.
     ///
-    /// `job` owns the reserved inputs and must be dropped before `completion`
-    /// runs; callers must not poll or drop the two in the opposite order.
+    /// Successful submission to [`CompactionCoordinator::schedule`] transfers
+    /// completion handling to the coordinator. If submission fails, neither
+    /// future is run, and the caller must finish its own bookkeeping.
     pub(crate) fn new(
         state: CancellableTaskState,
         input_bytes: u64,
@@ -191,6 +193,10 @@ impl CompactionCoordinator {
     }
 
     /// Accepts a bounded batch's ready work, not an unbounded discovered backlog.
+    ///
+    /// # Errors
+    /// Returns an error if shutdown has started. The rejected unit's job and
+    /// completion are dropped without running; the caller handles the error.
     pub(crate) fn schedule(self: &Arc<Self>, region_id: RegionId, unit: ReadyUnit) -> Result<()> {
         {
             let mut state = self.lock();
