@@ -32,9 +32,21 @@ use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
 
-/// Whether `fused` is a canonical producer whose prefix and sources can run in one region.
-/// Its physical canonical router assembles the complete label sets; ordinary consumers above it
-/// do not carry the producer marker and retain their normal placement requirements.
+/// Whether `fused` is a canonical producer that may run inside one region.
+///
+/// A canonical producer merges the pieces of one label set that its own input partitions hold, and
+/// its physical canonical router collects those pieces from exactly those partitions. In process the
+/// producer reads the region's own scans, so that region holds every piece its router has to see and
+/// the node belongs there. Ordinary consumers above it do not carry the producer marker and retain
+/// their normal placement requirements.
+///
+/// Over the wire the producer reads [`RawSeriesSource`] children instead - the wrapper that
+/// reconciles fragments several regions hold - so it is only admitted here when its children are the
+/// region's own scans. A producer planned below the raw sources runs once per region and its router
+/// then collects the pieces of the region it runs in and no others, which answers a label set from
+/// one region's share whenever the pieces are spread. Declining this classification is what keeps
+/// that from happening: the analyzer expands each raw source into a merge scan and the producer, with
+/// the router it inserts above itself, stays on the frontend over every region.
 fn canonical_boundary_region_node(fused: &FusedSeries) -> bool {
     if !fused.is_canonical_producer() {
         return false;
@@ -42,18 +54,10 @@ fn canonical_boundary_region_node(fused: &FusedSeries) -> bool {
     fused.format() == FusedOutputFormat::SeriesFrame
         && fused.canonical_producer_prefix_is_local()
         && !fused.children().is_empty()
-        && fused.children().iter().all(|child| match child {
-            LogicalPlan::TableScan(_) => true,
-            LogicalPlan::Extension(extension)
-                if extension.node.as_any().is::<RawSeriesSource>() =>
-            {
-                matches!(
-                    extension.node.inputs().as_slice(),
-                    [LogicalPlan::TableScan(_)]
-                )
-            }
-            _ => false,
-        })
+        && fused
+            .children()
+            .iter()
+            .all(|child| matches!(child, LogicalPlan::TableScan(_)))
 }
 
 pub struct StepTransformAction {
@@ -269,8 +273,17 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
-                if canonical_boundary_region_node(fused) {
-                    return Commutativity::Commutative;
+                if fused.is_canonical_producer() {
+                    // A canonical producer is placed by its own contract and not by the shape below
+                    // it: either the region holds every piece its router collects, or the node stays
+                    // above the raw sources with its router. It must not fall through to the
+                    // per-series rules below, which describe what a node computes and say nothing
+                    // about where the pieces of one label set are.
+                    return if canonical_boundary_region_node(fused) {
+                        Commutativity::Commutative
+                    } else {
+                        Commutativity::NonCommutative
+                    };
                 }
                 // The raw-series reader supports one scan, or the narrow same-table multi-scan
                 // one-to-one case. This classification is for region-local execution only.

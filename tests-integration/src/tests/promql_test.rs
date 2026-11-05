@@ -3030,6 +3030,283 @@ async fn distributed_native_promql_repeated_selector_over_partitioned_table() {
     }
 }
 
+/// The rows a collapsing rewrite joins into one series without a collision: the two stored series
+/// are ten minutes apart, twice the five-minute lookback, so exactly one of them holds a value at
+/// each evaluation point and the label set they share carries both points.
+fn canonical_merge_fixture_inserts(prefix: &str) -> String {
+    format!(
+        "INSERT INTO {prefix}_b (host, val, ts) VALUES ('first', 10, 0), ('second', 20, 600000)"
+    )
+}
+
+/// The rows a collapsing rewrite can only reject: the second series is two minutes after the first,
+/// inside the lookback, so both hold a value at the same evaluation point while a time partition puts
+/// them in different regions.
+fn canonical_collision_fixture_inserts(prefix: &str) -> String {
+    format!("INSERT INTO {prefix}_c (host, val, ts) VALUES ('early', 10, 0), ('late', 20, 120000)")
+}
+
+/// Real two-datanode TCP acceptance for a canonical merge over a time-partitioned metric table.
+///
+/// A rewrite that writes a label its input carries can give two stored series one label set, and a
+/// time partition then puts the pieces of that label set in different regions. A region-local
+/// producer merges only the pieces its own region holds, so the boundary has to be placed above the
+/// regions: the frontend runs the producer over the reconciled raw sources, and the canonical router
+/// it inserts above itself collects each label set from every region.
+///
+/// The test states that in the three ways it can be observed: the values (against the same rows in
+/// one unpartitioned table), the plan (the producer is a frontend node reading a merge scan, with its
+/// canonical router above it), and the error (a collision two different regions hold is reported,
+/// which no single region could see).
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_canonical_merge_over_time_partitioned_table() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_canonical")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_canon_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:00', ts >= '1970-01-01 00:02:00' AND ts < '1970-01-01 00:04:00', ts >= '1970-01-01 00:04:00') ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_canon_b", "dist_native_canon_c"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_canon_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &canonical_merge_fixture_inserts("dist_native_canon"),
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &canonical_collision_fixture_inserts("dist_native_canon"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The semantic reference: the same rows in one unpartitioned physical table, where one region
+    // holds every piece of a label set. Its evaluation is what the partitioned plan has to reproduce.
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_canon_ctl_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_canon_ctl_b", "dist_native_canon_ctl_c"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_canon_ctl_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &canonical_merge_fixture_inserts("dist_native_canon_ctl"),
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &canonical_collision_fixture_inserts("dist_native_canon_ctl"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // Two stored series rewritten to one label set, holding their values at different evaluation
+    // points, are one series carrying both points - and the pieces they were made of are in the first
+    // and the last time partition.
+    let expression = r#"label_replace(dist_native_canon_b, "host", "same", "host", ".*")"#;
+    let query = PromQuery {
+        query: expression.to_string(),
+        start: "0".to_string(),
+        end: "600".to_string(),
+        step: "600s".to_string(),
+        ..PromQuery::default()
+    };
+    let expected = vec![
+        (0, "same".to_string(), 10.0),
+        (600_000, "same".to_string(), 20.0),
+    ];
+    let control = expression.replace("dist_native_canon_", "dist_native_canon_ctl_");
+    for (route, native) in [("native", true), ("existing", false)] {
+        let control_rows = native_result_rows(
+            instance
+                .do_promql_query(
+                    &PromQuery {
+                        query: control.clone(),
+                        ..query.clone()
+                    },
+                    native_query_context(native, 2),
+                )
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            control_rows, expected,
+            "the control over one region defines every row: {route}: {control}"
+        );
+    }
+
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .unwrap();
+    let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+    let shape = native_plan_shape(plan);
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![3],
+        "the selector reads all three time partitions: {expression}: {plan:?}"
+    );
+    assert!(
+        shape
+            .scan_orderings
+            .iter()
+            .all(|ordering| ordering.as_deref() == Some("interleaved")),
+        "the merge scan publishes raw fragments, which is the boundary the producer has to read \
+         above: {expression}: {:?}: {plan:?}",
+        shape.scan_orderings
+    );
+    // The boundary's two halves are both frontend nodes: the producer merges what each execution
+    // partition holds and the consumer above it publishes the routed frames. A producer planned
+    // inside a region would leave this tree with one fused node and no canonical producer in it.
+    assert_eq!(
+        shape.fused, 2,
+        "the canonical producer and the consumer above it run on the frontend: {expression}: \
+         {plan:?}"
+    );
+    let producer = native_plan_nodes(plan)
+        .into_iter()
+        .find(|node| promql::extension_plan::is_canonical_producer_exec(node.as_ref()))
+        .unwrap_or_else(|| {
+            panic!(
+                "the canonical producer must be a frontend node above the regions, not a region's \
+                 own producer: {expression}: {plan:?}"
+            )
+        });
+    // What the producer reads is the reconciled raw source: a merge scan over every region, with the
+    // fragments of each series collected below the producer rather than by it.
+    let below_producer = native_plan_nodes(&producer);
+    assert!(
+        below_producer
+            .iter()
+            .any(|node| node.downcast_ref::<MergeScanExec>().is_some()),
+        "the producer reads the regions through a merge scan: {expression}: {plan:?}"
+    );
+    assert!(
+        below_producer
+            .iter()
+            .any(|node| node.name() == "SeriesRepartitionExec"),
+        "the fragments of each series are reconciled below the producer, so each input partition \
+         holds whole series: {expression}: {plan:?}"
+    );
+    // The router is the boundary's middle stage: it sits above the producer and collects each label
+    // set from every partition the producer ran on, which is what a region-local boundary cannot do.
+    let router = native_plan_nodes(plan)
+        .into_iter()
+        .find(|node| {
+            node.name() == "SeriesRepartitionExec"
+                && node
+                    .children()
+                    .iter()
+                    .any(|child| promql::extension_plan::is_canonical_producer_exec(child.as_ref()))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the canonical router must read the producer above the regions: {expression}: \
+                 {plan:?}"
+            )
+        });
+    assert_eq!(
+        router.children()[0].name(),
+        "FusedSeriesExec",
+        "the router reads the canonical producer: {expression}: {plan:?}"
+    );
+    assert_eq!(
+        router.properties().output_partitioning().partition_count(),
+        producer
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "the router keeps the producer's width instead of gathering every piece: {expression}: \
+         {plan:?}"
+    );
+    let rows = native_result_rows(output).await;
+    assert_eq!(
+        rows, expected,
+        "the partitioned plan answers the control's rows: {expression}"
+    );
+
+    // A collision two regions hold is the error Prometheus reports for two metrics with one label
+    // set. A region-local producer cannot see it: each region would hold one piece and publish it,
+    // and the answer would be two series under one label set. The control over one region reports it
+    // as well, which is the answer the partitioned plan owes.
+    let collision = r#"label_replace(dist_native_canon_c, "host", "same", "host", ".*")"#;
+    let collision_query = PromQuery {
+        query: collision.to_string(),
+        start: "120".to_string(),
+        end: "120".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let collision_control = collision.replace("dist_native_canon_", "dist_native_canon_ctl_");
+    let control_error = instance
+        .do_promql_query(
+            &PromQuery {
+                query: collision_control.clone(),
+                ..collision_query.clone()
+            },
+            native_query_context(true, 2),
+        )
+        .await
+        .remove(0);
+    let control_error = match control_error {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        control_error.contains("cannot contain metrics with the same labelset"),
+        "the control over one region reports the overlap: {collision_control}: {control_error}"
+    );
+    let partitioned = instance
+        .do_promql_query(&collision_query, native_query_context(true, 2))
+        .await
+        .remove(0);
+    let partitioned_error = match partitioned {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        partitioned_error.contains("cannot contain metrics with the same labelset"),
+        "a label set whose pieces two regions hold is collected by the router and rejected, not \
+         published twice: {collision}: {partitioned_error}"
+    );
+}
+
 /// The rows of the disjoint fixture, inserted into the logical tables `{prefix}_a` and
 /// `{prefix}_b`. Both hosts carry the same shape and land in different partitions.
 fn disjoint_fixture_inserts(prefix: &str) -> String {
