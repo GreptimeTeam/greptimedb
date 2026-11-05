@@ -2476,9 +2476,11 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
         // admitted `sum(label_replace(h, ...))` to a native fold over histograms.
         NativeExpr::Aggregate { input, op } => {
             // Three kinds take a histogram and still run here: `count` and `group` count it as one
-            // present sample, and `min`/`max`/`stddev`/`stdvar`/`quantile` skip it the way
-            // Prometheus does. Only `sum` and `avg` would have to fold the payload, and this route
-            // has no histogram aggregate state yet, so only they refuse the kind entering them.
+            // present sample, and `min`/`max`/`stddev`/`stdvar` skip it the way Prometheus does.
+            // Only `sum` and `avg` would have to fold the payload, and this route has no histogram
+            // aggregate state yet, so only they refuse the kind entering them. `quantile` is not
+            // among the skipping kinds: the native runtime has no `quantile` kernel either, so it
+            // keeps the existing plan after this check instead of folding here.
             let folds_payload = matches!(op.kind, AggregateKind::Sum | AggregateKind::Avg);
             (folds_payload
                 && !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float)))
