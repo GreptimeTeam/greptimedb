@@ -1641,6 +1641,59 @@ async fn check_fallback_case(
     }
 }
 
+/// Checks one query the native route answers by splitting the aggregate below a subquery.
+///
+/// The per-series prefix runs in a `Partial` producer on every partition and the window above it
+/// finishes the answer in the `Final` half over the merged values, so the native run must show
+/// exactly one producer and one frontend merge - the opposite of a fallback case - while the existing
+/// plan shows neither. Both routes must answer what the fixture derives by hand, which is what says
+/// the split's answer is the statement's answer and not an approximation of it.
+async fn check_split_case(
+    instance: &Arc<Instance>,
+    observer: &NativePlanObserver,
+    case: &AggregateCase,
+) {
+    let promql = case.promql.as_str();
+    let query = tql_eval(promql);
+    for native in [false, true] {
+        let route = if native { "native" } else { "legacy" };
+        let mark = observer.mark();
+        let (result, capture) = run_query(instance, promql, native, observer).await;
+        assert!(
+            observer.mark() > mark,
+            "`{query}`: the {route} run handed no plan to the observer, so nothing about the plan \
+             that ran was observed"
+        );
+        if native {
+            assert_eq!(
+                1,
+                capture.fused.len(),
+                "`{query}`: the {route} run must split the aggregate into one producer, but the \
+                 plans that ran held {} producers and {} frontend merges",
+                capture.fused.len(),
+                capture.finalize.len()
+            );
+            assert_eq!(
+                1,
+                capture.finalize.len(),
+                "`{query}`: the {route} run must finish the fold in one frontend merge, but the \
+                 plans that ran held {} producers and {} frontend merges",
+                capture.fused.len(),
+                capture.finalize.len()
+            );
+        } else {
+            assert!(
+                capture.fused.is_empty() && capture.finalize.is_empty(),
+                "`{query}`: the {route} run must keep the existing plan, but the plans that ran \
+                 held {} fused producers and {} frontend merges",
+                capture.fused.len(),
+                capture.finalize.len()
+            );
+        }
+        assert_rows(&result.rows, &case.expected, &format!("{route} `{query}`"));
+    }
+}
+
 /// Checks a split across two independently scanned sources.
 async fn check_two_source_segregation(
     instance: &Arc<Instance>,
@@ -2481,20 +2534,6 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     )
     .await;
 
-    // A shape the native compiler declines, checked on the plans that really ran: it may hold
-    // neither a fused producer nor a frontend merge, and both routes must answer what the fixture
-    // derives by hand. A subquery evaluates its own body on a grid of its own: it reads across
-    // series and cannot be answered by a producer per partition, so it keeps the existing plan. The
-    // subquery's window spans the two inner points `EVAL_SECS - 1` and `EVAL_SECS`, at each of
-    // which the same extrapolated rate answers 15 - both samples stay further from the window's
-    // ends than the 66s threshold - so the maximum is 15 as well.
-    let fallback_case = case(
-        format!("max_over_time((sum(rate({COUNTER_TABLE}[5m])))[2s:1s])"),
-        &[(&[], 15.0)],
-        false,
-    );
-    check_fallback_case(&instance, &observer, &fallback_case).await;
-
     // `scalar` reads the whole vector and the native route answers it, so it is no longer one of
     // the declined shapes. `scalar` reports the one value present at a point only when exactly one
     // series is present at it, so the five counter series make it NaN; a route that folded one
@@ -2540,6 +2579,20 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         &legacy.rows,
         "native `scalar` against the existing plan",
     );
+    // A subquery over a fold is not declined: the compiler binds a window over an evaluated input to
+    // that input's own grid, so the split carries it - the per-series prefix runs in a `Partial`
+    // producer on every partition and the window above it finishes the answer in the `Final` half
+    // over the merged values. The subquery's window spans the two inner points `EVAL_SECS - 1` and
+    // `EVAL_SECS`, at each of which the same extrapolated rate answers 15 - both samples stay further
+    // from the window's ends than the 66s threshold - so the maximum is 15 as well.
+    let split_cases = [case(
+        format!("max_over_time((sum(rate({COUNTER_TABLE}[5m])))[2s:1s])"),
+        &[(&[], 15.0)],
+        false,
+    )];
+    for case in &split_cases {
+        check_split_case(&instance, &observer, case).await;
+    }
 }
 
 /// Histogram functions above the cut merge Partial state before evaluating the complete buckets.

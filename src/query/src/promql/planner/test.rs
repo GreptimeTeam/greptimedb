@@ -3488,25 +3488,32 @@ async fn native_fused_depth_limit_falls_back_to_legacy_plan() {
     );
 }
 
-/// What the compiler has no node for still keeps the existing plan.
+/// A window over an evaluated input enters the native route, and only when it is asked for.
+///
+/// This test used to assert the opposite: a subquery evaluates its own body on a grid of its own,
+/// which the route did not offer, so the statement kept the existing plan. The route compiles a
+/// subquery now, and the window's per-series prefix - the `rate` over the raw scan - is the segment
+/// it is cut as, so the statement is planned natively. What the answer is worth is checked row for
+/// row against the existing plan in `native_promql_subqueries_match_legacy` (tests-integration),
+/// which runs both routes over the same fixture.
 #[tokio::test]
-async fn native_fused_unsupported_shape_falls_back() {
-    for query in [
-        // A subquery evaluates its own body on a grid of its own, which this route does not offer.
-        "sum_over_time(rate(some_metric[5m])[1h:])",
-    ] {
+async fn native_fused_subquery_window_enters_the_native_route() {
+    for query in ["sum_over_time(rate(some_metric[5m])[1h:])"] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
         assert!(
-            !display.contains("FusedSeries"),
-            "`{query}` must not enter the native route: {display}"
+            display.contains("FusedSeries"),
+            "`{query}` must enter the native route: {display}"
         );
-        // Falling back is the existing plan, not an approximation of it.
+        // The route is only offered when it is requested, so a statement that does not ask for it
+        // keeps the existing plan, which holds no fused node.
         let without_flag = build_native_fused_plan(query, false).await;
-        assert_eq!(
-            display,
-            without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan"
+        assert!(
+            !without_flag
+                .display_indent()
+                .to_string()
+                .contains("FusedSeries"),
+            "`{query}` must keep the existing plan when the route is not requested"
         );
     }
 }
