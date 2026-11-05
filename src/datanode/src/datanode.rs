@@ -754,8 +754,7 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher.clone(),
                     plugins,
-                )
-                .with_region_manifest_size_metrics(opts.logging.enable_per_region_metrics);
+                );
 
                 #[cfg(feature = "enterprise")]
                 let builder = builder.with_extension_range_provider_factory(
@@ -776,8 +775,7 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher,
                     plugins,
-                )
-                .with_region_manifest_size_metrics(opts.logging.enable_per_region_metrics);
+                );
 
                 #[cfg(feature = "enterprise")]
                 let builder = builder.with_extension_range_provider_factory(
@@ -798,8 +796,7 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher.clone(),
                     plugins,
-                )
-                .with_region_manifest_size_metrics(opts.logging.enable_per_region_metrics);
+                );
 
                 #[cfg(feature = "enterprise")]
                 let builder = builder.with_extension_range_provider_factory(
@@ -829,8 +826,7 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher,
                     plugins,
-                )
-                .with_region_manifest_size_metrics(opts.logging.enable_per_region_metrics);
+                );
 
                 #[cfg(feature = "enterprise")]
                 let builder = builder.with_extension_range_provider_factory(

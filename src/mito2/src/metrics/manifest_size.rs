@@ -25,7 +25,9 @@ const MANIFEST_SIZE_METRIC_THRESHOLD_ENV: &str =
     "GREPTIME_REGION_MANIFEST_SIZE_METRIC_THRESHOLD_BYTES";
 const DEFAULT_MANIFEST_SIZE_METRIC_THRESHOLD: ReadableSize = ReadableSize::mb(512);
 
-/// Process-wide threshold, read once on first use. Zero exposes all live regions.
+/// Manifest metrics are enabled independently of the logging query-metrics switch.
+/// The process-wide env threshold is read once on first use; changes require a restart.
+/// Zero exposes all live regions.
 static MANIFEST_SIZE_METRIC_THRESHOLD: LazyLock<u64> = LazyLock::new(|| {
     let value = std::env::var(MANIFEST_SIZE_METRIC_THRESHOLD_ENV).ok();
     parse_manifest_size_metric_threshold(value.as_deref())

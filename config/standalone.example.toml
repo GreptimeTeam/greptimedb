@@ -1096,8 +1096,8 @@ max_log_files = 720
 ## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
 max_log_dir_size = "0B"
 
-## Whether to enable per-region query and manifest size metrics.
-## These metrics can have high cardinality. Defaults to false.
+## Whether to enable per-region metrics.
+## Default to false.
 enable_per_region_metrics = false
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.

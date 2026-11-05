@@ -171,14 +171,6 @@ pub(crate) struct RegionOpener {
 }
 
 impl RegionOpener {
-    /// Creates publication state without touching an existing live instance's series.
-    pub(crate) fn with_region_metrics(mut self, enabled: bool) -> Self {
-        if enabled {
-            self.stats = ManifestStats::with_region_metrics(self.region_id);
-        }
-        self
-    }
-
     /// Returns a new opener.
     // TODO(LFC): Reduce the number of arguments.
     #[allow(clippy::too_many_arguments)]
@@ -209,7 +201,7 @@ impl RegionOpener {
             puffin_manager_factory,
             intermediate_manager,
             time_provider,
-            stats: Default::default(),
+            stats: ManifestStats::with_region_metrics(region_id),
             wal_entry_reader: None,
             replay_checkpoint: None,
             file_ref_manager,

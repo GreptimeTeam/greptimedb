@@ -306,9 +306,7 @@ pub struct LoggingOptions {
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub otlp_headers: HashMap<String, String>,
 
-    /// Whether to enable per-region metrics: query metrics on frontends and
-    /// manifest size metrics on datanodes. Standalone enables both.
-    /// These metrics can have high cardinality. Defaults to false.
+    /// Whether to enable per-region metrics.
     pub enable_per_region_metrics: bool,
 }
 
