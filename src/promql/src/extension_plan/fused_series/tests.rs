@@ -1345,6 +1345,93 @@ impl Drop for StagedStream {
     }
 }
 
+fn canonical_producer_node() -> FusedSeries {
+    let grid = grid();
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let evaluated = NativeType::Samples(Arc::clone(&schema));
+    let raw = NativeType::Samples(raw_schema());
+    let input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: raw.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: raw,
+    };
+    let window = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(input),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 1,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let map = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(window),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Label(Arc::new(
+                    LabelRewrite::replace("host", "web-1", "host", "web-.*").unwrap(),
+                ))]),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(map),
+        },
+        output: evaluated,
+    })
+    .unwrap();
+    FusedSeries::try_new_canonical_producer(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+    )
+    .unwrap()
+}
+
+#[test]
+fn fused_series_encoding_preserves_state_and_canonical_producer() {
+    // A state-exporting producer encodes like any other node: serialization is the node's own
+    // capability, not a decision about where it may run.
+    let tree = partial_tree(rate_tree(), AggregateKind::Sum, &[HOST, JOB]);
+    let producer = FusedSeries::try_new_state_export(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+    )
+    .unwrap();
+    let decoded = FusedSeries::deserialize(&producer.serialize().unwrap()).unwrap();
+    assert_eq!(decoded.tree(), producer.tree());
+    assert_eq!(decoded.binding(), producer.binding());
+    assert_eq!(decoded.schema(), producer.schema());
+    assert!(decoded.reads_aggregate_state() == producer.reads_aggregate_state());
+
+    // A canonical producer's flag is part of the node, so it survives the round trip; the
+    // decoder does not get to decide whether its prefix is partition-local.
+    let canonical = canonical_producer_node();
+    let decoded = FusedSeries::deserialize(&canonical.serialize().unwrap()).unwrap();
+    assert!(decoded.is_canonical_producer());
+    assert_eq!(decoded.tree(), canonical.tree());
+    assert_eq!(decoded.schema(), canonical.schema());
+}
+
 #[test]
 fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() {
     let tree = rate_tree();
@@ -1412,17 +1499,12 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     let projected_decoded = FusedSeries::deserialize(&projected_bytes).unwrap();
     assert_eq!(projected_decoded.schema(), projected.schema());
 
-    // A state-exporting producer never crosses the wire: the frame's state content has no wire
-    // form, so the producer stays on the machine that reads the samples.
+    // A state-exporting producer encodes like any other node; where it may run is decided by the
+    // planner, not by the codec.
     let partial = partial_node(AggregateKind::Sum);
-    assert!(
-        partial
-            .serialize()
-            .unwrap_err()
-            .to_string()
-            .contains("exporting aggregate state"),
-        "a state-exporting producer must be refused by the serializer"
-    );
+    let partial_decoded = FusedSeries::deserialize(&partial.serialize().unwrap()).unwrap();
+    assert_eq!(partial_decoded.tree(), partial.tree());
+    assert_eq!(partial_decoded.schema(), partial.schema());
     let mut bad_version = bytes.clone();
     bad_version[..4].copy_from_slice(&99u32.to_le_bytes());
     assert!(

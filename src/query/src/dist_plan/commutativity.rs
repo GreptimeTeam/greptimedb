@@ -1038,9 +1038,9 @@ mod tests {
         let in_process = analyze(DistPlannerAnalyzer::new(true), plan.clone());
         assert!(any_remote_input_holds(&in_process, holds_fused_series));
 
-        // A partial producer exports aggregate state, which has no wire form: it serializes only
-        // inside the region that reads the samples, never across the boundary. Its final half is
-        // frontend-side for the same reason.
+        // A partial producer exports aggregate state, which the codec carries like any other
+        // frame; whether it may be pushed below a region boundary is decided by the analyzer's
+        // placement rules, not by the encoder.
         let split = split_aggregate_plan(table_scan_plan());
         let final_node = as_final_split(&split).expect("the split's final half");
         let [producer] = final_node.children() else {
@@ -1049,8 +1049,8 @@ mod tests {
         assert!(
             DFLogicalSubstraitConvertor
                 .encode(producer, DefaultSerializer)
-                .is_err(),
-            "a state-exporting producer must not cross the wire"
+                .is_ok(),
+            "a state-exporting producer encodes like any other node"
         );
         let placed = analyze(DistPlannerAnalyzer::new(true), split);
         assert!(as_final_split(&placed).is_some());
@@ -1188,8 +1188,8 @@ mod tests {
         assert!(
             DFLogicalSubstraitConvertor
                 .encode(&plan, DefaultSerializer)
-                .is_err(),
-            "the split plan must remain unencodable across the wire"
+                .is_ok(),
+            "a split plan encodes like any other plan; where it may run is a placement decision"
         );
 
         let in_process = analyze(DistPlannerAnalyzer::new(true), plan.clone());
@@ -1214,9 +1214,11 @@ mod tests {
         assert!(holds_table_scan(merge_scan.input()));
 
         let encoded = analyze(DistPlannerAnalyzer::new(false), plan);
+        // The analyzer, not the codec, decides placement: a split aggregate's partial producer is
+        // region-local work and belongs below the boundary.
         assert!(
-            !any_remote_input_holds(&encoded, holds_fused_series),
-            "the analyzer placed a fused node although its plan has to encode: {encoded}"
+            any_remote_input_holds(&encoded, holds_fused_series),
+            "the analyzer keeps the partial producer below the region boundary: {encoded}"
         );
     }
 

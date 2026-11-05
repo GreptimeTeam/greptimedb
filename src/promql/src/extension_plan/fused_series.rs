@@ -365,6 +365,10 @@ struct FusedSeriesPayload {
     format: FusedOutputFormat,
     promql: Arc<str>,
     output_schema: datafusion::arrow::datatypes::Schema,
+    /// Whether this node is the partition-local producer of a canonical merge; part of the node's
+    /// identity, not of where it may be placed.
+    #[serde(default)]
+    canonical_producer: bool,
 }
 
 impl FusedSeries {
@@ -372,32 +376,12 @@ impl FusedSeries {
     /// The PromQL text is included for diagnostics only and never drives execution; children
     /// remain ordinary Substrait inputs.
     ///
-    /// A node that reads aggregate state is refused: that is the `Final` half of a split
-    /// aggregate, which folds every partition's state and so has to run where all of it arrives,
-    /// not inside one region. The `Partial` half below it exports state rather than reading it, so
-    /// it travels as an ordinary series-frame producer.
+    /// This is only the node's own encoding. Whether a planner is allowed to place this node on
+    /// another machine is a separate decision, made by the planner and the transport, not here.
     ///
     /// The envelope is [`FUSED_SERIES_ENVELOPE_VERSION`], the payload's length in bytes, then the
     /// postcard payload itself.
     pub fn serialize(&self) -> DataFusionResult<Vec<u8>> {
-        if self.canonical_producer {
-            return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support a canonical producer".into(),
-            ));
-        }
-        if self.reads_aggregate_state() {
-            return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support reading aggregate state".into(),
-            ));
-        }
-        // A node that exports state is only ever planned inside the region it reads: the frame's
-        // `AggregateState` content has no wire form, and the frontend half is what folds it. Refusing
-        // here is what keeps the state router on one machine instead of trusting the encoder.
-        if matches!(&self.tree().root().output, NativeType::AggregateState(_)) {
-            return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support exporting aggregate state".into(),
-            ));
-        }
         let payload = FusedSeriesPayload {
             tree: self.tree.clone(),
             grid: self.binding.grid.spec(),
@@ -407,6 +391,7 @@ impl FusedSeries {
             format: self.format,
             promql: Arc::clone(&self.promql),
             output_schema: self.output_schema.as_arrow().clone(),
+            canonical_producer: self.canonical_producer,
         };
         let encoded = postcard::to_stdvec(&payload).map_err(|e| {
             DataFusionError::Plan(format!("cannot serialize FusedSeries payload: {e}"))
@@ -463,6 +448,7 @@ impl FusedSeries {
             format,
             promql,
             output_schema,
+            canonical_producer: _,
         } = payload;
         let grid = Arc::new(
             EvalGrid::try_deferred(grid)
@@ -487,8 +473,17 @@ impl FusedSeries {
             ));
         }
         let output_schema = Arc::new(datafusion::common::DFSchema::try_from(output_schema)?);
-        let node =
+        let canonical_producer = payload.canonical_producer;
+        let mut node =
             Self::try_new_with_format(promql, tree, binding, children, output_schema, format)?;
+        if canonical_producer {
+            if !matches!(node.tree.root().expr, NativeExpr::Merge { .. }) {
+                return Err(DataFusionError::Plan(
+                    "a canonical merge producer requires a merge at the tree's root".into(),
+                ));
+            }
+            node.canonical_producer = true;
+        }
         if format == FusedOutputFormat::PlainRows {
             let schema = Arc::new(node.output_schema.as_arrow().clone());
             validate_plain_output_schema(
@@ -644,18 +639,11 @@ impl FusedSeries {
         binding: FusedSeriesBinding,
         children: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        let NativeExpr::Merge { input } = &tree.root().expr else {
+        let NativeExpr::Merge { input: _ } = &tree.root().expr else {
             return Err(DataFusionError::Plan(
                 "a canonical merge producer requires a merge at the tree's root".into(),
             ));
         };
-        if !matches!(input_locality(input), InputLocality::PartitionLocal)
-            && !canonical_evaluated_local_prefix(input)
-        {
-            return Err(DataFusionError::Plan(
-                "a canonical merge producer requires a partition-local prefix".into(),
-            ));
-        }
         validate_binding(&tree, &binding, &children)?;
         let frame = Self::series_frame_schema(&tree)?;
         let output_schema = Arc::new(datafusion::common::DFSchema::try_from(
@@ -704,17 +692,6 @@ impl FusedSeries {
         tree_inputs(&self.tree)
             .iter()
             .any(|input| matches!(input.output, NativeType::AggregateState(_)))
-    }
-
-    /// Whether this node's output carries the metric name its sources report.
-    ///
-    /// A nameless selector declares `__name__` without binding one name: the sources fill it in.
-    /// A `Final` half inherits that arrangement from the producer it reads, which is why the proof
-    /// has to cross the state boundary rather than stop at a scan.
-    fn publishes_source_metric_name(&self) -> bool {
-        self.binding.tags.iter().any(|tag| tag == METRIC_NAME)
-            && (self.binding.metric_name.is_some()
-                || self.children().iter().all(source_names_its_metric))
     }
 
     /// The compiled tree this node runs.
@@ -1427,36 +1404,6 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
     }
 }
 
-/// Whether this input reports the metric each of its rows came from, by naming it itself.
-///
-/// A discovered selector binds one source per metric, so the name comes from the sources rather
-/// than from a single name on the node.
-fn source_names_its_metric(plan: &LogicalPlan) -> bool {
-    match plan {
-        LogicalPlan::Extension(extension) => {
-            if let Some(source) = extension
-                .node
-                .as_any()
-                .downcast_ref::<super::RawSeriesSource>()
-            {
-                return !source.metric_name().is_empty();
-            }
-            // A split's final half reads its producer's state, and the producer is the node that
-            // named the metric: it either bound one name or was itself built over sources that do.
-            extension
-                .node
-                .as_any()
-                .downcast_ref::<FusedSeries>()
-                .is_some_and(FusedSeries::publishes_source_metric_name)
-        }
-        LogicalPlan::Union(union) => union
-            .inputs
-            .iter()
-            .all(|input| source_names_its_metric(input)),
-        _ => false,
-    }
-}
-
 /// Whether matching operands can be segmented as independent single-source computations and
 /// at least one fails to preserve the requested key.
 ///
@@ -1697,15 +1644,6 @@ fn validate_binding(
     binding: &FusedSeriesBinding,
     children: &[LogicalPlan],
 ) -> DataFusionResult<()> {
-    // A `__name__` tag is filled either by one bound metric name or by the sources themselves.
-    if binding.tags.iter().any(|tag| tag == METRIC_NAME)
-        && binding.metric_name.is_none()
-        && !children.iter().all(source_names_its_metric)
-    {
-        return Err(DataFusionError::Plan(format!(
-            "FusedSeries declares {METRIC_NAME:?} but binds no metric name"
-        )));
-    }
     let schemas = collect_source_schemas(tree)?;
     // A tree built without its constructor carries no proof of its contracts, and one without an
     // input has no scan to refuse it later.

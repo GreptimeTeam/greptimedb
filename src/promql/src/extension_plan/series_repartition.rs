@@ -258,7 +258,8 @@ impl SeriesRepartitionExec {
             FrameContent::Raw => SeriesRouting::RawPrimaryKey,
             FrameContent::AggregateState => {
                 return Err(DataFusionError::NotImplemented(
-                    "SeriesRepartition does not route aggregate state; use StateRepartitionExec"
+                    "a complete-disjoint router cannot prove aggregate state ownership; use the \
+                     ordinary canonical-label routing for state frames"
                         .into(),
                 ));
             }

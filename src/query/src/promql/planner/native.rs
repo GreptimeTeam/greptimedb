@@ -138,8 +138,9 @@ fn plans_over_remote_regions(query_engine_state: &QueryEngineState) -> bool {
 /// Whether this executable plan is the native raw PromQL topology, the one plan shape whose
 /// region reads one query-wide body budget cannot deadlock.
 ///
-/// That topology is a single [`FusedSeriesExec`]: it polls every input at once, so a region body
-/// holding a permit is always still being drained, whether it reads one source or several.
+/// That topology is a chain of [`FusedSeriesExec`] nodes over region reads: the split aggregate's
+/// final and partial halves are one unary chain, and each fused node polls its input while that
+/// input is being drained, so a region body holding a permit keeps making progress.
 /// Admission stops there: a plan with any other multi-input node (a join, or the union a
 /// discovered selector builds) keeps its per-scan bounds only and is not counted against the
 /// query-wide target until its own topology is checked against the budget.
@@ -158,7 +159,7 @@ pub(crate) fn native_raw_plan_bounds_region_reads(plan: &Arc<dyn ExecutionPlan>)
     }
 
     let mut fused = 0;
-    walk(plan.as_ref(), &mut fused) && fused == 1
+    walk(plan.as_ref(), &mut fused) && fused > 0
 }
 
 /// The ordering this route compiles its trees against.
@@ -500,10 +501,10 @@ impl PromPlanner {
         if !self.native_fused {
             return Ok(None);
         }
-        // Over the wire the region half of a plan is Substrait bytes, and the only fused shape that
-        // encodes is one node over raw sources: a bare scan below it, or the split and segmented
-        // shapes, cannot be carried. So this route plans the whole statement as that one node when
-        // the transport is remote, and keeps the shapes that run region-locally when it is not.
+        // Over the wire this route plans the whole statement as one fused node over raw sources:
+        // each region answers the series it holds, and the node reconciles them before evaluating.
+        // In process a region can also run a split or a segmented tree over its own scan, so those
+        // shapes stay there. This is a planning choice, not a limit of what the node can encode.
         let self_contained = plans_over_remote_regions(query_engine_state);
         // Only the statement root is offered: the tree is compiled against the statement's grid,
         // and a subquery's expression is evaluated on its own, smaller one. A range-vector root is
@@ -868,9 +869,16 @@ impl PromPlanner {
                 .map(|(scan, ..)| scan)
                 .filter(|scan| !is_empty_discovered_input(scan)),
         ) || logical_ids_differ;
-        // Only cross-table selectors are converted into independent raw sources below.
-        // A same-table multi-scan cannot be placed in one of several regions safely.
-        if selectors.len() > 1 && !cross_table && prepared.iter().any(|input| input.5) {
+        // A node over several scans of one partitioned table cannot run inside a region: it would
+        // read neither the other scans nor the fragments another region holds, and a segment reads
+        // one bare scan. Over the wire each occurrence is its own raw source with its own bounds
+        // and identity, reconciled above the regions, so the refusal only holds the in-process
+        // bare-scan route.
+        if selectors.len() > 1
+            && !cross_table
+            && !self_contained
+            && prepared.iter().any(|input| input.5)
+        {
             return Ok(None);
         }
         // The first input names the output's time index and, on one table, binds every scan.
@@ -1252,10 +1260,10 @@ impl PromPlanner {
             // would. The general segmentation below is the fallback for the trees it declines,
             // which are the ones its per-series prefix cannot express. The split is decided before
             // anything consumes a child, so a tree it declines keeps the plan it would have built
-            // without this route. It is a plan over one bare scan, though, which the remote
-            // transport cannot carry, so over the wire the whole tree is planned as the one
-            // raw-source node instead.
-            let split = if !multi_input && !self_contained && selectors.len() == 1 {
+            // without this route. Its producer reads whatever input the statement prepared: over
+            // the wire that is the raw series source, and the partial/final halves stay on the
+            // frontend above the regions, so per-series work keeps the scan width.
+            let split = if !multi_input && selectors.len() == 1 {
                 FusedSeries::split_aggregate(&tree, &time).context(DataFusionPlanningSnafu)?
             } else {
                 None
@@ -1301,11 +1309,10 @@ impl PromPlanner {
                 return Ok(None);
             }
         }
-        // A tree planned over the wire cannot be segmented: a segment reads a bare scan, and only
-        // the raw source crosses the transport. Such a tree is planned as the one node below.
-        if !self_contained
-            && (required_placement || matches!(locality, InputLocality::SinglePartition))
-        {
+        // A segment over the wire keeps the raw source as its input rather than a bare scan: the
+        // segment's prefixes run on the frontend above the regions, so the raw series source is
+        // what each of them reads.
+        if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = Box::pin(segment_tree(
                 prom_expr,
@@ -1321,6 +1328,7 @@ impl PromPlanner {
                 FusedOutputFormat::PlainRows,
                 contains_canonical_merge(root),
                 root_kind,
+                self_contained,
             ))
             .await?;
             if let Some(plan) = plan {
@@ -2203,6 +2211,7 @@ async fn segment_tree(
     format: FusedOutputFormat,
     canonical_segmentation: bool,
     root_kind: FieldKind,
+    remote_raw_boundary: bool,
 ) -> Result<Option<LogicalPlan>> {
     if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
         return Ok(None);
@@ -2273,6 +2282,7 @@ async fn segment_tree(
                     FusedOutputFormat::SeriesFrame,
                     canonical_segmentation,
                     root_kind,
+                    remote_raw_boundary,
                 ))
                 .await?;
                 match plan {
@@ -2284,7 +2294,7 @@ async fn segment_tree(
                     }
                     None => None,
                 }
-            } else if first_iteration && !canonical {
+            } else if first_iteration && !canonical && !remote_raw_boundary {
                 build_inner_segment(cut, bare_scans, per_source, grid)
             } else {
                 None

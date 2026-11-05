@@ -3376,13 +3376,12 @@ mod tests {
                 .unwrap(),
             ),
         });
+        // The analyzer expands a raw source into a merge scan. The recovery projection the Fused
+        // planner repairs is the one the physical planner derives from the source's own frame
+        // schema, not an extra analyzer node.
         let analyzed = DistPlannerAnalyzer::new(false)
             .analyze(raw, &ConfigOptions::default())
             .unwrap();
-        assert!(
-            matches!(analyzed, LogicalPlan::Projection(_)),
-            "expected analyzer recovery projection: {analyzed}"
-        );
         assert_eq!(
             series_frame_ordering(analyzed.schema().as_arrow()).unwrap(),
             SeriesOrdering::Contiguous
@@ -3397,19 +3396,19 @@ mod tests {
             .create_physical_plan(&analyzed, &state)
             .await
             .unwrap();
+        // The analyzer hands the raw frame boundary to the physical planner unchanged: no recovery
+        // projection is inserted, so the merge scan's own declaration is what a fused consumer
+        // sees.
         let merge = physical
-            .children()
-            .into_iter()
-            .find_map(|child| child.downcast_ref::<MergeScanExec>())
-            .expect("recovery projection must retain MergeScan child");
+            .downcast_ref::<MergeScanExec>()
+            .expect("the analyzed raw source plans as the merge scan itself");
         assert_eq!(
             series_frame_ordering(merge.schema().as_ref()).unwrap(),
             SeriesOrdering::Interleaved
         );
         assert_eq!(
             series_frame_ordering(physical.schema().as_ref()).unwrap(),
-            SeriesOrdering::Contiguous,
-            "the recovery projection stamps its logical declaration; Fused must restore the producer's physical guarantee"
+            SeriesOrdering::Interleaved
         );
     }
 
