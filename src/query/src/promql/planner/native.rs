@@ -1600,7 +1600,8 @@ impl PromPlanner {
             // while a cut whose groups are one group is finished by that merge wherever the state
             // lands and keeps the one-hop plan. The question is the one the state router asks of
             // the same aggregate, so both hops route by the group the merge finalizes by, and it is
-            // asked of the canonical tree this route plans above the boundary.
+            // asked of the canonical tree this route plans above the boundary — the tree the split
+            // itself is taken from, so the suffix it finalizes through is that tree's own.
             let split = if selectors.len() == 1 {
                 let depth = if state_needs_several_owners(tree.root()) {
                     SplitDepth::Two

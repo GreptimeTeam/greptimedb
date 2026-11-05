@@ -1342,6 +1342,57 @@ fn state_tree(stage: AggregateStage, input: NativeType) -> NativeTree {
     .expect("aggregate stage binding is valid")
 }
 
+/// Only the suffix the split admits counts as finalizing: a whole-vector operation above the merge
+/// reads state but does not answer values from it the way the split's `Final` does.
+#[test]
+fn state_is_finalized_only_through_the_suffix_the_split_admits() {
+    let final_tree = state_tree(
+        AggregateStage::Final,
+        NativeType::AggregateState(Arc::new(AggregateStateSchema {
+            group: Grouping::By(Arc::new([Arc::from(JOB)])),
+            kind: AggregateStateKind::Sum,
+            components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+            accumulators: raw_schema().fields.clone(),
+            grid: grid(),
+        })),
+    );
+    assert!(
+        super::state_is_finalized(final_tree.root()),
+        "the merge finalizes state"
+    );
+
+    // A map above the merge is the suffix the split moves up.
+    let mapped = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(final_tree.root().clone()),
+            op: crate::native::plan::BoundMap {
+                ops: Arc::from([MapOp::Math(crate::map::MathOp::Abs)]),
+            },
+        },
+        output: final_tree.root().output.clone(),
+    })
+    .expect("abs over a finalized tree is a tree");
+    assert!(super::state_is_finalized(mapped.root()), "a map keeps it");
+
+    // A rank above the merge is not: the split declines `topk` above the cut.
+    let ranked = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(final_tree.root().clone()),
+            op: BoundVectorOp::TopK {
+                k: 10.0,
+                top: true,
+                group: Grouping::By(Arc::new([])),
+            },
+        },
+        output: final_tree.root().output.clone(),
+    })
+    .expect("topk over a finalized tree is a tree");
+    assert!(
+        !super::state_is_finalized(ranked.root()),
+        "topk above the merge must not borrow the split's placement exception"
+    );
+}
+
 fn canonical_state_frame_schema(tree: &NativeTree) -> datafusion::common::DFSchemaRef {
     let schema = super::state_frame_output_schema(tree).unwrap();
     Arc::new(datafusion::common::DFSchema::try_from(schema).unwrap())

@@ -1730,14 +1730,29 @@ pub fn state_needs_several_owners(root: &NativeNode) -> bool {
     })
 }
 
-/// Whether `root` finalizes the state it reads: the aggregate that folds that state is a `Final`.
+/// Whether `root` finalizes the state it reads: the suffix the split admits sits above a `Final`.
 ///
-/// This is the stage [`state_routing`]'s walk stops at, read for what it produces rather than for
-/// the owners it needs. The suffix a split moves above the cut - scalar arithmetic, maps, a
-/// histogram function - does not change which aggregate folds the state, so a tree that only
-/// exports or reduces state is not a consumer that turns it into values.
+/// Only the operations [`split`](crate::native::split::split) actually admits above the cut are
+/// walked - a point-wise map, a constant-sided binary operation, a histogram function - because the
+/// question this answers is "is this the shape the split produces". Anything else that also reads
+/// state (a whole-vector operation such as `topk`, a second aggregate, a set operation) is not a
+/// finalizing consumer of this kind and must not borrow the placement exception.
 pub fn state_is_finalized(root: &NativeNode) -> bool {
-    matches!(state_cut(root), Some((AggregateStage::Final, _, _)))
+    fn finalized(node: &NativeNode) -> bool {
+        match &node.expr {
+            NativeExpr::Aggregate { op, .. } => op.stage == AggregateStage::Final,
+            NativeExpr::Map { input, .. } => finalized(input),
+            NativeExpr::Vector { input, op } => {
+                matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)) && finalized(input)
+            }
+            NativeExpr::Binary { left, right, .. } => {
+                (matches!(left.expr, NativeExpr::Scalar(_)) && finalized(right))
+                    || (matches!(right.expr, NativeExpr::Scalar(_)) && finalized(left))
+            }
+            _ => false,
+        }
+    }
+    finalized(root)
 }
 
 /// How many owners the groups of a state input have to be split across.
