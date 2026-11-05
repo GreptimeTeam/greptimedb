@@ -58,6 +58,13 @@ Internal series merges use the query runtime pool forwarded through
 `QueryScanContext`; reader and output-batch accounting uses the separate scan
 memory tracker. Direct scanner callers default to an unbounded operator pool.
 
+Live compaction queries read shared per-region state directly from `MitoRegion`,
+without sending a worker request. The scheduler publishes active and pending task
+state together; readers clone task Arcs under a short read lock, then filter and
+build rows outside the lock. Execution handles provide live background phases.
+There is no second task registry or completed-task history. See
+`compaction/scheduler/state.rs`.
+
 ## Public surface
 
 - Entry: `MitoEngine` in `src/mito2/src/engine.rs`, built via `MitoEngineBuilder`.

@@ -54,6 +54,7 @@ use tokio::sync::RwLockWriteGuard;
 pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
+use crate::compaction::CompactionStateRef;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
     FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
@@ -155,6 +156,8 @@ pub struct MitoRegion {
     /// Accessing region id from the version control is inconvenient so
     /// we also store it here.
     pub(crate) region_id: RegionId,
+    /// Live compaction state shared with readers without routing through the worker.
+    pub(crate) compaction_state: CompactionStateRef,
 
     /// Version controller for this region.
     ///
@@ -2344,6 +2347,7 @@ mod tests {
 
         MitoRegion {
             region_id: metadata.region_id,
+            compaction_state: Default::default(),
             version_control,
             series_index_version_control: Default::default(),
             series_index_store: None,
@@ -2967,6 +2971,7 @@ mod tests {
 
         let region = MitoRegion {
             region_id: metadata.region_id,
+            compaction_state: Default::default(),
             version_control,
             series_index_version_control: Default::default(),
             series_index_store: None,

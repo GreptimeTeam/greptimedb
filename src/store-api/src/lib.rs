@@ -15,7 +15,9 @@
 //! Storage related APIs
 
 pub mod codec;
+pub mod compaction_task;
 pub mod data_source;
+mod inspect;
 pub mod logstore;
 pub mod metadata;
 pub mod metric_engine_consts;

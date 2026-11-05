@@ -16,6 +16,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use common_meta::key::SchemaMetadataManagerRef;
+use store_api::compaction_task::{self, CompactionTaskEntry};
 use store_api::storage::RegionId;
 
 use crate::compaction::compactor::{CompactionContext, CompactionRegion};
@@ -50,11 +51,69 @@ pub(crate) struct LocalCompaction {
     parallelism: usize,
     error: Option<Arc<Error>>,
     made_progress: bool,
+    total_units: usize,
+    completed_units: usize,
+    /// Retains accepted cancellation while non-cancellable siblings finish committing.
+    cancellation_requested: bool,
+}
+
+/// Query-visible local progress with shared background execution flags.
+#[derive(Debug, Clone)]
+pub(crate) struct LocalCompactionState {
+    units: Vec<CancellableTaskState>,
+    total_units: usize,
+    completed_units: usize,
+    cancellation_requested: bool,
+}
+
+impl LocalCompactionState {
+    /// Aggregates live units: cancellation takes precedence over running and queued states;
+    /// committing takes precedence over executing and waiting phases. A cancelling cycle
+    /// can still be committing while non-cancellable siblings finish.
+    pub(crate) fn inspect(&self, entry: &mut CompactionTaskEntry) {
+        entry.total_units = Some(self.total_units as u64);
+        entry.completed_units = Some(self.completed_units as u64);
+        let cancelling =
+            self.cancellation_requested || self.units.iter().any(|state| state.is_cancelled());
+        let committing = self.units.iter().any(|state| state.commit_started());
+        let running = committing || self.units.iter().any(|state| state.started());
+        entry.state = if cancelling {
+            compaction_task::STATE_CANCELLING
+        } else if running {
+            compaction_task::STATE_RUNNING
+        } else {
+            compaction_task::STATE_QUEUED
+        }
+        .into();
+        entry.phase = if committing {
+            compaction_task::PHASE_COMMITTING
+        } else if running {
+            compaction_task::PHASE_EXECUTING
+        } else {
+            compaction_task::PHASE_WAITING
+        }
+        .into();
+    }
 }
 
 impl LocalCompaction {
+    /// Clones progress and live task handles without retaining tasks or their SST leases.
+    pub(crate) fn current_state(&self) -> LocalCompactionState {
+        LocalCompactionState {
+            units: self.units.values().map(|unit| unit.state.clone()).collect(),
+            total_units: self.total_units,
+            completed_units: self.completed_units,
+            cancellation_requested: self.cancellation_requested,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inspect(&self, entry: &mut CompactionTaskEntry) {
+        self.current_state().inspect(entry);
+    }
+
     /// Requests cancellation for all units that have not started committing.
-    pub(crate) fn request_cancel(&self) -> RequestCancelResult {
+    pub(crate) fn request_cancel(&mut self) -> RequestCancelResult {
         let mut result = RequestCancelResult::TooLateToCancel;
         for unit in self.units.values() {
             match unit.state.request_cancel() {
@@ -67,6 +126,7 @@ impl LocalCompaction {
                 _ => {}
             }
         }
+        self.cancellation_requested |= result != RequestCancelResult::TooLateToCancel;
         result
     }
 
@@ -91,6 +151,7 @@ impl LocalCompaction {
             return;
         }
         unit.finished = true;
+        self.completed_units += 1;
         match result {
             Ok(progress) => self.made_progress |= progress,
             Err(err) => {
@@ -120,12 +181,27 @@ impl CompactionScheduler {
         units: Vec<CompactionUnit>,
         reserved: CompactingFiles,
     ) -> CompactionPhase {
+        // Memory admission may have removed oversized units from the picker output.
+        // Report only the inputs that this local cycle will actually execute.
+        if let Some(info) = self
+            .region_status
+            .get_mut(&region.region_id)
+            .and_then(|status| status.active.task_state.as_mut())
+        {
+            info.set_plan_stats(
+                units.iter().flat_map(|unit| &unit.inputs),
+                units.iter().flat_map(|unit| &unit.outputs),
+            );
+        }
         let mut local = LocalCompaction {
             units: HashMap::new(),
             pending: VecDeque::new(),
             parallelism: region.max_parallelism.max(1),
             error: None,
             made_progress: false,
+            total_units: units.len(),
+            completed_units: 0,
+            cancellation_requested: false,
         };
         let context = CompactionContext::from(&region);
         // Planning is complete; unit tasks must not pin the other units' inputs.
@@ -172,6 +248,13 @@ impl CompactionScheduler {
 
     /// Submits pending units up to the request limit and arranges task-exit notifications.
     pub(crate) fn dispatch_local_units(&mut self, region_id: RegionId) {
+        self.submit_local_units(region_id);
+        if let Some(status) = self.region_status.get(&region_id) {
+            status.publish_state();
+        }
+    }
+
+    fn submit_local_units(&mut self, region_id: RegionId) {
         loop {
             let Some(local) = self.local_units_mut(region_id) else {
                 return;
@@ -226,6 +309,9 @@ impl CompactionScheduler {
     ) {
         if let Some(local) = self.local_units_mut(region_id) {
             local.finish(id, result);
+        }
+        if let Some(status) = self.region_status.get(&region_id) {
+            status.publish_state();
         }
     }
 
@@ -294,8 +380,7 @@ impl CompactionScheduler {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_compaction_unit_apply_accepts_independent_executions() {
+    fn local_compaction() -> LocalCompaction {
         let units = [1, 2]
             .into_iter()
             .map(|id| {
@@ -308,13 +393,21 @@ mod tests {
                 )
             })
             .collect();
-        let mut local = LocalCompaction {
+        LocalCompaction {
             units,
             pending: VecDeque::new(),
             parallelism: 2,
             error: None,
             made_progress: false,
-        };
+            total_units: 2,
+            completed_units: 0,
+            cancellation_requested: false,
+        }
+    }
+
+    #[test]
+    fn test_compaction_unit_apply_accepts_independent_executions() {
+        let mut local = local_compaction();
         assert!(!local.can_apply(1));
         assert!(!local.can_apply(2));
         assert!(!local.can_apply(99));
@@ -337,5 +430,54 @@ mod tests {
             local.units.len(),
             "terminal units remain tracked until task exit"
         );
+    }
+
+    #[test]
+    fn test_compaction_cancelling_survives_cancelled_sibling_release() {
+        use crate::compaction::scheduler::state::{CompactionTaskState, CompactionTrigger};
+
+        let mut local = local_compaction();
+        let mut entry = CompactionTaskState::new(
+            RegionId::from_u64(1),
+            &api::v1::region::compact_request::Options::Regular(Default::default()),
+            2,
+            None,
+            CompactionTrigger::Manual,
+        )
+        .snapshot(None);
+        // One published view observes background phase changes without republishing.
+        let published = local.current_state();
+        published.inspect(&mut entry);
+        assert_eq!((&*entry.state, &*entry.phase), ("queued", "waiting"));
+        local.units[&1].state.mark_started();
+        published.inspect(&mut entry);
+        assert_eq!((&*entry.state, &*entry.phase), ("running", "executing"));
+        assert!(local.units[&1].state.mark_commit_started());
+        published.inspect(&mut entry);
+        assert_eq!((&*entry.state, &*entry.phase), ("running", "committing"));
+        assert_eq!(local.request_cancel(), RequestCancelResult::CancelIssued);
+        published.inspect(&mut entry);
+        assert_eq!((&*entry.state, &*entry.phase), ("cancelling", "committing"));
+
+        // The cancelled sibling exits first; the committing sibling cannot be cancelled.
+        local.finish(2, Err(Arc::new(error::CompactionCancelledSnafu.build())));
+        local.units.remove(&2);
+        assert!(!local.units[&1].state.is_cancelled());
+        local.inspect(&mut entry);
+        assert_eq!((&*entry.state, &*entry.phase), ("cancelling", "committing"));
+        assert_eq!(entry.completed_units, Some(1));
+        assert_eq!(entry.total_units, Some(2));
+
+        // A request arriving after every unit crossed the boundary is not accepted.
+        let mut too_late = local_compaction();
+        for unit in too_late.units.values() {
+            assert!(unit.state.mark_commit_started());
+        }
+        assert_eq!(
+            too_late.request_cancel(),
+            RequestCancelResult::TooLateToCancel
+        );
+        too_late.inspect(&mut entry);
+        assert_eq!((&*entry.state, &*entry.phase), ("running", "committing"));
     }
 }

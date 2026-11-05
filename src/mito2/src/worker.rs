@@ -1109,8 +1109,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             old.deactivate_region_manifest_size_metric();
         }
 
-        self.compaction_scheduler
-            .register_region(&region.version_control, &region.access_layer);
+        self.compaction_scheduler.register_region(
+            &region.version_control,
+            &region.access_layer,
+            &region.compaction_state,
+        );
         self.regions.insert_region(region.clone());
         region.activate_region_manifest_size_metric();
     }

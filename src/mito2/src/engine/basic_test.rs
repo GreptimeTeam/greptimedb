@@ -15,12 +15,16 @@
 //! Basic tests for mito engine.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use api::v1::helper::row;
+use api::v1::region::StrictWindow;
+use api::v1::region::compact_request::Options;
 use api::v1::value::ValueData;
 use api::v1::{ArrowIpc, Rows, SemanticType};
+use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -28,6 +32,10 @@ use common_recordbatch::{DfRecordBatch, RecordBatches};
 use common_test_util::flight::encode_to_flight_data;
 use common_time::Timestamp;
 use common_wal::options::WAL_OPTIONS_KEY;
+use datafusion::datasource::empty::EmptyTable;
+use datafusion::logical_expr::LogicalPlan;
+use datafusion::prelude::SessionContext;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datatypes::arrow::array::{
     ArrayRef, DictionaryArray, Float64Array, StringArray, TimestampMillisecondArray,
 };
@@ -41,12 +49,14 @@ use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
-    PathType, RegionBulkInsertsRequest, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest,
-    RegionPutRequest, RegionRequirements,
+    PathType, RegionBulkInsertsRequest, RegionCompactRequest, RegionCreateRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequirements,
 };
 use store_api::storage::RegionId;
+use tokio::sync::Notify;
 
 use super::*;
+use crate::engine::listener::{CompactionListener, EventListener};
 use crate::region::version::VersionControlData;
 use crate::region_write_ctx::test_hooks::arm_bulk_install_barrier;
 use crate::test_util::{
@@ -2429,5 +2439,233 @@ async fn test_region_manifest_size_metrics_failed_open() {
             .is_err()
     );
     assert_eq!(manifest_metric_sample(id), None);
+    engine.stop().await.unwrap();
+}
+
+/// Reads a real running compaction even while its owning worker is blocked.
+#[tokio::test]
+async fn test_inspect_compaction_tasks() {
+    #[derive(Default)]
+    struct InspectionListener {
+        compaction: CompactionListener,
+        block_write: AtomicBool,
+        write_blocked: Notify,
+        release_write: Notify,
+    }
+
+    #[async_trait]
+    impl EventListener for InspectionListener {
+        async fn on_merge_ssts_finished(&self, region_id: RegionId) {
+            self.compaction.on_merge_ssts_finished(region_id).await;
+        }
+
+        async fn on_write_wal_end(&self) {
+            if self.block_write.swap(false, Ordering::Relaxed) {
+                self.write_blocked.notify_one();
+                self.release_write.notified().await;
+            }
+        }
+    }
+
+    struct Release(Arc<InspectionListener>);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release_write.notify_one();
+            self.0.compaction.wake();
+        }
+    }
+
+    let listener = Arc::new(InspectionListener::default());
+    let release = Release(listener.clone());
+    let mut env = TestEnv::with_prefix("inspect-compaction")
+        .await
+        .with_node_id(42);
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(123, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
+        .build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    assert!(
+        engine
+            .inspect_compaction_tasks(&[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for _ in 0..2 {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(0, 2),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let compact = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Compact(RegionCompactRequest {
+                        options: Options::StrictWindow(StrictWindow {
+                            window_seconds: 3600,
+                        }),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap()
+        })
+    };
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        listener.compaction.wait_handle_finished(),
+    )
+    .await
+    .unwrap();
+    let tasks = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.inspect_compaction_tasks(&[]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(tasks.len(), 1);
+    let task = &tasks[0];
+    assert_eq!(task.region_id, region_id);
+    assert_eq!(task.table_id, region_id.table_id());
+    assert_eq!(task.node_id, Some(42));
+    assert_eq!(task.state.as_ref(), "running");
+    assert_eq!(task.phase.as_ref(), "executing");
+    assert_eq!(task.trigger_type.as_ref(), "manual");
+
+    let context = SessionContext::new();
+    context
+        .register_table(
+            "compaction_tasks",
+            Arc::new(EmptyTable::new(
+                CompactionTaskEntry::schema().arrow_schema().clone(),
+            )),
+        )
+        .unwrap();
+    for (column, value) in [("node_id", 42), ("region_id", region_id.as_u64())] {
+        for (predicate, expected_count) in [
+            (format!("{column} = {value}"), 1),
+            (format!("{column} = {}", value + 1), 0),
+            (format!("{value} = {column}"), 1),
+            (format!("{} = {column}", value + 1), 0),
+            (format!("{value} <= {column}"), 1),
+            (format!("{value} < {column}"), 0),
+        ] {
+            let sql = format!("SELECT * FROM compaction_tasks WHERE {predicate}");
+            let state = context.state();
+            let plan = state.create_logical_plan(&sql).await.unwrap();
+            let optimized = state.optimize(&plan).unwrap();
+            let mut filters = Vec::new();
+            optimized
+                .apply(|plan| {
+                    if let LogicalPlan::Filter(filter) = plan {
+                        filters.push(filter.predicate.clone());
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+                .unwrap();
+            assert_eq!(filters.len(), 1, "{sql}");
+            let mut has_decimal_cast = false;
+            filters[0]
+                .apply(|expr| {
+                    if let Expr::Cast(cast) = expr {
+                        has_decimal_cast |= matches!(cast.expr.as_ref(), Expr::Column(_))
+                            && cast.field.data_type() == &DataType::Decimal128(20, 0);
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+                .unwrap();
+            assert!(!has_decimal_cast, "{sql}: {}", filters[0]);
+
+            // The engine must prune these predicates without a residual SQL filter.
+            let actual = engine.inspect_compaction_tasks(&filters).await.unwrap();
+            assert_eq!(actual.len(), expected_count, "{sql}");
+            if let Some(actual) = actual.first() {
+                assert_eq!(actual.task_id, task.task_id, "{sql}");
+                assert_eq!(actual.region_id, region_id, "{sql}");
+                assert_eq!(actual.node_id, Some(42), "{sql}");
+            }
+        }
+    }
+    // This hook runs on the region worker, unlike the background compaction gate.
+    listener.block_write.store(true, Ordering::Relaxed);
+    let write = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema,
+                    rows: build_rows(2, 3),
+                },
+            )
+            .await;
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), listener.write_blocked.notified())
+        .await
+        .unwrap();
+    let blocked_worker_tasks = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.inspect_compaction_tasks(&[]),
+    )
+    .await
+    .expect("inspection must not wait for the blocked region worker")
+    .unwrap();
+    assert_eq!(blocked_worker_tasks.len(), 1);
+    assert_eq!(blocked_worker_tasks[0].task_id, task.task_id);
+    assert_eq!(blocked_worker_tasks[0].region_id, region_id);
+    assert_eq!(blocked_worker_tasks[0].state.as_ref(), "running");
+    assert!(!write.is_finished());
+
+    drop(release);
+    tokio::time::timeout(Duration::from_secs(10), write)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), compact)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !engine
+            .inspect_compaction_tasks(&[])
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     engine.stop().await.unwrap();
 }

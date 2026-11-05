@@ -43,7 +43,8 @@ pub(crate) use json2::{
 };
 pub use scheduler::CompactionRequest;
 pub(crate) use scheduler::{
-    CompactionExecution, CompactionPickFinished, CompactionScheduler, CompactionTransition,
+    CompactionExecution, CompactionPickFinished, CompactionScheduler, CompactionState,
+    CompactionStateRef, CompactionTransition,
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;

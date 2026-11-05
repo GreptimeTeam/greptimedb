@@ -24,14 +24,20 @@ use api::v1::region::compact_request;
 use common_base::Plugins;
 use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
+#[cfg(test)]
+use common_recordbatch::filter::MetadataFilter;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
+#[cfg(test)]
+use datafusion_common::ScalarValue;
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
 #[cfg(test)]
 pub(crate) use planning::pick_automatic_for_test;
-pub(crate) use state::CompactionExecution;
+pub(crate) use state::{CompactionExecution, CompactionState, CompactionStateRef};
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
+#[cfg(test)]
+use store_api::compaction_task::{self, CompactionTaskEntry};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
@@ -183,6 +189,7 @@ impl CompactionScheduler {
         &mut self,
         version_control: &VersionControlRef,
         access_layer: &AccessLayerRef,
+        shared_state: &CompactionStateRef,
     ) {
         let region_id = version_control.region_id();
         if let Some(status) = self.region_status.get_mut(&region_id) {
@@ -191,10 +198,10 @@ impl CompactionScheduler {
             }
             status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
         }
-        self.region_status.insert(
-            region_id,
-            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone()),
-        );
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
+        status.shared_state = shared_state.clone();
+        self.region_status.insert(region_id, status);
     }
 
     /// Reports active work rather than the existence of a resident region record.
@@ -625,6 +632,7 @@ impl CompactionScheduler {
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking_with_trigger(plan_id, CompactionTrigger::Manual);
+        status.active.task_state = status.pending_task_state.take();
         self.dispatch_compaction_planning(
             plan_id,
             request,
@@ -892,6 +900,36 @@ impl Drop for CompactionScheduler {
             // We are shutting down so notify all pending tasks.
             status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
         }
+    }
+}
+
+impl CompactionScheduler {
+    /// Reads the same published task state as engine queries.
+    #[cfg(test)]
+    pub(crate) fn inspect_tasks(
+        &self,
+        filters: &MetadataFilter,
+        node_id: Option<u64>,
+    ) -> Vec<CompactionTaskEntry> {
+        let mut entries = Vec::new();
+        for (region_id, status) in &self.region_status {
+            if !filters.matches(|name| match name {
+                compaction_task::REGION_ID => Some(ScalarValue::UInt64(Some(region_id.as_u64()))),
+                compaction_task::TABLE_ID => Some(ScalarValue::UInt32(Some(region_id.table_id()))),
+                compaction_task::NODE_ID => Some(ScalarValue::UInt64(node_id)),
+                _ => None,
+            }) {
+                continue;
+            }
+            let (active, pending) = CompactionState::current(&status.shared_state);
+            for task in active.into_iter().chain(pending) {
+                let entry = task.snapshot(node_id);
+                if entry.matches(filters) {
+                    entries.push(entry);
+                }
+            }
+        }
+        entries
     }
 }
 
