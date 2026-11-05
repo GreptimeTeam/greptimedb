@@ -869,16 +869,15 @@ impl PromPlanner {
                 .map(|(scan, ..)| scan)
                 .filter(|scan| !is_empty_discovered_input(scan)),
         ) || logical_ids_differ;
-        // A node over several scans of one partitioned table cannot run inside a region: it would
-        // read neither the other scans nor the fragments another region holds, and a segment reads
-        // one bare scan. Over the wire each occurrence is its own raw source with its own bounds
-        // and identity, reconciled above the regions, so the refusal only holds the in-process
-        // bare-scan route.
-        if selectors.len() > 1
-            && !cross_table
-            && !self_contained
-            && prepared.iter().any(|input| input.5)
-        {
+        // A multi-selector tree over a partitioned table has no in-process placement whose matching
+        // and uniqueness semantics equal the frontend route. One node over several scans of one
+        // partitioned table reads neither the other scans nor the fragments another region holds,
+        // and one node over several tables' sources matches every series those sources delivered,
+        // where the frontend route copies the operands' matchers into their scans first and checks
+        // uniqueness above the join. Keep the existing plan in process; the hybrid route lifts such
+        // a tree one operand at a time. Over the wire every occurrence is already its own raw source
+        // reconciled above the regions, so the route keeps those trees.
+        if selectors.len() > 1 && !self_contained && prepared.iter().any(|input| input.5) {
             return Ok(None);
         }
         // The first input names the output's time index and, on one table, binds every scan.

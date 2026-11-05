@@ -3757,17 +3757,37 @@ async fn native_fused_same_table_nested_match_keeps_prior_admission() {
     );
 }
 
-/// Partitioned cross-table operands are independently transported by raw sources. Repeated
-/// scans of one partitioned table retain the region-local multi-scan refusal.
+/// On the wire, partitioned cross-table operands are independently transported by raw sources:
+/// the pair is one fused node whose two inputs each name the metric they read. In process the same
+/// pair keeps the frontend hybrid route instead, because only that route copies the matcher's
+/// labels into each operand's scan and checks uniqueness above the join. Repeated scans of one
+/// partitioned table retain the region-local multi-scan refusal on both routes.
 #[tokio::test]
 async fn native_fused_partitioned_pair_requires_per_selector_raw_sources() {
-    let plan = build_native_fused_plan_with_provider(
-        "some_metric / other_metric",
+    let state = QueryEngineState::try_new_with_region_transport(
+        new_memory_catalog_manager().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
         true,
-        native_two_table_provider(vec![0]).await,
+        false,
+        Plugins::default(),
+        QueryOptions::default(),
     )
-    .await;
-    let fused = find_fused_series(&plan).expect("cross-table pair is native");
+    .unwrap();
+    let eval_stmt = build_eval_stmt("some_metric / other_metric");
+    let plan = PromPlanner::stmt_to_plan_with_annotations(
+        native_two_table_provider(vec![0]).await,
+        &eval_stmt,
+        &state,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    let fused = find_fused_series(&plan).expect("cross-table pair is native on the wire");
     assert_eq!(fused.inputs().len(), 2, "{plan}");
     for input in fused.inputs() {
         assert!(
@@ -3776,6 +3796,19 @@ async fn native_fused_partitioned_pair_requires_per_selector_raw_sources() {
             "{plan}"
         );
     }
+    // The same pair in process must not become one two-input node: the frontend hybrid route is
+    // what the matcher propagation and the uniqueness check live in, and that is the plan the
+    // partitioned-RHS hybrid cases assert.
+    let in_process = build_native_fused_plan_with_provider(
+        "some_metric / other_metric",
+        true,
+        native_two_table_provider(vec![0]).await,
+    )
+    .await;
+    assert!(
+        !has_pair_node(&in_process),
+        "an in-process partitioned pair keeps the hybrid route: {in_process}"
+    );
     let repeated = build_native_fused_plan_with_provider(
         "some_metric / some_metric",
         true,
