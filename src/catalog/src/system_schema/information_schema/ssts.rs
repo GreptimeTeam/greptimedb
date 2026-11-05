@@ -19,8 +19,12 @@ use common_catalog::consts::{
     INFORMATION_SCHEMA_SSTS_STORAGE_TABLE_ID,
 };
 use common_error::ext::BoxedError;
+use common_query::logical_plan::is_lossless_substrait_type;
 use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
+use datafusion::common::DFSchema;
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion::logical_expr::ExprSchemable;
 use datafusion::physical_plan::ExecutionPlan;
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
@@ -52,12 +56,39 @@ fn inspect_plan(
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
     let projected_schema = projected_schema(schema, &request)?;
     let info_ext = utils::information_extension(catalog_manager)?;
-    let req = DatanodeInspectRequest {
-        kind,
-        scan: request,
-    };
+    let req = inspect_request(kind, schema, request)?;
 
     info_ext.inspect_datanode_plan(req, projected_schema)
+}
+
+// System table predicates are inexact: the frontend keeps a residual filter. Dropping
+// an unsafe remote filter preserves correctness only if no remote limit truncates it.
+fn inspect_request(
+    kind: DatanodeInspectKind,
+    schema: &SchemaRef,
+    mut scan: ScanRequest,
+) -> Result<DatanodeInspectRequest> {
+    let schema =
+        DFSchema::try_from(schema.arrow_schema().clone()).context(crate::error::DatafusionSnafu)?;
+    let filter_count = scan.filters.len();
+    scan.filters.retain(|filter| {
+        let mut supported = true;
+        let visited = filter.apply(|expr| {
+            if !expr
+                .get_type(&schema)
+                .is_ok_and(|data_type| is_lossless_substrait_type(&data_type))
+            {
+                supported = false;
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        });
+        visited.is_ok() && supported
+    });
+    if scan.filters.len() != filter_count {
+        scan.limit = None;
+    }
+    Ok(DatanodeInspectRequest { kind, scan })
 }
 
 /// Information schema table for sst manifest.
@@ -97,10 +128,7 @@ impl SystemTable for InformationSchemaSstsManifest {
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let schema = projected_schema(&self.schema, &request)?;
         let info_ext = utils::information_extension(&self.catalog_manager)?;
-        let req = DatanodeInspectRequest {
-            kind: DatanodeInspectKind::SstManifest,
-            scan: request,
-        };
+        let req = inspect_request(DatanodeInspectKind::SstManifest, &self.schema, request)?;
 
         let future = async move {
             info_ext
@@ -163,10 +191,7 @@ impl SystemTable for InformationSchemaSstsStorage {
         let schema = projected_schema(&self.schema, &request)?;
 
         let info_ext = utils::information_extension(&self.catalog_manager)?;
-        let req = DatanodeInspectRequest {
-            kind: DatanodeInspectKind::SstStorage,
-            scan: request,
-        };
+        let req = inspect_request(DatanodeInspectKind::SstStorage, &self.schema, request)?;
 
         let future = async move {
             info_ext
@@ -229,10 +254,7 @@ impl SystemTable for InformationSchemaSstsIndexMeta {
         let schema = projected_schema(&self.schema, &request)?;
 
         let info_ext = utils::information_extension(&self.catalog_manager)?;
-        let req = DatanodeInspectRequest {
-            kind: DatanodeInspectKind::SstIndexMeta,
-            scan: request,
-        };
+        let req = inspect_request(DatanodeInspectKind::SstIndexMeta, &self.schema, request)?;
 
         let future = async move {
             info_ext
@@ -314,6 +336,59 @@ mod tests {
             Ok(Some(Arc::new(EmptyExec::new(
                 schema.arrow_schema().clone(),
             ))))
+        }
+    }
+
+    #[test]
+    fn test_inspect_request_keeps_unsafe_filters_on_frontend() {
+        use datafusion::arrow::datatypes::{DataType, TimeUnit};
+        use datafusion::logical_expr::expr::Cast;
+        use datafusion::logical_expr::{Expr, col, lit};
+
+        for (kind, schema) in [
+            (DatanodeInspectKind::SstManifest, ManifestSstEntry::schema()),
+            (DatanodeInspectKind::SstStorage, StorageSstEntry::schema()),
+            (
+                DatanodeInspectKind::SstIndexMeta,
+                PuffinIndexMetaEntry::schema(),
+            ),
+        ] {
+            let safe = col(&schema.column_schemas()[0].name).is_not_null();
+            let scan = ScanRequest {
+                projection: Some(vec![0]),
+                filters: vec![safe.clone()],
+                limit: Some(1),
+                ..Default::default()
+            };
+            assert_eq!(
+                inspect_request(kind, &schema, scan.clone()).unwrap(),
+                DatanodeInspectRequest {
+                    kind,
+                    scan: scan.clone()
+                }
+            );
+            for unsafe_filter in [
+                Expr::Cast(Cast::new(
+                    Box::new(lit(0_i64)),
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("+08:00".into())),
+                ))
+                .is_not_null(),
+                Expr::Cast(Cast::new(Box::new(lit(1_i64)), DataType::Decimal32(9, 0)))
+                    .is_not_null(),
+                col("missing_column").is_null(),
+            ] {
+                let mut input = scan.clone();
+                input.filters.push(unsafe_filter);
+                let mut expected = scan.clone();
+                expected.limit = None;
+                assert_eq!(
+                    inspect_request(kind, &schema, input).unwrap(),
+                    DatanodeInspectRequest {
+                        kind,
+                        scan: expected
+                    }
+                );
+            }
         }
     }
 

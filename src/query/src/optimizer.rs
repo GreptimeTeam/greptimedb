@@ -27,6 +27,7 @@ pub mod parallelize_scan;
 pub mod promql_tsid_narrow_join;
 pub mod remove_duplicate;
 pub mod scan_hint;
+pub(crate) mod sst_manifest_aggregate;
 pub mod string_normalization;
 #[cfg(test)]
 pub(crate) mod test_util;
