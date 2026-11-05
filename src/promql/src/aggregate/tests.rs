@@ -2064,6 +2064,13 @@ fn count_and_group_count_histogram_samples() {
         value(&aggregate_float(&schema, &input, AggregateOp::Group, Grouping::By(&[])).unwrap()),
         1.0,
     );
+    // The sparse series must still contribute at the position it does hold: a fold that dropped it
+    // would answer the same count at the first position and nothing at the second.
+    let counted = aggregate_float(&schema, &input, AggregateOp::Count, Grouping::By(&[])).unwrap();
+    let SampleRef::Float(second) = counted[0].fields.as_slice()[0].sample(1) else {
+        panic!("a count is a float");
+    };
+    assert_eq!(second, 1.0, "the sparse series counts at its own position");
 
     // A float beside a histogram is one more present sample, not a different kind of answer.
     let mixed = [
