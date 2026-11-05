@@ -257,6 +257,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use common_procedure::store::state_store::StateStore;
     use common_procedure::{Procedure, ProcedureId, ProcedureManagerRef, Status};
     use tokio::sync::Notify;
@@ -351,16 +353,16 @@ mod tests {
         );
         let mut conflicting = task();
         conflicting.target_node_id = Some(3);
-        assert!(matches!(
+        for err in [
             manager
                 .submit_procedure(Default::default(), conflicting)
-                .await,
-            Err(error::Error::DrainDatanodeRunning { .. })
-        ));
-        assert!(matches!(
-            manager.mark_schedulable(1).await,
-            Err(error::Error::DrainDatanodeRunning { .. })
-        ));
+                .await
+                .unwrap_err(),
+            manager.mark_schedulable(1).await.unwrap_err(),
+        ] {
+            assert!(matches!(&err, error::Error::DrainDatanodeRunning { .. }));
+            assert_eq!(StatusCode::IllegalState, err.status_code());
+        }
         release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -516,16 +518,16 @@ mod tests {
         }
         let mut conflicting = task();
         conflicting.target_node_id = Some(3);
-        assert!(matches!(
+        for err in [
             manager
                 .submit_procedure(Default::default(), conflicting)
-                .await,
-            Err(error::Error::DrainDatanodeRunning { .. })
-        ));
-        assert!(matches!(
-            manager.mark_schedulable(1).await,
-            Err(error::Error::DrainDatanodeRunning { .. })
-        ));
+                .await
+                .unwrap_err(),
+            manager.mark_schedulable(1).await.unwrap_err(),
+        ] {
+            assert!(matches!(&err, error::Error::DrainDatanodeRunning { .. }));
+            assert_eq!(StatusCode::IllegalState, err.status_code());
+        }
         release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), async {
             while manager.tracker.contains(1) {
