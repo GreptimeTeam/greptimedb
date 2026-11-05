@@ -2537,7 +2537,15 @@ impl Stream for RepartitionStream {
             }
             if this.eof_metadata.is_none() {
                 let metadata = MemoryConsumer::new("SeriesRepartitionEof").register(&this.pool);
-                let bytes = this.inputs.saturating_mul(std::mem::size_of::<bool>());
+                // Every vector allocated below is charged for before any of them exists: one flag,
+                // one range slot and one range charge per input. Charging the flags alone would
+                // admit a pool too small for the two slot vectors and only discover it after the
+                // allocation, so the charge covers the whole bookkeeping or nothing.
+                let bytes = this.inputs.saturating_mul(
+                    std::mem::size_of::<bool>()
+                        .saturating_add(std::mem::size_of::<Option<RawSeriesKeyRange>>())
+                        .saturating_add(std::mem::size_of::<Option<MemoryReservation>>()),
+                );
                 if let Err(error) = metadata.try_grow(bytes) {
                     this.lease.fail(Arc::new(error));
                     continue;
