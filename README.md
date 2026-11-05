@@ -16,6 +16,7 @@ One engine, on your infrastructure.</h2>
 
 <a href="https://docs.greptime.com/user-guide/overview/">User Guide</a> &nbsp;·&nbsp;
 <a href="https://greptimedb.rs/">API Docs</a> &nbsp;·&nbsp;
+<a href="https://live.greptime.cloud/dashboard/?info=eyJ1c2VybmFtZSI6ImdyZXB0aW1lIiwicGFzc3dvcmQiOiJkZW1vc2Vzc2lvbiJ9&query_guide=1&utm_source=github&utm_medium=readme&utm_campaign=greptimedb#/dashboard/explore">Live Demo</a> &nbsp;·&nbsp;
 <a href="https://github.com/GreptimeTeam/greptimedb/issues/7685">Roadmap 2026</a> &nbsp;·&nbsp;
 <a href="https://greptime.com/slack">Slack</a>
 
@@ -150,7 +151,8 @@ docker run -p 127.0.0.1:4000-4003:4000-4003 \
   --mysql-addr 0.0.0.0:4002 \
   --postgres-addr 0.0.0.0:4003
 ```
-Dashboard: [http://localhost:4000/dashboard](http://localhost:4000/dashboard)
+Dashboard: [http://localhost:4000/dashboard](http://localhost:4000/dashboard)  
+Or skip the install and try the [Live Demo](https://live.greptime.cloud/dashboard/?info=eyJ1c2VybmFtZSI6ImdyZXB0aW1lIiwicGFzc3dvcmQiOiJkZW1vc2Vzc2lvbiJ9&query_guide=1&utm_source=github&utm_medium=readme&utm_campaign=greptimedb#/dashboard/explore).
 
 Read more in the [full Install Guide](https://docs.greptime.com/getting-started/installation/overview).
 
