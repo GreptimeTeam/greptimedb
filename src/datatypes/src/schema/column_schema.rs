@@ -40,6 +40,16 @@ pub type Metadata = HashMap<String, String>;
 
 /// Key used to store whether the column is time index in arrow field's metadata.
 pub const TIME_INDEX_KEY: &str = "greptime:time_index";
+/// Key used to store whether the column carries the metric name of each row in arrow field's
+/// metadata.
+///
+/// A PromQL result normally carries one metric name for the whole response, which the response
+/// layer derives from the statement. A native set operator reports the series of both operands, so
+/// its rows carry the name of the side each one came from, and that name is a column of the plan.
+/// This declaration is what says a column is that name rather than an ordinary label; a column's
+/// name cannot say it, because a label an operation generates may legitimately be called
+/// `__name__`.
+pub const METRIC_NAME_KEY: &str = "greptime:metric_name";
 pub const COMMENT_KEY: &str = "greptime:storage:comment";
 /// Key used to store default constraint in arrow field's metadata.
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
@@ -237,6 +247,28 @@ impl ColumnSchema {
             .get(INVERTED_INDEX_KEY)
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
+    }
+
+    /// Whether this column carries the metric name of its row.
+    ///
+    /// See [METRIC_NAME_KEY] for what a producer declares and the response layer that reads it.
+    pub fn is_metric_name(&self) -> bool {
+        self.metadata
+            .get(METRIC_NAME_KEY)
+            .map(|value| value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    /// Marks this column as carrying the metric name of its row, or clears the mark.
+    pub fn with_metric_name(mut self, is_metric_name: bool) -> Self {
+        if is_metric_name {
+            let _ = self
+                .metadata
+                .insert(METRIC_NAME_KEY.to_string(), "true".to_string());
+        } else {
+            let _ = self.metadata.remove(METRIC_NAME_KEY);
+        }
+        self
     }
 
     pub fn is_fulltext_indexed(&self) -> bool {
@@ -647,6 +679,25 @@ impl TryFrom<&ColumnSchema> for Field {
         )
         .with_metadata(metadata))
     }
+}
+
+/// The arrow field metadata that declares a column as carrying the metric name of its rows.
+///
+/// A producer that builds an arrow [Field] directly, rather than through a [ColumnSchema], attaches
+/// this to the name column so the response layer reads the name from it; see [METRIC_NAME_KEY].
+pub fn metric_name_field_metadata() -> Metadata {
+    let mut metadata = Metadata::new();
+    let _ = metadata.insert(METRIC_NAME_KEY.to_string(), "true".to_string());
+    metadata
+}
+
+/// Whether the metadata of `field` declares it as carrying the metric name of its rows.
+pub fn is_metric_name_field(field: &Field) -> bool {
+    field
+        .metadata()
+        .get(METRIC_NAME_KEY)
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// Fulltext options for a column.

@@ -2411,7 +2411,14 @@ fn fused_output_schema(
         columns.push((None, Arc::new(Field::new(name, field_type.clone(), true))));
     }
     for name in tags {
-        columns.push((None, Arc::new(Field::new(name, ArrowDataType::Utf8, true))));
+        let mut field = Field::new(name, ArrowDataType::Utf8, true);
+        // The runtime answers `__name__` from the metric name of the series it reports, so a tag
+        // column of that name is the name of each row rather than one name for the whole result.
+        // Declaring it keeps the response layer from naming every row after the statement.
+        if name == METRIC_NAME {
+            field = field.with_metadata(datatypes::schema::metric_name_field_metadata());
+        }
+        columns.push((None, Arc::new(field)));
     }
 
     Ok(Arc::new(
@@ -2861,6 +2868,12 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                     if !tags.contains(&tag) {
                         tags.push(tag);
                     }
+                }
+                // `or` reports the series of both sides, and each row keeps the name of the side it
+                // came from. The runtime already answers that name for every series it reports, so
+                // the column it is read from is the one the tags name.
+                if !tags.iter().any(|tag| tag == METRIC_NAME) {
+                    tags.push(METRIC_NAME.to_string());
                 }
             }
             Some(tags)
@@ -3397,11 +3410,13 @@ mod tests {
             native_output_tags(and.root(), &sources)
         );
         let or = compiled_test_tree("x or y");
+        // `or` reports the series of both sides, so it reports each row's own name as well.
         assert_eq!(
             Some(vec![
                 "host".to_string(),
                 "kind".to_string(),
-                "zone".to_string()
+                "zone".to_string(),
+                "__name__".to_string()
             ]),
             native_output_tags(or.root(), &sources)
         );
@@ -3482,7 +3497,11 @@ mod tests {
         for (query, expected) in [
             ("(x - y) / on(host) z", vec!["host"]),
             ("x + ignoring(zone) y + ignoring(kind) z", vec!["host"]),
-            ("x / on(host, kind) y or z", vec!["host", "kind", "az"]),
+            // `or` reports the series of both sides, so each row's own name comes with them.
+            (
+                "x / on(host, kind) y or z",
+                vec!["host", "kind", "az", "__name__"],
+            ),
         ] {
             assert_eq!(
                 Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
