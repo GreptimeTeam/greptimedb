@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use futures::TryStreamExt;
 use futures::future::try_join_all;
 use object_store::{Entry, ErrorKind, Lister, ObjectStore};
@@ -208,6 +208,15 @@ impl<T: Tracker> DeltaStorage<T> {
             let cache_key = entry.path();
             // Try to get from cache first
             if let Some(data) = get_from_cache(self.manifest_cache.as_ref(), cache_key).await {
+                let size = entry.metadata().content_length();
+                if size > 0 {
+                    self.delta_tracker.record(*v, size);
+                } else {
+                    match self.object_store.stat(entry.path()).await {
+                        Ok(metadata) => self.delta_tracker.record(*v, metadata.content_length()),
+                        Err(error) => warn!(error; "Failed to account for cached manifest delta {}", entry.path()),
+                    }
+                }
                 return Ok((*v, data));
             }
 
@@ -223,6 +232,7 @@ impl<T: Tracker> DeltaStorage<T> {
                 }
                 Err(error) => return Err(error).context(OpenDalSnafu),
             };
+            self.delta_tracker.record(*v, bytes.len() as u64);
             let data = compress_type
                 .decode(bytes)
                 .await

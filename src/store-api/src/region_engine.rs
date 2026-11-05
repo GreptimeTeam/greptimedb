@@ -562,7 +562,10 @@ pub struct RegionStatistic {
     pub memtable_size: u64,
     /// The size of WAL in bytes.
     pub wal_size: u64,
-    /// The size of manifest in bytes.
+    /// Stored bytes of the latest observed manifest checkpoint and subsequent deltas,
+    /// compressed when enabled. Excludes staging manifests, `_last_checkpoint`, and
+    /// superseded files still present on disk. This is a logical recovery-size estimate,
+    /// not the physical directory usage; observation failures can leave it incomplete.
     pub manifest_size: u64,
     /// The size of SST data files owned by this region in bytes.
     ///
