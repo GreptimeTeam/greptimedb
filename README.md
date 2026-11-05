@@ -9,9 +9,6 @@
 <h2 align="center">Metrics, logs, and traces.<br/>
 One engine, on your infrastructure.</h2>
 
-> A columnar database for metrics, logs, and traces on object storage.
-> Apache-2.0 licensed core.
-
 <div align="center">
 
 <a href="https://docs.greptime.com/user-guide/overview/">User Guide</a> &nbsp;·&nbsp;
@@ -62,76 +59,6 @@ LIMIT 20;
 Metrics join the same way, on any tag the tables share, such as `service`,
 `host`, or `pod`.
 
-## Why You Might Use It
-
-- You run Prometheus plus Loki or Elasticsearch and want one backend instead of three
-- You have outgrown Prometheus on cardinality or retention and don't want the Thanos/Mimir operational surface
-- You are hitting Loki's query performance limits as log volume grows
-- You need long retention on object storage without a separate analytics stack
-- You want to query telemetry with SQL, not only a domain query language
-- You are storing GenAI or agent telemetry ([OTel GenAI conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)) alongside infrastructure signals
-
-Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb).
-
-## What's Supported
-
-| | |
-|---|---|
-| **Ingest** | [OpenTelemetry (OTLP)](https://docs.greptime.com/user-guide/ingest-data/for-observability/opentelemetry/), [Prometheus Remote Write](https://docs.greptime.com/user-guide/ingest-data/for-observability/prometheus/), [Loki Push](https://docs.greptime.com/user-guide/ingest-data/for-observability/loki), [Elasticsearch Bulk](https://docs.greptime.com/user-guide/ingest-data/for-observability/elasticsearch), [InfluxDB line protocol](https://docs.greptime.com/user-guide/protocols/influxdb-line-protocol), [gRPC](https://docs.greptime.com/user-guide/protocols/grpc/) |
-| **Query** | [SQL](https://docs.greptime.com/user-guide/query-data/overview/), [PromQL](https://docs.greptime.com/user-guide/query-data/promql/), [Jaeger-compatible trace queries](https://docs.greptime.com/user-guide/query-data/jaeger/), MySQL and PostgreSQL wire protocols |
-| **Storage** | S3, GCS, Azure Blob and S3-compatible endpoints as [primary storage](https://docs.greptime.com/user-guide/deployments-administration/configuration/#storage-options), with memory and local-disk caches |
-| **Built in** | Retention policies, downsampling, [continuous aggregation](https://docs.greptime.com/user-guide/flow-computation/overview), explicit table partitioning, and [inverted / skipping / fulltext indexes](https://docs.greptime.com/user-guide/manage-data/data-index) |
-
-Compute and storage are disaggregated: object storage holds the data, while memory and local-disk caches keep recent and frequently queried data close to compute.
-
-<p align="center">
-  <a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/overview.png" target="_blank" rel="noopener">
-    <img alt="GreptimeDB Overview" src="docs/overview.png" width="900px">
-  </a>
-</p>
-
-## Benchmarks
-
-* [Agent RCA Bench](https://rca-bench.greptime.com/): LLM agents doing root cause analysis
-  over GreptimeDB versus Prometheus + Loki + Tempo. 40% fewer wrong diagnoses, 48% fewer
-  input tokens, 45% lower cost
-  ([write-up](https://greptime.com/blogs/2026-09-08-agent-rca-bench-interface-semantic-layer))
-* [GreptimeDB tops JSONBench's billion-record cold run test](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)
-* [TSBS Benchmark](https://github.com/GreptimeTeam/greptimedb/tree/main/docs/benchmarks/tsbs)
-* [More benchmark reports](https://docs.greptime.com/user-guide/concepts/features-that-you-concern#how-is-greptimedbs-performance-compared-to-other-solutions)
-
-## Compatibility and Migration
-
-Compatibility is per protocol, and query-side coverage is narrower than ingestion.
-
-| | Compatible | Not compatible |
-|---|---|---|
-| **Prometheus** | Remote Write ingestion; PromQL queries | Gaps are listed in [PromQL compatibility](https://docs.greptime.com/user-guide/query-data/promql/) |
-| **Loki** | Push ingestion; dual-write through Grafana Alloy makes the [cutover gradual](https://greptime.com/blogs/2026-07-23-from-loki-to-greptimedb-dual-write-migration) | LogQL and the rest of the Loki query API |
-| **Elasticsearch** | `_bulk` ingestion in the open-source core; [QueryDSL](https://docs.greptime.com/enterprise/elasticsearch-compatible/query/) partially, in Enterprise | Most other Elasticsearch APIs |
-
-## Limitations and Edition Boundary
-
-Cluster deployment, object storage, the Flow engine, and every ingestion protocol listed above are in the Apache-2.0 build. Repartitioning, region migration, and index creation are manual operations there.
-
-Read replicas, workload isolation, and automated repartitioning are **GreptimeDB Enterprise** features, along with enterprise security and governance. The [Enterprise overview](https://docs.greptime.com/enterprise/overview/) has the current list, and [pricing](https://www.greptime.com/pricing#differences) has the edition comparison.
-
-## Architecture
-
-GreptimeDB can run in two modes:
-* **Standalone** — single binary for development and small deployments.
-* **Distributed** — four components, each independently scalable:
-  - **Frontend** — protocol entry (OTel, Prometheus, MySQL/PostgreSQL, gRPC, ingestion APIs for Elasticsearch/InfluxDB/Loki) and the distributed query engine. Stateless, scales horizontally.
-  - **Datanode** — region engine with WAL, memtable, SST, cache, compaction, and indexes. Persists data to object storage. Elastic.
-  - **Metasrv** — metadata, routing, repartitioning, and security. Backed by a pluggable KV layer (etcd or RDS).
-  - **Flownode** (optional) — continuous flow computation (streaming and materialized views).
-
-For deeper coverage, see the [architecture doc](https://docs.greptime.com/contributor-guide/overview/#architecture) or [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview).
-
-<a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/architecture.png" target="_blank" rel="noopener">
-  <img alt="GreptimeDB System Overview" src="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@main/docs/architecture.png">
-</a>
-
 ## Try GreptimeDB
 
 **For AI agents** — paste this prompt into your agent:
@@ -154,18 +81,78 @@ docker run -p 127.0.0.1:4000-4003:4000-4003 \
 Dashboard: [http://localhost:4000/dashboard](http://localhost:4000/dashboard)  
 Or skip the install and try the [Live Demo](https://live.greptime.cloud/dashboard/?info=eyJ1c2VybmFtZSI6ImdyZXB0aW1lIiwicGFzc3dvcmQiOiJkZW1vc2Vzc2lvbiJ9&query_guide=1&utm_source=github&utm_medium=readme&utm_campaign=greptimedb#/dashboard/explore).
 
-Read more in the [full Install Guide](https://docs.greptime.com/getting-started/installation/overview).
+Next: [Quickstart](https://docs.greptime.com/getting-started/quick-start), the [full Install Guide](https://docs.greptime.com/getting-started/installation/overview), [Demo Scenes](https://github.com/GreptimeTeam/demo-scene), and the [FAQ](https://docs.greptime.com/faq-and-others/faq).
 
-**Troubleshooting:**
-* Cannot connect to the database? Ensure that ports `4000`, `4001`, `4002`, and `4003` are not blocked by a firewall or used by other services.
-* Failed to start? Check the container logs with `docker logs greptime` for further details.
+## Why You Might Use It
 
-## Getting Started
+- You run Prometheus plus Loki or Elasticsearch and want one backend instead of three
+- You have outgrown Prometheus on cardinality or retention and don't want the Thanos/Mimir operational surface
+- You are hitting Loki's query performance limits as log volume grows
+- You need long retention on object storage without a separate analytics stack
+- You want to query telemetry with SQL, not only a domain query language
+- You are storing GenAI or agent telemetry ([OTel GenAI conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)) alongside infrastructure signals
 
-- [Quickstart](https://docs.greptime.com/getting-started/quick-start)
-- [User Guide](https://docs.greptime.com/user-guide/overview)
-- [Demo Scenes](https://github.com/GreptimeTeam/demo-scene)
-- [FAQ](https://docs.greptime.com/faq-and-others/faq)
+Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb).
+
+## What's Supported
+
+| | |
+|---|---|
+| **Ingest** | [OpenTelemetry (OTLP)](https://docs.greptime.com/user-guide/ingest-data/for-observability/opentelemetry/), [Prometheus Remote Write](https://docs.greptime.com/user-guide/ingest-data/for-observability/prometheus/) (with [native histograms](https://docs.greptime.com/user-guide/ingest-data/for-observability/prometheus/#native-histograms) over Remote Write 2.0), [Loki Push](https://docs.greptime.com/user-guide/ingest-data/for-observability/loki), [Elasticsearch Bulk](https://docs.greptime.com/user-guide/ingest-data/for-observability/elasticsearch), [InfluxDB line protocol](https://docs.greptime.com/user-guide/protocols/influxdb-line-protocol), [gRPC](https://docs.greptime.com/user-guide/protocols/grpc/) |
+| **Query** | [SQL](https://docs.greptime.com/user-guide/query-data/overview/), [PromQL](https://docs.greptime.com/user-guide/query-data/promql/), [Jaeger-compatible trace queries](https://docs.greptime.com/user-guide/query-data/jaeger/), MySQL and PostgreSQL wire protocols |
+| **Storage** | S3, GCS, Azure Blob and S3-compatible endpoints as [primary storage](https://docs.greptime.com/user-guide/deployments-administration/configuration/#storage-options), with memory and local-disk caches |
+| **Built in** | [Pipelines](https://docs.greptime.com/user-guide/logs/use-custom-pipelines) that parse and transform logs at ingestion, retention policies, downsampling, [continuous aggregation](https://docs.greptime.com/user-guide/flow-computation/overview), explicit table partitioning, and [inverted / skipping / fulltext indexes](https://docs.greptime.com/user-guide/manage-data/data-index) |
+
+Compute and storage are disaggregated: object storage holds the data, while memory and local-disk caches keep recent and frequently queried data close to compute.
+
+<p align="center">
+  <a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/overview.png" target="_blank" rel="noopener">
+    <img alt="GreptimeDB Overview" src="docs/overview.png" width="900px">
+  </a>
+</p>
+
+## Benchmarks
+
+* [Agent RCA Bench](https://rca-bench.greptime.com/): LLM agents doing root cause analysis
+  over GreptimeDB versus Prometheus + Loki + Tempo, six models and 168 investigations per
+  interface. 40% fewer wrong diagnoses, about 48% fewer input tokens, about 45% lower
+  estimated cost
+  ([write-up](https://greptime.com/blogs/2026-09-08-agent-rca-bench-interface-semantic-layer))
+* [JSONBench billion-record cold run: first place as of March 2025](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)
+* [TSBS Benchmark](https://github.com/GreptimeTeam/greptimedb/tree/main/docs/benchmarks/tsbs)
+* [More benchmark reports](https://docs.greptime.com/user-guide/concepts/features-that-you-concern#how-is-greptimedbs-performance-compared-to-other-solutions)
+
+## Compatibility and Migration
+
+Compatibility is per protocol, and query-side coverage is narrower than ingestion.
+
+| | Compatible | Not compatible |
+|---|---|---|
+| **Prometheus** | Remote Write ingestion; PromQL queries | Gaps are listed in [PromQL compatibility](https://docs.greptime.com/user-guide/query-data/promql/) |
+| **Loki** | Push ingestion; dual-write through Grafana Alloy makes the [cutover gradual](https://greptime.com/blogs/2026-07-23-from-loki-to-greptimedb-dual-write-migration) | LogQL and the rest of the Loki query API |
+| **Elasticsearch** | `_bulk` ingestion in the open-source core; [QueryDSL](https://docs.greptime.com/enterprise/elasticsearch-compatible/query/) partially, in Enterprise | Most other Elasticsearch APIs |
+
+## Limitations and Edition Boundary
+
+Cluster deployment, object storage, the Flow engine, and every ingestion protocol listed above are in the Apache-2.0 build. Repartitioning and region migration are manual operations there.
+
+Read replicas, workload isolation, and automated repartitioning are **GreptimeDB Enterprise** features, along with enterprise security and governance. The [Enterprise overview](https://docs.greptime.com/enterprise/overview/) has the current list, and [pricing](https://www.greptime.com/pricing#differences) has the edition comparison. For Enterprise support, [contact us](https://greptime.com/contactus).
+
+## Architecture
+
+GreptimeDB can run in two modes:
+* **Standalone** — single binary for development and small deployments.
+* **Distributed** — four components, each independently scalable:
+  - **Frontend** — protocol entry and the distributed query engine. Stateless, scales horizontally.
+  - **Datanode** — region engine with WAL, memtable, SST, cache, compaction, and indexes. Persists data to object storage.
+  - **Metasrv** — metadata, region routing, and cluster coordination (DDL, failover, region migration, repartitioning). Backed by a pluggable KV layer (etcd or RDS).
+  - **Flownode** (optional) — continuous flow computation (streaming and materialized views).
+
+For deeper coverage, see the [architecture doc](https://docs.greptime.com/contributor-guide/overview/#architecture) or [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview).
+
+<a href="https://github.com/GreptimeTeam/greptimedb/raw/main/docs/architecture.png" target="_blank" rel="noopener">
+  <img alt="GreptimeDB System Overview" src="https://cdn.jsdelivr.net/gh/GreptimeTeam/greptimedb@main/docs/architecture.png">
+</a>
 
 ## Build From Source
 
@@ -204,11 +191,9 @@ See the [Contribution Guidelines](CONTRIBUTING.md) for the full developer workfl
 
 GreptimeDB is generally available, with stable APIs and regular releases. It runs in production at scale — [OceanBase Cloud](https://greptime.com/blogs/2025-07-22-user-case-obcloud-log-management-greptimedb) operates 80+ GreptimeDB clusters managing 300 TB of logs, cutting log storage cost by 60%+ after migrating from Grafana Loki. See more in [case studies](https://greptime.com/blogs/?category=Use%20Case).
 
-Release lines and support windows are in the [version reference](https://docs.greptime.com/nightly/reference/about-greptimedb-version). For where the project is going, read the [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights), the [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026), and [what we mean by an observability database](https://greptime.com/blogs/2026-08-26-what-is-an-observability-database).
+Releases follow [Semantic Versioning](https://docs.greptime.com/reference/about-greptimedb-version). For where the project is going, read the [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights), the [2026 roadmap](https://github.com/GreptimeTeam/greptimedb/issues/7685), and [what we mean by an observability database](https://greptime.com/blogs/2026-08-26-what-is-an-observability-database).
 
 ## Community
-
-We invite you to engage and contribute!
 
 - [Slack](https://greptime.com/slack)
 - [Discussions](https://github.com/GreptimeTeam/greptimedb/discussions)
@@ -219,6 +204,14 @@ We invite you to engage and contribute!
 - [YouTube](https://www.youtube.com/@greptime)
 
 If GreptimeDB is useful to you, please star the repo.
+
+<a href="https://www.star-history.com/?repos=GreptimeTeam%2FGreptimeDB&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&legend=top-left" />
+ </picture>
+</a>
 
 <img alt="Known Users" src="https://greptime.com/logo/img/users.png"/>
 
@@ -232,17 +225,10 @@ A small set of peripheral, enterprise-only features are gated behind the
 separate [GreptimeDB Enterprise License](LICENSE-ENTERPRISE). Source files under
 that license carry an explicit Enterprise License header.
 
-## Commercial Support
-
-Scaling observability on your infrastructure?
-[GreptimeDB Enterprise](https://docs.greptime.com/enterprise/overview/) adds the operational,
-security, and support layer for production deployments.
-[Contact us](https://greptime.com/contactus) for details.
-
 ## Contributing
 
 - Read our [Contribution Guidelines](CONTRIBUTING.md).
-- Explore [Internal Concepts](https://docs.greptime.com/contributor-guide/overview.html) and [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb).
+- Explore [Internal Concepts](https://docs.greptime.com/contributor-guide/overview/) and [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb).
 - Pick up a [good first issue](https://github.com/GreptimeTeam/greptimedb/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and join the #contributors [Slack](https://greptime.com/slack) channel.
 
 [![Integration CI](https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml/badge.svg)](https://github.com/GreptimeTeam/greptimedb/actions/workflows/integration.yml)
