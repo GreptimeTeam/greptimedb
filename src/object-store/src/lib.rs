@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use opendal::raw::{Service, ServiceInfo, Servicer};
+pub use opendal::raw::{Service, ServiceInfo, Servicer, new_std_io_error};
 pub use opendal::{
     Buffer, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, FuturesAsyncReader,
     FuturesAsyncWriter, HttpTransporter, Lister, OperationContext, Operator as ObjectStore, Reader,
