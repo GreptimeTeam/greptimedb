@@ -1073,7 +1073,9 @@ impl PromPlanner {
                 None
             };
             if let Some((partial, final_tree)) = split {
-                let Some(output_schema) = Self::fused_root_schema(&final_tree, &source_tags, &time)
+                // The partial stage may introduce labels before aggregation. The final
+                // tree consumes state, so derive output columns from the complete tree.
+                let Some(output_schema) = Self::fused_root_schema(&tree, &source_tags, &time)
                 else {
                     return Ok(None);
                 };
