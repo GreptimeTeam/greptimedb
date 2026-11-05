@@ -17,16 +17,18 @@ use std::collections::BTreeMap;
 use ahash::{HashMap, HashMapExt};
 use api::helper::{ColumnDataTypeWrapper, timestamp_unit};
 use api::v1::column_data_type_extension::TypeExt;
-use api::v1::column_def::options_from_column_schema;
+use api::v1::column_def::{options_from_column_schema, options_from_skipping};
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, Rows, SemanticType, Value as GreptimeValue,
 };
 use bytes::Bytes;
+use common_catalog::consts::SERVICE_NAME_COLUMN;
 use common_telemetry::warn;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
+use datatypes::schema::SkippingIndexOptions;
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
@@ -36,6 +38,7 @@ use pipeline::{
 };
 use session::context::QueryContextRef;
 use snafu::ensure;
+use table::requests::TABLE_DATA_MODEL_LOG_V1;
 use vrl::prelude::NotNan;
 use vrl::value::{KeyString, Value as VrlValue};
 
@@ -45,12 +48,15 @@ use crate::error::{
 };
 use crate::http::event::PipelineIngestRequest;
 use crate::otlp::coerce::{coerce_value_data, is_supported_signed_to_unsigned_coercion};
+use crate::otlp::trace::KEY_SERVICE_NAME;
 use crate::otlp::trace::attributes::OtlpAnyValue;
 use crate::otlp::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::pipeline::run_pipeline;
 use crate::query_handler::PipelineHandlerRef;
 
 pub const LOG_TABLE_NAME: &str = "opentelemetry_logs";
+const EVENT_NAME_COLUMN: &str = "event_name";
+const OBSERVED_TIMESTAMP_COLUMN: &str = "observed_timestamp";
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
 ///
@@ -73,6 +79,11 @@ pub async fn to_grpc_insert_requests(
                 .get_table(&table_name, query_ctx)
                 .await
                 .map_err(Error::from)?;
+            // New tables get the v1 schema. Existing tables without the v1 marker keep
+            // the legacy schema, so upgrading never alters their columns or keys.
+            let v1_schema = table.as_deref().is_none_or(|table| {
+                table.table_info().meta.options.data_model() == Some(TABLE_DATA_MODEL_LOG_V1)
+            });
             let existing_schema = table
                 .as_deref()
                 .map(ExistingLogSchema::try_from_table)
@@ -80,6 +91,7 @@ pub async fn to_grpc_insert_requests(
             let rows = parse_export_logs_service_request_to_rows(
                 request,
                 select_info,
+                v1_schema,
                 existing_schema.as_ref(),
                 &table_name,
             )?;
@@ -197,8 +209,17 @@ fn log_to_pipeline_value(
     VrlValue::Object(map)
 }
 
-fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
-    [
+/// Built-in columns of a direct OTLP log row, in row order.
+///
+/// The v1 schema puts `service_name` before `scope_name` because auto-create
+/// orders the primary key by column order.
+fn build_otlp_logs_identity_schema(v1_schema: bool) -> Result<Vec<ColumnSchema>> {
+    let trace_id_options = if v1_schema {
+        options_from_skipping(&SkippingIndexOptions::default())?
+    } else {
+        None
+    };
+    let mut columns = vec![
         (
             "timestamp",
             ColumnDataType::TimestampNanosecond,
@@ -211,7 +232,7 @@ fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
             ColumnDataType::String,
             SemanticType::Field,
             None,
-            None,
+            trace_id_options,
         ),
         (
             "span_id",
@@ -262,6 +283,17 @@ fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
             None,
             None,
         ),
+    ];
+    if v1_schema {
+        columns.push((
+            SERVICE_NAME_COLUMN,
+            ColumnDataType::String,
+            SemanticType::Tag,
+            None,
+            None,
+        ));
+    }
+    columns.extend([
         (
             "scope_name",
             ColumnDataType::String,
@@ -308,18 +340,38 @@ fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
             None,
             None,
         ),
-    ]
-    .into_iter()
-    .map(
-        |(field_name, column_type, semantic_type, datatype_extension, options)| ColumnSchema {
-            column_name: field_name.to_string(),
-            datatype: column_type as i32,
-            semantic_type: semantic_type as i32,
-            datatype_extension,
-            options,
-        },
-    )
-    .collect::<Vec<ColumnSchema>>()
+    ]);
+    if v1_schema {
+        columns.extend([
+            (
+                EVENT_NAME_COLUMN,
+                ColumnDataType::String,
+                SemanticType::Field,
+                None,
+                None,
+            ),
+            (
+                OBSERVED_TIMESTAMP_COLUMN,
+                ColumnDataType::TimestampNanosecond,
+                SemanticType::Field,
+                None,
+                None,
+            ),
+        ]);
+    }
+
+    Ok(columns
+        .into_iter()
+        .map(
+            |(field_name, column_type, semantic_type, datatype_extension, options)| ColumnSchema {
+                column_name: field_name.to_string(),
+                datatype: column_type as i32,
+                semantic_type: semantic_type as i32,
+                datatype_extension,
+                options,
+            },
+        )
+        .collect())
 }
 
 #[derive(Clone)]
@@ -405,16 +457,17 @@ impl ExistingLogSchema {
 
 fn build_otlp_build_in_row(
     log: LogRecord,
-    parse_ctx: &mut ParseContext,
-) -> (Row, JsonbValue<'static>) {
-    let log_attr = key_value_to_jsonb(log.attributes);
+    log_attr: &JsonbValue,
+    service_name: Option<String>,
+    parse_ctx: &ParseContext,
+) -> Row {
     let ts = if log.time_unix_nano != 0 {
         log.time_unix_nano
     } else {
         log.observed_time_unix_nano
     };
 
-    let row = vec![
+    let mut row = vec![
         GreptimeValue {
             value_data: Some(ValueData::TimestampNanosecondValue(ts as i64)),
         },
@@ -442,6 +495,13 @@ fn build_otlp_build_in_row(
         GreptimeValue {
             value_data: Some(ValueData::I32Value(log.flags as i32)),
         },
+    ];
+    if parse_ctx.v1_schema {
+        row.push(GreptimeValue {
+            value_data: service_name.map(ValueData::StringValue),
+        });
+    }
+    row.extend([
         GreptimeValue {
             value_data: parse_ctx.scope_name.clone().map(ValueData::StringValue),
         },
@@ -460,8 +520,54 @@ fn build_otlp_build_in_row(
         GreptimeValue {
             value_data: Some(ValueData::StringValue(parse_ctx.resource_url.clone())),
         },
-    ];
-    (Row { values: row }, log_attr)
+    ]);
+    if parse_ctx.v1_schema {
+        row.extend([
+            GreptimeValue {
+                value_data: (!log.event_name.is_empty())
+                    .then_some(ValueData::StringValue(log.event_name)),
+            },
+            GreptimeValue {
+                value_data: (log.observed_time_unix_nano != 0).then_some(
+                    ValueData::TimestampNanosecondValue(log.observed_time_unix_nano as i64),
+                ),
+            },
+        ]);
+    }
+    Row { values: row }
+}
+
+/// Reads a `service_name` value the request asked to extract from `attrs`, with
+/// the same key matching and type rules as other extract keys.
+fn extracted_service_name(attrs: &JsonbValue) -> Result<Option<String>> {
+    attrs
+        .get_by_name_ignore_case(SERVICE_NAME_COLUMN)
+        .cloned()
+        .map(|value| scalar_attr_to_string(SERVICE_NAME_COLUMN, value))
+        .transpose()
+        .map(Option::flatten)
+}
+
+/// Reads the `service.name` resource attribute. A non-scalar value is left out
+/// of `service_name` rather than failing the write; it stays in
+/// `resource_attributes`.
+fn resource_service_name(resource_attr: &JsonbValue) -> Option<String> {
+    let JsonbValue::Object(attrs) = resource_attr else {
+        return None;
+    };
+    let value = attrs.get(KEY_SERVICE_NAME)?.clone();
+    scalar_attr_to_string(KEY_SERVICE_NAME, value)
+        .ok()
+        .flatten()
+}
+
+fn scalar_attr_to_string(name: &str, value: JsonbValue) -> Result<Option<String>> {
+    Ok(jsonb_value_to_log_value_data(name, value, true)?
+        .and_then(|(value_data, _)| stringify_scalar_value(value_data))
+        .and_then(|value_data| match value_data {
+            ValueData::StringValue(value) => Some(value),
+            _ => None,
+        }))
 }
 
 fn extract_field_from_attr_and_combine_schema(
@@ -900,13 +1006,37 @@ fn is_timestamp_type(datatype: ColumnDataType) -> bool {
 
 fn parse_export_logs_service_request_to_rows(
     request: ExportLogsServiceRequest,
-    select_info: Box<SelectInfo>,
+    mut select_info: Box<SelectInfo>,
+    v1_schema: bool,
     existing_schema: Option<&ExistingLogSchema>,
     table_name: &str,
 ) -> Result<Rows> {
-    let mut schemas = build_otlp_logs_identity_schema();
+    let mut schemas = build_otlp_logs_identity_schema(v1_schema)?;
 
-    let mut parse_ctx = ParseContext::new(select_info, existing_schema, table_name);
+    // Extract keys named after v1 built-in columns would add duplicate columns. A
+    // `service_name` key fills the built-in column; `event_name` and
+    // `observed_timestamp` keep the LogRecord values, and the attribute stays in
+    // `log_attributes`.
+    let extract_service_name = v1_schema
+        && select_info
+            .keys
+            .iter()
+            .any(|key| key == SERVICE_NAME_COLUMN);
+    if v1_schema {
+        select_info.keys.retain(|key| {
+            !matches!(
+                key.as_str(),
+                SERVICE_NAME_COLUMN | EVENT_NAME_COLUMN | OBSERVED_TIMESTAMP_COLUMN
+            )
+        });
+    }
+    let mut parse_ctx = ParseContext::new(
+        select_info,
+        v1_schema,
+        extract_service_name,
+        existing_schema,
+        table_name,
+    );
     let mut rows = parse_resource(&mut parse_ctx, request.resource_logs)?;
 
     schemas.extend(parse_ctx.select_schema.column_schemas()?);
@@ -941,6 +1071,15 @@ fn parse_resource(
             .unwrap_or(JsonbValue::Null);
 
         parse_ctx.resource_url = r.schema_url;
+        if parse_ctx.v1_schema {
+            let extracted = if parse_ctx.extract_service_name {
+                extracted_service_name(&parse_ctx.resource_attr)?
+            } else {
+                None
+            };
+            parse_ctx.resource_service_name =
+                extracted.or_else(|| resource_service_name(&parse_ctx.resource_attr));
+        }
 
         parse_ctx.resource_uplift_values = extract_field_from_attr_and_combine_schema(
             &parse_ctx.select_info,
@@ -959,6 +1098,8 @@ fn parse_resource(
 struct ParseContext<'a> {
     // input selected keys
     select_info: Box<SelectInfo>,
+    v1_schema: bool,
+    extract_service_name: bool,
     existing_schema: Option<&'a ExistingLogSchema>,
     table_name: &'a str,
     // schema infos for selected keys from resource/scope/log for current request
@@ -976,17 +1117,25 @@ struct ParseContext<'a> {
     scope_version: Option<String>,
     scope_url: String,
     scope_attrs: JsonbValue<'a>,
+    // `service_name` values resolved at the resource and scope levels; a log
+    // record falls back to them when its own attributes don't carry one
+    resource_service_name: Option<String>,
+    scope_service_name: Option<String>,
 }
 
 impl<'a> ParseContext<'a> {
     pub fn new(
         select_info: Box<SelectInfo>,
+        v1_schema: bool,
+        extract_service_name: bool,
         existing_schema: Option<&'a ExistingLogSchema>,
         table_name: &'a str,
     ) -> ParseContext<'a> {
         let len = select_info.keys.len();
         ParseContext {
             select_info,
+            v1_schema,
+            extract_service_name,
             existing_schema,
             table_name,
             select_schema: SchemaInfo::with_capacity(len),
@@ -998,6 +1147,8 @@ impl<'a> ParseContext<'a> {
             scope_version: None,
             scope_url: String::new(),
             scope_attrs: JsonbValue::Null,
+            resource_service_name: None,
+            scope_service_name: None,
         }
     }
 }
@@ -1012,6 +1163,11 @@ fn parse_scope(scopes_log_vec: Vec<ScopeLogs>, parse_ctx: &mut ParseContext) -> 
         parse_ctx.scope_version = scope_version;
         parse_ctx.scope_url = scope_logs.schema_url;
         parse_ctx.scope_attrs = scope_attrs;
+        parse_ctx.scope_service_name = if parse_ctx.extract_service_name {
+            extracted_service_name(&parse_ctx.scope_attrs)?
+        } else {
+            None
+        };
 
         parse_ctx.scope_uplift_values = extract_field_from_attr_and_combine_schema(
             &parse_ctx.select_info,
@@ -1030,8 +1186,21 @@ fn parse_scope(scopes_log_vec: Vec<ScopeLogs>, parse_ctx: &mut ParseContext) -> 
 fn parse_log(log_records: Vec<LogRecord>, parse_ctx: &mut ParseContext) -> Result<Vec<Row>> {
     let mut result = Vec::with_capacity(log_records.len());
 
-    for log in log_records {
-        let (mut row, log_attr) = build_otlp_build_in_row(log, parse_ctx);
+    for mut log in log_records {
+        let log_attr = key_value_to_jsonb(std::mem::take(&mut log.attributes));
+        let service_name = if parse_ctx.v1_schema {
+            let extracted = if parse_ctx.extract_service_name {
+                extracted_service_name(&log_attr)?
+            } else {
+                None
+            };
+            extracted
+                .or_else(|| parse_ctx.scope_service_name.clone())
+                .or_else(|| parse_ctx.resource_service_name.clone())
+        } else {
+            None
+        };
+        let mut row = build_otlp_build_in_row(log, &log_attr, service_name, parse_ctx);
 
         let log_values = extract_field_from_attr_and_combine_schema(
             &parse_ctx.select_info,
@@ -1225,9 +1394,12 @@ mod tests {
         select: &str,
         existing_schema: Option<&ExistingLogSchema>,
     ) -> Result<Rows> {
+        // Mirrors production: only new tables get the v1 schema, and the existing
+        // schemas built here carry no v1 marker.
         parse_export_logs_service_request_to_rows(
             request,
             Box::new(SelectInfo::from(select.to_string())),
+            existing_schema.is_none(),
             existing_schema,
             "test_logs",
         )
@@ -1255,6 +1427,165 @@ mod tests {
             rows.schema[scope_name_idx].semantic_type,
             SemanticType::Tag as i32
         );
+    }
+
+    fn request_with_resource_and_logs(
+        resource_attrs: Vec<KeyValue>,
+        log_records: Vec<LogRecord>,
+    ) -> ExportLogsServiceRequest {
+        ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(opentelemetry_proto::tonic::resource::v1::Resource {
+                    attributes: resource_attrs,
+                    ..Default::default()
+                }),
+                scope_logs: vec![ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: "com.example.Checkout".to_string(),
+                        ..Default::default()
+                    }),
+                    log_records,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn value_at(rows: &Rows, row: usize, column: &str) -> Option<ValueData> {
+        rows.rows[row].values[column_index(rows, column)]
+            .value_data
+            .clone()
+    }
+
+    #[test]
+    fn test_new_table_uses_v1_schema() {
+        let request = request_with_resource_and_logs(
+            vec![kv(
+                KEY_SERVICE_NAME,
+                OtlpValue::StringValue("checkout".to_string()),
+            )],
+            vec![
+                LogRecord {
+                    time_unix_nano: 1_000,
+                    observed_time_unix_nano: 2_000,
+                    event_name: "gen_ai.choice".to_string(),
+                    ..Default::default()
+                },
+                LogRecord {
+                    time_unix_nano: 3_000,
+                    ..Default::default()
+                },
+            ],
+        );
+        let rows = parse_with_select(request, "", None).unwrap();
+
+        // Auto-create orders the primary key by column order.
+        let tags: Vec<_> = rows
+            .schema
+            .iter()
+            .filter(|schema| schema.semantic_type == SemanticType::Tag as i32)
+            .map(|schema| schema.column_name.as_str())
+            .collect();
+        assert_eq!(tags, [SERVICE_NAME_COLUMN, "scope_name"]);
+        let trace_id = &rows.schema[column_index(&rows, "trace_id")];
+        assert!(
+            trace_id
+                .options
+                .as_ref()
+                .is_some_and(|options| options.options.contains_key("skipping_index"))
+        );
+
+        assert_eq!(
+            value_at(&rows, 0, SERVICE_NAME_COLUMN),
+            Some(ValueData::StringValue("checkout".to_string()))
+        );
+        assert_eq!(
+            value_at(&rows, 0, "event_name"),
+            Some(ValueData::StringValue("gen_ai.choice".to_string()))
+        );
+        assert_eq!(
+            value_at(&rows, 0, "observed_timestamp"),
+            Some(ValueData::TimestampNanosecondValue(2_000))
+        );
+        // Empty event name and zero observed time mean "absent" in OTLP.
+        assert_eq!(value_at(&rows, 1, "event_name"), None);
+        assert_eq!(value_at(&rows, 1, "observed_timestamp"), None);
+    }
+
+    #[test]
+    fn test_extracted_service_name_overrides_resource_service_name() {
+        let mut request = request_with_resource_and_logs(
+            vec![kv(
+                KEY_SERVICE_NAME,
+                OtlpValue::StringValue("from-resource".to_string()),
+            )],
+            vec![
+                LogRecord {
+                    attributes: vec![
+                        kv(
+                            SERVICE_NAME_COLUMN,
+                            OtlpValue::StringValue("from-log".to_string()),
+                        ),
+                        kv(
+                            EVENT_NAME_COLUMN,
+                            OtlpValue::StringValue("from-attr".to_string()),
+                        ),
+                    ],
+                    event_name: "from-record".to_string(),
+                    ..Default::default()
+                },
+                LogRecord::default(),
+            ],
+        );
+        let mut scope_logs = request.resource_logs[0].scope_logs[0].clone();
+        scope_logs.scope.as_mut().unwrap().attributes = vec![kv(
+            SERVICE_NAME_COLUMN,
+            OtlpValue::StringValue("from-scope".to_string()),
+        )];
+        scope_logs.log_records = vec![LogRecord::default()];
+        request.resource_logs[0].scope_logs.push(scope_logs);
+        let rows = parse_with_select(request, "service_name,event_name,host", None).unwrap();
+
+        for column in [SERVICE_NAME_COLUMN, EVENT_NAME_COLUMN] {
+            assert_eq!(
+                rows.schema
+                    .iter()
+                    .filter(|schema| schema.column_name == column)
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            value_at(&rows, 0, SERVICE_NAME_COLUMN),
+            Some(ValueData::StringValue("from-log".to_string()))
+        );
+        assert_eq!(
+            value_at(&rows, 0, EVENT_NAME_COLUMN),
+            Some(ValueData::StringValue("from-record".to_string()))
+        );
+        assert_eq!(
+            value_at(&rows, 1, SERVICE_NAME_COLUMN),
+            Some(ValueData::StringValue("from-resource".to_string()))
+        );
+        assert_eq!(
+            value_at(&rows, 2, SERVICE_NAME_COLUMN),
+            Some(ValueData::StringValue("from-scope".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_non_scalar_resource_service_name_is_not_an_error() {
+        let request = request_with_resource_and_logs(
+            vec![kv(
+                KEY_SERVICE_NAME,
+                OtlpValue::ArrayValue(Default::default()),
+            )],
+            vec![LogRecord::default()],
+        );
+        let rows = parse_with_select(request, "", None).unwrap();
+
+        assert_eq!(value_at(&rows, 0, SERVICE_NAME_COLUMN), None);
     }
 
     #[test]
@@ -1508,6 +1839,14 @@ mod tests {
             rows.schema[scope_name_idx].semantic_type,
             SemanticType::Field as i32
         );
+        // Unmarked existing tables keep the legacy columns.
+        for column in [SERVICE_NAME_COLUMN, "event_name", "observed_timestamp"] {
+            assert!(
+                rows.schema
+                    .iter()
+                    .all(|schema| schema.column_name != column)
+            );
+        }
     }
 
     #[test]
