@@ -41,6 +41,7 @@ serde.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 tokio.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
