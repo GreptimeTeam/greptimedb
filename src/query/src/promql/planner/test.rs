@@ -1385,8 +1385,20 @@ async fn build_test_native_histogram_table_provider(table_name: &str) -> DfTable
     build_test_native_histogram_table_provider_with_marker(table_name, false).await
 }
 
+/// Several Mito tables of native histograms, for the multi-input gates.
+async fn build_test_native_histogram_tables(table_names: &[&str]) -> DfTableSourceProvider {
+    build_test_native_histogram_tables_with_marker(table_names, false).await
+}
+
 async fn build_test_native_histogram_table_provider_with_marker(
     table_name: &str,
+    temporality_marker: bool,
+) -> DfTableSourceProvider {
+    build_test_native_histogram_tables_with_marker(&[table_name], temporality_marker).await
+}
+
+async fn build_test_native_histogram_tables_with_marker(
+    table_names: &[&str],
     temporality_marker: bool,
 ) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
@@ -1434,24 +1446,26 @@ async fn build_test_native_histogram_table_provider_with_marker(
         .next_column_id(1024)
         .build()
         .unwrap();
-    let table_info = TableInfoBuilder::default()
-        .name(table_name)
-        .meta(table_meta)
-        .build()
-        .unwrap();
-    let table = EmptyTable::from_table_info(&table_info);
+    for (index, table_name) in table_names.iter().enumerate() {
+        let table_info = TableInfoBuilder::default()
+            .name(*table_name)
+            .meta(table_meta.clone())
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
 
-    assert!(
-        catalog_list
-            .register_table_sync(RegisterTableRequest {
-                catalog: DEFAULT_CATALOG_NAME.to_string(),
-                schema: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: table_name.to_string(),
-                table_id: 1024,
-                table,
-            })
-            .is_ok()
-    );
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024 + index as u32,
+                    table,
+                })
+                .is_ok()
+        );
+    }
 
     DfTableSourceProvider::new(
         catalog_list,
@@ -7856,28 +7870,36 @@ async fn native_histogram_selector_plans_a_native_producer() {
     );
 }
 
-/// A histogram reaching an aggregate keeps the existing plan wherever that aggregate sits.
+/// A histogram fold is admitted below a pointwise operator.
 ///
-/// The gate this pins cannot look at the root alone: `sum(h) * 2` has a binary root, and admitting
-/// it ran the per-partition producer's float-only fold, which every histogram sample fails at
-/// execution. The value entering each aggregate is what decides, so an operator above one does not
-/// hide it.
+/// The gate cannot look at the root alone: `sum(h) * 2` has a binary root and the fold sits below
+/// it, so the value entering each aggregate is what decides. A scalar multiple of a histogram - a
+/// negation included - is a histogram, which this route's binary kernel answers, so those
+/// statements run and publish the histogram column. The shapes whose state cannot cross keep the
+/// existing plan instead, which `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan`
+/// pins.
 #[tokio::test]
-async fn histogram_into_an_aggregate_keeps_the_existing_plan_below_any_operator() {
+async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
     for query in [
         "sum(some_metric)",
         "sum(some_metric) * 2",
         "sum(some_metric) / 2",
-        "-sum(some_metric)",
         "avg(some_metric) + 1",
-        "sum(sum(some_metric))",
+        "-sum(some_metric)",
     ] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
-        assert!(
-            find_fused_series(&plan).is_none(),
-            "{query} ran a native fold over histograms: {}",
-            plan.display_indent_schema()
+        let display = plan.display_indent_schema().to_string();
+        let final_node = find_final_split(&plan)
+            .unwrap_or_else(|| panic!("{query} kept the existing plan: {display}"));
+        let field = final_node
+            .schema()
+            .field_with_unqualified_name(greptime_native_histogram())
+            .unwrap_or_else(|_| panic!("{query} published no field column: {display}"));
+        assert_eq!(
+            &native_histogram_value_type().as_arrow_type(),
+            field.data_type(),
+            "{query} answered something other than the histogram it folded: {display}"
         );
     }
 }
@@ -7944,14 +7966,13 @@ async fn presence_and_order_aggregates_fold_histograms_natively() {
         );
     }
     for query in [
-        "sum(some_metric)",
-        "avg(some_metric)",
         // `quantile` has no kernel in this runtime: the admission check lets it through and the
         // runtime's own construction refuses it, which keeps the statement on the plan it had
         // rather than making it count or skip histogram samples here.
         "quantile(0.9, some_metric)",
         // A skipping or counting aggregate at the root does not excuse the payload-folding one
-        // below it: `sum` still has no histogram state to fold into.
+        // below it: the split cannot carry an aggregate above an aggregate, and a segmented tree
+        // would fold each segment's histograms into an answer no segment owns.
         "count(sum(some_metric))",
         "min(sum(some_metric))",
     ] {
@@ -7981,17 +8002,8 @@ async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
             plan.display_indent_schema()
         );
     }
-    // `rate` answers histograms, so an aggregate over it folds histograms and keeps the existing
-    // plan; the float-answering prefix case is covered by the kind walk, not by this statement.
-    for query in ["sum(some_metric)", "sum(rate(some_metric[5m]))"] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
-        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
-        assert!(
-            find_fused_series(&plan).is_none(),
-            "{query} ran a native fold over histograms: {}",
-            plan.display_indent_schema()
-        );
-    }
+    // `rate` answers histograms, so an aggregate over it folds histograms - and that folds now
+    // runs here, which is what `a_histogram_sum_or_avg_folds_natively` covers.
 }
 
 /// An instant selection over a native histogram keeps the histogram, so its output column stays the
@@ -12716,5 +12728,123 @@ async fn eval_times_before_epoch() {
     // represent this SystemTime.
     if let Some(too_early) = UNIX_EPOCH.checked_sub(Duration::from_secs(10_000_000_000_000_000)) {
         assert!(plan(too_early, too_early).await.is_err());
+    }
+}
+
+/// `sum` and `avg` over native histograms fold and merge their own state, so the statement is
+/// admitted and its answer column is the canonical histogram struct.
+///
+/// The single-selector split answers them: the producer folds each partition's histograms into a
+/// `Partial` state and the final node merges that state above the series router, which is the
+/// pairing the merge rules were written for. A histogram answer came out of this route before only
+/// for statements that never folded the payload (`count`, a range function), and those keep their
+/// float columns.
+#[tokio::test]
+async fn a_histogram_sum_or_avg_folds_natively() {
+    for query in [
+        "sum(some_metric)",
+        "avg(some_metric)",
+        "sum(rate(some_metric[5m]))",
+        "avg by (tag_0) (some_metric)",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let final_node = find_final_split(&plan)
+            .unwrap_or_else(|| panic!("{query} kept the existing plan: {display}"));
+        assert!(
+            partial_below(final_node).is_some(),
+            "{query} lost the partial half of its split: {display}"
+        );
+        let field = final_node
+            .schema()
+            .field_with_unqualified_name(greptime_native_histogram())
+            .unwrap_or_else(|_| panic!("{query} published no field column: {display}"));
+        assert_eq!(
+            &native_histogram_value_type().as_arrow_type(),
+            field.data_type(),
+            "{query} answers the histogram it folded: {display}"
+        );
+    }
+}
+
+/// A histogram aggregate the split cannot carry keeps the existing plan instead of being segmented.
+///
+/// Segmentation answers a group by folding each segment's samples and appending the pieces, so a
+/// histogram point whose contributions are spread over partitions would be folded once per segment:
+/// a sum would merge histograms that never met, and an average would average averages. Neither an
+/// aggregate above another aggregate nor a whole-vector ranking is a shape the split can move across
+/// the boundary, so the whole statement falls back rather than being cut.
+#[tokio::test]
+async fn a_histogram_aggregate_the_split_declines_keeps_the_existing_plan() {
+    for query in [
+        "sum(sum(some_metric))",
+        "count(sum(some_metric))",
+        "min(sum(some_metric))",
+        "avg(sum(some_metric))",
+        "topk(1, sum(some_metric))",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} ran a histogram fold per segment: {display}"
+        );
+        // The fallback is the legacy plan, not a native segment above a missing partial.
+        assert!(
+            !display.contains("FusedSeriesExec"),
+            "{query} was segmented instead of kept: {display}"
+        );
+    }
+}
+
+/// The gates that admit a histogram fold do not admit the shapes whose histogram state has no
+/// execution: a canonical merge carrying histograms, and a multi-input tree.
+#[tokio::test]
+async fn histogram_state_stays_out_of_the_shapes_it_cannot_cross() {
+    // A canonical merge inside the tree routes whole label sets, and the pieces of one set arrive in
+    // different partitions: the merge would carry histogram frames through that boundary.
+    for query in [
+        "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+        "sum(sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        assert!(
+            find_fused_series(&plan).is_none(),
+            "{query} carried histograms through a canonical merge: {}",
+            plan.display_indent_schema()
+        );
+    }
+    // Two histogram tables are a multi-input tree, and one execution folds several scans there: no
+    // state crosses that pairing yet.
+    let provider = build_test_native_histogram_tables(&["some_metric", "other_metric"]).await;
+    let plan = build_native_fused_plan_with_provider(
+        "sum(some_metric) + sum(other_metric)",
+        true,
+        provider,
+    )
+    .await;
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "a multi-input histogram tree ran natively: {}",
+        plan.display_indent_schema()
+    );
+}
+
+/// The histogram refusals do not touch a float tree: a shape that segments today still segments.
+#[tokio::test]
+async fn a_float_tree_still_segments_next_to_the_histogram_gates() {
+    for query in [
+        "sum(topk(1, some_metric)) + 1",
+        "avg(topk(1, some_metric)) * 2",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "{query} left the native route: {}",
+            plan.display_indent_schema()
+        );
     }
 }

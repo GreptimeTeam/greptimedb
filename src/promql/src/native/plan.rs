@@ -496,15 +496,27 @@ impl NativeNode {
                 let left_kind = kind_of(left)?;
                 (left_kind == kind_of(right)?).then_some(left_kind)
             }
-            // Every aggregate answers floats: `count`/`group` answer a count or a `1` whatever the
-            // samples they counted, `min`/`max`/`stddev`/`stdvar` fold the float samples and skip
-            // the histogram ones, and `sum`/`avg` - the only two that would fold the payload - keep
-            // a histogram out at admission. Naming it here is what lets `sum(count_over_time(h[5m]))`
-            // - a float built from histograms - declare a float column instead of keeping the
-            // existing plan.
-            NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
+            // An aggregate answers the kind its own state carries: `count`/`group` answer a count
+            // or a `1` whatever the samples they counted, `min`/`max`/`stddev`/`stdvar` fold the
+            // float samples and skip the histogram ones, and `sum`/`avg` answer the payload they
+            // folded - a native histogram when their binding is a histogram state, a float
+            // otherwise. Naming it here is what lets `sum(count_over_time(h[5m]))` - a float built
+            // from histograms - declare a float column, and `sum(h)` declare a histogram one.
+            NativeExpr::Aggregate { op, .. } => Some(aggregate_output_kind(op)),
             _ => None,
         }
+    }
+}
+
+/// The kind an aggregate's own output column carries.
+///
+/// It follows the state the aggregate keeps rather than the samples it read, because the two can
+/// differ in both directions: `count` over a histogram answers a float, and so does every aggregate
+/// that skips histogram samples, while `sum`/`avg` over a histogram answer the histogram they folded.
+pub fn aggregate_output_kind(op: &BoundAggregate) -> FieldKind {
+    match aggregate_state_binding(op.kind, op.field_kind) {
+        Some((kind, _)) if kind.is_histogram() => FieldKind::Histogram,
+        _ => FieldKind::Float,
     }
 }
 
@@ -535,7 +547,7 @@ pub struct AggregateStateSchema {
 /// the histogram state of the same aggregate: it carries the payload and the compensation that
 /// belongs to it, plus the evidence a merge of two partitions has to report. A quantile has no
 /// partial kernel at all, whatever it reads.
-pub(crate) fn aggregate_state_binding(
+pub fn aggregate_state_binding(
     kind: AggregateKind,
     field_kind: FieldKind,
 ) -> Option<(AggregateStateKind, Vec<StateComponent>)> {
