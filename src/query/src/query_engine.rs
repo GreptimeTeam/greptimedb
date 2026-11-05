@@ -45,7 +45,7 @@ pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::runtime::{
     DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider, QueryRuntimeProviderRef,
 };
-pub use crate::query_engine::state::QueryEngineState;
+pub use crate::query_engine::state::{QueryEngineState, new_flow_memory_pool};
 use crate::region_query::RegionQueryHandlerRef;
 
 /// Describe statement result

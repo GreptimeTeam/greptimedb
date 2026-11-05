@@ -13845,6 +13845,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datafusion-common",
+ "datafusion-execution",
  "derive_builder 0.20.2",
  "derive_more",
  "prost 0.14.1",

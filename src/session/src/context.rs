@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -31,6 +31,7 @@ use common_telemetry::warn;
 use common_time::Timezone;
 use common_time::timezone::parse_timezone;
 use datafusion_common::config::ConfigOptions;
+use datafusion_execution::memory_pool::MemoryPool;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
@@ -59,6 +60,52 @@ pub fn generate_remote_query_id() -> String {
 
 pub fn generate_remote_query_id_value() -> QueryId {
     QueryId::new()
+}
+
+/// A process-local, bounded DataFusion memory pool that one logical unit of
+/// work (for example a single Flow) executes its plan against.
+///
+/// This is deliberately never serialized and never transported over the wire:
+/// it wraps a live [`MemoryPool`], which only means something inside the
+/// process that created it. It is modeled on the other process-local fields of
+/// [`QueryContext`] (`admitted_write`, `write_progress`, `batching_enabled`).
+#[derive(Clone)]
+pub struct QueryMemoryScope {
+    label: String,
+    pool: Arc<dyn MemoryPool>,
+}
+
+impl QueryMemoryScope {
+    /// Creates a scope called `label` bounded by `pool`.
+    pub fn new(label: impl Into<String>, pool: Arc<dyn MemoryPool>) -> Self {
+        Self {
+            label: label.into(),
+            pool,
+        }
+    }
+
+    /// Returns the human-readable label of this scope, e.g. the Flow name.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns the memory pool bounding this scope.
+    ///
+    /// The pool is a shared limiter: cloning the `Arc` does not split the
+    /// budget, so concurrent work installed into the same scope pool competes
+    /// for the same bytes.
+    pub fn pool(&self) -> Arc<dyn MemoryPool> {
+        self.pool.clone()
+    }
+}
+
+/// Hand-written because the label is the only stable identifier worth logging.
+impl Debug for QueryMemoryScope {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryMemoryScope")
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Builder, Clone)]
@@ -102,6 +149,10 @@ pub struct QueryContext {
     /// Preserve storage acknowledgements for protocol-level partial-write accounting.
     #[builder(setter(skip))]
     confirmed_writes: bool,
+    /// Process-local memory pool bounding this query. Never serialized or sent
+    /// over the wire; see [`QueryMemoryScope`].
+    #[builder(default)]
+    memory_scope: Option<QueryMemoryScope>,
     /// Process id for managing on-going queries
     #[builder(default)]
     process_id: u32,
@@ -320,6 +371,16 @@ impl QueryContext {
     /// See [`Self::with_confirmed_writes`] for the caller's completion-handling contract.
     pub fn confirmed_writes(&self) -> bool {
         self.confirmed_writes
+    }
+
+    /// Returns the process-local memory scope of this query, if any.
+    pub fn memory_scope(&self) -> Option<&QueryMemoryScope> {
+        self.memory_scope.as_ref()
+    }
+
+    /// Sets the process-local memory scope that bounds this query.
+    pub fn set_memory_scope(&mut self, scope: QueryMemoryScope) {
+        self.memory_scope = Some(scope);
     }
 
     /// Forks this context with an independent snapshot of mutable session data.
@@ -798,6 +859,7 @@ impl QueryContextBuilder {
             admitted_write: None,
             write_progress: None,
             confirmed_writes: false,
+            memory_scope: self.memory_scope.unwrap_or_default(),
             logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
@@ -943,8 +1005,10 @@ impl ConfigurationVariables {
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
+    use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryLimit};
 
     use crate::Session;
     use crate::context::{Channel, *};
@@ -1277,5 +1341,51 @@ mod test {
             .set_extension("batching_enabled".to_string(), "true".to_string())
             .build();
         assert!(!ctx.batching_enabled());
+    }
+
+    #[test]
+    fn test_memory_scope_is_optional_and_cloned() {
+        let ctx = QueryContextBuilder::default().build();
+        assert!(ctx.memory_scope().is_none());
+
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4096));
+        let ctx = QueryContextBuilder::default()
+            .memory_scope(Some(QueryMemoryScope::new("flow_a", pool.clone())))
+            .build();
+        let scope = ctx.memory_scope().expect("scope is set by the builder");
+        assert_eq!("flow_a", scope.label());
+        assert!(Arc::ptr_eq(&scope.pool(), &pool));
+        // The scope really carries a bounded limiter, not just a label.
+        assert!(matches!(
+            scope.pool().memory_limit(),
+            MemoryLimit::Finite(4096)
+        ));
+        assert!(format!("{ctx:?}").contains("flow_a"));
+
+        // Cloning (and forking) a context shares the same limiter instead of
+        // copying or dropping the budget.
+        let cloned = ctx.clone();
+        let cloned_scope = cloned.memory_scope().expect("clone keeps the scope");
+        assert_eq!("flow_a", cloned_scope.label());
+        assert!(Arc::ptr_eq(&cloned_scope.pool(), &pool));
+        assert!(Arc::ptr_eq(
+            &ctx.fork().memory_scope().unwrap().pool(),
+            &pool
+        ));
+    }
+
+    #[test]
+    fn test_memory_scope_is_local_only() {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024));
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(ctx.memory_scope().is_none());
+
+        ctx.set_memory_scope(QueryMemoryScope::new("flow_b", pool.clone()));
+        assert_eq!("flow_b", ctx.memory_scope().unwrap().label());
+
+        // A live pool must never leak into the wire context.
+        let wire: api::v1::QueryContext = ctx.into();
+        let restored = QueryContext::try_from(wire).unwrap();
+        assert!(restored.memory_scope().is_none());
     }
 }

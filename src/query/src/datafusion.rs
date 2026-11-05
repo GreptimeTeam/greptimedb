@@ -35,6 +35,8 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
+use datafusion::execution::SessionStateBuilder;
+use datafusion::execution::memory_pool::{MemoryLimit as DfMemoryLimit, MemoryPool};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -67,10 +69,14 @@ use crate::metrics::{
     should_collect_region_watermark_from_query_ctx,
 };
 use crate::optimizer::expr_depth;
-use crate::options::ScheduledTimeExtension;
+use crate::options::{
+    FLOW_ID, FLOW_MAX_MEMORY_BYTES, QueryMemoryPoolPolicy, ScheduledTimeExtension,
+};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
-use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
+use crate::query_engine::{
+    DescribeResult, QueryEngineContext, QueryEngineState, new_flow_memory_pool,
+};
 use crate::{QueryEngine, metrics};
 
 /// Query parallelism hint key.
@@ -500,6 +506,108 @@ impl DatafusionQueryEngine {
 
         Ok(optimized_plan)
     }
+
+    /// Builds the process-local memory pool a Flow asked for through the query
+    /// extensions of `query_ctx`, or returns `None` when the query declares no
+    /// budget of its own.
+    ///
+    /// A Flow declares its budget with [`FLOW_MAX_MEMORY_BYTES`] (a decimal
+    /// byte count) and names itself with [`FLOW_ID`]. Turning that declaration
+    /// into the pool the query actually runs against is what keeps a single
+    /// Flow from taking down the process that executes it: the Flow fails its
+    /// own query on exhaustion instead of draining the pool every other query
+    /// in the process shares.
+    ///
+    /// Two rules keep the aggregate bound:
+    ///
+    /// - The pool built here is always nested under the node-wide pool by
+    ///   [`QueryEngineState::runtime_env_with_memory_pool`], so every byte a
+    ///   Flow reserves is charged to `query.memory_pool_size` as well. Any
+    ///   number of Flows plus ordinary queries therefore still cannot exceed
+    ///   the node budget.
+    /// - The declared budget is clamped to the node-wide limit, so a Flow pool
+    ///   is never wider than the node pool it is nested in.
+    ///
+    /// # Trust boundary
+    ///
+    /// The extension is supplied by the client. `servers/src/grpc/flight.rs`
+    /// reads the Flow hints from the request metadata and builds the query
+    /// context with them *before* authentication runs, so the budget must not
+    /// be treated as an authorization decision. It is safe only because of the
+    /// nesting above: a forged budget can repartition the node pool between
+    /// flows - hand one Flow a narrow slice and another a wide one - but it can
+    /// never make the process reserve more than `query.memory_pool_size`. For
+    /// the same reason no internal-channel gate is needed here: a default
+    /// distributed deployment has no internal listener at all
+    /// (`frontend/src/frontend.rs` leaves `internal_grpc` unset), so there is
+    /// no privileged entry point that could be trusted over this one.
+    ///
+    /// # Limits of the declaration
+    ///
+    /// `0`, an empty value and a value that is not a decimal byte count mean
+    /// "no budget declared": the query keeps running on the node pool, but a
+    /// warning is logged once per query with the Flow id and the raw value, so
+    /// nobody believes a limit exists when it does not. A query that declares
+    /// no budget at all runs on the node pool exactly as before.
+    ///
+    /// The allocation policy is [`QueryMemoryPoolPolicy::Greedy`]: the engine's
+    /// `experimental_memory_pool_policy` is consumed while the runtime
+    /// environment is built and is not retained in [`QueryEngineState`], so it
+    /// is not reachable from here.
+    fn flow_memory_scope(&self, query_ctx: &QueryContextRef) -> Option<Arc<dyn MemoryPool>> {
+        let extensions = query_ctx.extensions();
+        let raw = extensions.get(FLOW_MAX_MEMORY_BYTES)?;
+        // `-` keeps log lines parseable when the optional id is absent.
+        let flow_id = extensions.get(FLOW_ID).map(String::as_str).unwrap_or("-");
+
+        let requested = match raw.trim().parse::<u64>() {
+            Ok(bytes) if bytes > 0 => bytes,
+            _ => {
+                // Fail open: a Flow with a malformed budget must still run, but
+                // the operator must not believe it was ever bounded.
+                common_telemetry::warn!(
+                    "Ignoring Flow memory budget: flow_id={}, {}={} is not a positive \
+                     decimal byte count, the query runs on the engine memory pool",
+                    flow_id,
+                    FLOW_MAX_MEMORY_BYTES,
+                    raw
+                );
+                return None;
+            }
+        };
+
+        // Clamp against the node-wide pool. `Finite(0)` and `Infinite` are how
+        // an unset `query.memory_pool_size` reaches this point (`0` is
+        // documented as unbounded, and the engine then keeps DataFusion's
+        // unbounded pool): both leave the declared budget as the only bound.
+        let effective = match self
+            .state
+            .session_state()
+            .runtime_env()
+            .memory_pool
+            .memory_limit()
+        {
+            DfMemoryLimit::Finite(node_limit) if node_limit > 0 => requested.min(node_limit as u64),
+            _ => requested,
+        };
+        // A budget that does not fit the address space is clamped to `usize::MAX`.
+        let effective = usize::try_from(effective).unwrap_or(usize::MAX);
+
+        // Ties the `flow-scoped` pool - and every exhaustion error it reports -
+        // to the Flow that owns it.
+        common_telemetry::debug!(
+            "Query runs against a Flow-scoped memory pool: flow_id={}, effective_bytes={}, \
+             requested_bytes={}",
+            flow_id,
+            effective,
+            requested
+        );
+
+        Some(new_flow_memory_pool(
+            effective,
+            QueryMemoryPoolPolicy::Greedy,
+        ))
+    }
 }
 
 #[async_trait]
@@ -562,6 +670,26 @@ impl QueryEngine for DatafusionQueryEngine {
 
     fn engine_context(&self, query_ctx: QueryContextRef) -> Result<QueryEngineContext> {
         let mut state = self.state.session_state();
+        // A process-local memory scope replaces the engine-wide pool for this
+        // unit of work only. Rebuild before applying per-query config so the
+        // options/timezone/extensions below land on the final state.
+        //
+        // An explicit scope always wins over a budget declared through query
+        // extensions: the scope is installed by the process that owns the unit
+        // of work, while the extension is only a request from whoever issued
+        // the query. Queries with neither run on the engine pool unchanged.
+        let scoped_pool = match query_ctx.memory_scope() {
+            Some(scope) => Some(scope.pool()),
+            None => self.flow_memory_scope(&query_ctx),
+        };
+        if let Some(pool) = scoped_pool {
+            let session_id = state.session_id().to_string();
+            let runtime_env = self.state.runtime_env_with_memory_pool(pool);
+            state = SessionStateBuilder::new_from_existing(state)
+                .with_session_id(session_id)
+                .with_runtime_env(runtime_env)
+                .build();
+        }
         let query_ctx = self.state.apply_query_options(&mut state, query_ctx)?;
         state.config_mut().set_extension(query_ctx.clone());
         state.config_mut().set_extension(self.state.clone());
@@ -720,11 +848,14 @@ mod tests {
     use arrow_schema::SortOptions;
     use async_trait::async_trait;
     use catalog::RegisterTableRequest;
+    use common_base::memory_limit::MemoryLimit;
+    use common_base::readable_size::ReadableSize;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_error::ext::BoxedError;
     use common_recordbatch::{
         EmptyRecordBatchStream, RecordBatch, SendableRecordBatchStream, util,
     };
+    use datafusion::execution::memory_pool::MemoryConsumer;
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::expressions::PhysicalSortExpr;
     use datafusion::physical_plan::joins::{HashJoinExec, JoinOn, PartitionMode};
@@ -736,7 +867,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaRef};
     use datatypes::vectors::{Helper, UInt32Vector, VectorRef};
-    use session::context::{QueryContext, QueryContextBuilder};
+    use session::context::{QueryContext, QueryContextBuilder, QueryMemoryScope};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
         PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
@@ -1665,6 +1796,316 @@ mod tests {
                 ScalarValue::try_from_array(batch.column(index).as_ref(), 0).unwrap(),
                 value
             );
+        }
+    }
+
+    #[test]
+    fn engine_context_swaps_memory_pool_only_for_scoped_queries() {
+        let engine = QueryEngineFactory::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions {
+                memory_pool_size: MemoryLimit::Size(ReadableSize(1024)),
+                ..Default::default()
+            },
+        )
+        .query_engine();
+
+        // Without a scope the engine-configured pool is used unchanged.
+        let ctx = engine.engine_context(QueryContext::arc()).unwrap();
+        assert!(matches!(
+            ctx.state().runtime_env().memory_pool.memory_limit(),
+            DfMemoryLimit::Finite(1024)
+        ));
+
+        // With a scope this unit of work is bounded by the scope pool.
+        let pool = new_flow_memory_pool(4096, QueryMemoryPoolPolicy::Greedy);
+        let query_ctx = QueryContextBuilder::default()
+            .set_extension(
+                "datafusion.optimizer.max_passes".to_string(),
+                "7".to_string(),
+            )
+            .memory_scope(Some(QueryMemoryScope::new("flow_a", pool.clone())))
+            .build();
+        let ctx = engine.engine_context(Arc::new(query_ctx)).unwrap();
+        let runtime_env = ctx.state().runtime_env();
+        assert!(matches!(
+            runtime_env.memory_pool.memory_limit(),
+            DfMemoryLimit::Finite(4096)
+        ));
+        // The scope is nested inside the node-wide pool instead of replacing
+        // it, so the scoped runtime reports the scope bound and the flow pool's
+        // reservation. The previous `Arc::ptr_eq` on the flow pool no longer
+        // holds because the installed pool is a `NestedMemoryPool`.
+        assert_eq!("flow-scoped", runtime_env.memory_pool.name());
+        assert_eq!(0, pool.reserved());
+
+        // Nesting at engine level: a scoped reservation above the engine's 1KB
+        // node limit is refused even though the flow budget is 4KB, and both
+        // pools always agree on what was actually granted.
+        let node_pool = engine
+            .engine_state()
+            .session_state()
+            .runtime_env()
+            .memory_pool
+            .clone();
+        let reservation = MemoryConsumer::new("scoped").register(&runtime_env.memory_pool);
+        reservation.try_grow(1025).unwrap_err();
+        assert_eq!(0, node_pool.reserved());
+        assert_eq!(0, pool.reserved());
+        reservation.try_grow(1024).unwrap();
+        assert_eq!(1024, node_pool.reserved());
+        assert_eq!(1024, pool.reserved());
+        // Per-query config still lands on the rebuilt state...
+        assert_eq!(7, ctx.state().config().options().optimizer.max_passes);
+        assert_eq!(
+            Some(ctx.query_ctx().timezone().to_string()),
+            ctx.state().config().options().execution.time_zone
+        );
+        // ...and the engine-wide state is untouched.
+        assert!(matches!(
+            engine
+                .engine_state()
+                .session_state()
+                .runtime_env()
+                .memory_pool
+                .memory_limit(),
+            DfMemoryLimit::Finite(1024)
+        ));
+    }
+
+    /// Builds an engine over the `numbers` table whose node-wide memory pool is
+    /// `node_bytes` bytes, mirroring how `query.memory_pool_size` reaches
+    /// [`QueryEngineState`].
+    fn query_engine_with_node_memory_pool(node_bytes: u64) -> QueryEngineRef {
+        let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: NUMBERS_TABLE_NAME.to_string(),
+                table_id: NUMBERS_TABLE_ID,
+                table: NumbersTable::table(NUMBERS_TABLE_ID),
+            })
+            .unwrap();
+
+        QueryEngineFactory::new(
+            catalog_manager,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions {
+                memory_pool_size: MemoryLimit::Size(ReadableSize(node_bytes)),
+                ..Default::default()
+            },
+        )
+        .query_engine()
+    }
+
+    /// The process-wide pool every query of the engine is charged to.
+    fn node_memory_pool(engine: &QueryEngineRef) -> Arc<dyn MemoryPool> {
+        engine
+            .engine_state()
+            .session_state()
+            .runtime_env()
+            .memory_pool
+            .clone()
+    }
+
+    #[test]
+    fn engine_context_installs_flow_memory_pool_from_extension() {
+        let engine = query_engine_with_node_memory_pool(8192);
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(FLOW_MAX_MEMORY_BYTES.to_string(), "4096".to_string())
+                .set_extension(FLOW_ID.to_string(), "42".to_string())
+                .build(),
+        );
+
+        let ctx = engine.engine_context(query_ctx).unwrap();
+        let runtime_env = ctx.state().runtime_env();
+        // The declared budget (4KB, below the 8KB node pool) becomes the bound
+        // of this unit of work.
+        assert!(matches!(
+            runtime_env.memory_pool.memory_limit(),
+            DfMemoryLimit::Finite(4096)
+        ));
+        assert_eq!("flow-scoped", runtime_env.memory_pool.name());
+
+        // The Flow pool is nested, so every byte it grants is also charged to
+        // the node pool: a Flow can only use memory an ordinary query could not
+        // have taken anyway.
+        let node_pool = node_memory_pool(&engine);
+        let reservation = MemoryConsumer::new("flow_42").register(&runtime_env.memory_pool);
+        reservation.try_grow(4096).unwrap();
+        assert_eq!(4096, node_pool.reserved());
+        // The Flow budget binds first, and a refused growth is not charged to
+        // the node pool either.
+        reservation.try_grow(1).unwrap_err();
+        assert_eq!(4096, node_pool.reserved());
+        assert_eq!(4096, reservation.size());
+
+        // The engine-wide state still serves ordinary queries with its own pool.
+        assert!(matches!(
+            node_pool.memory_limit(),
+            DfMemoryLimit::Finite(8192)
+        ));
+    }
+
+    #[test]
+    fn engine_context_clamps_flow_memory_pool_to_node_pool() {
+        let engine = query_engine_with_node_memory_pool(1024);
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(FLOW_MAX_MEMORY_BYTES.to_string(), "4096".to_string())
+                .set_extension(FLOW_ID.to_string(), "7".to_string())
+                .build(),
+        );
+
+        let ctx = engine.engine_context(query_ctx).unwrap();
+        let runtime_env = ctx.state().runtime_env();
+        // `min(4096, 1024)`: a Flow that asks for more than the node has is
+        // clamped, so the Flow pool is never wider than the node pool.
+        assert!(matches!(
+            runtime_env.memory_pool.memory_limit(),
+            DfMemoryLimit::Finite(1024)
+        ));
+        assert_eq!("flow-scoped", runtime_env.memory_pool.name());
+
+        let node_pool = node_memory_pool(&engine);
+        let reservation = MemoryConsumer::new("flow_7").register(&runtime_env.memory_pool);
+        reservation.try_grow(1025).unwrap_err();
+        assert_eq!(0, node_pool.reserved());
+        assert_eq!(0, reservation.size());
+        reservation.try_grow(1024).unwrap();
+        assert_eq!(1024, node_pool.reserved());
+    }
+
+    #[test]
+    fn engine_context_keeps_node_memory_pool_without_flow_budget() {
+        let engine = query_engine_with_node_memory_pool(4096);
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    "datafusion.optimizer.max_passes".to_string(),
+                    "7".to_string(),
+                )
+                .build(),
+        );
+
+        let ctx = engine.engine_context(query_ctx).unwrap();
+        let runtime_env = ctx.state().runtime_env();
+        // No flow extension: exactly the pool the engine was built with, with
+        // no scoping wrapper around it.
+        assert!(matches!(
+            runtime_env.memory_pool.memory_limit(),
+            DfMemoryLimit::Finite(4096)
+        ));
+        assert_eq!("metrics", runtime_env.memory_pool.name());
+        assert_eq!(7, ctx.state().config().options().optimizer.max_passes);
+    }
+
+    #[test]
+    fn engine_context_flow_pool_cannot_exceed_the_node_pool() {
+        let engine = query_engine_with_node_memory_pool(4096);
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(FLOW_MAX_MEMORY_BYTES.to_string(), "3000".to_string())
+                .build(),
+        );
+        let ctx = engine.engine_context(query_ctx).unwrap();
+        let runtime_env = ctx.state().runtime_env();
+        assert!(matches!(
+            runtime_env.memory_pool.memory_limit(),
+            DfMemoryLimit::Finite(3000)
+        ));
+
+        let node_pool = node_memory_pool(&engine);
+        // An ordinary query already took 3200 of the 4096-byte node pool.
+        let ordinary = MemoryConsumer::new("ordinary").register(&node_pool);
+        ordinary.try_grow(3200).unwrap();
+
+        // The Flow still has its whole 3000-byte budget, but only 896 bytes are
+        // left in the node pool, so the node pool refuses: the aggregate of all
+        // flows and ordinary queries stays under `query.memory_pool_size`.
+        let flow = MemoryConsumer::new("flow").register(&runtime_env.memory_pool);
+        let err = flow.try_grow(1024).unwrap_err();
+        let message = format!("{err}");
+        assert!(message.contains("896.0 B"), "unexpected error: {message}");
+        assert!(!message.contains("2.9 KB"), "unexpected error: {message}");
+        assert_eq!(3200, node_pool.reserved());
+        assert_eq!(0, flow.size());
+    }
+
+    #[test]
+    fn engine_context_explicit_memory_scope_beats_flow_budget() {
+        let engine = query_engine_with_node_memory_pool(8192);
+        let explicit = new_flow_memory_pool(2048, QueryMemoryPoolPolicy::Greedy);
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(FLOW_MAX_MEMORY_BYTES.to_string(), "4096".to_string())
+                .memory_scope(Some(QueryMemoryScope::new("explicit", explicit.clone())))
+                .build(),
+        );
+
+        let ctx = engine.engine_context(query_ctx).unwrap();
+        let runtime_env = ctx.state().runtime_env();
+        // The explicitly installed scope (2048) wins over the extension (4096).
+        assert!(matches!(
+            runtime_env.memory_pool.memory_limit(),
+            DfMemoryLimit::Finite(2048)
+        ));
+        assert_eq!("flow-scoped", runtime_env.memory_pool.name());
+
+        let reservation = MemoryConsumer::new("scoped").register(&runtime_env.memory_pool);
+        reservation.try_grow(2049).unwrap_err();
+        reservation.try_grow(2048).unwrap();
+        assert_eq!(2048, explicit.reserved());
+    }
+
+    #[tokio::test]
+    async fn test_invalid_flow_memory_budget_keeps_query_on_node_pool() {
+        let engine = query_engine_with_node_memory_pool(4 * 1024 * 1024);
+        for raw in ["nonsense", "0"] {
+            let query_ctx = Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension(FLOW_MAX_MEMORY_BYTES.to_string(), raw.to_string())
+                    .set_extension(FLOW_ID.to_string(), "9".to_string())
+                    .build(),
+            );
+
+            // No scope is installed for a value that declares no budget.
+            let ctx = engine.engine_context(query_ctx.clone()).unwrap();
+            assert!(matches!(
+                ctx.state().runtime_env().memory_pool.memory_limit(),
+                DfMemoryLimit::Finite(4194304)
+            ));
+            assert_eq!("metrics", ctx.state().runtime_env().memory_pool.name());
+
+            // The query still runs, it is just not bounded by a Flow budget.
+            let stmt = QueryLanguageParser::parse_sql(
+                "select sum(number) from numbers limit 20",
+                &query_ctx,
+            )
+            .unwrap();
+            let plan = engine
+                .planner()
+                .plan(&stmt, query_ctx.clone())
+                .await
+                .unwrap();
+            let output = engine.execute(plan, query_ctx).await.unwrap();
+            match output.data {
+                OutputData::Stream(stream) => {
+                    assert_eq!(1, util::collect(stream).await.unwrap().len());
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }
