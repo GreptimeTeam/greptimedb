@@ -392,16 +392,32 @@ impl Display for JsonType {
 /// The binary jsonb is serialized directly with `serde_json`, so both object keys and
 /// string values are escaped by `serde_json`. `RawJsonb::to_string()` is deliberately
 /// avoided, since it falls back to the lossy raw bytes when serialization fails.
+///
+/// Some write paths (e.g. `COPY FROM` csv/json/parquet files, or a JSON parameter bound
+/// as text through the MySQL protocol) currently store the JSON *text* as the column
+/// bytes instead of binary jsonb, and such data may already be persisted. When the bytes
+/// are not valid jsonb but are valid JSON text, they are re-encoded as jsonb and then
+/// serialized the same way, so the output is still escaped by `serde_json`. Anything else
+/// is reported as an error.
 pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
     if val.is_empty() {
         return Ok("".to_string());
     }
-    serde_json::to_string(&jsonb::RawJsonb::new(val)).map_err(|e| {
-        InvalidJsonSnafu {
-            value: e.to_string(),
-        }
-        .build()
-    })
+    match serde_json::to_string(&jsonb::RawJsonb::new(val)) {
+        Ok(s) => Ok(s),
+        Err(e) => match jsonb::parse_value_standard_mode(val) {
+            Ok(json) => serde_json::to_string(&jsonb::RawJsonb::new(&json.to_vec())).map_err(|e| {
+                InvalidJsonSnafu {
+                    value: e.to_string(),
+                }
+                .build()
+            }),
+            Err(_) => InvalidJsonSnafu {
+                value: e.to_string(),
+            }
+            .fail(),
+        },
+    }
 }
 
 /// Converts a json type value to serde_json::Value
@@ -498,6 +514,25 @@ mod tests {
     fn test_jsonb_to_string_rejects_invalid_jsonb() {
         assert!(jsonb_to_string(&[1, 2, 3, 4]).is_err());
         assert_eq!(jsonb_to_string(&[]).unwrap(), "");
+    }
+
+    #[test]
+    fn test_jsonb_to_string_accepts_json_text_bytes() {
+        // Bytes written as JSON text rather than binary jsonb (e.g. by `COPY FROM`).
+        assert_eq!(
+            jsonb_to_string(br#"{"foo":"bar"}"#).unwrap(),
+            r#"{"foo":"bar"}"#
+        );
+        assert_eq!(
+            jsonb_to_string(br#"{"a":null, "foo":"bar"}"#).unwrap(),
+            r#"{"a":null,"foo":"bar"}"#
+        );
+        // Keys and values coming from text are still escaped by serde_json.
+        assert_eq!(
+            jsonb_to_string(br#"{"a\"b":"c\u0000d"}"#).unwrap(),
+            r#"{"a\"b":"c\u0000d"}"#
+        );
+        assert!(jsonb_to_string(b"{not json").is_err());
     }
 
     #[test]
