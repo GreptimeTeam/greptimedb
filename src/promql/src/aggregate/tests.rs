@@ -22,7 +22,8 @@ use datatypes::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::series::Label;
 use datatypes::series::aggregate_state::{
-    AggregateStateKind, AggregateStateSchema, StateComponent, StateFieldsBatch, StateSeries,
+    AggregateStateKind, AggregateStateSchema, StateComponent, StateFieldsBatch, StatePayload,
+    StateSeries,
 };
 use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
@@ -1795,6 +1796,15 @@ fn state_row_of(op: AggregateOp, group: StateSeries) -> StateRow {
     let item_type = DataType::Struct(item_fields.clone());
     let mut lists: Vec<Arc<dyn Array>> = Vec::with_capacity(group.states.len());
     for field in &group.states {
+        // Only numeric payloads reach this encoder: `state_fields` describes numeric accumulators,
+        // and every state these folds produce is one.
+        let numeric = |payload: &Option<StatePayload>| match payload.as_ref() {
+            Some(StatePayload::Float(state)) => Some(*state),
+            Some(StatePayload::Histogram(_)) => {
+                panic!("a numeric fold produced a histogram state")
+            }
+            None => None,
+        };
         let columns = state
             .components
             .iter()
@@ -1802,19 +1812,22 @@ fn state_row_of(op: AggregateOp, group: StateSeries) -> StateRow {
                 StateComponent::IncrementalMean => Arc::new(BooleanArray::from(
                     field
                         .iter()
-                        .map(|state| state.map(|state| state.incremental_mean))
+                        .map(|state| numeric(state).map(|state| state.incremental_mean))
                         .collect::<Vec<_>>(),
                 )) as Arc<dyn Array>,
                 _ => Arc::new(Float64Array::from(
                     field
                         .iter()
                         .map(|state| {
-                            state.map(|state| match component {
+                            numeric(state).map(|state| match component {
                                 StateComponent::Value => state.value,
                                 StateComponent::Mean => state.mean,
                                 StateComponent::Compensation => state.compensation,
                                 StateComponent::Count => state.count,
                                 StateComponent::IncrementalMean => unreachable!("handled above"),
+                                _ => {
+                                    unreachable!("a numeric state declares no histogram component")
+                                }
                             })
                         })
                         .collect::<Vec<_>>(),
@@ -1941,10 +1954,10 @@ fn finish_partial_reserves_one_slot_per_seen_point() {
             ),
         )
         .saturating_add(std::mem::size_of::<
-            Vec<Option<datatypes::series::aggregate_state::AggregateStateValues>>,
+            Vec<Option<datatypes::series::aggregate_state::StatePayload>>,
         >())
         .saturating_add(SEEN.saturating_mul(std::mem::size_of::<
-            Option<datatypes::series::aggregate_state::AggregateStateValues>,
+            Option<datatypes::series::aggregate_state::StatePayload>,
         >()));
     let mut peak = 0usize;
     let partial = aggregator
@@ -1996,10 +2009,10 @@ fn merge_admits_groups_and_blocks_before_it_inserts_them() {
     let one_point =
         || TimeAxis::Grid(GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 1).unwrap());
     let point = || {
-        Some(AccumulatorState {
+        Some(StatePayload::Float(AccumulatorState {
             value: 1.0,
             ..Default::default()
-        })
+        }))
     };
     let partial = |ids: std::ops::Range<usize>| PartialAggregate {
         op: AggregateOp::Sum,
@@ -2093,7 +2106,7 @@ fn a_long_metric_name_is_held_by_the_group_and_by_its_key() {
                 time: TimeAxis::Grid(
                     GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 1).unwrap(),
                 ),
-                states: vec![vec![Some(AccumulatorState::default())]],
+                states: vec![vec![Some(StatePayload::Float(AccumulatorState::default()))]],
             }],
         };
         let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();

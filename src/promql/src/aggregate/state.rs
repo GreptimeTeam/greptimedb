@@ -35,7 +35,7 @@ use datafusion::arrow::array::Array;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesLabels;
 use datatypes::series::aggregate_state::{
-    AggregateStateKind, AggregateStateValues, StateComponent, StateFieldsBatch, StateSeries,
+    AggregateStateKind, StateComponent, StateFieldsBatch, StatePayload, StateSeries,
 };
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{GridSpan, TimeAxis};
@@ -127,13 +127,11 @@ impl FloatAggregator {
                 .saturating_add(
                     points.saturating_mul(size_of::<GridSpan>().saturating_add(size_of::<usize>())),
                 )
-                .saturating_add(
-                    width.saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>()),
-                )
+                .saturating_add(width.saturating_mul(size_of::<Vec<Option<StatePayload>>>()))
                 .saturating_add(
                     points
                         .saturating_mul(width)
-                        .saturating_mul(size_of::<Option<AggregateStateValues>>()),
+                        .saturating_mul(size_of::<Option<StatePayload>>()),
                 );
         }
         budget(self.state_bytes().saturating_add(partial_bytes))?;
@@ -155,7 +153,7 @@ impl FloatAggregator {
         for group in self.groups {
             let points = seen_points(&group, width);
             let mut spans: Vec<GridSpan> = Vec::with_capacity(points.min(1));
-            let mut states: Vec<Vec<Option<AggregateStateValues>>> =
+            let mut states: Vec<Vec<Option<StatePayload>>> =
                 (0..width).map(|_| Vec::with_capacity(points)).collect();
             for (&block, block_states) in &group.blocks {
                 for (offset, point) in block_states.chunks_exact(width).enumerate() {
@@ -175,7 +173,7 @@ impl FloatAggregator {
                         _ => spans.push(GridSpan::new(position, 1)),
                     }
                     for (field, state) in point.iter().enumerate() {
-                        states[field].push(state.partial());
+                        states[field].push(state.partial().map(StatePayload::Float));
                     }
                 }
             }
@@ -276,7 +274,7 @@ impl FloatMerger {
         row: &StateRow,
         mut budget: impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
-        let op = crate::native::state::op_of_state(row.kind);
+        let op = crate::native::state::op_of_state(row.kind)?;
         if op != self.op {
             return Err(DataFusionError::Execution(format!(
                 "cannot merge {:?} state into {:?}",
@@ -510,6 +508,20 @@ fn state_at(
                         )
                     })?;
             }
+            // A histogram state's payload is not numeric components, so this merge cannot read one.
+            // No aggregate binds a histogram state through this route yet; refusing is what keeps a
+            // histogram from being folded as the numeric state it is not.
+            StateComponent::HistogramValue
+            | StateComponent::HistogramCompensation
+            | StateComponent::Poisoned
+            | StateComponent::IncompatibleLayout
+            | StateComponent::CustomBoundsReconciled
+            | StateComponent::CounterResetSeen
+            | StateComponent::NotCounterResetSeen => {
+                return Err(DataFusionError::Execution(
+                    "histogram aggregate state reached the numeric merge".into(),
+                ));
+            }
             _ => {
                 let value = fields
                     .field_values(field, component)
@@ -525,7 +537,7 @@ fn state_at(
                     StateComponent::Mean => state.mean = value,
                     StateComponent::Compensation => state.compensation = value,
                     StateComponent::Count => state.count = value,
-                    StateComponent::IncrementalMean => unreachable!(),
+                    _ => unreachable!("every other component is handled above"),
                 }
             }
         }
