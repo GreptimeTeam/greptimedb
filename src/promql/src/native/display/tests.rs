@@ -26,6 +26,7 @@ use super::super::plan::{
     NativeType, ParameterizedOp,
 };
 use super::child_segments;
+use crate::extension_plan::FieldKind;
 use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::native::metrics::{NodeMetrics, NodeMetricsSnapshot};
@@ -312,6 +313,7 @@ fn an_aggregate_and_a_binary_name_their_binding() {
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(Arc::clone(&out)),
@@ -443,6 +445,7 @@ fn a_without_grouping_does_not_read_as_by() {
                 kind: AggregateKind::Sum,
                 group: Grouping::Without(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
             },
         },
         output: evaluated(Arc::clone(&out)),

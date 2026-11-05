@@ -279,7 +279,7 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
 pub fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
     node.any(&|node| {
         matches!(node.expr, NativeExpr::Merge { .. })
-            && node.output_field_kind(input_kind) == Some(FieldKind::Histogram)
+            && node.output_field_kind(Some(input_kind)) == Some(FieldKind::Histogram)
     })
 }
 

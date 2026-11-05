@@ -28,6 +28,7 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::merge_label_rewrites;
+use crate::extension_plan::FieldKind;
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::info::InfoSelector;
 use crate::map::MathOp;
@@ -166,9 +167,12 @@ fn aggregate_over(inner: NativeNode, out: Arc<EvalGrid>, stage: AggregateStage) 
                 // kernel binding, not from a second mapping.
                 kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
                 components: Arc::from(
-                    crate::native::plan::aggregate_state_binding(AggregateKind::Sum)
-                        .expect("sum has a mergeable state")
-                        .1,
+                    crate::native::plan::aggregate_state_binding(
+                        AggregateKind::Sum,
+                        FieldKind::Float,
+                    )
+                    .expect("sum has a mergeable state")
+                    .1,
                 ),
                 accumulators: fields(1),
                 grid: Arc::clone(&out),
@@ -183,6 +187,7 @@ fn aggregate_over(inner: NativeNode, out: Arc<EvalGrid>, stage: AggregateStage) 
                 kind: AggregateKind::Sum,
                 group: Grouping::By(Arc::from([])),
                 stage,
+                field_kind: FieldKind::Float,
             },
         },
         output,

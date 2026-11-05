@@ -34,7 +34,7 @@ use datatypes::series::frame::StateFrameRow;
 use datatypes::series::time::{GridSpan, TimeAxis};
 
 use crate::aggregate::{AggregateOp, PartialAggregate};
-use crate::native::plan::AggregateStateSchema;
+use crate::native::plan::{AggregateStateSchema, BoundAggregate, aggregate_state_binding};
 
 /// One partition's aggregate state, either in producer series form or as a decoded consumer row.
 #[derive(Debug)]
@@ -52,6 +52,37 @@ pub(crate) enum StateChunk {
     Row(crate::aggregate::state::StateRow),
 }
 
+/// Rejects a bound state whose kind or component layout is not what this node binds.
+///
+/// Both halves matter. A frame carries its kind so a `sum` state is never merged as an `avg` one, and
+/// it carries the component list so a merge reads exactly the columns the producer wrote. The
+/// expected pair comes from the same binding the node was built from, so a histogram aggregate
+/// exports and accepts histogram state and a numeric one numeric state, with no second table to
+/// drift from the first.
+fn ensure_bound_state(op: &BoundAggregate, state_schema: &AggregateStateSchema) -> Result<()> {
+    let Some((expected_kind, expected_components)) =
+        aggregate_state_binding(op.kind, op.field_kind)
+    else {
+        return Err(DataFusionError::NotImplemented(format!(
+            "aggregate state is not defined for {:?}",
+            op.kind
+        )));
+    };
+    if state_schema.kind != expected_kind {
+        return Err(DataFusionError::Execution(format!(
+            "aggregate state of kind {:?} is not {expected_kind:?} state",
+            state_schema.kind
+        )));
+    }
+    if state_schema.components.as_ref() != expected_components.as_slice() {
+        return Err(DataFusionError::Execution(format!(
+            "aggregate state components {:?} are not what {:?} produces: {:?}",
+            state_schema.components, op.kind, expected_components
+        )));
+    }
+    Ok(())
+}
+
 /// Hands one partition's kernel state over as the frame state a consumer reads.
 ///
 /// The fold already builds the frame's own representation - field-major states on sparse absolute
@@ -60,7 +91,9 @@ pub(crate) enum StateChunk {
 pub(crate) fn state_chunk_from_partial(
     partial: PartialAggregate,
     state_schema: Arc<AggregateStateSchema>,
+    op: &BoundAggregate,
 ) -> Result<StateChunk> {
+    ensure_bound_state(op, state_schema.as_ref())?;
     Ok(StateChunk::Series {
         series: partial.groups,
         state_schema,
@@ -98,26 +131,21 @@ pub(crate) fn state_row_from_frame_row(
     })
 }
 
-/// The numeric kernel aggregate a state kind merges into.
+/// The aggregate a state kind is the state of.
 ///
-/// A histogram state has no numeric accumulator, and no aggregate binds one through this route yet, so
-/// the conversion is fallible instead of mapping a histogram kind onto its numeric namesake.
-pub(crate) fn op_of_state(kind: AggregateStateKind) -> Result<AggregateOp> {
-    Ok(match kind {
-        AggregateStateKind::Sum => AggregateOp::Sum,
+/// A histogram kind is the state of the same aggregate over a histogram input, so it merges with the
+/// same rules; what differs is the payload, which the merge reads from the kind itself.
+pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
+    match kind {
+        AggregateStateKind::Sum | AggregateStateKind::HistogramSum => AggregateOp::Sum,
         AggregateStateKind::Count => AggregateOp::Count,
-        AggregateStateKind::Avg => AggregateOp::Avg,
+        AggregateStateKind::Avg | AggregateStateKind::HistogramAvg => AggregateOp::Avg,
         AggregateStateKind::Min => AggregateOp::Min,
         AggregateStateKind::Max => AggregateOp::Max,
         AggregateStateKind::Group => AggregateOp::Group,
         AggregateStateKind::Stddev => AggregateOp::Stddev,
         AggregateStateKind::Stdvar => AggregateOp::Stdvar,
-        AggregateStateKind::HistogramSum | AggregateStateKind::HistogramAvg => {
-            return Err(DataFusionError::Execution(format!(
-                "{kind:?} state has no numeric aggregate to merge into"
-            )));
-        }
-    })
+    }
 }
 
 /// Transient bytes for the selected state array consumed by a decoded row.

@@ -199,6 +199,7 @@ macro_rules! http_tests {
                 test_remote_write_v2_histogram_prometheus_native_route,
                 test_remote_write_v2_histogram_float_prefix_native_route,
                 test_remote_write_v2_histogram_count_and_group_native_route,
+                test_remote_write_v2_histogram_sum_over_range,
                 test_remote_write_v2_histogram_native_annotations,
                 test_remote_write_v2_histogram_native_arithmetic,
                 test_remote_write_v2_histogram_native_composition,
@@ -6943,6 +6944,102 @@ pub async fn test_remote_write_v2_histogram_count_and_group_native_route(store_t
             .as_str()
             .is_some_and(|text| text.contains("ignored native histogram samples"))),
         "the skipped-sample info did not reach the response: {body}"
+    );
+}
+
+/// `sum` over a native histogram answers every point of a range, not one point per run.
+///
+/// A split aggregate exports one state row per grid point and folds those rows elsewhere, and three
+/// adjacent samples are where a row addressed by its run instead of by its point collapses: every
+/// point of a run is written into the run's first row and the frame drops the rest, so the range
+/// answers one point carrying the run's last count. The counts written here are 1, 2 and 3, so a
+/// range answering 1, 2, 3 has one row per point and a range answering 3 alone has one row per run.
+/// Every current fixture is a single point or an instant query, which is why none of them sees it.
+pub async fn test_remote_write_v2_histogram_sum_over_range(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_sum_over_range",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    // Three adjacent samples of one series: the range below selects one of them per grid point, so
+    // the aggregate folds a run of three and the split exports a state row for each.
+    let metric = "native_histogram_range_sum";
+    for (timestamp, count, sum) in [(1000, 1u64, 10.0), (2000, 2, 20.0), (3000, 3, 30.0)] {
+        write_native_histogram(
+            &client,
+            &[(prom_store::METRIC_NAME_LABEL, metric), ("job", "api")],
+            timestamp,
+            count,
+            sum,
+        )
+        .await;
+    }
+    observer.clear();
+    let url = format!("/v1/prometheus/api/v1/query_range?query=sum({metric})&start=1&end=3&step=1");
+    let response = client
+        .get(&url)
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the range failed natively"
+    );
+    let body: Value = response.json().await;
+    assert_eq!(body["data"]["resultType"], "matrix");
+    let results = body["data"]["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no result in {body}"));
+    assert_eq!(results.len(), 1, "one group: {body}");
+    let histograms = results[0]["histograms"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no histograms in {body}"));
+    // One histogram per grid point, in grid order: a run collapsed into its first row answers one.
+    assert_eq!(
+        histograms.len(),
+        3,
+        "the range answers every point of the run: {body}"
+    );
+    for (index, (count, sum)) in [("1", "10"), ("2", "20"), ("3", "30")]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            histograms[index][0].as_f64(),
+            Some(1.0 + index as f64),
+            "point {index} is its own timestamp: {body}"
+        );
+        assert_eq!(
+            histograms[index][1]["count"].as_str(),
+            Some(count),
+            "point {index} answers the count of its own sample: {body}"
+        );
+        assert_eq!(
+            histograms[index][1]["sum"].as_str(),
+            Some(sum),
+            "point {index} answers the sum of its own sample: {body}"
+        );
+    }
+    // The answer came from the native route, which is the only one that exports this state.
+    let fused = observer.take_all("sum over a range");
+    assert!(
+        fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+        "sum over a range executed a node that is not the fused producer: {fused:?}"
     );
 }
 

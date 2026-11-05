@@ -83,7 +83,11 @@ impl AggregateStateKind {
     pub const fn is_histogram(self) -> bool {
         matches!(self, Self::HistogramSum | Self::HistogramAvg)
     }
-    fn components(self) -> &'static [StateComponent] {
+    /// The components this kind's state carries, in canonical order.
+    ///
+    /// [`AggregateStateSchema::try_new`] accepts exactly this list for this kind, so a producer that
+    /// binds a state from this table cannot declare a layout the frame would refuse.
+    pub fn components(self) -> &'static [StateComponent] {
         use StateComponent as C;
         match self {
             Self::Sum => &[C::Value, C::Compensation],
