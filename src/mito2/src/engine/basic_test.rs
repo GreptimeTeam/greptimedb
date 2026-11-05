@@ -2318,6 +2318,10 @@ async fn test_region_manifest_size_metrics_lifecycle() {
         .handle_request(region_id, RegionRequest::Create(request.clone()))
         .await
         .unwrap();
+    engine
+        .get_region(region_id)
+        .unwrap()
+        .set_manifest_size_metric_threshold(0);
     let assert_sample = || {
         let expected = engine
             .get_region(region_id)
@@ -2350,6 +2354,10 @@ async fn test_region_manifest_size_metrics_lifecycle() {
         .unwrap();
     assert_eq!(manifest_metric_sample(region_id), None);
     reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    engine
+        .get_region(region_id)
+        .unwrap()
+        .set_manifest_size_metric_threshold(0);
     assert_sample();
     drop(old_region);
     assert_sample();
@@ -2371,6 +2379,8 @@ async fn test_region_manifest_size_metrics_lifecycle() {
         .handle_request(stop_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    let region = engine.get_region(stop_id).unwrap();
+    region.set_manifest_size_metric_threshold(0);
     assert!(manifest_metric_sample(stop_id).is_some());
     engine.stop().await.unwrap();
     assert_eq!(manifest_metric_sample(stop_id), None);

@@ -321,6 +321,10 @@ impl MitoEngine {
 
     /// Enables manifest size metrics for subsequent region creates and opens.
     ///
+    /// Only sizes above 512 MiB are exposed by default. Override the threshold with
+    /// `GREPTIME_REGION_MANIFEST_SIZE_METRIC_THRESHOLD_BYTES` (integer bytes, zero
+    /// disables filtering). It is read once on first use; changes require a restart.
+    /// Sizes at or below the threshold remove the series without changing statistics.
     /// Existing regions and openers already in progress are not enabled retroactively.
     pub fn enable_region_manifest_size_metrics(&self) {
         self.inner.per_region_metrics.store(true, Ordering::Relaxed);

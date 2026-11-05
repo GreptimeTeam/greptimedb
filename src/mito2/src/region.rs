@@ -256,16 +256,24 @@ impl StagingPartitionInfo {
 
 impl MitoRegion {
     /// Publishes the current size when this instance enters the live map.
-    pub(crate) fn arm_region_manifest_size(&self) {
+    pub(crate) fn activate_region_manifest_size_metric(&self) {
         if let Some(metric) = self.stats.metric() {
-            metric.arm(&self.stats.total_manifest_size);
+            metric.activate(&self.stats.total_manifest_size);
         }
     }
 
+    /// Injects a metric threshold for lifecycle tests without changing process env.
+    #[cfg(test)]
+    pub(crate) fn set_manifest_size_metric_threshold(&self, threshold: u64) {
+        let metric = self.stats.metric().unwrap();
+        metric.set_test_threshold(threshold);
+        metric.publish(self.stats.total_manifest_size());
+    }
+
     /// Revokes publication before removal or replacement of this instance.
-    pub(crate) fn disarm_region_manifest_size(&self) {
+    pub(crate) fn deactivate_region_manifest_size_metric(&self) {
         if let Some(metric) = self.stats.metric() {
-            metric.disarm();
+            metric.deactivate();
         }
     }
 
@@ -2085,7 +2093,7 @@ pub struct ManifestStats {
 }
 
 impl ManifestStats {
-    /// Creates an unarmed descriptor; opening a region does not publish a series.
+    /// Creates an inactive descriptor; opening a region does not publish a series.
     pub(crate) fn with_region_metrics(region_id: RegionId) -> Self {
         Self {
             metric: Some(RegionManifestSizeMetric::new(region_id)),

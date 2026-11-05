@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 use lazy_static::lazy_static;
@@ -40,8 +40,30 @@ pub const STAGING_TYPE: &str = "index_staging";
 /// Recycle bin type label.
 pub const RECYCLE_TYPE: &str = "recycle_bin";
 
+const MANIFEST_SIZE_METRIC_THRESHOLD_ENV: &str =
+    "GREPTIME_REGION_MANIFEST_SIZE_METRIC_THRESHOLD_BYTES";
+const DEFAULT_MANIFEST_SIZE_METRIC_THRESHOLD: u64 = 512 * 1024 * 1024;
+
+/// Process-wide threshold, read once on first use. Zero exposes all live regions.
+static MANIFEST_SIZE_METRIC_THRESHOLD: LazyLock<u64> = LazyLock::new(|| {
+    let value = std::env::var(MANIFEST_SIZE_METRIC_THRESHOLD_ENV).ok();
+    parse_manifest_size_metric_threshold(value.as_deref())
+});
+
+fn parse_manifest_size_metric_threshold(value: Option<&str>) -> u64 {
+    match value {
+        None => DEFAULT_MANIFEST_SIZE_METRIC_THRESHOLD,
+        Some(value) => value.parse().unwrap_or_else(|_| {
+            common_telemetry::warn!(
+                "Invalid {MANIFEST_SIZE_METRIC_THRESHOLD_ENV}: expected non-negative bytes; using {DEFAULT_MANIFEST_SIZE_METRIC_THRESHOLD}"
+            );
+            DEFAULT_MANIFEST_SIZE_METRIC_THRESHOLD
+        }),
+    }
+}
+
 lazy_static! {
-    /// Manifest size of each live region in bytes, from the region statistics counter.
+    /// Manifest size of live regions above the threshold, from the region statistics counter.
     pub(crate) static ref REGION_MANIFEST_SIZE: IntGaugeVec = register_int_gauge_vec!(
         "greptime_mito_region_manifest_size_bytes",
         "mito region manifest size in bytes",
@@ -66,13 +88,15 @@ pub(crate) fn remove_region_manifest_size(region_id: RegionId) {
 /// Shared publishing state of one region's manifest size gauge.
 ///
 /// Publishing can run on the worker or the background checkpoint task
-/// (`common_runtime::spawn_global`). Arming, disarming and publishing share one
+/// (`common_runtime::spawn_global`). Activation, deactivation and publishing share one
 /// mutex, so a late publish can neither resurrect a series removed by
 /// close/drop nor overwrite a successor instance's value.
 #[derive(Debug)]
 struct MetricState {
-    armed: bool,
-    /// Test-only pause point between the armed check and the gauge write.
+    active: bool,
+    published: bool,
+    threshold: u64,
+    /// Test-only pause point between the active check and the gauge write.
     #[cfg(test)]
     hook: Option<TestHook>,
 }
@@ -111,14 +135,28 @@ pub(crate) struct RegionManifestSizeMetric {
 
 impl RegionManifestSizeMetric {
     pub(crate) fn new(region_id: RegionId) -> Self {
+        Self::with_threshold(region_id, *MANIFEST_SIZE_METRIC_THRESHOLD)
+    }
+
+    pub(crate) fn with_threshold(region_id: RegionId, threshold: u64) -> Self {
         Self {
             region_id,
             state: Arc::new(Mutex::new(MetricState {
-                armed: false,
+                active: false,
+                published: false,
+                threshold,
                 #[cfg(test)]
                 hook: None,
             })),
         }
+    }
+
+    /// Overrides the threshold without changing the process environment.
+    #[cfg(test)]
+    pub(crate) fn set_test_threshold(&self, threshold: u64) {
+        let mut state = self.lock();
+        assert!(state.active, "test region must already be live");
+        state.threshold = threshold;
     }
 
     /// Installs a pause hook used by the deterministic concurrency tests.
@@ -132,44 +170,55 @@ impl RegionManifestSizeMetric {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Starts publishing and reports the current total.
+    /// Activates publication and applies the threshold to the current total.
     ///
     /// The total is read while holding the lock: a concurrent writer that
-    /// skipped publishing because the gauge was not armed yet cannot be lost.
+    /// skipped publishing because the gauge was not active yet cannot be lost.
     /// Does not call [`Self::publish`] to avoid taking the lock twice.
-    pub(crate) fn arm(&self, total: &AtomicU64) {
+    pub(crate) fn activate(&self, total: &AtomicU64) {
         let mut state = self.lock();
-        state.armed = true;
+        state.active = true;
         let total = total.load(Ordering::Relaxed);
-        self.write(&state, total);
+        self.write(&mut state, total);
     }
 
     /// Stops publishing. Called when the instance leaves the live map or is replaced.
     ///
-    /// Must run before `remove_region_manifest_size`.
-    pub(crate) fn disarm(&self) {
-        self.lock().armed = false;
+    /// Removes the series before a successor instance can publish.
+    pub(crate) fn deactivate(&self) {
+        let mut state = self.lock();
+        state.active = false;
+        if state.published {
+            remove_region_manifest_size(self.region_id);
+            state.published = false;
+        }
     }
 
-    /// Writes `total` when armed.
+    /// Writes `total` when active.
     ///
     /// Callers must hold the size tracker's write lock so a concurrent publisher
     /// cannot publish an older total afterwards.
     pub(crate) fn publish(&self, total: u64) {
-        let state = self.lock();
-        if state.armed {
-            self.write(&state, total);
+        let mut state = self.lock();
+        if state.active {
+            self.write(&mut state, total);
         }
     }
 
     /// Writes the gauge. The caller keeps the state lock alive across this call,
-    /// so the pause hook (and the write) cannot interleave with arm/disarm.
-    fn write(&self, _state: &MetricState, total: u64) {
+    /// so the pause hook (and the write) cannot interleave with activate/deactivate.
+    fn write(&self, state: &mut MetricState, total: u64) {
         #[cfg(test)]
-        if let Some(hook) = &_state.hook {
+        if let Some(hook) = &state.hook {
             hook.call();
         }
-        set_region_manifest_size(self.region_id, total);
+        if state.threshold == 0 || total > state.threshold {
+            set_region_manifest_size(self.region_id, total);
+            state.published = true;
+        } else if state.published {
+            remove_region_manifest_size(self.region_id);
+            state.published = false;
+        }
     }
 }
 
@@ -1020,6 +1069,65 @@ mod tests {
     use common_cache::paged::{PageEvent, PageFetchStats};
 
     #[test]
+    fn manifest_metric_threshold_parsing() {
+        for (input, expected) in [
+            (None, 536_870_912),
+            (Some("536870912"), 536_870_912),
+            (Some("123"), 123),
+            (Some("0"), 0),
+            (Some(""), 536_870_912),
+            (Some("-1"), 536_870_912),
+            (Some("512MiB"), 536_870_912),
+            (Some("18446744073709551616"), 536_870_912),
+        ] {
+            assert_eq!(parse_manifest_size_metric_threshold(input), expected);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::filtered(100, 40)]
+    #[case::unfiltered(0, 41)]
+    fn manifest_metric_threshold_transitions(#[case] threshold: u64, #[case] sequence: u32) {
+        let id = RegionId::new(u32::MAX, sequence);
+        let metric = RegionManifestSizeMetric::with_threshold(id, threshold);
+        metric.publish(101);
+        assert_eq!(manifest_metric_sample(id), None);
+        metric.activate(&AtomicU64::new(99));
+        assert_eq!(manifest_metric_sample(id), (threshold == 0).then_some(99));
+        for total in [100, 101, 150, 100, 99, 0, 101] {
+            metric.publish(total);
+            let expected = (threshold == 0 || total > threshold).then_some(total as i64);
+            assert_eq!(manifest_metric_sample(id), expected);
+            assert_eq!(metric.lock().published, expected.is_some());
+        }
+        metric.deactivate();
+        assert_eq!(manifest_metric_sample(id), None);
+        metric.publish(200);
+        assert_eq!(manifest_metric_sample(id), None);
+    }
+
+    #[test]
+    fn manifest_metric_replacement_below_threshold() {
+        let id = RegionId::new(u32::MAX, 42);
+        let old = RegionManifestSizeMetric::with_threshold(id, 100);
+        old.activate(&AtomicU64::new(200));
+        assert_eq!(manifest_metric_sample(id), Some(200));
+        let new = RegionManifestSizeMetric::with_threshold(id, 100);
+        // An inactive opener must not remove the live instance's series.
+        new.publish(50);
+        new.deactivate();
+        assert_eq!(manifest_metric_sample(id), Some(200));
+        old.deactivate();
+        new.activate(&AtomicU64::new(50));
+        assert_eq!(manifest_metric_sample(id), None);
+        new.publish(150);
+        old.publish(300);
+        old.deactivate();
+        assert_eq!(manifest_metric_sample(id), Some(150));
+        new.deactivate();
+    }
+
+    #[test]
     fn page_cache_capacity_sums_live_instances_by_category() {
         use bytes::Bytes;
         use common_cache::paged::PagedCache;
@@ -1106,14 +1214,27 @@ mod tests {
         }
     }
     #[rstest::rstest]
-    #[case::remove(false)]
-    #[case::replace(true)]
-    fn publishing_holds_lock_through_gauge_write(#[case] replace: bool) {
-        let id = RegionId::new(u32::MAX, if replace { 21 } else { 20 });
+    #[case::remove(false, false)]
+    #[case::replace(true, false)]
+    #[case::threshold_removal(true, true)]
+    fn publishing_holds_lock_through_gauge_write(
+        #[case] replace: bool,
+        #[case] below_threshold: bool,
+    ) {
+        let id = RegionId::new(
+            u32::MAX,
+            if below_threshold {
+                43
+            } else if replace {
+                21
+            } else {
+                20
+            },
+        );
         remove_region_manifest_size(id);
-        let old = RegionManifestSizeMetric::new(id);
-        old.arm(&AtomicU64::new(10));
-        let new = RegionManifestSizeMetric::new(id);
+        let old = RegionManifestSizeMetric::with_threshold(id, 5);
+        old.activate(&AtomicU64::new(10));
+        let new = RegionManifestSizeMetric::with_threshold(id, 0);
         let (paused_tx, paused_rx) = mpsc::channel();
         let (go_tx, go_rx) = mpsc::channel();
         let go_rx = Mutex::new(go_rx);
@@ -1127,7 +1248,7 @@ mod tests {
         })));
         let publisher = std::thread::spawn({
             let old = old.clone();
-            move || old.publish(11)
+            move || old.publish(if below_threshold { 5 } else { 11 })
         });
         paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         // Directly prove the lock is held at the gauge write boundary. This fails
@@ -1142,11 +1263,9 @@ mod tests {
             let new = new.clone();
             move || {
                 started_tx.send(()).unwrap();
-                old.disarm();
+                old.deactivate();
                 if replace {
-                    new.arm(&AtomicU64::new(20));
-                } else {
-                    remove_region_manifest_size(id);
+                    new.activate(&AtomicU64::new(20));
                 }
             }
         });
@@ -1163,7 +1282,7 @@ mod tests {
         old.set_test_hook(None);
         old.publish(1);
         assert_eq!(manifest_metric_sample(id), replace.then_some(20));
-        new.disarm();
+        new.deactivate();
         remove_region_manifest_size(id);
     }
 }

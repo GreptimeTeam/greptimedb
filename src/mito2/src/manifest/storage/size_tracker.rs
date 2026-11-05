@@ -173,15 +173,15 @@ mod tests {
     use crate::metrics::{manifest_metric_sample, remove_region_manifest_size};
 
     #[test]
-    fn manifest_metric_tracks_mutations_and_arming() {
+    fn manifest_metric_tracks_mutations_and_activation() {
         let id = RegionId::new(u32::MAX, 30);
         remove_region_manifest_size(id);
         let total = Arc::new(AtomicU64::new(0));
-        let metric = RegionManifestSizeMetric::new(id);
+        let metric = RegionManifestSizeMetric::with_threshold(id, 0);
         let tracker = SizeTracker::new(total.clone(), Some(metric.clone()));
         tracker.manifest_tracker().record(0, 10);
         assert_eq!(manifest_metric_sample(id), None);
-        metric.arm(&total);
+        metric.activate(&total);
         assert_eq!(manifest_metric_sample(id), Some(10));
         tracker.manifest_tracker().record(0, 20);
         tracker.checkpoint_tracker().record(1, 30);
@@ -194,16 +194,37 @@ mod tests {
         tracker.retain_after(0);
         assert_eq!(manifest_metric_sample(id), Some(30));
         // An unregistered opener with the same id has no right to publish.
-        let candidate = RegionManifestSizeMetric::new(id);
+        let candidate = RegionManifestSizeMetric::with_threshold(id, 0);
         let candidate_tracker = SizeTracker::new(Arc::new(AtomicU64::new(0)), Some(candidate));
         candidate_tracker.manifest_tracker().record(2, 999);
         assert_eq!(manifest_metric_sample(id), Some(30));
         tracker.retain_after(2);
         assert_eq!(manifest_metric_sample(id), Some(0));
-        metric.disarm();
+        metric.deactivate();
         remove_region_manifest_size(id);
         tracker.manifest_tracker().record(3, 99);
         assert_eq!(manifest_metric_sample(id), None);
+    }
+
+    #[test]
+    fn manifest_metric_retention_removes_series_below_threshold() {
+        let id = RegionId::new(u32::MAX, 44);
+        let total = Arc::new(AtomicU64::new(0));
+        let metric = RegionManifestSizeMetric::with_threshold(id, 100);
+        let tracker = SizeTracker::new(total.clone(), Some(metric.clone()));
+        metric.activate(&total);
+        tracker.manifest_tracker().record(0, 80);
+        assert_eq!(tracker.total(), 80);
+        assert_eq!(manifest_metric_sample(id), None);
+        tracker.checkpoint_tracker().record(1, 30);
+        assert_eq!(manifest_metric_sample(id), Some(110));
+        tracker.retain_after(1);
+        assert_eq!(tracker.total(), 30);
+        assert_eq!(manifest_metric_sample(id), None);
+        tracker.manifest_tracker().record(0, 999);
+        assert_eq!(tracker.total(), 30);
+        assert_eq!(manifest_metric_sample(id), None);
+        metric.deactivate();
     }
 
     #[test]
@@ -212,9 +233,9 @@ mod tests {
         let id = RegionId::new(u32::MAX, 31);
         remove_region_manifest_size(id);
         let total = Arc::new(AtomicU64::new(0));
-        let metric = RegionManifestSizeMetric::new(id);
+        let metric = RegionManifestSizeMetric::with_threshold(id, 0);
         let tracker = SizeTracker::new(total.clone(), Some(metric.clone()));
-        metric.arm(&total);
+        metric.activate(&total);
         let sizes = tracker.inventory.clone();
         metric.set_test_hook(Some(TestHook::new(move || {
             assert!(
@@ -228,7 +249,7 @@ mod tests {
         tracker.retain_after(1);
         tracker.retain_after(2);
         assert_eq!(manifest_metric_sample(id), Some(tracker.total() as i64));
-        metric.disarm();
+        metric.deactivate();
         remove_region_manifest_size(id);
     }
 
