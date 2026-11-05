@@ -76,7 +76,7 @@ use tokio::sync::Notify;
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::config::MitoConfig;
 use crate::engine::listener::EventListenerRef;
-use crate::engine::{MITO_ENGINE_NAME, MitoEngine};
+use crate::engine::{MITO_ENGINE_NAME, MitoEngine, MitoEngineBuilder};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
@@ -365,6 +365,7 @@ pub struct TestEnv {
     kv_backend: KvBackendRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     object_store_mock_layer: Option<MockLayer>,
+    per_region_metrics: bool,
 }
 
 impl TestEnv {
@@ -402,7 +403,14 @@ impl TestEnv {
             kv_backend,
             partition_expr_fetcher: noop_partition_expr_fetcher(),
             object_store_mock_layer: None,
+            per_region_metrics: false,
         }
+    }
+
+    /// Configures manifest metrics before engines and workers are constructed.
+    pub fn with_region_manifest_size_metrics(mut self, enabled: bool) -> Self {
+        self.per_region_metrics = enabled;
+        self
     }
 
     /// Overwrites the original `log_store_factory`.
@@ -448,7 +456,7 @@ impl TestEnv {
             plugins: Plugins,
         ) -> MitoEngine {
             let data_home = zelf.data_home().display().to_string();
-            MitoEngine::new(
+            MitoEngineBuilder::new(
                 &data_home,
                 config,
                 log_store,
@@ -458,6 +466,8 @@ impl TestEnv {
                 zelf.partition_expr_fetcher.clone(),
                 plugins,
             )
+            .with_region_manifest_size_metrics(zelf.per_region_metrics)
+            .try_build()
             .await
             .unwrap()
         }
@@ -735,7 +745,7 @@ impl TestEnv {
                 self.file_ref_manager.clone(),
                 self.partition_expr_fetcher.clone(),
                 Plugins::new(),
-                Arc::new(AtomicBool::new(false)),
+                self.per_region_metrics,
             )
             .await
             .unwrap(),
@@ -748,7 +758,7 @@ impl TestEnv {
                 self.file_ref_manager.clone(),
                 self.partition_expr_fetcher.clone(),
                 Plugins::new(),
-                Arc::new(AtomicBool::new(false)),
+                self.per_region_metrics,
             )
             .await
             .unwrap(),

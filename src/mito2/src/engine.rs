@@ -100,7 +100,6 @@ mod puffin_index;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use api::region::RegionResponse;
@@ -189,6 +188,7 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     plugins: Plugins,
+    per_region_metrics: bool,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -214,6 +214,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             file_ref_manager,
             plugins,
             partition_expr_fetcher,
+            per_region_metrics: false,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         }
@@ -231,6 +232,19 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         }
     }
 
+    /// Sets whether regions expose manifest size metrics, disabled by default.
+    ///
+    /// The process-wide threshold defaults to the value in the manifest size metrics
+    /// module. `GREPTIME_REGION_MANIFEST_SIZE_METRIC_THRESHOLD_BYTES` overrides it
+    /// in integer bytes; zero disables filtering. It is read once on first use,
+    /// so changes require a restart. Sizes at or below the threshold remove the
+    /// series without changing region statistics.
+    #[must_use]
+    pub fn with_region_manifest_size_metrics(mut self, enabled: bool) -> Self {
+        self.per_region_metrics = enabled;
+        self
+    }
+
     pub async fn try_build(mut self) -> Result<MitoEngine> {
         self.config.sanitize(self.data_home)?;
 
@@ -238,7 +252,6 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         // Extract the region hook before `plugins` is moved into the WorkerGroup,
         // so the engine (and thus the GC worker) can fire `on_region_gc`.
         let region_hook = self.plugins.get::<RegionHookRef>();
-        let per_region_metrics = Arc::new(AtomicBool::new(false));
         let workers = WorkerGroup::start(
             self.data_home,
             config.clone(),
@@ -248,7 +261,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             self.file_ref_manager,
             self.partition_expr_fetcher.clone(),
             self.plugins,
-            per_region_metrics.clone(),
+            self.per_region_metrics,
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
@@ -267,7 +280,6 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             .build();
 
         let inner = EngineInner {
-            per_region_metrics,
             workers,
             config,
             wal_raw_entry_reader,
@@ -317,17 +329,6 @@ impl MitoEngine {
             plugins,
         );
         builder.try_build().await
-    }
-
-    /// Enables manifest size metrics for subsequent region creates and opens.
-    ///
-    /// Only sizes above 512 MiB are exposed by default. Override the threshold with
-    /// `GREPTIME_REGION_MANIFEST_SIZE_METRIC_THRESHOLD_BYTES` (integer bytes, zero
-    /// disables filtering). It is read once on first use; changes require a restart.
-    /// Sizes at or below the threshold remove the series without changing statistics.
-    /// Existing regions and openers already in progress are not enabled retroactively.
-    pub fn enable_region_manifest_size_metrics(&self) {
-        self.inner.per_region_metrics.store(true, Ordering::Relaxed);
     }
 
     pub fn mito_config(&self) -> &MitoConfig {
@@ -822,7 +823,6 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
 
 /// Inner struct of [MitoEngine].
 struct EngineInner {
-    per_region_metrics: Arc<AtomicBool>,
     /// Region workers group.
     workers: WorkerGroup,
     /// Config of the engine.
@@ -1775,7 +1775,6 @@ impl MitoEngine {
                 SCAN_REQUESTS_REJECTED_TOTAL.inc();
             })
             .build();
-        let per_region_metrics = Arc::new(AtomicBool::new(false));
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
@@ -1789,14 +1788,13 @@ impl MitoEngine {
                     file_ref_manager,
                     time_provider,
                     partition_expr_fetcher,
-                    per_region_metrics.clone(),
+                    false,
                 )
                 .await?,
                 config,
                 wal_raw_entry_reader,
                 scan_memory_tracker,
                 region_hook: None,
-                per_region_metrics,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),

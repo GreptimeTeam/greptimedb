@@ -2294,10 +2294,15 @@ async fn test_manifest_scan_table_filter() {
 
 #[tokio::test]
 async fn test_region_manifest_size_metrics_lifecycle() {
-    use crate::metrics::{manifest_metric_sample, remove_region_manifest_size};
+    use crate::metrics::manifest_size::remove_region_manifest_size;
+    use crate::metrics::manifest_size::tests::manifest_metric_sample;
     use store_api::region_request::{RegionCloseRequest, RegionDropRequest};
 
-    let mut env = TestEnv::with_prefix("manifest-size-metrics").await;
+    let mut env = TestEnv::with_prefix("manifest-size-metrics")
+        .await
+        .with_region_manifest_size_metrics(true);
+    let mut disabled_env = TestEnv::with_prefix("manifest-size-metrics-disabled").await;
+    let disabled_engine = disabled_env.create_engine(MitoConfig::default()).await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(u32::MAX, 7);
     let disabled_id = RegionId::new(u32::MAX, 8);
@@ -2306,13 +2311,10 @@ async fn test_region_manifest_size_metrics_lifecycle() {
     }
     let request = CreateRequestBuilder::new().build();
     let table_dir = request.table_dir.clone();
-    engine
+    disabled_engine
         .handle_request(disabled_id, RegionRequest::Create(request.clone()))
         .await
         .unwrap();
-    assert_eq!(manifest_metric_sample(disabled_id), None);
-    engine.enable_region_manifest_size_metrics();
-    engine.enable_region_manifest_size_metrics();
     assert_eq!(manifest_metric_sample(disabled_id), None);
     engine
         .handle_request(region_id, RegionRequest::Create(request.clone()))
@@ -2383,20 +2385,23 @@ async fn test_region_manifest_size_metrics_lifecycle() {
     region.set_manifest_size_metric_threshold(0);
     assert!(manifest_metric_sample(stop_id).is_some());
     engine.stop().await.unwrap();
+    disabled_engine.stop().await.unwrap();
     assert_eq!(manifest_metric_sample(stop_id), None);
     assert_eq!(manifest_metric_sample(disabled_id), None);
 }
 
 #[tokio::test]
 async fn test_region_manifest_size_metrics_failed_open() {
-    use crate::metrics::{manifest_metric_sample, remove_region_manifest_size};
+    use crate::metrics::manifest_size::remove_region_manifest_size;
+    use crate::metrics::manifest_size::tests::manifest_metric_sample;
     use store_api::region_request::RegionCloseRequest;
 
     let id = RegionId::new(u32::MAX, 10);
     remove_region_manifest_size(id);
-    let mut env = TestEnv::with_prefix("manifest-metric-failed-open").await;
+    let mut env = TestEnv::with_prefix("manifest-metric-failed-open")
+        .await
+        .with_region_manifest_size_metrics(true);
     let engine = env.create_engine(MitoConfig::default()).await;
-    engine.enable_region_manifest_size_metrics();
     let request = CreateRequestBuilder::new().build();
     let table_dir = request.table_dir.clone();
     engine
@@ -2404,6 +2409,8 @@ async fn test_region_manifest_size_metrics_failed_open() {
         .await
         .unwrap();
     let region = engine.get_region(id).unwrap();
+    region.set_manifest_size_metric_threshold(0);
+    assert!(manifest_metric_sample(id).is_some());
     let store = region.access_layer.object_store().clone();
     let dir = crate::manifest::storage::manifest_dir(&region.access_layer.build_region_dir(id));
     engine

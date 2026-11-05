@@ -183,7 +183,7 @@ impl WorkerGroup {
         file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
-        per_region_metrics: Arc<AtomicBool>,
+        per_region_metrics: bool,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = Arc::new(
@@ -259,7 +259,7 @@ impl WorkerGroup {
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
-                    per_region_metrics: per_region_metrics.clone(),
+                    per_region_metrics,
                     config: config.clone(),
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
@@ -457,7 +457,7 @@ impl WorkerGroup {
         file_ref_manager: FileReferenceManagerRef,
         time_provider: TimeProviderRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
-        per_region_metrics: Arc<AtomicBool>,
+        per_region_metrics: bool,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
@@ -526,7 +526,7 @@ impl WorkerGroup {
             .map(|id| {
                 WorkerStarter {
                     id: id as WorkerId,
-                    per_region_metrics: per_region_metrics.clone(),
+                    per_region_metrics,
                     config: config.clone(),
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
@@ -638,7 +638,7 @@ pub(crate) fn worker_init_check_delay() -> Duration {
 
 /// Worker start config.
 struct WorkerStarter<S> {
-    per_region_metrics: Arc<AtomicBool>,
+    per_region_metrics: bool,
     id: WorkerId,
     config: Arc<MitoConfig>,
     log_store: Arc<S>,
@@ -1026,7 +1026,7 @@ impl StalledRequests {
 
 /// Background worker loop to handle requests.
 struct RegionWorkerLoop<S> {
-    per_region_metrics: Arc<AtomicBool>,
+    per_region_metrics: bool,
     /// Id of the worker.
     id: WorkerId,
     /// Engine config.

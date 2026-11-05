@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 
 use store_api::ManifestVersion;
 
-use crate::metrics::RegionManifestSizeMetric;
+use crate::metrics::manifest_size::RegionManifestSizeMetric;
 
 /// Key to identify a manifest file.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -170,7 +170,8 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::metrics::{manifest_metric_sample, remove_region_manifest_size};
+    use crate::metrics::manifest_size::remove_region_manifest_size;
+    use crate::metrics::manifest_size::tests::manifest_metric_sample;
 
     #[test]
     fn manifest_metric_tracks_mutations_and_activation() {
@@ -229,7 +230,7 @@ mod tests {
 
     #[test]
     fn manifest_metric_publishes_with_inventory_locked() {
-        use crate::metrics::TestHook;
+        use crate::metrics::manifest_size::TestHook;
         let id = RegionId::new(u32::MAX, 31);
         remove_region_manifest_size(id);
         let total = Arc::new(AtomicU64::new(0));

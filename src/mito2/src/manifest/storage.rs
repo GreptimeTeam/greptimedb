@@ -45,7 +45,7 @@ use crate::manifest::storage::delta::DeltaStorage;
 use crate::manifest::storage::size_tracker::{CheckpointTracker, DeltaTracker, SizeTracker};
 use crate::manifest::storage::staging::StagingStorage;
 use crate::manifest::storage::utils::remove_from_cache;
-use crate::metrics::RegionManifestSizeMetric;
+use crate::metrics::manifest_size::RegionManifestSizeMetric;
 
 lazy_static! {
     static ref DELTA_RE: Regex = Regex::new("^\\d+\\.json").unwrap();
