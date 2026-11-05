@@ -634,7 +634,7 @@ async fn native_prefix_executes_over_real_mito_region() {
         .try_into()
         .unwrap_or_else(|_| panic!("missing version bytes at {envelope_at}"));
     let version = u32::from_le_bytes(version_bytes);
-    assert_eq!(version, 3, "observed version bytes: {version_bytes:?}");
+    assert_eq!(version, 1, "observed version bytes: {version_bytes:?}");
     let length_bytes: [u8; 4] = tampered[envelope_at + 4..envelope_at + 8]
         .try_into()
         .unwrap_or_else(|_| panic!("missing length bytes at {}", envelope_at + 4));

@@ -13,8 +13,6 @@
 // limitations under the License.
 
 mod absent;
-mod aggregate_exchange;
-mod aggregate_finalize;
 mod empty_metric;
 mod fused_series;
 mod histogram_fold;
@@ -31,7 +29,6 @@ mod test_util;
 mod union_distinct_on;
 
 pub use absent::{Absent, AbsentExec, AbsentStream};
-pub use aggregate_finalize::AggregateFinalize;
 use common_query::native_histogram::{SUM_FIELD, native_histogram_value_type};
 use common_query::prometheus::is_prometheus_stale_nan;
 use datafusion::arrow::array::{Array, Float64Array, StructArray};
@@ -43,6 +40,8 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::{Expr, Extension, LogicalPlan};
 use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
+#[cfg(feature = "test-utils")]
+pub use fused_series::is_canonical_producer_exec;
 pub use fused_series::{
     FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesStream,
     InputLocality, input_locality, matching_operands_drop_key, tree_source_fields,

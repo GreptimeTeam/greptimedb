@@ -41,6 +41,7 @@ use std::time::Duration;
 use datafusion::arrow::array::{Array, Float64Array, ListArray, StructArray, UInt32Array};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::common::config::ConfigOptions;
+use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -53,6 +54,9 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::prelude::SessionContext;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::series::Label;
+use datatypes::series::aggregate_state::{
+    AggregateStateKind, AggregateStateSchema, AggregateStateValues, StateComponent, StateSeries,
+};
 use datatypes::series::frame::{
     FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeTag,
 };
@@ -975,6 +979,617 @@ async fn raw_primary_key_still_groups_a_key_labelled_input_by_its_key() {
         owners[0], owners[1],
         "two pieces of one stored key must meet in one owner"
     );
+}
+
+#[test]
+fn canonical_labels_except_routes_histogram_buckets_and_metadata_together() {
+    let routing = Routing::with_policy(
+        97,
+        SeriesRouting::CanonicalLabelsExcept(
+            ["le", "__name__", "__type__", "__unit__"]
+                .into_iter()
+                .map(Arc::from)
+                .collect::<Vec<_>>()
+                .into(),
+        ),
+    );
+    let group = |job: &str, le: &str, name: &str, unit: &str| {
+        SeriesLabels::try_new(
+            Some(Arc::from(name)),
+            vec![
+                Label {
+                    name: Arc::from("job"),
+                    value: Arc::from(job),
+                },
+                Label {
+                    name: Arc::from("le"),
+                    value: Arc::from(le),
+                },
+                Label {
+                    name: Arc::from("__unit__"),
+                    value: Arc::from(unit),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let owner = routing.output(&group("api", "1", "m", "seconds"));
+    assert_eq!(owner, routing.output(&group("api", "+Inf", "n", "bytes")));
+    // Hash partitions can collide, so compare a set of distinct jobs, not an arbitrary pair.
+    assert!((0..100).any(|job| {
+        routing.output(&group(&format!("job-{job}"), "1", "m", "seconds")) != owner
+    }));
+}
+
+#[tokio::test]
+async fn aggregate_state_router_slices_and_preserves_group_validity() {
+    use futures::TryStreamExt;
+
+    let series = schema();
+    let wire = Arc::new(
+        AggregateStateSchema::try_new(AggregateStateKind::Group, Vec::new())
+            .expect("Group has no components"),
+    );
+    // Two producers both contribute to the same group, including the same grid point. Routing
+    // must preserve both partial-state rows rather than treating a repeated point as a duplicate.
+    let mut batches = [vec![0, 1], vec![0, 2]]
+        .into_iter()
+        .map(|positions| {
+            let states = positions
+                .into_iter()
+                .map(|position| {
+                    Ok((
+                        StateSeries {
+                            metric: labels("same"),
+                            time: TimeAxis::from_grid_spans(
+                                series.eval_grid.clone().unwrap(),
+                                vec![GridSpan::new(position, 1)],
+                            )
+                            .unwrap(),
+                            states: vec![vec![None]],
+                        },
+                        true,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let mut frames = common_query::series_frame::pack_aggregate_state(
+                Box::pin(futures::stream::iter(states)),
+                Arc::clone(&wire),
+                Arc::clone(&series),
+            )
+            .unwrap();
+            futures::executor::block_on(futures::future::poll_fn(|cx| {
+                match frames.as_mut().poll_next(cx) {
+                    Poll::Ready(batch) => Poll::Ready(batch.expect("state batch is emitted")),
+                    Poll::Pending => Poll::Pending,
+                }
+            }))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let child_schema = batches[0].schema();
+    let child = MemorySourceConfig::try_new_exec(
+        &[vec![batches.remove(0)], vec![batches.remove(0)]],
+        child_schema,
+        None,
+    )
+    .unwrap();
+    let plan = Arc::new(SeriesRepartitionExec::try_new(child, 2).unwrap());
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let outputs = futures::future::join_all((0..2).map(|partition| {
+        let plan = Arc::clone(&plan);
+        let context = Arc::clone(&context);
+        async move {
+            plan.execute(partition, context)
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+        }
+    }))
+    .await;
+    let rows = outputs
+        .into_iter()
+        .flatten()
+        .map(|batch| batch.num_rows())
+        .sum::<usize>();
+    assert_eq!(
+        rows, 4,
+        "both producers' rows are forwarded, including their overlapping point, without losing Group presence"
+    );
+    assert_eq!(pool.reserved(), 0, "terminal output releases state slices");
+}
+
+#[tokio::test]
+async fn aggregate_state_slice_wrappers_remain_charged_until_terminal_cleanup() {
+    let grid = grid();
+    let fields = (0..16)
+        .map(|index| FieldSpec {
+            name: Arc::from(format!("slice_field_{index}")),
+        })
+        .collect::<Vec<_>>();
+    let series = Arc::new(SeriesSchema {
+        fields: fields.into(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let wire = Arc::new(
+        AggregateStateSchema::try_new(
+            AggregateStateKind::Avg,
+            vec![
+                StateComponent::Value,
+                StateComponent::Mean,
+                StateComponent::Compensation,
+                StateComponent::Count,
+                StateComponent::IncrementalMean,
+            ],
+        )
+        .unwrap(),
+    );
+    const ROWS: usize = 8;
+    let rows = (0..ROWS)
+        .map(|position| {
+            Ok((
+                StateSeries {
+                    metric: labels("many-slice-wrappers"),
+                    time: TimeAxis::from_grid_spans(
+                        Arc::clone(&grid),
+                        vec![GridSpan::new(position, 1)],
+                    )
+                    .unwrap(),
+                    states: vec![vec![Some(AggregateStateValues::default())]; series.fields.len()],
+                },
+                true,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut frames = common_query::series_frame::pack_aggregate_state(
+        Box::pin(futures::stream::iter(rows)),
+        Arc::clone(&wire),
+        Arc::clone(&series),
+    )
+    .unwrap();
+    let batch = frames
+        .next()
+        .await
+        .expect("state batch is emitted")
+        .expect("state batch packs successfully");
+    assert_eq!(ROWS, batch.num_rows());
+    let backing_bytes = std::mem::size_of::<RecordBatch>()
+        + batch.num_columns() * std::mem::size_of::<datafusion::arrow::array::ArrayRef>()
+        + batch.get_array_memory_size();
+    let slice_wrappers = state_slice_wrapper_bytes(batch.schema().as_ref()).unwrap();
+    // Hand-count the declared shape: 23 sliced array nodes; list values are not collected.
+    // There are 17 struct-child refs and six root-column refs.
+    use datafusion::arrow::array::{
+        ArrayRef, BinaryArray, BooleanArray, ListArray, StringArray, StructArray,
+    };
+    let node_bytes = std::mem::size_of::<StructArray>() * 2
+        + std::mem::size_of::<ListArray>() * 18
+        + std::mem::size_of::<BinaryArray>()
+        + std::mem::size_of::<BooleanArray>()
+        + std::mem::size_of::<StringArray>();
+    let expected_wrappers =
+        node_bytes + 23 * 2 * std::mem::size_of::<usize>() + 23 * std::mem::size_of::<ArrayRef>();
+    assert_eq!(
+        expected_wrappers, slice_wrappers,
+        "schema-shape upper bound"
+    );
+    let child_schema = batch.schema();
+    let child: Arc<dyn ExecutionPlan> =
+        MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema.clone(), None).unwrap();
+    let budget =
+        backing_bytes + ROWS * (slice_wrappers + std::mem::size_of::<Queued>()) + (4 << 10);
+    let pool = Arc::new(GreedyMemoryPool::new(budget));
+    let context = task_context(&pool);
+    let shared = SharedExecution::start(
+        &child,
+        Routing::new(2),
+        Arc::clone(&series),
+        Some(Arc::clone(&wire)),
+        &context,
+    )
+    .unwrap();
+    let owner = Routing::new(2).output(&labels("many-slice-wrappers"));
+    let (receiver, lease) = SharedExecution::claim(&shared, owner).expect("claim output");
+    let mut output = StateBatchOutputStream {
+        schema: child_schema,
+        receiver,
+        lease,
+        retained: None,
+        reported: false,
+    };
+    wait_until("state producer queues every slice", || {
+        producer_stopped(&shared)
+    })
+    .await;
+    let expected_payload_and_wrappers = backing_bytes + ROWS * slice_wrappers;
+    assert!(
+        pool.reserved() >= expected_payload_and_wrappers,
+        "queued state slices retain one shared backing charge plus {ROWS} recursive wrapper charges: reserved {}, expected at least {expected_payload_and_wrappers}",
+        pool.reserved()
+    );
+    // Inspect queued rows directly: all carry the same Arc parent, proving the producer does not
+    // allocate a RecordBatch slice per row. The normal stream path slices only when polled.
+    let mut batches = Vec::with_capacity(ROWS);
+    let mut charges = Vec::with_capacity(ROWS);
+    for _ in 0..ROWS {
+        let message = output.receiver.recv().await.expect("a queued state row");
+        let message = match message {
+            Queued::StateBatch {
+                batch,
+                row,
+                _charge,
+                _metadata,
+            } => {
+                let row = row.expect("multi-output routing selects one row");
+                assert!(row < ROWS);
+                assert_eq!(1, batch.slice(row, 1).num_rows());
+                charges.push(_charge);
+                batch
+            }
+            _ => panic!("expected aggregate-state row"),
+        };
+        batches.push(message);
+    }
+    assert!(
+        batches
+            .windows(2)
+            .all(|pair| Arc::ptr_eq(&pair[0], &pair[1]))
+    );
+    assert!(
+        charges
+            .windows(2)
+            .all(|pair| Arc::ptr_eq(&pair[0], &pair[1])),
+        "every row shares the same parent reservation"
+    );
+    assert!(pool.reserved() >= backing_bytes);
+    drop(batches);
+    drop(charges);
+    assert!(
+        output.next().await.is_none(),
+        "state output drains to clean EOF"
+    );
+    drop(output);
+    drop(shared);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "terminal cleanup releases slice reservations"
+    );
+}
+
+/// Region exit forwards one packed frame, then Final routes its rows while retaining its parent
+/// exactly once, even though Arrow's List slices still retain all of the component values.
+#[tokio::test]
+async fn chained_state_routers_share_parent_charge_for_multi_point_groups() {
+    const GROUPS: usize = 128;
+    const POINTS: usize = 60;
+    const OUTPUTS: usize = 2;
+    const COPIES: usize = 64;
+
+    let series = schema();
+    let wire = Arc::new(
+        AggregateStateSchema::try_new(
+            AggregateStateKind::Sum,
+            vec![StateComponent::Value, StateComponent::Compensation],
+        )
+        .unwrap(),
+    );
+    let rows = (0..GROUPS)
+        .map(|group| {
+            let states = (0..POINTS)
+                .map(|point| {
+                    Some(AggregateStateValues {
+                        value: (group * POINTS + point) as f64,
+                        compensation: -(point as f64),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            Ok((
+                StateSeries {
+                    metric: labels(&format!("group-{group:03}")),
+                    time: TimeAxis::from_grid_spans(
+                        series.eval_grid.clone().unwrap(),
+                        vec![GridSpan::new(0, POINTS)],
+                    )
+                    .unwrap(),
+                    states: vec![states],
+                },
+                true,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let frames = common_query::series_frame::pack_aggregate_state(
+        Box::pin(futures::stream::iter(rows)),
+        Arc::clone(&wire),
+        Arc::clone(&series),
+    )
+    .unwrap();
+    let mut batches = frames.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(1, batches.len(), "all groups share one packed parent");
+    let batch = batches.pop().unwrap();
+    assert_eq!(GROUPS, batch.num_rows());
+    let parent_payload = std::mem::size_of::<RecordBatch>()
+        + batch.num_columns() * std::mem::size_of::<datafusion::arrow::array::ArrayRef>()
+        + batch.get_array_memory_size();
+    let wrappers = state_slice_wrapper_bytes(batch.schema().as_ref()).unwrap();
+    let message = std::mem::size_of::<Queued>();
+    // There are GROUPS output wrappers, OUTPUTS EOF messages, and briefly another parent during
+    // handoff between routers. Once the producer stops, only one parent and those wrappers remain.
+    let overhead = GROUPS * (wrappers + message) + OUTPUTS * message;
+    let bound = parent_payload + overhead;
+    let handoff_overhead = parent_payload + 2 * message + (4 << 10);
+    let budget = bound + handoff_overhead;
+    let duplicated_components = COPIES * GROUPS * POINTS * 2 * std::mem::size_of::<f64>();
+    assert!(
+        budget < duplicated_components,
+        "64+ duplicated payloads must not fit"
+    );
+
+    let pool = Arc::new(GreedyMemoryPool::new(budget));
+    let context = task_context(&pool);
+    let child_schema = batch.schema();
+    let probe_child =
+        MemorySourceConfig::try_new_exec(&[vec![batch.clone()]], Arc::clone(&child_schema), None)
+            .unwrap();
+    let probe = Arc::new(SeriesRepartitionExec::try_new(probe_child, 1).unwrap());
+    let mut probe_output = probe.execute(0, Arc::clone(&context)).unwrap();
+    let forwarded = probe_output.next().await.unwrap().unwrap();
+    assert_eq!(
+        GROUPS,
+        forwarded.num_rows(),
+        "region exit forwards the packed frame"
+    );
+    assert!(
+        Arc::ptr_eq(batch.column(3), forwarded.column(3)),
+        "the region exit does not slice the state column"
+    );
+    assert!(
+        probe_output.next().await.is_none(),
+        "one parent is one message"
+    );
+    drop(forwarded);
+    drop(probe_output);
+    drop(probe);
+    assert_eq!(0, pool.reserved(), "the region exit releases its charge");
+
+    let child = MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema, None).unwrap();
+    let region = Arc::new(SeriesRepartitionExec::try_new(child, 1).unwrap());
+    let final_router = Arc::new(SeriesRepartitionExec::try_new(region.clone(), OUTPUTS).unwrap());
+    let mut outputs = (0..OUTPUTS)
+        .map(|output| final_router.execute(output, Arc::clone(&context)).unwrap())
+        .collect::<Vec<_>>();
+    let final_shared = execution(&final_router);
+    wait_until("the Final router queues its rows", || {
+        !matches!(final_shared.ending(), Ending::Pending)
+    })
+    .await;
+    let region_shared = execution(&region);
+    assert!(matches!(region_shared.ending(), Ending::Finished));
+    assert!(
+        matches!(final_shared.ending(), Ending::Finished),
+        "the bounded Final router must finish: {:?}",
+        final_shared.ending()
+    );
+    let observed = pool.reserved();
+    assert!(
+        observed >= parent_payload,
+        "the queued slices retain their parent"
+    );
+    assert!(
+        observed <= bound,
+        "queued rows must share their parent: observed {observed}, parent {parent_payload}, \
+         overhead {overhead}, bound {bound}"
+    );
+
+    let decoder =
+        SeriesFrameDecoder::try_new_aggregate_state(&wire, &series, FrameLabelMode::Explicit)
+            .unwrap();
+    let mut seen = vec![false; GROUPS];
+    let mut owner_counts = [0; OUTPUTS];
+    for (owner, output) in outputs.iter_mut().enumerate() {
+        while let Some(batch) = output.next().await {
+            let batch = batch.expect("the Final router must not exhaust the pool");
+            assert_eq!(
+                1,
+                batch.num_rows(),
+                "multi-output routing still splits rows"
+            );
+            for row in decoder.decode_aggregate_state(&batch).unwrap() {
+                assert!(row.is_last());
+                let group = row.metric().tags()[0]
+                    .value
+                    .strip_prefix("group-")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert!(!seen[group], "each group is routed exactly once");
+                assert_eq!(owner, final_router.routing.output_labels(row.metric()));
+                let row = row.to_state_series().unwrap();
+                assert_eq!(POINTS, row.time.len());
+                for (point, state) in row.states[0].iter().enumerate() {
+                    let state = state.unwrap();
+                    assert_eq!((group * POINTS + point) as f64, state.value);
+                    assert_eq!(-(point as f64), state.compensation);
+                }
+                seen[group] = true;
+                owner_counts[owner] += 1;
+            }
+        }
+    }
+    assert!(seen.into_iter().all(|seen| seen));
+    assert!(owner_counts.into_iter().all(|count| count > 0));
+    drop(outputs);
+    drop(final_shared);
+    drop(region_shared);
+    drop(final_router);
+    drop(region);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "terminal cleanup releases the parent and wrappers"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_state_router_holds_charge_for_batch_handoff_until_eof() {
+    let series = schema();
+    let wire = Arc::new(
+        AggregateStateSchema::try_new(AggregateStateKind::Group, Vec::new())
+            .expect("Group has no components"),
+    );
+    let state = StateSeries {
+        metric: labels("handoff"),
+        time: TimeAxis::from_grid_spans(
+            series.eval_grid.clone().unwrap(),
+            vec![GridSpan::new(0, 1)],
+        )
+        .unwrap(),
+        states: vec![vec![None]],
+    };
+    let mut frames = common_query::series_frame::pack_aggregate_state(
+        Box::pin(futures::stream::iter(vec![Ok((state, true))])),
+        Arc::clone(&wire),
+        Arc::clone(&series),
+    )
+    .unwrap();
+    let batch = futures::executor::block_on(futures::future::poll_fn(|cx| {
+        match frames.as_mut().poll_next(cx) {
+            Poll::Ready(batch) => Poll::Ready(batch.expect("state batch is emitted")),
+            Poll::Pending => Poll::Pending,
+        }
+    }))
+    .unwrap();
+    let child_schema = batch.schema();
+    let child = MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema, None).unwrap();
+    let plan = Arc::new(SeriesRepartitionExec::try_new(child, 1).unwrap());
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let mut output = plan.execute(0, context).unwrap();
+
+    let returned = futures::future::poll_fn(|cx| match output.as_mut().poll_next(cx) {
+        Poll::Ready(Some(batch)) => Poll::Ready(batch),
+        Poll::Ready(None) => panic!("state router emitted no batch"),
+        Poll::Pending => Poll::Pending,
+    })
+    .await
+    .unwrap();
+    assert_eq!(1, returned.num_rows());
+    assert!(
+        pool.reserved() > 0,
+        "router memory remains charged while the returned batch has not been admitted downstream"
+    );
+
+    assert!(
+        futures::future::poll_fn(|cx| output.as_mut().poll_next(cx))
+            .await
+            .is_none(),
+        "state router reaches EOF after its one batch"
+    );
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "router reservation is released at EOF while output, returned batch, and plan remain alive"
+    );
+    assert_eq!(1, returned.num_rows());
+}
+
+#[tokio::test]
+async fn aggregate_state_router_drop_handoff_releases_charge() {
+    let series = schema();
+    let wire =
+        Arc::new(AggregateStateSchema::try_new(AggregateStateKind::Group, Vec::new()).unwrap());
+    let state = StateSeries {
+        metric: labels("drop-handoff"),
+        time: TimeAxis::from_grid_spans(
+            series.eval_grid.clone().unwrap(),
+            vec![GridSpan::new(0, 1)],
+        )
+        .unwrap(),
+        states: vec![vec![None]],
+    };
+    let batch = futures::executor::block_on(
+        common_query::series_frame::pack_aggregate_state(
+            Box::pin(futures::stream::iter(vec![Ok((state, true))])),
+            Arc::clone(&wire),
+            Arc::clone(&series),
+        )
+        .unwrap()
+        .try_collect::<Vec<_>>(),
+    )
+    .unwrap()
+    .remove(0);
+    let child_schema = batch.schema();
+    let child = MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema, None).unwrap();
+    let plan = Arc::new(SeriesRepartitionExec::try_new(child, 1).unwrap());
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let mut output = plan.execute(0, context).unwrap();
+    let returned = output.next().await.expect("state batch").unwrap();
+    assert!(
+        pool.reserved() > 0,
+        "handoff remains charged before downstream admission"
+    );
+    drop(returned);
+    assert!(output.next().await.is_none(), "router reaches EOF");
+    drop(output);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "dropping an unadmitted slice releases all charges"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_state_router_cancelled_consumer_releases_queued_charge() {
+    let series = schema();
+    let wire =
+        Arc::new(AggregateStateSchema::try_new(AggregateStateKind::Group, Vec::new()).unwrap());
+    let rows = (0..8)
+        .map(|position| {
+            Ok((
+                StateSeries {
+                    metric: labels("cancel"),
+                    time: TimeAxis::from_grid_spans(
+                        series.eval_grid.clone().unwrap(),
+                        vec![GridSpan::new(position, 1)],
+                    )
+                    .unwrap(),
+                    states: vec![vec![None]],
+                },
+                true,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let batch = futures::executor::block_on(
+        common_query::series_frame::pack_aggregate_state(
+            Box::pin(futures::stream::iter(rows)),
+            Arc::clone(&wire),
+            Arc::clone(&series),
+        )
+        .unwrap()
+        .try_collect::<Vec<_>>(),
+    )
+    .unwrap()
+    .remove(0);
+    let child_schema = batch.schema();
+    let child = MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema, None).unwrap();
+    let plan = Arc::new(SeriesRepartitionExec::try_new(child, 1).unwrap());
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let output = plan.execute(0, context).unwrap();
+    wait_until("state producer queues its state", || pool.reserved() > 0).await;
+    drop(output);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while pool.reserved() != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("cancellation releases all queued charges");
+    assert_eq!(0, pool.reserved(), "cancelled consumer holds nothing");
 }
 
 /// The raw owner over `child` routing by an explicit policy.
@@ -2741,8 +3356,14 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
     ]]);
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let context = task_context(&pool);
-    let shared =
-        SharedExecution::start(&child, Routing::new(1), Arc::clone(&schema()), &context).unwrap();
+    let shared = SharedExecution::start(
+        &child,
+        Routing::new(1),
+        Arc::clone(&schema()),
+        None,
+        &context,
+    )
+    .unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
     let mut stream = RepartitionStream::new(
         receiver,
@@ -4768,8 +5389,14 @@ async fn a_recorded_failure_reaches_every_output_once() {
     let context = task_context(&pool);
     // Claim internal queues so assertions observe retained chains, not encoded frame batches.
     let child = plan.children()[0].clone();
-    let shared =
-        SharedExecution::start(&child, Routing::new(2), Arc::clone(&schema()), &context).unwrap();
+    let shared = SharedExecution::start(
+        &child,
+        Routing::new(2),
+        Arc::clone(&schema()),
+        None,
+        &context,
+    )
+    .unwrap();
     let mut streams = Vec::new();
     for partition in 0..2 {
         let (receiver, lease) = SharedExecution::claim(&shared, partition).expect("output claim");
@@ -5972,8 +6599,14 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
             .map(|(series, is_last)| Step::Chunk(series, is_last))
             .collect(),
     ]);
-    let shared =
-        SharedExecution::start(&child, Routing::new(1), Arc::clone(&schema()), &context).unwrap();
+    let shared = SharedExecution::start(
+        &child,
+        Routing::new(1),
+        Arc::clone(&schema()),
+        None,
+        &context,
+    )
+    .unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
     let mut stream = RepartitionStream::new(
         receiver,
@@ -6270,8 +6903,14 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
     );
     let pool = Arc::new(GreedyMemoryPool::new(budget));
     let context = task_context(&pool);
-    let shared =
-        SharedExecution::start(&child, Routing::new(1), Arc::clone(&schema()), &context).unwrap();
+    let shared = SharedExecution::start(
+        &child,
+        Routing::new(1),
+        Arc::clone(&schema()),
+        None,
+        &context,
+    )
+    .unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
     let mut output = RepartitionStream::new(
         receiver,
@@ -7331,4 +7970,109 @@ async fn a_raw_merge_conflict_fails_the_execution() {
             .to_string()
             .contains("duplicate raw timestamp has conflicting samples")
     );
+}
+
+/// A one-output region exit hands the Final router one packed batch containing several group
+/// labels. Each row must be dispatched by its own key, not by the first label in the batch.
+#[tokio::test]
+async fn histogram_state_router_dispatches_each_row_of_a_packed_batch() {
+    let series = schema();
+    let wire = Arc::new(AggregateStateSchema::try_new(AggregateStateKind::Group, vec![]).unwrap());
+    let policy = SeriesRouting::CanonicalLabelsExcept(
+        ["le", "__name__", "__type__", "__unit__"]
+            .into_iter()
+            .map(Arc::from)
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    let routing = Routing::with_policy(8, policy.clone());
+    let group = |job: &str, le: &str| {
+        SeriesLabels::try_new(
+            None,
+            vec![
+                Label {
+                    name: Arc::from("job"),
+                    value: Arc::from(job),
+                },
+                Label {
+                    name: Arc::from("le"),
+                    value: Arc::from(le),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let first = group("api", "1");
+    let other_job = (0..100)
+        .map(|index| format!("other-{index}"))
+        .find(|job| routing.output(&group(job, "1")) != routing.output(&first))
+        .unwrap();
+    let groups = [
+        first,
+        group("api", "+Inf"),
+        group(&other_job, "1"),
+        group(&other_job, "+Inf"),
+    ];
+    let input = groups
+        .iter()
+        .cloned()
+        .map(|metric| {
+            Ok((
+                StateSeries {
+                    metric,
+                    time: TimeAxis::from_grid_spans(
+                        series.eval_grid.clone().unwrap(),
+                        vec![GridSpan::new(0, 1)],
+                    )
+                    .unwrap(),
+                    states: vec![vec![None]],
+                },
+                true,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut packed = common_query::series_frame::pack_aggregate_state(
+        Box::pin(futures::stream::iter(input)),
+        Arc::clone(&wire),
+        Arc::clone(&series),
+    )
+    .unwrap();
+    let batch = packed.next().await.unwrap().unwrap();
+    assert_eq!(
+        batch.num_rows(),
+        groups.len(),
+        "fixture must be one multi-row packed batch"
+    );
+    let child =
+        MemorySourceConfig::try_new_exec(&[vec![batch.clone()]], batch.schema(), None).unwrap();
+    let region = Arc::new(SeriesRepartitionExec::try_new(child, 1).unwrap());
+    let final_router =
+        Arc::new(SeriesRepartitionExec::try_new_with_routing(region, 8, policy).unwrap());
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let outputs = futures::future::join_all((0..8).map(|partition| {
+        let router = Arc::clone(&final_router);
+        let context = Arc::clone(&context);
+        async move {
+            router
+                .execute(partition, context)
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+        }
+    }))
+    .await;
+    let decoder =
+        SeriesFrameDecoder::try_new_aggregate_state(&wire, &series, FrameLabelMode::Explicit)
+            .unwrap();
+    let mut seen = 0;
+    for (partition, batches) in outputs.into_iter().enumerate() {
+        for batch in batches {
+            for metric in decoder.decode_aggregate_state_labels(&batch).unwrap() {
+                assert_eq!(partition, routing.output(&metric));
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(seen, groups.len());
 }

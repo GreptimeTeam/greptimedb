@@ -26,22 +26,30 @@
 //! caller that schedules scans and exchanges guarantees it, and a plan that ran a `Complete`
 //! aggregate once per partition and then combined the answers would be combining values that were
 //! each missing the other partitions' contributions. The stages that exist for that shape are
-//! [`AggregateStage::Partial`] and [`AggregateStage::Final`], which this runtime does not execute
-//! yet.
+//! [`AggregateStage::Partial`] and [`AggregateStage::Final`], which carry kernel accumulator
+//! state between executions.
 
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{Series, SeriesSchema};
 
-use crate::aggregate::{AggregateOp, FloatAggregator, Grouping};
+use crate::aggregate::{AggregateOp, FloatAggregator, FloatMerger, Grouping};
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::series_bytes;
 use crate::map::validate_float_series;
 use crate::native::execute::{NodeBuffer, evaluated_bytes};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, Grouping as BoundGrouping,
+    AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, Grouping as BoundGrouping,
+    aggregate_state_binding,
 };
+use crate::native::state::{StateChunk, state_bytes, state_chunk_from_partial};
+
+/// The output shape produced by an aggregate stage.
+pub(crate) enum AggregateOutput {
+    Samples(Vec<Series>),
+    State(StateChunk),
+}
 
 /// One aggregate node's states, from the first chunk it is handed to the series it finishes with.
 pub(crate) struct AggregateRuntime {
@@ -54,6 +62,8 @@ pub(crate) struct AggregateRuntime {
     /// The fold. `None` once [`Self::compute`] has taken it, which is also what says the node has
     /// nothing left to fold into.
     accumulator: Option<FloatAggregator>,
+    merger: Option<FloatMerger>,
+    state_schema: Option<Arc<AggregateStateSchema>>,
     /// Whether the fold has been finished and its series handed over. A node computes once: a second
     /// pull finds the series it queued rather than a fold that ran again.
     ///
@@ -81,14 +91,6 @@ impl AggregateRuntime {
         schema: Arc<SeriesSchema>,
         buffer: &mut NodeBuffer,
     ) -> Result<Self> {
-        if op.stage != AggregateStage::Complete {
-            return Err(DataFusionError::NotImplemented(format!(
-                "the native runtime does not execute a `{:?}` aggregate yet: a `Partial` aggregate \
-                 reports the state a later stage merges and a `Final` aggregate merges that state, \
-                 and only `Complete` -- every contribution inside one execution -- is computed here",
-                op.stage
-            )));
-        }
         let kind = match op.kind {
             AggregateKind::Sum => AggregateOp::Sum,
             AggregateKind::Count => AggregateOp::Count,
@@ -104,6 +106,30 @@ impl AggregateRuntime {
                 )));
             }
         };
+        let (state_kind, state_components) = aggregate_state_binding(op.kind).ok_or_else(|| {
+            DataFusionError::NotImplemented("aggregate kind has no mergeable state".into())
+        })?;
+        let state_schema = schema.eval_grid.as_ref().map(|grid| {
+            Arc::new(AggregateStateSchema {
+                group: op.group.clone(),
+                kind: state_kind,
+                components: state_components.into(),
+                accumulators: schema.fields.clone(),
+                grid: grid.clone(),
+            })
+        });
+        if op.stage == AggregateStage::Final {
+            let merger = FloatMerger::try_new(&schema, kind)?;
+            buffer.resize(merger.state_bytes())?;
+            return Ok(Self {
+                op,
+                schema,
+                accumulator: None,
+                merger: Some(merger),
+                state_schema,
+                computed: false,
+            });
+        }
         let name_count = match &op.group {
             BoundGrouping::By(labels) | BoundGrouping::Without(labels) => labels.len(),
         };
@@ -128,6 +154,8 @@ impl AggregateRuntime {
             op,
             schema,
             accumulator: Some(initial),
+            merger: None,
+            state_schema,
             computed: false,
         })
     }
@@ -171,6 +199,57 @@ impl AggregateRuntime {
         buffer.resize(accumulator.state_bytes())
     }
 
+    /// Merges one state chunk into this final aggregate.
+    pub(crate) fn accumulate_state(
+        &mut self,
+        chunk: StateChunk,
+        buffer: &mut NodeBuffer,
+        pending: usize,
+    ) -> Result<()> {
+        let expected = self.state_schema.as_ref().ok_or_else(|| {
+            DataFusionError::NotImplemented("this runtime does not merge aggregate state".into())
+        })?;
+        let StateChunk::Row(row) = chunk else {
+            return Err(DataFusionError::Internal(
+                "Final aggregate received producer state series".into(),
+            ));
+        };
+        if row.fields.kind() != expected.kind
+            || row.fields.components() != expected.components.as_ref()
+        {
+            return Err(DataFusionError::NotImplemented(
+                "this runtime does not merge that kind of state".into(),
+            ));
+        }
+        if row
+            .time
+            .grid()
+            .is_none_or(|grid| grid.spec() != expected.grid.spec())
+        {
+            return Err(DataFusionError::Execution(
+                "aggregate state grid mismatch".into(),
+            ));
+        }
+        if row.fields.len() != self.schema.fields.len() {
+            return Err(DataFusionError::Execution(
+                "aggregate state field count mismatch".into(),
+            ));
+        }
+        let description = self.describe();
+        let merger = self.merger.as_mut().ok_or_else(|| no_fold(&description))?;
+        merger.merge_row(&row, |bytes| buffer.resize(pending.saturating_add(bytes)))?;
+        drop(row);
+        buffer.resize(merger.state_bytes())
+    }
+
+    /// Transient bytes required to consume a state chunk.
+    pub(crate) fn pending_state(&self, chunk: &StateChunk) -> usize {
+        match chunk {
+            StateChunk::Series { .. } => state_bytes(chunk),
+            StateChunk::Row(row) => crate::native::state::state_row_bytes(row),
+        }
+    }
+
     /// The number of retained groups, for budgeting the output queue backing storage.
     pub(crate) fn groups(&self) -> usize {
         self.accumulator.as_ref().map_or(0, FloatAggregator::groups)
@@ -185,32 +264,71 @@ impl AggregateRuntime {
         &mut self,
         buffer: &mut NodeBuffer,
         queue_bytes: usize,
-    ) -> Result<Option<Vec<Series>>> {
+    ) -> Result<Option<AggregateOutput>> {
         if self.computed {
             return Ok(None);
         }
-        if self.accumulator.is_none() {
-            return Err(no_fold(&self.describe()));
-        }
         self.computed = true;
-        let output = self
-            .accumulator
-            .take()
-            .ok_or_else(|| no_fold(&self.describe()))?
-            .finish_budgeted(|total| buffer.resize(total.saturating_add(queue_bytes)))?;
-        let output_bytes = output.iter().fold(0usize, |bytes, series| {
-            bytes.saturating_add(series_bytes(series))
-        });
-        let output_vec_bytes = output
-            .capacity()
-            .saturating_mul(std::mem::size_of::<Series>());
-        buffer.resize(
-            output_bytes
-                .saturating_add(output_vec_bytes)
-                .saturating_add(queue_bytes),
-        )?;
-        Ok(Some(output))
+        if let Some(accumulator) = self.accumulator.take() {
+            return match self.op.stage {
+                AggregateStage::Complete => {
+                    let output = accumulator.finish_budgeted(|total| {
+                        buffer.resize(total.saturating_add(queue_bytes))
+                    })?;
+                    let output_vec_bytes = output
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<Series>());
+                    charge_samples(buffer, &output, output_vec_bytes, queue_bytes)?;
+                    Ok(Some(AggregateOutput::Samples(output)))
+                }
+                AggregateStage::Partial => {
+                    let state_schema = self
+                        .state_schema
+                        .clone()
+                        .ok_or_else(|| no_fold(&self.describe()))?;
+                    // The fold builds the chunk's own representation, so handing it over costs no
+                    // second copy and no second charge: what was admitted for the groups is what
+                    // the chunk now holds.
+                    let partial = accumulator
+                        .finish_partial_budgeted(|bytes| buffer.resize(bytes + queue_bytes))?;
+                    let chunk = state_chunk_from_partial(partial, state_schema)?;
+                    Ok(Some(AggregateOutput::State(chunk)))
+                }
+                AggregateStage::Final => Err(no_fold(&self.describe())),
+            };
+        }
+        if let Some(merger) = self.merger.take() {
+            let output =
+                merger.finish_budgeted(|total| buffer.resize(total.saturating_add(queue_bytes)))?;
+            let output_vec_bytes = output
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Series>());
+            charge_samples(buffer, &output, output_vec_bytes, queue_bytes)?;
+            return Ok(Some(AggregateOutput::Samples(output)));
+        }
+        Err(no_fold(&self.describe()))
     }
+}
+
+/// Charges the series a finished aggregate hands over, plus the queue they enter.
+///
+/// The queue's own backing is counted by the caller that appends to it, so what is added here is
+/// the series themselves and the vector that carries them; the two are charged together because
+/// the vector outlives the call that built it.
+fn charge_samples(
+    buffer: &mut NodeBuffer,
+    output: &[Series],
+    output_vec_bytes: usize,
+    queue_bytes: usize,
+) -> Result<()> {
+    let output_bytes = output.iter().fold(0usize, |bytes, series| {
+        bytes.saturating_add(series_bytes(series))
+    });
+    buffer.resize(
+        output_bytes
+            .saturating_add(output_vec_bytes)
+            .saturating_add(queue_bytes),
+    )
 }
 
 /// The rejection of a chunk that is not the layout this node folds.
