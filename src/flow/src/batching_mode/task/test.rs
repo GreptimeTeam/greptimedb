@@ -26,6 +26,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_error::mock::MockError;
 use common_error::status_code::StatusCode;
+use common_meta::ddl::create_flow::FLOW_MAX_MEMORY_OPTION_KEY;
 use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
@@ -38,8 +39,9 @@ use datatypes::vectors::{
 use pretty_assertions::assert_eq;
 use prost::Message;
 use query::options::{
-    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
-    FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, QueryOptions,
+    FLOW_ID, FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE,
+    FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, FLOW_MAX_MEMORY_BYTES, FLOW_SCHEDULED_TIME_MILLIS,
+    FLOW_SINK_TABLE_ID, QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
@@ -53,6 +55,7 @@ use crate::batching_mode::checkpoint::{
     CHECKPOINT_DECISION_ADVANCE, CHECKPOINT_DECISION_FALLBACK, CHECKPOINT_REASON_NONE,
     FlowCheckpointDecision, FlowQueryFallbackReason,
 };
+use crate::batching_mode::engine::BatchingEngine;
 use crate::batching_mode::eval_schedule::{FlowMissedTickPolicy, FlowScheduleConfig};
 use crate::batching_mode::state::CheckpointMode;
 use crate::batching_mode::time_window::find_time_window_expr;
@@ -559,6 +562,7 @@ async fn new_test_task_engine_and_plan_with_query_and_opts_and_required(
             batch_opts,
             flow_eval_interval: None,
             eval_schedule: None,
+            max_memory_bytes: None,
         },
         exact_sequence_range_required,
     )
@@ -633,6 +637,7 @@ async fn test_non_aggregate_scheduled_sql_honors_eval_offset_phase() {
         batch_opts: Arc::new(BatchingModeOptions::default()),
         flow_eval_interval: Some(Duration::from_secs(3600)),
         eval_schedule: Some(schedule),
+        max_memory_bytes: None,
     })
     .unwrap();
 
@@ -758,6 +763,7 @@ async fn new_time_window_test_task_with_query(query: &str) -> TestTaskParts {
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
         eval_schedule: None,
+        max_memory_bytes: None,
     })
     .unwrap();
 
@@ -1430,6 +1436,67 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
     }
 }
 
+/// Asserts that recovery window capture carries the fixed sequence-range
+/// extensions plus exactly the per-flow memory budget extensions it expects:
+/// `flow.max_memory_bytes` and `flow.flow_id` when the flow declares
+/// `max_memory`, and neither of them otherwise.
+struct RecoveryBudgetCaptureHandler {
+    lower: String,
+    max_memory_bytes: Option<u64>,
+    flow_id: crate::FlowId,
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for RecoveryBudgetCaptureHandler
+{
+    async fn do_query(
+        &self,
+        query: api::v1::greptime_request::Request,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        // The three fixed extensions are unchanged.
+        assert_eq!(ctx.extension(FLOW_INCREMENTAL_MODE), Some("sequence_range"));
+        assert_eq!(
+            ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS),
+            Some(self.lower.as_str())
+        );
+        assert_eq!(
+            ctx.extension(query::options::FLOW_RETURN_REGION_SEQ),
+            Some("true")
+        );
+
+        match self.max_memory_bytes {
+            Some(max_memory_bytes) => {
+                let expected_max_memory = max_memory_bytes.to_string();
+                let expected_flow_id = self.flow_id.to_string();
+                assert_eq!(
+                    ctx.extension(FLOW_MAX_MEMORY_BYTES),
+                    Some(expected_max_memory.as_str())
+                );
+                assert_eq!(ctx.extension(FLOW_ID), Some(expected_flow_id.as_str()));
+            }
+            None => {
+                assert_eq!(ctx.extension(FLOW_MAX_MEMORY_BYTES), None);
+                assert_eq!(ctx.extension(FLOW_ID), None);
+            }
+        }
+
+        let api::v1::greptime_request::Request::Query(request) = query else {
+            panic!("recovery capture must issue a query request");
+        };
+        let Some(api::v1::query_request::Query::LogicalPlan(_plan)) = request.query else {
+            panic!("recovery capture must issue a logical plan read");
+        };
+        // Terminal proof that the requested bounds are already complete.
+        Ok(recovery_stream_output(
+            vec![],
+            Some(vec![(1, Some(10))]),
+            false,
+        ))
+    }
+}
+
 fn recovery_timestamp_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), true).with_time_index(true),
@@ -1665,6 +1732,7 @@ async fn test_scheduled_time_ctx_restored_on_no_dirty_windows() {
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
         eval_schedule: None,
+        max_memory_bytes: None,
     })
     .unwrap();
 
@@ -1710,6 +1778,52 @@ async fn test_scheduled_time_ctx_restored_on_no_dirty_windows() {
     );
 }
 
+/// The resolved per-flow memory budget (`max_memory` flow option) and the flow
+/// identity are forwarded to the frontend as the `flow.max_memory_bytes` /
+/// `flow.flow_id` extensions, and both are absent when the flow was created
+/// without that option.
+#[tokio::test]
+async fn test_frontend_extensions_carry_max_memory_bytes() {
+    let TestTaskParts { mut task, .. } = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "max_memory_sink",
+    )
+    .await;
+
+    // No `max_memory` option: nothing memory-related is forwarded, not even the
+    // flow identity.
+    assert_eq!(task.config.max_memory_bytes, None);
+    let extensions = task.frontend_extensions();
+    assert!(
+        !extensions.contains_key(FLOW_MAX_MEMORY_BYTES),
+        "flow.max_memory_bytes must not be forwarded without the max_memory option"
+    );
+    assert!(
+        !extensions.contains_key(FLOW_ID),
+        "flow.flow_id must not be forwarded without the max_memory option"
+    );
+
+    // `max_memory = '512MB'` as resolved by the batching engine.
+    let max_memory_bytes = BatchingEngine::max_memory_bytes_for_flow_options(&HashMap::from([(
+        FLOW_MAX_MEMORY_OPTION_KEY.to_string(),
+        "512MB".to_string(),
+    )]))
+    .unwrap();
+    assert_eq!(max_memory_bytes, Some(536_870_912));
+    Arc::get_mut(&mut task.config).unwrap().max_memory_bytes = max_memory_bytes;
+
+    let expected_flow_id = task.config.flow_id.to_string();
+    let extensions = task.frontend_extensions();
+    assert_eq!(
+        extensions.get(FLOW_MAX_MEMORY_BYTES).map(String::as_str),
+        Some("536870912")
+    );
+    assert_eq!(
+        extensions.get(FLOW_ID).map(String::as_str),
+        Some(expected_flow_id.as_str())
+    );
+}
+
 #[tokio::test]
 async fn test_scheduled_time_now_is_bound_to_selected_attempt() {
     let query_engine = create_test_query_engine();
@@ -1743,6 +1857,7 @@ async fn test_scheduled_time_now_is_bound_to_selected_attempt() {
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: Some(Duration::from_secs(1)),
         eval_schedule: None,
+        max_memory_bytes: None,
     })
     .unwrap();
 
@@ -1958,6 +2073,52 @@ async fn test_capture_recovery_windows_since_uses_supplied_retention_lower() {
     assert_eq!(high, lower);
     assert!(windows.is_empty());
     assert_eq!(*handler.expiry_lower.lock().unwrap(), Some(retention_lower));
+}
+
+/// Recovery window capture is a Flow-owned query: when the flow declares
+/// `max_memory` it must carry `flow.max_memory_bytes` and `flow.flow_id`, and
+/// when it does not, the extension set must stay exactly as before.
+#[tokio::test]
+async fn test_capture_recovery_windows_carries_max_memory_budget_extensions() {
+    for max_memory_bytes in [Some(536_870_912_u64), None] {
+        let TestTaskParts {
+            mut task,
+            query_engine,
+            ..
+        } = new_time_window_test_task_with_query(
+            "SELECT max(number) AS output_value, date_bin(INTERVAL '5 second', ts) AS output_window FROM numbers_with_ts WHERE number = 42 GROUP BY output_window",
+        )
+        .await;
+        configure_source_capability(&query_engine, "mito", true).await;
+        let flow_id = task.config.flow_id;
+        Arc::get_mut(&mut task.config)
+            .expect("test task config should be uniquely owned")
+            .max_memory_bytes = max_memory_bytes;
+
+        let lower = BTreeMap::from([(1, 10)]);
+        let handler = Arc::new(RecoveryBudgetCaptureHandler {
+            lower: serde_json::to_string(&lower).unwrap(),
+            max_memory_bytes,
+            flow_id,
+        });
+        let frontend = FrontendClient::from_grpc_handler(
+            Arc::downgrade(
+                &(handler.clone()
+                    as Arc<
+                        dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+                    >),
+            ),
+            QueryOptions::default(),
+        );
+
+        let (high, windows) = task
+            .capture_recovery_windows_since(&query_engine, &frontend, &lower, None)
+            .await
+            .unwrap();
+
+        assert_eq!(high, lower);
+        assert!(windows.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -3749,6 +3910,7 @@ async fn test_exact_required_unsupported_plan_keeps_exact_retry_state() {
             batch_opts: incremental_batch_opts(),
             flow_eval_interval: None,
             eval_schedule: None,
+            max_memory_bytes: None,
         },
         true,
     )
@@ -3841,6 +4003,7 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
         eval_schedule: None,
+        max_memory_bytes: None,
     })
     .unwrap();
 
@@ -3922,6 +4085,7 @@ async fn test_unsafe_incremental_plan_skip_restores_dirty_without_query() {
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
         eval_schedule: None,
+        max_memory_bytes: None,
     })
     .unwrap();
 
@@ -4012,6 +4176,7 @@ async fn test_prepare_plan_for_incremental_group_by_without_merge_columns_uses_o
         batch_opts: incremental_batch_opts(),
         flow_eval_interval: None,
         eval_schedule: None,
+        max_memory_bytes: None,
     })
     .unwrap();
 

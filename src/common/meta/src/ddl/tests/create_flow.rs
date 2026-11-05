@@ -27,8 +27,8 @@ use table::table_name::TableName;
 use crate::ddl::DdlContext;
 use crate::ddl::create_flow::{
     CreateFlowData, CreateFlowProcedure, CreateFlowState, DEFER_ON_MISSING_SOURCE_KEY,
-    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, ceil_to_whole_sec,
-    defer_on_missing_source, effective_eval_schedule_from_flow_info,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FLOW_MAX_MEMORY_OPTION_KEY, FlowType,
+    ceil_to_whole_sec, defer_on_missing_source, effective_eval_schedule_from_flow_info,
     resolve_schedule_defaults_into_task, validate_flow_options,
 };
 use crate::ddl::test_util::create_table::test_create_table_task;
@@ -342,10 +342,95 @@ fn test_validate_flow_options_unknown_option_matches_invalid_sql_error() {
     let err = validate_flow_options(&task).unwrap_err();
     assert_eq!(StatusCode::InvalidArguments, err.status_code());
     assert_eq!(
-        "Invalid SQL, error: unknown flow option 'foo', supported options: defer_on_missing_source, experimental_enable_incremental_read",
+        "Invalid SQL, error: unknown flow option 'foo', supported options: defer_on_missing_source, experimental_enable_incremental_read, max_memory",
         err.output_msg()
     );
     assert!(!err.output_msg().contains("sensitive-value"));
+}
+
+#[test]
+fn test_validate_flow_options_accepts_max_memory() {
+    for value in ["512MB", "1073741824", "1GiB"] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.flow_options
+            .insert(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), value.to_string());
+
+        validate_flow_options(&task).unwrap();
+    }
+}
+
+#[test]
+fn test_validate_flow_options_rejects_invalid_max_memory() {
+    for value in ["not-a-size", "0", "0B"] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.flow_options
+            .insert(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), value.to_string());
+
+        let err = validate_flow_options(&task).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert!(
+            err.output_msg()
+                .contains(&format!("Invalid flow option 'max_memory': {value}")),
+            "unexpected error for {value}: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_validate_flow_options_rejects_max_memory_for_streaming_flows() {
+    let mut streaming = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    streaming.flow_options.insert(
+        FlowType::FLOW_TYPE_KEY.to_string(),
+        FlowType::STREAMING.to_string(),
+    );
+    streaming
+        .flow_options
+        .insert(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), "512MB".to_string());
+
+    let err = validate_flow_options(&streaming).unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    assert!(
+        err.output_msg()
+            .contains("flow option 'max_memory' is only supported for batching flows"),
+        "unexpected error: {err}"
+    );
+
+    // The same option on a batching flow (explicit or default) stays accepted,
+    // with or without the `max_memory` option itself.
+    for flow_type in [Some(FlowType::BATCHING), None] {
+        let mut batching = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        if let Some(flow_type) = flow_type {
+            batching
+                .flow_options
+                .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type.to_string());
+        }
+        validate_flow_options(&batching).unwrap();
+
+        batching
+            .flow_options
+            .insert(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), "512MB".to_string());
+        validate_flow_options(&batching).unwrap();
+    }
 }
 
 #[test]

@@ -34,6 +34,14 @@ pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
 /// Query planning, SQL/TQL parsing, range-select rewrite and DataFusion
 /// execution read this extension so `now()` is stable for the whole attempt.
 pub const FLOW_SCHEDULED_TIME_MILLIS: &str = "flow.scheduled_time_millis";
+/// Resolved per-flow memory budget in decimal bytes, carried with a flow's own
+/// query. The value comes from the flow's `max_memory` option and is only
+/// transported here; it is interpreted and enforced by the execution side.
+pub const FLOW_MAX_MEMORY_BYTES: &str = "flow.max_memory_bytes";
+/// Identity of the flow that issues the query, as a decimal flow id. Lets the
+/// execution side key a per-flow memory budget on the flow rather than on the
+/// individual query. Forwarded together with [`FLOW_MAX_MEMORY_BYTES`].
+pub const FLOW_ID: &str = "flow.flow_id";
 /// Enable by default, set to false to explicitly disable.
 pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
     "query.enable_remote_dynamic_filter_pushdown";

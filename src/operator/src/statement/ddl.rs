@@ -41,8 +41,8 @@ use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::{
-    DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
-    INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY,
+    DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+    FLOW_MAX_MEMORY_OPTION_KEY, FlowType, INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY,
 };
 use common_meta::instruction::CacheIdent;
 #[cfg(feature = "enterprise")]
@@ -144,9 +144,10 @@ impl Default for DdlSubmitOptions {
 }
 
 #[cfg(not(feature = "enterprise"))]
-const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
+const ALLOWED_FLOW_OPTIONS: [&str; 3] = [
     DEFER_ON_MISSING_SOURCE_KEY,
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+    FLOW_MAX_MEMORY_OPTION_KEY,
 ];
 
 fn build_procedure_id_output(procedure_id: &str) -> Result<Output> {
@@ -239,6 +240,8 @@ fn validate_and_normalize_flow_options(
                 DEFER_ON_MISSING_SOURCE_KEY | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY => {
                     normalize_flow_bool_option(&key, &value)?
                 }
+                // A `ReadableSize` string such as `512MB`; validated by meta.
+                FLOW_MAX_MEMORY_OPTION_KEY => value,
                 #[cfg(feature = "enterprise")]
                 _ => value,
                 #[cfg(not(feature = "enterprise"))]
@@ -3511,6 +3514,18 @@ mod test {
                     "false".to_string(),
                 )
             ])
+        );
+    }
+
+    #[test]
+    fn test_validate_and_normalize_flow_options_accepts_max_memory() {
+        let options =
+            HashMap::from([(FLOW_MAX_MEMORY_OPTION_KEY.to_string(), "512MB".to_string())]);
+
+        // The size string is passed through unchanged; meta validates it.
+        assert_eq!(
+            validate_and_normalize_flow_options(options.clone(), None).unwrap(),
+            options
         );
     }
 
