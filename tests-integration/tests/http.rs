@@ -6086,6 +6086,36 @@ pub async fn test_remote_write_v2_histogram_count_and_group_native_route(store_t
             "{query} executed a node that is not the fused producer: {fused:?}"
         );
     }
+
+    // `min` reads a float value, so a group holding only histograms answers nothing - and says why:
+    // Prometheus reports the samples it skipped instead of refusing the statement.
+    let url = "/v1/prometheus/api/v1/query?query=min(native_histogram_counted)&time=4";
+    observer.clear();
+    let response = client
+        .get(url)
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(
+        body["data"]["result"].as_array().map(Vec::len),
+        Some(0),
+        "a histogram-only group has no float to answer: {body}"
+    );
+    // The route has to have run before the annotation can exist: check that first, so a missing
+    // info is read as an annotation problem and not as a fall back to the existing plan.
+    let fused = observer.take_all("min(h)");
+    assert_eq!(fused[0].name(), "FusedSeriesExec");
+    let infos = body["infos"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no infos in {body}"));
+    assert!(
+        infos.iter().any(|info| info
+            .as_str()
+            .is_some_and(|text| text.contains("ignored native histogram samples"))),
+        "the skipped-sample info did not reach the response: {body}"
+    );
 }
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {

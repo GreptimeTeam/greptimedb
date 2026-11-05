@@ -31,11 +31,14 @@
 
 use std::sync::Arc;
 
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{Series, SeriesSchema};
 
-use crate::aggregate::validate_aggregate_series;
-use crate::aggregate::{AggregateOp, FloatAggregator, FloatMerger, Grouping};
+use crate::aggregate::{
+    AggregateOp, FloatAggregator, FloatMerger, Grouping, HistogramSamples, histogram_samples,
+    validate_aggregate_series,
+};
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::series_bytes;
 use crate::native::execute::{NodeBuffer, evaluated_bytes};
@@ -62,6 +65,9 @@ pub(crate) struct AggregateRuntime {
     /// The kind this node folds by, as the runtime's own enum, so the chunk check can ask what the
     /// operation accepts.
     fold_op: AggregateOp,
+    /// The query's annotation collector, once the driver installed it. Only an operation that skips
+    /// histogram samples has anything to say, and it says it once.
+    annotations: Option<PromqlAnnotationCollector>,
     /// The fold. `None` once [`Self::compute`] has taken it, which is also what says the node has
     /// nothing left to fold into.
     accumulator: Option<FloatAggregator>,
@@ -76,6 +82,25 @@ pub(crate) struct AggregateRuntime {
 }
 
 impl AggregateRuntime {
+    /// The PromQL name of the aggregate this node folds, as an annotation names it.
+    fn aggregate_name(&self) -> &'static str {
+        match self.fold_op {
+            AggregateOp::Sum => "sum",
+            AggregateOp::Count => "count",
+            AggregateOp::Avg => "avg",
+            AggregateOp::Min => "min",
+            AggregateOp::Max => "max",
+            AggregateOp::Group => "group",
+            AggregateOp::Stddev => "stddev",
+            AggregateOp::Stdvar => "stdvar",
+        }
+    }
+
+    /// Gives this node the query's collector, so it can report what it skipped.
+    pub(crate) fn set_annotations(&mut self, collector: PromqlAnnotationCollector) {
+        self.annotations = Some(collector);
+    }
+
     /// What this node computes, for a rejection that has to say what it refused.
     ///
     /// It names the kind this node computes, which distinguishes it from another node in the tree.
@@ -127,6 +152,7 @@ impl AggregateRuntime {
             return Ok(Self {
                 op,
                 fold_op: kind,
+                annotations: None,
                 schema,
                 accumulator: None,
                 merger: Some(merger),
@@ -157,6 +183,7 @@ impl AggregateRuntime {
         Ok(Self {
             op,
             fold_op: kind,
+            annotations: None,
             schema,
             accumulator: Some(initial),
             merger: None,
@@ -193,6 +220,19 @@ impl AggregateRuntime {
         // chunk of another field count or another grid would be folded into the wrong places.
         validate_aggregate_series(&self.schema, &chunk.series, self.fold_op)
             .map_err(|error| folded_chunk(&self.describe(), error))?;
+        if histogram_samples(self.fold_op) == HistogramSamples::Ignored
+            && !crate::map::is_float_series(&chunk.series)
+            && let Some(collector) = &self.annotations
+        {
+            // Prometheus reports once that it skipped samples it cannot order or average over; the
+            // fold keeps going on the float samples it can read.
+            collector.record_info(format!(
+                "{}: ignored native histogram samples",
+                self.aggregate_name()
+            ));
+            // The collector keeps the message, so the node has said its piece.
+            self.annotations = None;
+        }
         let Some(accumulator) = self.accumulator.as_mut() else {
             return Err(no_fold(&self.describe()));
         };
