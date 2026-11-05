@@ -40,13 +40,14 @@ use std::time::{Duration, UNIX_EPOCH};
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
+use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::logical_expr::UserDefinedLogicalNode;
 use datafusion::logical_expr::{
-    Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
+    EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
 };
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
@@ -73,6 +74,7 @@ use promql_parser::parser::{
 use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
+use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
@@ -209,22 +211,6 @@ impl PromPlanner {
         Ok(Some((plan, output_ctx)))
     }
 
-    /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
-    ///
-    /// The compiler's bound tree and selector schemas determine the native output names; the
-    /// existing planner is not consulted for capability or schema approval.
-    ///
-    /// The route is offered a whole expression because the compiler folds a range function and the
-    /// math functions over it into one tree: offering a sub-expression instead would compile a tree
-    /// that computes something the reader did not write. Everything else about the node comes from
-    /// the planner's resolved selector context: the table name, the time index column, the tag
-    /// columns and the field columns, which are exactly the raw series schema the tree's input
-    /// has to be compiled against. Selectors with a `__field__` matcher keep legacy planning.
-    ///
-    /// `None` is not a failure. It says this query cannot take the route unchanged, and the caller
-    /// plans it with the existing planner as if this method did not exist. The aggregate split only
-    /// admits shapes the split can carry; other vector-wide operations, subqueries, alternative
-    /// matchers, and unbindable scans keep existing planning.
     /// Builds the scan of the one logical table the current context is bound to. The caller has
     /// already preprocessed this selector's matchers and set the context to its table.
     async fn prepare_one_scan(
@@ -431,6 +417,22 @@ impl PromPlanner {
             .map(|(plan, _)| plan))
     }
 
+    /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
+    ///
+    /// The compiler's bound tree and selector schemas determine the native output names; the
+    /// existing planner is not consulted for capability or schema approval.
+    ///
+    /// The route is offered a whole expression because the compiler folds a range function and the
+    /// math functions over it into one tree: offering a sub-expression instead would compile a tree
+    /// that computes something the reader did not write. Everything else about the node comes from
+    /// the planner's resolved selector context: the table name, the time index column, the tag
+    /// columns and the field columns, which are exactly the raw series schema the tree's input
+    /// has to be compiled against. Selectors with a `__field__` matcher keep legacy planning.
+    ///
+    /// `None` is not a failure. It says this query cannot take the route unchanged, and the caller
+    /// plans it with the existing planner as if this method did not exist. The aggregate split only
+    /// admits shapes the split can carry; other vector-wide operations, subqueries, alternative
+    /// matchers, and unbindable scans keep existing planning.
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,
@@ -617,7 +619,34 @@ impl PromPlanner {
                         .context(DataFusionPlanningSnafu);
                     }
                     if metrics.is_empty() {
-                        return Ok(None);
+                        // Nothing matches the selector, so the query still has an answer: the
+                        // empty vector. Planning it here rather than declining is what keeps a
+                        // nameless selector that matches nothing from reaching the existing
+                        // planner, which has no table to bind and raises `TableNameNotFound`: no
+                        // table matching is a result, not a failure to plan.
+                        //
+                        // The answer is an empty raw series frame, which is the one input the node
+                        // and every operator above it already accept. A statement with another
+                        // data input beside this selector keeps its existing plan: two inputs
+                        // reach one node under one partition-count contract, and a real scan's
+                        // partitions and an empty frame's single one cannot share it here.
+                        if selectors.len() != 1 {
+                            return Ok(None);
+                        }
+                        // A `__field__` matcher narrows the field set in a projection the existing
+                        // planner builds, and this route declines it for a scan it can read; the
+                        // same refusal keeps the empty input from claiming a field layout the
+                        // matcher would have decided.
+                        if self.ctx.field_column_matcher.is_some() {
+                            return Ok(None);
+                        }
+                        prepared.push(empty_discovered_input(
+                            self.ctx
+                                .time_index_column
+                                .clone()
+                                .unwrap_or_else(|| DEFAULT_TIME_INDEX_COLUMN.to_string()),
+                        )?);
+                        continue;
                     }
                     // One compiler source per selector: the discovered scans become one union
                     // input, so the compiled tree still reads what the planner prepared.
@@ -762,8 +791,16 @@ impl PromPlanner {
         // above them; see `RawSeriesSource`. A metric logical table's id is part of the identity it
         // reads: two ids are two metrics even when one physical table holds both, so two selectors
         // that differ only by that id still read different series and are bound as two inputs.
-        let cross_table =
-            !same_table_scans(prepared.iter().map(|(scan, ..)| scan)) || logical_ids_differ;
+        //
+        // The typed empty input of a selector that matched no table reads no region, so it takes no
+        // part in this: it is not a second table beside the others, and counting it as one would
+        // ask the others' binding to name a metric it does not have.
+        let cross_table = !same_table_scans(
+            prepared
+                .iter()
+                .map(|(scan, ..)| scan)
+                .filter(|scan| !is_empty_discovered_input(scan)),
+        ) || logical_ids_differ;
         // The first input names the output's time index and, on one table, binds every scan.
         let Some((_, _, metric, time, tags, _)) = prepared.first() else {
             return Ok(None);
@@ -1322,6 +1359,46 @@ impl PromPlanner {
             lookback_delta: Duration::from_millis(self.ctx.lookback_delta as u64),
         })
     }
+}
+
+/// The typed empty input of a discovered selector that matched no metric table.
+///
+/// No table matched, so there is no scan and no metric name: the input is an empty raw series
+/// frame, the one input a [`FusedSeries`] node and every operator above it already read. It is
+/// bound to a series schema of one field and no grid because that is the layout this route compiles
+/// a selector against, and a schema with no field is refused by the compiler for the shapes that
+/// read one. No row of that field is ever read, so its name decides only what an operator that
+/// answers on its own - `absent` - calls its value column.
+///
+/// The empty plan declares the frame a scan would declare, so the physical planner reads it as the
+/// frame producer it is instead of looking for a region scan below the node. Its labels are
+/// explicit, which is the mode a producer names each series in rather than a scan's storage key.
+fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
+    let schema = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from(DEFAULT_FIELD_COLUMN),
+        }]),
+        eval_grid: None,
+    });
+    let frame =
+        raw_series_frame_schema_with_ordering(&schema, &RawLabelSource::Explicit, NATIVE_ORDERING)
+            .context(DataFusionPlanningSnafu)?;
+    let input = LogicalPlan::EmptyRelation(EmptyRelation {
+        produce_one_row: false,
+        schema: Arc::new(
+            DFSchema::try_from(frame.as_ref().clone()).context(DataFusionPlanningSnafu)?,
+        ),
+    });
+    // No table stands behind this input, so no region splits it along a partition column.
+    Ok((input, schema, None, time_index, Vec::new(), false))
+}
+
+/// Whether `plan` is the typed empty input [`empty_discovered_input`] builds.
+///
+/// It reads no region and holds no scan, so it is not one of the tables a node's binding is derived
+/// from: two selectors are "of one table" only if the tables they scan are one.
+fn is_empty_discovered_input(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row)
 }
 
 /// The subtrees a [`NativeNode`] reads, in the order the node evaluates them.
@@ -2518,15 +2595,6 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
     })
 }
 
-/// The label columns `node` reports, from the tags of the scan each input reads.
-///
-/// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
-/// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
-/// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
-/// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
-/// labels this walk does not derive - a whole-vector operation or a label rewrite, which renames the
-/// labels below it - so a tree holding one reports no label set here. Such a tree is declined rather
-/// than borrowing output names from the legacy planner.
 /// The most metric tables one discovered selector will scan.
 ///
 /// Every one of them costs a scan of the physical region behind it, and the union is as wide as
@@ -2571,6 +2639,15 @@ fn without_metric_name(tags: Vec<String>) -> Vec<String> {
     tags.into_iter().filter(|tag| tag != METRIC_NAME).collect()
 }
 
+/// The label columns `node` reports, from the tags of the scan each input reads.
+///
+/// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
+/// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
+/// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
+/// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
+/// labels this walk does not derive - a whole-vector operation or a label rewrite, which renames the
+/// labels below it - so a tree holding one reports no label set here. Such a tree is declined rather
+/// than borrowing output names from the legacy planner.
 fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Aggregate { input, op } => {

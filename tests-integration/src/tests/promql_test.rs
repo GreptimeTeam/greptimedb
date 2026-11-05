@@ -4268,6 +4268,97 @@ async fn native_promql_cross_table_pairs_run_above_both_regions() {
     }
 }
 
+/// A nameless selector reads every metric it matches, and each output row keeps its own name.
+///
+/// The two metrics hold the same ordinary label `job="api"` and differ only in their values, so
+/// `__name__` is the one thing that tells their series apart: a plan that dropped it would report
+/// one label set twice, and a plan that bound one metric's name to both rows would report a name
+/// one of them does not carry. Each row's name is asserted together with its value, so a row cannot
+/// pass by carrying the right name and another metric's samples.
+///
+/// Only the bare selector is asserted. The aggregate form of the same selector cannot be planned in
+/// a frontend yet: the in-process bypass in `query::dist_plan::analyzer` is granted only to a fused
+/// root, or to a split aggregate whose partial producer reads a bare `TableScan`, and a discovered
+/// source is a `RawSeriesSource`. The bypass is therefore not granted, `should_expand` expands one
+/// level lower than the source, and
+/// `plan_raw_series_source` refuses the `MergeScanExec` it is then handed
+/// (`RawSeriesSource for metric ... must be planned over a region scan, got MergeScanExec`). That
+/// is a separate, pre-existing gap - see
+/// `.e-agent/notes/KNOWN-ISSUE-discovery-under-aggregate-cannot-plan.md` - so `sum({job="api"})` is
+/// deliberately not asserted here.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_discovery_names_each_metric_it_reads() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_discovery_names",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    // Two logical metrics of one physical table, whose rows hold the same ordinary label: only the
+    // metric name tells their series apart.
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE native_dn_phy (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job))
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_dn_alpha (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job))
+            ENGINE=metric WITH ("on_physical_table" = "native_dn_phy");
+        CREATE TABLE native_dn_beta (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job))
+            ENGINE=metric WITH ("on_physical_table" = "native_dn_phy");
+        INSERT INTO native_dn_alpha (job, ts, val) VALUES ('api', 0, 1);
+        INSERT INTO native_dn_beta (job, ts, val) VALUES ('api', 0, 2);
+        ADMIN FLUSH_TABLE('native_dn_phy');
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    observer.clear();
+    let (columns, rows) =
+        native_labelled_rows(discovery_query(&instance, "{job=\"api\"}").await).await;
+    assert!(
+        observed_physical_nodes(&observer)
+            .into_iter()
+            .any(|node| node.name() == "FusedSeriesExec"),
+        "the discovered selector did not reach the fused node: {columns:?} {rows:?}"
+    );
+    let named = rows
+        .iter()
+        .map(|(_, labels, value)| (labels.get("__name__").cloned().unwrap_or_default(), *value))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        named,
+        vec![
+            ("native_dn_alpha".to_string(), 1.0),
+            ("native_dn_beta".to_string(), 2.0),
+        ],
+        "each row reports its own metric's name and samples: {rows:?}"
+    );
+}
+
+/// `promql` evaluated at one instant through the Prometheus handler, which is the path that
+/// authorizes and plans a discovered selector.
+///
+/// A `TQL EVAL` statement reaches the planner through the statement executor instead, and that path
+/// prepares no discovery scope, so it keeps declining a selector that names no metric. The trait is
+/// named in full because this module already calls the SQL handler's `do_query`.
+async fn discovery_query(instance: &Arc<Instance>, promql: &str) -> Output {
+    let query = PromQuery {
+        query: promql.to_string(),
+        start: "0".to_string(),
+        end: "0".to_string(),
+        step: "1s".to_string(),
+        ..PromQuery::default()
+    };
+    servers::prometheus_handler::PrometheusHandler::do_query(
+        instance.as_ref(),
+        &query,
+        native_query_context(true, 4),
+    )
+    .await
+    .unwrap()
+}
+
 /// `(time, labels, value)` of every row, sorted, whatever the columns are named: the time index is
 /// the timestamp column, the value the one `Float64` column, and every other column a label that a
 /// NULL or empty value leaves out. Also returns the column names.
