@@ -15,7 +15,6 @@
 //! Immutable native-reader metadata shares the decoded SST reservation.
 
 use std::any::{Any, TypeId};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use store_api::storage::FileId;
@@ -63,12 +62,11 @@ pub(crate) fn shared_weight(key: &DecodedKey, value: &DecodedValue) -> u32 {
     }
 }
 
-/// Contains no artifact handle or live object-store reader. Fixed lock striping bounds
-/// coordination memory; cancellation drops the guard and permits a later retry.
+/// Contains no artifact handle or live object-store reader. Loads run independently;
+/// admission uses a synchronous, atomic cache entry after loading.
 #[derive(Clone)]
 pub(crate) struct MetadataCache {
     cache: SstDecodedMetaCache,
-    locks: Arc<[tokio::sync::Mutex<()>; 32]>,
     namespace: FileId,
 }
 impl CacheStrategy {
@@ -78,7 +76,6 @@ impl CacheStrategy {
         };
         Some(MetadataCache {
             cache: manager.sst_decoded_meta_cache.clone()?,
-            locks: manager.columnar_load_locks.clone(),
             namespace,
         })
     }
@@ -185,16 +182,11 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
         return Ok(value);
     }
     CACHE_MISS.with_label_values(&[COLUMNAR_META]).inc();
-    let mut hash = DefaultHasher::new();
-    key.hash(&mut hash);
-    let _guard = context.locks[hash.finish() as usize % context.locks.len()]
-        .lock()
-        .await;
-    if let Some(value) = get() {
-        return Ok(value);
-    }
     CACHE_LOAD.with_label_values(&[COLUMNAR_META]).inc();
     let value = Arc::new(loader.await?);
+    // A caller may flush buffered output while its loader is Pending, then stop
+    // polling it under downstream backpressure. Never hold a shared lock across
+    // that await: another stream may need the lock to finish the current series.
     let identity_size = match &key {
         DecodedKey::Columnar { identity, .. } => identity.capacity(),
         _ => 0,
@@ -207,26 +199,34 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     if let Ok(weight) = u32::try_from(retained)
         && u64::from(weight) <= context.cache.policy().max_capacity().unwrap_or(0)
     {
-        CACHE_BYTES
-            .with_label_values(&[COLUMNAR_META])
-            .add(i64::from(weight));
-        context.cache.insert(
-            key,
-            DecodedValue::Columnar {
+        let entry = context
+            .cache
+            .entry(key)
+            .or_insert_with(|| DecodedValue::Columnar {
                 value: value.clone(),
                 weight,
-            },
-        );
+            });
+        if entry.is_fresh() {
+            CACHE_BYTES
+                .with_label_values(&[COLUMNAR_META])
+                .add(i64::from(weight));
+        }
+        if let DecodedValue::Columnar {
+            value: admitted, ..
+        } = entry.into_value()
+            && let Ok(admitted) = admitted.downcast::<T>()
+        {
+            return Ok(admitted);
+        }
     }
     Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
     use crate::cache::CacheManager;
+    use std::hash::{DefaultHasher, Hash, Hasher};
 
     #[test]
     fn payload_cache_isolates_objects_and_bounds_memory() {
@@ -272,22 +272,68 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case::same_key(false)]
+    #[case::stripe_collision(true)]
     #[tokio::test]
-    async fn concurrent_loads_coalesce_and_cancellation_allows_retry() {
+    async fn backpressured_load_does_not_block_other_readers(#[case] different_key: bool) {
         let manager = CacheManager::builder().sst_meta_cache_size(8192).build();
         let strategy = CacheStrategy::EnableAll(Arc::new(manager));
         let cache = strategy.columnar_metadata(FileId::random()).unwrap();
-        let calls = AtomicUsize::new(0);
-        let request = || {
-            load(Some(&cache), "generation/part/page".into(), |_| 64, async {
-                calls.fetch_add(1, Ordering::Relaxed);
-                tokio::task::yield_now().await;
-                Ok(vec![1u8, 2, 3])
-            })
+        let identity = "generation/part/page";
+        // Keep the former stripe collision as a regression case for the old loader.
+        let stripe = |identity: &str| {
+            let key = DecodedKey::Columnar {
+                namespace: cache.namespace,
+                identity: identity.to_string(),
+                representation: TypeId::of::<Vec<u8>>(),
+            };
+            let mut hash = DefaultHasher::new();
+            key.hash(&mut hash);
+            hash.finish() as usize % 32
         };
-        let (left, right) = tokio::join!(request(), request());
-        assert!(Arc::ptr_eq(&left.unwrap(), &right.unwrap()));
-        assert_eq!(1, calls.load(Ordering::Relaxed));
+        let other_identity = if different_key {
+            (0..)
+                .map(|i| format!("other/{i}"))
+                .find(|other| stripe(other) == stripe(identity))
+                .unwrap()
+        } else {
+            identity.to_string()
+        };
+        let (complete, pending) = tokio::sync::oneshot::channel();
+        let mut owner = Box::pin(load(
+            Some(&cache),
+            "generation/part/page".into(),
+            |_| 64,
+            async {
+                pending.await.unwrap();
+                Ok(vec![1u8, 2, 3])
+            },
+        ));
+        assert!(futures::poll!(&mut owner).is_pending());
+        // Deliver the I/O wake, but deliberately never poll its owner again until
+        // the second reader completes. This models a stream paused after a flush.
+        complete.send(()).unwrap();
+        let other = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            load(Some(&cache), other_identity, |_| 64, async {
+                Ok(vec![1u8, 2, 3])
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(other.as_slice(), &[1, 2, 3]);
+        let first = owner.await.unwrap();
+        if !different_key {
+            assert!(Arc::ptr_eq(&first, &other));
+        }
+        let cached = load(Some(&cache), "generation/part/page".into(), |_| 64, async {
+            panic!("must reuse the admitted entry")
+        })
+        .await
+        .unwrap();
+        assert!(Arc::ptr_eq(&first, &cached));
 
         let mut canceled = Box::pin(load(
             Some(&cache),
@@ -303,5 +349,35 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(&[4], retry.as_slice());
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_misses_share_the_admitted_value() {
+        let strategy = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder().sst_meta_cache_size(8192).build(),
+        ));
+        let cache = strategy.columnar_metadata(FileId::random()).unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(64));
+        let tasks = (0..64)
+            .map(|_| {
+                let cache = cache.clone();
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    load(Some(&cache), "shared-generation".into(), |_| 64, async {
+                        barrier.wait().await;
+                        Ok(vec![1_u8; 64])
+                    })
+                    .await
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let values = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::try_join_all(tasks),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(values.iter().all(|value| Arc::ptr_eq(value, &values[0])));
     }
 }

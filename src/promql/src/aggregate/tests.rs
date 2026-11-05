@@ -1394,22 +1394,25 @@ fn assert_flat_close(
 fn to_layout(mut partial: PartialAggregate) -> PartialAggregate {
     let kept = partial.op.state_fields();
     for group in &mut partial.groups {
-        for (_, states) in &mut group.points {
-            for state in states.iter_mut().flatten() {
-                let mut stripped = AccumulatorState::default();
-                for field in kept {
-                    match field {
-                        StateField::Value => stripped.value = state.value,
-                        StateField::Mean => stripped.mean = state.mean,
-                        StateField::Compensation => stripped.compensation = state.compensation,
-                        StateField::Count => stripped.count = state.count,
-                        StateField::IncrementalMean => {
-                            stripped.incremental_mean = state.incremental_mean
-                        }
+        for state in group
+            .states
+            .iter_mut()
+            .flat_map(|field| field.iter_mut())
+            .flatten()
+        {
+            let mut stripped = AccumulatorState::default();
+            for field in kept {
+                match field {
+                    StateField::Value => stripped.value = state.value,
+                    StateField::Mean => stripped.mean = state.mean,
+                    StateField::Compensation => stripped.compensation = state.compensation,
+                    StateField::Count => stripped.count = state.count,
+                    StateField::IncrementalMean => {
+                        stripped.incremental_mean = state.incremental_mean
                     }
                 }
-                *state = stripped;
             }
+            *state = stripped;
         }
     }
     partial
@@ -1432,7 +1435,7 @@ fn merged_and_serial(op: AggregateOp, partitions: &[&[f64]]) -> (f64, f64) {
             aggregator.update(&series).unwrap();
         }
         merger
-            .merge(to_layout(aggregator.finish_partial()))
+            .merge(to_layout(aggregator.finish_partial().unwrap()))
             .unwrap();
     }
     let all: Vec<Series> = partitions
@@ -1471,11 +1474,22 @@ fn finish_partial_reserves_one_slot_per_seen_point() {
     aggregator.update(&series).unwrap();
     let expected = aggregator
         .state_bytes()
-        .saturating_add(std::mem::size_of::<PartialGroup>())
+        .saturating_add(std::mem::size_of::<
+            datatypes::series::aggregate_state::StateSeries,
+        >())
+        .saturating_add(std::mem::size_of::<datatypes::series::time::TimeAxis>())
         .saturating_add(
-            SEEN.saturating_mul(std::mem::size_of::<(usize, Vec<Option<AccumulatorState>>)>()),
+            SEEN.saturating_mul(
+                std::mem::size_of::<datatypes::series::time::GridSpan>()
+                    .saturating_add(std::mem::size_of::<usize>()),
+            ),
         )
-        .saturating_add(SEEN.saturating_mul(std::mem::size_of::<Option<AccumulatorState>>()));
+        .saturating_add(std::mem::size_of::<
+            Vec<Option<datatypes::series::aggregate_state::AggregateStateValues>>,
+        >())
+        .saturating_add(SEEN.saturating_mul(std::mem::size_of::<
+            Option<datatypes::series::aggregate_state::AggregateStateValues>,
+        >()));
     let mut peak = 0usize;
     let partial = aggregator
         .finish_partial_budgeted(|bytes| {
@@ -1483,9 +1497,11 @@ fn finish_partial_reserves_one_slot_per_seen_point() {
             Ok(())
         })
         .unwrap();
-    // The vector is reserved once, at the points that carry a state, so pushing does not double it.
-    assert_eq!(partial.groups[0].points.len(), SEEN);
-    assert_eq!(partial.groups[0].points.capacity(), SEEN);
+    // Each field vector is reserved once, at the points that carry a state, so pushing does not
+    // double it and the export holds one vector per field rather than one per point.
+    assert_eq!(partial.groups[0].states.len(), 1);
+    assert_eq!(partial.groups[0].states[0].len(), SEEN);
+    assert_eq!(partial.groups[0].states[0].capacity(), SEEN);
     assert_eq!(peak, expected);
 }
 
@@ -1496,20 +1512,17 @@ fn merge_charges_the_capacity_of_an_input_partial() {
     let mut aggregator =
         FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
     aggregator.update(&series).unwrap();
-    let partial = aggregator.finish_partial();
-    assert_eq!(partial.groups[0].points.capacity(), 1);
+    let partial = aggregator.finish_partial().unwrap();
+    assert_eq!(partial.groups[0].states[0].capacity(), 1);
     let mut spare = partial.clone();
-    let point = spare.groups[0].points.pop().unwrap();
-    let mut points = Vec::with_capacity(1024);
-    points.push(point);
-    spare.groups[0].points = points;
+    spare.groups[0].states[0].reserve(1023);
     let peak = |partial: PartialAggregate| {
         let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
         let (peak, result) = peak_admission(|budget| merger.merge_budgeted(partial, budget));
         result.unwrap();
         peak
     };
-    let slack = 1023 * std::mem::size_of::<(usize, Vec<Option<AccumulatorState>>)>();
+    let slack = 1023 * std::mem::size_of::<Option<AccumulatorState>>();
     assert!(
         peak(spare) >= peak(partial).saturating_add(slack),
         "spare capacity was not admitted"
@@ -1526,8 +1539,8 @@ fn merge_charges_one_block_per_new_block_not_per_point() {
     let mut aggregator =
         FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
     aggregator.update(&series).unwrap();
-    let partial = aggregator.finish_partial();
-    assert_eq!(partial.groups[0].points.len(), 64);
+    let partial = aggregator.finish_partial().unwrap();
+    assert_eq!(partial.groups[0].states[0].len(), 64);
     let block = BLOCK_POINTS * 64 * std::mem::size_of::<FloatState>();
     let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
     let (peak, result) = peak_admission(|budget| merger.merge_budgeted(partial, budget));
@@ -1545,12 +1558,20 @@ fn merge_charges_one_block_per_new_block_not_per_point() {
 #[test]
 fn merge_admits_groups_and_blocks_before_it_inserts_them() {
     let schema = schema(&["value"]);
+    let empty_axis = || {
+        datatypes::series::time::TimeAxis::from_grid_spans(
+            schema.eval_grid.clone().unwrap(),
+            Vec::new(),
+        )
+        .unwrap()
+    };
     let partial = |ids: std::ops::Range<usize>| PartialAggregate {
         op: AggregateOp::Sum,
         groups: ids
-            .map(|id| PartialGroup {
+            .map(|id| datatypes::series::aggregate_state::StateSeries {
                 metric: metric("m", &[("i", &id.to_string())]),
-                points: Vec::new(),
+                time: empty_axis(),
+                states: vec![Vec::new()],
             })
             .collect(),
     };
@@ -1564,7 +1585,7 @@ fn merge_admits_groups_and_blocks_before_it_inserts_them() {
     assert!(merger.merge_budgeted(partial(100..108), refused).is_err());
     assert_eq!(merger.state_bytes(), retained);
     let mut invalid = partial(200..201);
-    invalid.groups[0].points.push((256, Vec::new()));
+    invalid.groups[0].states[0].push(None);
     assert!(merger.merge(invalid).is_err());
     assert_eq!(merger.state_bytes(), retained);
     assert!(
@@ -1584,7 +1605,7 @@ fn merge_admits_the_key_before_it_builds_it() {
         let mut aggregator =
             FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
         aggregator.update(&series).unwrap();
-        aggregator.finish_partial()
+        aggregator.finish_partial().unwrap()
     };
     let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
     merger.merge(partial()).unwrap();
@@ -1622,9 +1643,14 @@ fn a_long_metric_name_is_held_by_the_group_and_by_its_key() {
     let retained = |name: &str| {
         let partial = PartialAggregate {
             op: AggregateOp::Sum,
-            groups: vec![PartialGroup {
+            groups: vec![datatypes::series::aggregate_state::StateSeries {
                 metric: metric(name, &[]),
-                points: Vec::new(),
+                time: datatypes::series::time::TimeAxis::from_grid_spans(
+                    schema.eval_grid.clone().unwrap(),
+                    Vec::new(),
+                )
+                .unwrap(),
+                states: vec![Vec::new()],
             }],
         };
         let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
@@ -1747,7 +1773,7 @@ fn partials_merge_to_the_serial_result() {
                     aggregator.update(series).unwrap();
                 }
                 merger
-                    .merge(to_layout(aggregator.finish_partial()))
+                    .merge(to_layout(aggregator.finish_partial().unwrap()))
                     .unwrap();
             }
             let merged = merger.finish().unwrap();
@@ -1760,7 +1786,7 @@ fn partials_merge_to_the_serial_result() {
             }
             let mut merger = FloatMerger::try_new(&schema, op).unwrap();
             merger
-                .merge(to_layout(aggregator.finish_partial()))
+                .merge(to_layout(aggregator.finish_partial().unwrap()))
                 .unwrap();
             assert_flat_close(
                 &merger.finish().unwrap(),
@@ -1876,7 +1902,7 @@ fn equal_zero_extremes_follow_the_merge_order() {
                 aggregator
                     .update(&input(&schema, metric("m", &[]), 0, &[vec![Some(value)]]))
                     .unwrap();
-                merger.merge(aggregator.finish_partial()).unwrap();
+                merger.merge(aggregator.finish_partial().unwrap()).unwrap();
             }
             let value = values_of(&merger.finish().unwrap(), 0, 128).1[0].unwrap();
             assert_eq!(
@@ -1897,15 +1923,27 @@ fn a_merge_rejects_state_that_does_not_fit() {
         aggregator
             .update(&input(&schema, metric("m", &[]), 5, &[vec![Some(1.0)]]))
             .unwrap();
-        aggregator.finish_partial()
+        aggregator.finish_partial().unwrap()
     };
     let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
     assert!(merger.merge(partial(AggregateOp::Avg)).is_err());
+    // A field with a state at a position the axis does not carry: the shape no longer fits.
     let mut wide = partial(AggregateOp::Sum);
-    wide.groups[0].points[0].1.push(None);
+    wide.groups[0].states[0].push(None);
     assert!(merger.merge(wide).is_err());
+    // An axis whose positions belong to another grid: the merge is bound to its own.
     let mut late = partial(AggregateOp::Sum);
-    late.groups[0].points[0].0 = 128;
+    // The fixture's grid holds 128 positions, so a position from a longer grid is out of bounds.
+    let other_grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 256).unwrap()).unwrap());
+    late.groups[0].time = datatypes::series::time::TimeAxis::from_grid_spans(
+        other_grid,
+        vec![datatypes::series::time::GridSpan::new(200, 1)],
+    )
+    .unwrap();
+    late.groups[0].states[0] = vec![Some(AccumulatorState {
+        value: 1.0,
+        ..Default::default()
+    })];
     assert!(merger.merge(late).is_err());
     assert!(merger.finish().unwrap().is_empty());
 }

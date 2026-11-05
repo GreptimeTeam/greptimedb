@@ -414,13 +414,6 @@ impl ColumnarPreparedSource {
                         table_id: table.value(row),
                         tsid: tsid.value(row),
                     };
-                    let mut values = HashMap::new();
-                    for (column_id, strings) in &tag_arrays {
-                        values.insert(
-                            *column_id,
-                            (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
-                        );
-                    }
                     // TODO(yingwen): Separate raw-series identity from label representation.
                     // The PoC formats assume (table_id, tsid) uniqueness; encode once at
                     // this adapter boundary until RawSeriesChunk no longer needs sparse keys.
@@ -432,12 +425,14 @@ impl ColumnarPreparedSource {
                     let merge_key_len = key.len();
                     codec
                         .encode_to_vec(
-                            tags.iter().map(|(id, _)| {
+                            tag_arrays.iter().map(|(id, strings)| {
                                 (
                                     *id,
-                                    values[id]
-                                        .as_deref()
-                                        .map_or(ValueRef::Null, ValueRef::String),
+                                    if strings.is_null(row) {
+                                        ValueRef::Null
+                                    } else {
+                                        ValueRef::String(strings.value(row))
+                                    },
                                 )
                             }),
                             &mut key,
@@ -450,6 +445,15 @@ impl ColumnarPreparedSource {
                             ));
                         }
                         continue;
+                    }
+                    // Duplicate identities still undergo a full key comparison before
+                    // allocating another owned tag map.
+                    let mut values = HashMap::with_capacity(tag_arrays.len());
+                    for (column_id, strings) in &tag_arrays {
+                        values.insert(
+                            *column_id,
+                            (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
+                        );
                     }
                     let bytes = key.len()
                         + values.values().flatten().map(String::len).sum::<usize>()

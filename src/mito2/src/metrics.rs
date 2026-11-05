@@ -281,9 +281,9 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
-    /// Metadata loads after concurrent misses have been coalesced.
+    /// Counts cache loaders that actually ran.
     pub static ref CACHE_LOAD: IntCounterVec = register_int_counter_vec!(
-        "greptime_mito_cache_load", "Cache loads attempted after miss coalescing", &["type"]
+        "greptime_mito_cache_load", "Cache loaders that actually ran", &["type"]
     ).unwrap();
     /// Cache miss counter.
     pub static ref CACHE_MISS: IntCounterVec = register_int_counter_vec!(

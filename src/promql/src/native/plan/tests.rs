@@ -16,13 +16,14 @@ use std::sync::Arc;
 
 use datafusion::common::{DFSchema, DataFusionError};
 use datatypes::series::SeriesOrdering;
+use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, reads_across_series,
+    NativeType, duplicates_canonical_labels, fused_output_tags, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::info::InfoSelector;
@@ -151,6 +152,11 @@ fn partial_aggregate(inner: NativeNode) -> NativeNode {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: Arc::new([]),
             grid,
         })),
@@ -860,6 +866,46 @@ fn two_scalars_cannot_produce_a_vector() {
     );
 }
 
+/// `vector(s)` materializes its scalar on the grid that scalar is evaluated on, so an output on
+/// another grid would address positions the scalar does not have.
+#[test]
+fn vector_of_keeps_its_scalars_grid() {
+    let shared = grid(0, 60_000, 4);
+    let vector_of = |output: NativeType| NativeNode {
+        expr: NativeExpr::VectorOf {
+            input: Box::new(scalar_on(1.0, Arc::clone(&shared))),
+        },
+        output,
+    };
+
+    // The same spec on another allocation is the grid the scalar is on.
+    let same = vector_of(evaluated(fields(1), grid(0, 60_000, 4)));
+    assert!(same.validate().is_ok(), "{}", same.validate().unwrap_err());
+
+    // Without a grid there are no positions to materialize the scalar on.
+    let missing = vector_of(NativeType::Samples(Arc::new(SeriesSchema {
+        fields: fields(1),
+        eval_grid: None,
+    })));
+    let error = missing.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("vector() produces values without a grid"),
+        "{error}"
+    );
+
+    // Another grid addresses positions that scalar has no value at.
+    let mismatched = vector_of(evaluated(fields(1), grid(0, 30_000, 8)));
+    let error = mismatched.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("vector() declares a grid its output does not carry"),
+        "{error}"
+    );
+}
+
 /// A constant operand is broadcast to each series the other side answers, so such an operation reads
 /// one series at a time exactly when that other side does.
 ///
@@ -1001,6 +1047,11 @@ fn an_aggregate_output_matches_its_stage() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: Arc::new([]),
             grid: value_grid,
         })),
@@ -1074,6 +1125,11 @@ fn a_partial_aggregate_cannot_change_the_accumulator_count() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: fields(1),
             grid: out,
         })),
@@ -1118,6 +1174,11 @@ fn a_partial_aggregate_indexes_its_state_on_the_inputs_grid() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: Arc::new([]),
             grid: grid(0, 30_000, 8),
         })),
@@ -1204,6 +1265,11 @@ fn a_final_aggregate_cannot_change_the_field_count() {
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
             group: Grouping::By(Arc::new(["job".into()])),
+            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+            components: Arc::from([
+                datatypes::series::aggregate_state::StateComponent::Value,
+                datatypes::series::aggregate_state::StateComponent::Compensation,
+            ]),
             accumulators: fields(2),
             grid: Arc::clone(&out),
         })),
@@ -1423,6 +1489,8 @@ fn an_input_can_bind_aggregate_state() {
     let state_group_mismatch = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
         group: Grouping::Without(Arc::new([Arc::from("job")])),
         accumulators: schema_a.accumulators.clone(),
+        kind: schema_a.kind,
+        components: schema_a.components.clone(),
         grid: schema_a.grid.clone(),
     }));
     let mismatch = NativeNode {
@@ -1439,11 +1507,15 @@ fn an_input_can_bind_aggregate_state() {
     let state = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
         group: Grouping::By(Arc::new([Arc::from("job")])),
         accumulators: fields(2),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
         grid: Arc::clone(&state_grid),
     }));
     let equivalent_state = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
         group: Grouping::By(Arc::new([Arc::from("job")])),
         accumulators: fields(2),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
         grid: Arc::clone(&state_grid),
     }));
     let state_input = |bound: NativeType, output: NativeType| NativeNode {
@@ -1461,6 +1533,8 @@ fn an_input_can_bind_aggregate_state() {
     );
     let reversed_accumulators = NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
         group: Grouping::By(Arc::new([Arc::from("job")])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
         accumulators: Arc::from([
             FieldSpec {
                 name: Arc::from("f1"),
@@ -1589,6 +1663,335 @@ fn info_reads_the_sample_times_of_one_field() {
         let error = info_of(value, fields).validate().unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+/// `label_replace(x, dst, "$1", src, "(.*)")` over `inner`, a rewrite that writes `dst`.
+fn rewritten(inner: NativeNode, dst: &str, src: &str) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(inner),
+            op: BoundMap {
+                ops: Arc::new([MapOp::Label(Arc::new(
+                    crate::map_label::LabelRewrite::replace(dst, "$1", src, "(.*)")
+                        .expect("the rewrite compiles"),
+                ))]),
+            },
+        },
+        output,
+    }
+}
+
+/// `Merge(inner)`: the canonical collection over `inner`.
+fn merge_over(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    }
+}
+
+/// The labels the fixture scan reports: one tag, which is what its series are told apart by.
+fn scan_tags() -> Vec<Vec<String>> {
+    vec![vec!["host".to_string()]]
+}
+
+/// A rewrite that writes a label the input does not carry cannot make two series equal, which is
+/// what lets a query like `label_replace(x, "dst", "$1", "host", "(.*)")` keep every partition.
+#[test]
+fn a_fresh_destination_does_not_alias() {
+    let out = grid(0, 60_000, 4);
+    let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(!duplicates_canonical_labels(
+        &rewritten(inner, "dst", "host"),
+        &scan_tags()
+    ));
+}
+
+/// A rewrite that writes a label the input carries can fold two series into one, which is what a
+/// canonical merge has to collect.
+#[test]
+fn a_rewrite_of_an_existing_label_aliases() {
+    let out = grid(0, 60_000, 4);
+    let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(duplicates_canonical_labels(
+        &rewritten(inner, "host", "host"),
+        &scan_tags()
+    ));
+}
+
+/// A source the caller says nothing about proves nothing: the pass has to assume the destination
+/// was one of its labels, because two series sharing one is exactly the wrong answer to ship.
+#[test]
+fn an_unknown_source_may_alias() {
+    let out = grid(0, 60_000, 4);
+    let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(duplicates_canonical_labels(
+        &rewritten(inner, "dst", "host"),
+        &[]
+    ));
+}
+
+/// Dropping the metric name is not aliasing within one metric: the remaining tags are the primary
+/// key, so two series that agree on all of them are the same stored series.
+#[test]
+fn dropping_the_metric_name_keeps_the_inputs_answer() {
+    let out = grid(0, 60_000, 4);
+    let plain = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(!duplicates_canonical_labels(&plain, &scan_tags()));
+    assert!(!duplicates_canonical_labels(
+        &map_over(rewritten(plain, "dst", "host")),
+        &scan_tags()
+    ));
+}
+
+/// A rewrite can alias distinct outputs of a whole-vector operation, even when they were unique
+/// before the rewrite. Grouped topk(1) and an aggregate can each produce more than one series.
+#[test]
+fn a_rewrite_after_ranking_or_grouping_may_alias() {
+    let out = grid(0, 60_000, 4);
+    let selected = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    let vector = |op| NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(selected()),
+            op,
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let group = || Grouping::By(Arc::new([Arc::from("host")]));
+    let grouped_sum = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(selected()),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: group(),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let source_tags = vec![vec!["host".to_string(), "zone".to_string()]];
+    for (name, inner) in [
+        (
+            "topk(2)",
+            vector(BoundVectorOp::TopK {
+                k: 2.0,
+                top: true,
+                group: Grouping::By(Arc::new([])),
+            }),
+        ),
+        (
+            "topk(1) by host",
+            vector(BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: group(),
+            }),
+        ),
+        ("sum by host", grouped_sum),
+    ] {
+        assert!(!duplicates_canonical_labels(&inner, &source_tags), "{name}");
+        let output = inner.output.clone();
+        let renamed = NativeNode {
+            expr: NativeExpr::Map {
+                input: Box::new(inner),
+                op: BoundMap {
+                    ops: Arc::new([MapOp::Label(Arc::new(
+                        crate::map_label::LabelRewrite::replace("host", "same", "host", ".*")
+                            .unwrap(),
+                    ))]),
+                },
+            },
+            output,
+        };
+        assert!(renamed.validate().is_ok(), "{name}");
+        assert!(
+            duplicates_canonical_labels(&renamed, &source_tags),
+            "{name}"
+        );
+    }
+}
+
+/// `count_values` reports the grouping applied to the labels its input carries, plus the label it
+/// writes. What it does not report is the input's own set: a `by` narrows it, a `without` narrows
+/// it the other way, and the destination is a column no scan has.
+#[test]
+fn count_values_reports_its_grouping_and_the_label_it_writes() {
+    let out = grid(0, 60_000, 4);
+    let counted = |label: &str, group: Grouping| NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            op: BoundVectorOp::CountValues {
+                label: Arc::from(label),
+                group,
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let source_tags = vec![vec!["host".to_string(), "zone".to_string()]];
+    let tags = |names: &[&str]| {
+        Some(
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    // `by (zone)` keeps one of the input's labels and adds the one the node writes.
+    assert_eq!(
+        tags(&["zone", "value"]),
+        fused_output_tags(
+            &counted("value", Grouping::By(Arc::new([Arc::from("zone")]))),
+            &source_tags
+        )
+    );
+    // `without (host)` keeps the rest, and the destination with it.
+    assert_eq!(
+        tags(&["zone", "value"]),
+        fused_output_tags(
+            &counted("value", Grouping::Without(Arc::new([Arc::from("host")]))),
+            &source_tags
+        )
+    );
+    // A `without` naming the destination removes the label the node just wrote.
+    assert_eq!(
+        tags(&["zone"]),
+        fused_output_tags(
+            &counted("host", Grouping::Without(Arc::new([Arc::from("host")]))),
+            &source_tags
+        )
+    );
+    // A destination naming the metric name writes no column this walk can name.
+    assert_eq!(
+        None,
+        fused_output_tags(
+            &counted("__name__", Grouping::By(Arc::new([]))),
+            &source_tags
+        )
+    );
+}
+
+/// A consumer that files its rows by the label set a sample ends under answers one series per set,
+/// so a rewrite beneath it is not something above it has to collect again.
+#[test]
+fn a_whole_vector_consumer_answers_one_series_per_set() {
+    let out = grid(0, 60_000, 4);
+    let aliasing = || {
+        rewritten(
+            window_fields(input_with_fields(1), Arc::clone(&out), 1),
+            "host",
+            "host",
+        )
+    };
+    for op in [
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::new([])),
+        },
+        BoundVectorOp::Absent {
+            labels: datatypes::series::SeriesLabels::try_new(None, Vec::new()).unwrap(),
+        },
+        BoundVectorOp::CountValues {
+            label: Arc::from("v"),
+            group: Grouping::By(Arc::new([])),
+        },
+    ] {
+        let node = NativeNode {
+            expr: NativeExpr::Vector {
+                input: Box::new(aliasing()),
+                op,
+            },
+            output: evaluated(fields(1), Arc::clone(&out)),
+        };
+        assert!(node.validate().is_ok());
+    }
+}
+
+/// The merge is the collection, so a second pass over a collected node finds nothing to collect.
+#[test]
+fn a_merge_answers_one_series_per_set() {
+    let out = grid(0, 60_000, 4);
+    let aliasing = rewritten(
+        window_fields(input_with_fields(1), Arc::clone(&out), 1),
+        "host",
+        "host",
+    );
+    assert!(!duplicates_canonical_labels(
+        &merge_over(aliasing),
+        &scan_tags()
+    ));
+}
+
+/// `info` reads its info side through a canonical merge: the merge only collects the pieces of one
+/// label set, so the sample times it hands over are the ones the selection produced.
+#[test]
+fn info_sees_through_a_canonical_merge() {
+    let out = grid(0, 60_000, 4);
+    let info = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(input_with_fields(1)),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::InfoTimestamp,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let node = NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            info: Box::new(merge_over(info)),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: true,
+            },
+        },
+        output: evaluated(fields(1), out),
+    };
+    node.validate()
+        .expect("a merge above the info selection keeps its meaning");
+}
+
+/// The same tree without the merge is the tree the check was written for, so the check is not
+/// simply accepting every info side.
+#[test]
+fn info_still_refuses_an_evaluated_value_vector() {
+    let out = grid(0, 60_000, 4);
+    let values = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(input_with_fields(1)),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::Sample,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let node = NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            info: Box::new(merge_over(values)),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: true,
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let error = node.validate().expect_err("a value vector is not a time");
+    assert!(error.to_string().contains("not their values"), "{error}");
 }
 
 #[test]
