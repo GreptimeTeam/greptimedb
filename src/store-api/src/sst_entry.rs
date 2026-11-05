@@ -16,10 +16,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use common_recordbatch::DfRecordBatch;
+use common_recordbatch::filter::MetadataFilter;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datafusion_common::DataFusionError;
-use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, LogicalTableSource};
+use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, LogicalTableSource};
 use datatypes::arrow::array::{
     ArrayRef, BinaryArray, BooleanArray, TimestampMillisecondArray, TimestampNanosecondArray,
     UInt8Array, UInt32Array, UInt64Array,
@@ -162,6 +163,11 @@ impl ManifestSstEntry {
             ),
             ColumnSchema::new(PARTITION_EXPR, Ty::string_datatype(), true),
         ]))
+    }
+
+    /// Compiles inspection predicates using the public schema to normalize lossless casts.
+    pub fn metadata_filter(expressions: &[Expr]) -> MetadataFilter {
+        MetadataFilter::new_with_schema(expressions, Self::schema().arrow_schema())
     }
 
     /// Converts a list of manifest sst entries to a record batch.

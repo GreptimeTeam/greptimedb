@@ -2291,3 +2291,156 @@ async fn test_manifest_scan_table_filter() {
     );
     drop(guard);
 }
+
+#[tokio::test]
+async fn test_manifest_scan_sql_numeric_cast_pruning() {
+    use datafusion::logical_expr::{Expr, LogicalPlan};
+    use datafusion::prelude::SessionContext;
+    use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+    use futures::StreamExt;
+
+    async fn analyzed_filter(
+        context: &SessionContext,
+        predicate: &str,
+        expect_decimal: bool,
+    ) -> Expr {
+        let state = context.state();
+        let plan = state
+            .create_logical_plan(&format!(
+                "SELECT file_id FROM ssts_manifest WHERE {predicate}"
+            ))
+            .await
+            .unwrap();
+        let analyzed = state
+            .analyzer()
+            .execute_and_check(plan, state.config_options(), |_, _| {})
+            .unwrap();
+        let mut filters = Vec::new();
+        analyzed
+            .apply(|plan| {
+                if let LogicalPlan::Filter(filter) = plan {
+                    filters.push(filter.predicate.clone());
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        assert_eq!(filters.len(), 1);
+        let filter = filters.pop().unwrap();
+        if expect_decimal {
+            let mut found = false;
+            filter
+                .apply(|expr| {
+                    if let Expr::Cast(cast) = expr {
+                        found |= matches!(cast.expr.as_ref(), Expr::Column(_))
+                            && cast.field.data_type() == &DataType::Decimal128(20, 0);
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+                .unwrap();
+            assert!(found, "{predicate}: {filter}");
+        }
+        filter
+    }
+
+    let mut env = TestEnv::new().await.with_node_id(42);
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let target = RegionId::new(11, 1);
+    let other = RegionId::new(11, 2);
+    for region_id in [target, other] {
+        add_manifest_scan_region(&engine, region_id, 2).await;
+    }
+    let entries = engine.all_ssts_from_manifest().await;
+    assert_eq!(entries.len(), 4);
+    let context = SessionContext::new();
+    context
+        .register_batch(
+            "ssts_manifest",
+            ManifestSstEntry::to_record_batch(&entries).unwrap(),
+        )
+        .unwrap();
+    for (predicate, exact) in [
+        (format!("region_id = {}", target.as_u64()), true),
+        (format!("region_id != {}", target.as_u64()), true),
+        ("region_id = 0".to_string(), true),
+        ("node_id = 42".to_string(), true),
+        ("node_id = 99".to_string(), true),
+        ("node_id != 42".to_string(), true),
+        ("node_id != 99".to_string(), true),
+        (
+            format!("region_id = {} OR length(file_id) > 0", target.as_u64()),
+            false,
+        ),
+        (
+            format!("CAST(region_id AS VARCHAR) = '{}'", target.as_u64()),
+            false,
+        ),
+    ] {
+        let filter = analyzed_filter(&context, &predicate, exact).await;
+        let scanned = engine
+            .scan_ssts_from_manifest(&[filter], 2)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut actual_ids = scanned
+            .iter()
+            .map(|entry| entry.file_id.clone())
+            .collect::<Vec<_>>();
+        actual_ids.sort();
+        let sql = format!("SELECT file_id FROM ssts_manifest WHERE {predicate}");
+        let batches = context.sql(&sql).await.unwrap().collect().await.unwrap();
+        let mut expected_ids = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.unwrap().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        expected_ids.sort();
+        if exact {
+            assert_eq!(actual_ids, expected_ids, "{predicate}");
+        } else {
+            assert_eq!(
+                scanned.len(),
+                entries.len(),
+                "unsupported filters must remain conservative: {predicate}"
+            );
+            assert!(expected_ids.iter().all(|id| actual_ids.contains(id)));
+        }
+    }
+
+    // These predicates must exclude the locked region before reading its manifest.
+    // Switching the scan back to the untyped constructor makes these scans time out.
+    let unrelated = engine.get_region(other).unwrap();
+    let guard = unrelated.manifest_ctx.manifest_manager.write().await;
+    for (predicate, count) in [
+        (format!("region_id = {}", target.as_u64()), 2),
+        (format!("region_id != {}", other.as_u64()), 2),
+        ("region_id = 0".to_string(), 0),
+        ("node_id = 99".to_string(), 0),
+        ("node_id != 42".to_string(), 0),
+    ] {
+        let filter = analyzed_filter(&context, &predicate, true).await;
+        let batches = tokio::time::timeout(
+            Duration::from_secs(5),
+            engine
+                .scan_ssts_from_manifest(&[filter], 2)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("SQL numeric pruning must not acquire an excluded manifest lock");
+        assert_eq!(
+            batches.iter().map(Vec::len).sum::<usize>(),
+            count,
+            "{predicate}"
+        );
+    }
+    drop(guard);
+}

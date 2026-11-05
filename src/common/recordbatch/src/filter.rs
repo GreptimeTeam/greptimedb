@@ -23,7 +23,8 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use datafusion::error::Result as DfResult;
-use datafusion::logical_expr::{Expr, Literal, Operator, utils};
+use datafusion::logical_expr::{BinaryExpr, Expr, Literal, Operator, utils};
+use datafusion::logical_expr_common::casts;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::arrow::array::{ArrayRef, Datum};
 use datafusion_common::arrow::buffer::BooleanBuffer;
@@ -31,7 +32,7 @@ use datafusion_common::cast::{as_boolean_array, as_null_array};
 use datafusion_common::{DataFusionError, ScalarValue, internal_err};
 use datatypes::arrow::array::{Array, BooleanArray, BooleanBufferBuilder, RecordBatch};
 use datatypes::arrow::compute::filter_record_batch;
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::{DataType, SchemaRef};
 use datatypes::data_type::{ConcreteDataType, DataType as _};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
@@ -54,13 +55,17 @@ impl MetadataFilter {
     /// Compiles supported conjuncts once for reuse across scan stages. OR is
     /// never split: an unknown alternative might match the candidate.
     pub fn new(expressions: &[Expr]) -> Self {
-        Self {
-            filters: expressions
-                .iter()
-                .flat_map(utils::split_conjunction)
-                .filter_map(SimpleFilterEvaluator::try_new)
-                .collect(),
-        }
+        Self::compile(expressions, &|_| None, |_| None)
+    }
+
+    /// Compiles metadata predicates using column types from the Arrow schema.
+    pub fn new_with_schema(expressions: &[Expr], schema: &SchemaRef) -> Self {
+        Self::new_with_column_type(expressions, &|name| {
+            schema
+                .field_with_name(name)
+                .ok()
+                .map(|field| field.data_type().clone())
+        })
     }
 
     /// Returns false only when known metadata proves a conjunct cannot match.
@@ -74,6 +79,40 @@ impl MetadataFilter {
             value(filter.column_name())
                 .is_none_or(|value| filter.evaluate_scalar(value.borrow()).unwrap_or(true))
         })
+    }
+
+    /// Compiles metadata predicates with known source types, including lossless
+    /// string dictionary casts and the full-domain lossless UInt64 to
+    /// Decimal128(20, 0) coercion introduced by SQL integer comparisons.
+    /// Unsupported or nonrepresentable casts remain residual predicates.
+    fn new_with_column_type(
+        expressions: &[Expr],
+        column_type: &impl Fn(&str) -> Option<DataType>,
+    ) -> Self {
+        Self::compile(expressions, column_type, |expression| {
+            normalize_uint64_decimal_cast(expression, column_type)
+        })
+    }
+
+    /// Compiles supported conjuncts after applying the caller's optional normalization.
+    fn compile(
+        expressions: &[Expr],
+        column_type: &impl Fn(&str) -> Option<DataType>,
+        normalize: impl Fn(&Expr) -> Option<Expr>,
+    ) -> Self {
+        Self {
+            filters: expressions
+                .iter()
+                .flat_map(utils::split_conjunction)
+                .filter_map(|expression| {
+                    let normalized = normalize(expression);
+                    SimpleFilterEvaluator::try_new_with_column_type(
+                        normalized.as_ref().unwrap_or(expression),
+                        column_type,
+                    )
+                })
+                .collect(),
+        }
     }
 }
 
@@ -298,6 +337,106 @@ pub fn batch_filter(
                 &boolean_array_to_scan_mask(&filter_array),
             )?)
         })
+}
+
+/// Normalizes the full-domain lossless UInt64 to Decimal128(20, 0) SQL coercion.
+/// Other casts and unknown OR branches remain intact for residual evaluation.
+fn normalize_uint64_decimal_cast(
+    expression: &Expr,
+    column_type: &impl Fn(&str) -> Option<DataType>,
+) -> Option<Expr> {
+    match expression {
+        Expr::BinaryExpr(binary) if matches!(binary.op, Operator::And | Operator::Or) => {
+            Some(Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(
+                    normalize_uint64_decimal_cast(&binary.left, column_type)
+                        .unwrap_or_else(|| *binary.left.clone()),
+                ),
+                binary.op,
+                Box::new(
+                    normalize_uint64_decimal_cast(&binary.right, column_type)
+                        .unwrap_or_else(|| *binary.right.clone()),
+                ),
+            )))
+        }
+        Expr::BinaryExpr(binary)
+            if matches!(
+                binary.op,
+                Operator::Eq
+                    | Operator::NotEq
+                    | Operator::Lt
+                    | Operator::LtEq
+                    | Operator::Gt
+                    | Operator::GtEq
+            ) =>
+        {
+            let (column, literal, op) =
+                if let Some(column) = metadata_uint64_column(&binary.left, column_type) {
+                    (column, metadata_numeric_literal(&binary.right)?, binary.op)
+                } else {
+                    (
+                        metadata_uint64_column(&binary.right, column_type)?,
+                        metadata_numeric_literal(&binary.left)?,
+                        binary.op.swap()?,
+                    )
+                };
+            let literal = casts::exact_preimage_cast(
+                &DataType::UInt64,
+                &DataType::Decimal128(20, 0),
+                &literal,
+            )?;
+            Some(Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(column.clone()),
+                op,
+                Box::new(literal.lit()),
+            )))
+        }
+        Expr::IsNull(expression) => Some(
+            metadata_uint64_column(expression, column_type)?
+                .clone()
+                .is_null(),
+        ),
+        Expr::IsNotNull(expression) => Some(
+            metadata_uint64_column(expression, column_type)?
+                .clone()
+                .is_not_null(),
+        ),
+        _ => None,
+    }
+}
+
+fn metadata_uint64_column<'a>(
+    expression: &'a Expr,
+    column_type: &impl Fn(&str) -> Option<DataType>,
+) -> Option<&'a Expr> {
+    let Expr::Cast(cast) = expression else {
+        return None;
+    };
+    let Expr::Column(column) = cast.expr.as_ref() else {
+        return None;
+    };
+    (cast.field.data_type() == &DataType::Decimal128(20, 0)
+        && column_type(&column.name) == Some(DataType::UInt64))
+    .then_some(cast.expr.as_ref())
+}
+
+/// Constant casts must preserve the exact numeric value at every nested step.
+/// The shared cast helper also handles timestamps, which are intentionally excluded.
+/// Decimal parameters are limited to valid nonnegative scales supported by that helper.
+fn metadata_numeric_literal(expression: &Expr) -> Option<ScalarValue> {
+    let numeric = |data_type: &DataType| {
+        data_type.is_integer()
+            || matches!(data_type, DataType::Decimal128(precision, scale)
+                if (1..=38).contains(precision) && *scale >= 0 && (*scale as u8) <= *precision)
+    };
+    match expression {
+        Expr::Literal(value, _) if numeric(&value.data_type()) => Some(value.clone()),
+        Expr::Cast(cast) if numeric(cast.field.data_type()) => {
+            let value = metadata_numeric_literal(&cast.expr)?;
+            casts::try_cast_literal_to_type(&value, cast.field.data_type())
+        }
+        _ => None,
+    }
 }
 
 /// Converts nullable SQL predicate values to a scan mask, where `NULL` is `false`.

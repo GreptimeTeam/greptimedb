@@ -628,7 +628,7 @@ impl MitoEngine {
     ) -> futures::stream::BoxStream<'static, Vec<ManifestSstEntry>> {
         let engine = self.clone();
         let projection = crate::region::ManifestSstProjection::new(projection);
-        let filters = MetadataFilter::new(filters);
+        let filters = ManifestSstEntry::metadata_filter(filters);
         Box::pin(async_stream::stream! {
             let node_id = engine.inner.workers.file_ref_manager().node_id();
             if !filters.matches(|column| match column {

@@ -12,18 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::OnceCell;
 use std::sync::Arc;
 
 use datafusion::execution::context::ExecutionProps;
 use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
-use datafusion::logical_expr::{col, lit};
+use datafusion::logical_expr::{BinaryExpr, Expr, LogicalPlan, Operator, cast, col, lit};
 use datafusion::physical_expr::create_physical_expr;
-use datafusion_common::DFSchema;
+use datafusion::prelude::SessionContext;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_common::{DFSchema, ScalarValue};
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
 
-use datatypes::arrow::array::{BooleanArray, RecordBatch};
+use datatypes::arrow::array::{BooleanArray, Int32Array, RecordBatch, UInt64Array};
 
-use crate::filter::{batch_filter, boolean_array_to_scan_mask};
+use crate::filter::{
+    MetadataFilter, SimpleFilterEvaluator, batch_filter, boolean_array_to_scan_mask,
+};
 
 #[test]
 fn batch_filter_test() {
@@ -73,10 +78,6 @@ fn test_nullable_boolean_predicate_becomes_scan_mask() {
 
 #[test]
 fn test_partial_metadata() {
-    use datafusion_common::ScalarValue;
-
-    use crate::filter::MetadataFilter;
-
     let node = col("node_id").eq(lit(7u64));
     let path = col("file_path").eq(lit("table/region/file.parquet"));
     let filters = MetadataFilter::new(&[node.clone().and(path.clone())]);
@@ -109,11 +110,39 @@ fn test_partial_metadata() {
 }
 
 #[test]
+fn test_metadata_filter_dictionary_cast() {
+    let data_type = DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "label",
+        data_type.clone(),
+        true,
+    )]));
+    let expressions = [cast(col("label"), DataType::Utf8).eq(lit("matched"))];
+    let typed = MetadataFilter::new_with_column_type(&expressions, &|name| {
+        (name == "label").then(|| data_type.clone())
+    });
+    let from_schema = MetadataFilter::new_with_schema(&expressions, &schema);
+    let untyped = MetadataFilter::new(&expressions);
+    for (value, expected) in [
+        (Some("matched"), true),
+        (Some("other"), false),
+        (None, false),
+    ] {
+        let value = ScalarValue::Dictionary(
+            Box::new(DataType::UInt32),
+            Box::new(ScalarValue::Utf8(value.map(String::from))),
+        );
+        assert_eq!(typed.matches(|_| Some(&value)), expected);
+        assert_eq!(from_schema.matches(|_| Some(&value)), expected);
+        // Without source types the cast remains residual, so no candidate is pruned.
+        assert!(untyped.matches(|_| Some(&value)));
+    }
+    assert!(typed.matches(|_| None::<ScalarValue>));
+    assert!(from_schema.matches(|_| None::<ScalarValue>));
+}
+
+#[test]
 fn test_borrowed_and_owned_values() {
-    use datafusion_common::ScalarValue;
-
-    use crate::filter::MetadataFilter;
-
     let pruner = MetadataFilter::new(&[col("path").gt_eq(lit("a")).and(col("path").lt(lit("z")))]);
     for (value, expected) in [
         (ScalarValue::Utf8(Some("a".into())), true),
@@ -128,12 +157,6 @@ fn test_borrowed_and_owned_values() {
 
 #[test]
 fn test_borrowed_lazy_metadata() {
-    use std::cell::OnceCell;
-
-    use datafusion_common::ScalarValue;
-
-    use crate::filter::MetadataFilter;
-
     let pruner = MetadataFilter::new(&[col("path").gt(lit("a")).and(col("path").lt(lit("z")))]);
     let path = OnceCell::new();
     let mut builds = 0;
@@ -157,4 +180,204 @@ fn test_borrowed_lazy_metadata() {
             .matches(|_| { Some(path.get_or_init(|| ScalarValue::Utf8(Some("unused".into())))) })
     );
     assert!(path.get().is_none());
+}
+
+#[test]
+fn test_typed_metadata_numeric_cast_boundaries() {
+    let decimal = DataType::Decimal128(20, 0);
+    let column = cast(col("node_id"), decimal.clone());
+    let column_type = |name: &str| (name == "node_id").then_some(DataType::UInt64);
+    let matches = |expression: Expr, value| {
+        MetadataFilter::new_with_column_type(&[expression], &column_type)
+            .matches(|_| Some(ScalarValue::UInt64(value)))
+    };
+    for value in [0, 7, u64::MAX] {
+        let expression =
+            column
+                .clone()
+                .eq(lit(ScalarValue::Decimal128(Some(value as i128), 20, 0)));
+        assert!(matches(expression.clone(), Some(value)));
+        assert!(!matches(expression.clone(), Some(value.wrapping_add(1))));
+        assert!(!matches(expression.clone(), None));
+        // Neither the default metadata constructor nor the existing typed evaluator changes.
+        assert!(
+            MetadataFilter::new(std::slice::from_ref(&expression))
+                .matches(|_| Some(ScalarValue::UInt64(Some(value.wrapping_add(1)))))
+        );
+        assert!(
+            SimpleFilterEvaluator::try_new_with_column_type(&expression, &column_type).is_none()
+        );
+        assert!(
+            MetadataFilter::new_with_column_type(&[expression], &|_| None)
+                .matches(|_| Some(ScalarValue::UInt64(Some(value.wrapping_add(1)))))
+        );
+    }
+    let nested = cast(cast(lit(7i32), DataType::Int64), decimal.clone());
+    assert!(matches(column.clone().eq(nested.clone()), Some(7)));
+    assert!(!matches(nested.eq(column.clone()), Some(8)));
+    for literal in [
+        ScalarValue::Decimal128(Some(-1), 20, 0),
+        ScalarValue::Decimal128(Some(u64::MAX as i128 + 1), 20, 0),
+        ScalarValue::Decimal128(Some(15), 20, 1),
+    ] {
+        for op in [
+            Operator::Eq,
+            Operator::NotEq,
+            Operator::Lt,
+            Operator::LtEq,
+            Operator::Gt,
+            Operator::GtEq,
+        ] {
+            let expression = Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(column.clone()),
+                op,
+                Box::new(lit(literal.clone())),
+            ));
+            for value in [None, Some(0), Some(u64::MAX)] {
+                assert!(matches(expression.clone(), value));
+            }
+        }
+    }
+    // Unsupported decimal parameters must never reach the exact-cast helper,
+    // including at an inner step of a nested constant cast.
+    for (precision, scale) in [(20, -1), (0, 0), (39, 0), (20, 21)] {
+        let source = lit(ScalarValue::Decimal128(Some(1), precision, scale));
+        let target = DataType::Decimal128(precision, scale);
+        for literal in [
+            source.clone(),
+            cast(source, decimal.clone()),
+            cast(cast(lit(1i64), target), decimal.clone()),
+        ] {
+            assert!(matches(column.clone().eq(literal), Some(0)));
+        }
+    }
+    // Lossy literal casts and lossy/unknown column casts stay residual.
+    let lossy_literal = cast(
+        lit(ScalarValue::Decimal128(Some(15), 20, 1)),
+        decimal.clone(),
+    );
+    assert!(matches(column.clone().eq(lossy_literal), Some(0)));
+    assert!(matches(
+        cast(col("node_id"), DataType::Int64).eq(lit(7i64)),
+        Some(0)
+    ));
+    assert!(matches(column.clone().is_null(), None));
+    assert!(!matches(column.clone().is_null(), Some(0)));
+    assert!(!matches(column.clone().is_not_null(), None));
+    assert!(matches(column.clone().is_not_null(), Some(0)));
+    let null_comparison = column.clone().eq(lit(ScalarValue::Decimal128(None, 20, 0)));
+    assert!(!matches(null_comparison.clone(), None));
+    assert!(!matches(null_comparison, Some(0)));
+    let equals_seven = column.eq(cast(lit(7i64), decimal));
+    // Cross-column and unsupported same-column OR alternatives must not be discarded.
+    for residual in [
+        col("other").eq(lit(1i64)),
+        cast(col("node_id"), DataType::Utf8).like(lit("8%")),
+    ] {
+        assert!(matches(equals_seven.clone().or(residual.clone()), Some(8)));
+        assert!(!matches(equals_seven.clone().and(residual), Some(8)));
+    }
+}
+
+#[tokio::test]
+async fn test_typed_metadata_casts_from_sql_analyzer() {
+    let values = [None, Some(0), Some(1), Some(7), Some(u64::MAX)];
+    let context = SessionContext::new();
+    context
+        .register_batch(
+            "metadata",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("node_id", DataType::UInt64, true),
+                    Field::new("id", DataType::Int32, false),
+                ])),
+                vec![
+                    Arc::new(UInt64Array::from(values.to_vec())),
+                    Arc::new(Int32Array::from_iter_values(0..values.len() as i32)),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut predicates = Vec::new();
+    for op in ["=", "!=", "<", "<=", ">", ">="] {
+        predicates.push(format!("node_id {op} 7"));
+        predicates.push(format!("7 {op} node_id"));
+    }
+    predicates.extend(
+        [
+            "CAST(node_id AS DECIMAL(20,0)) IS NULL",
+            "CAST(node_id AS DECIMAL(20,0)) IS NOT NULL",
+            "node_id = 7 OR node_id = 1",
+            "node_id = 7 OR CAST(node_id AS DECIMAL(20,0)) IS NULL",
+            "node_id >= 1 AND node_id < 7",
+            "CAST(node_id AS DECIMAL(20,0)) = CAST(CAST(7 AS BIGINT) AS DECIMAL(20,0))",
+        ]
+        .map(str::to_string),
+    );
+    for predicate in predicates {
+        let sql = format!("SELECT id FROM metadata WHERE {predicate}");
+        let state = context.state();
+        let plan = state.create_logical_plan(&sql).await.unwrap();
+        let analyzed = state
+            .analyzer()
+            .execute_and_check(plan, state.config_options(), |_, _| {})
+            .unwrap();
+        let mut filters = Vec::new();
+        analyzed
+            .apply(|plan| {
+                if let LogicalPlan::Filter(filter) = plan {
+                    filters.push(filter.predicate.clone());
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        assert_eq!(filters.len(), 1, "{sql}");
+        let mut has_decimal_cast = false;
+        filters[0]
+            .apply(|expr| {
+                if let Expr::Cast(cast) = expr {
+                    has_decimal_cast |= matches!(cast.expr.as_ref(), Expr::Column(_))
+                        && cast.field.data_type() == &DataType::Decimal128(20, 0);
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        assert!(has_decimal_cast, "{sql}: {}", filters[0]);
+        let filter = MetadataFilter::new_with_column_type(&filters, &|name| {
+            (name == "node_id").then_some(DataType::UInt64)
+        });
+        let expected = context
+            .sql(&sql)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect::<Vec<_>>();
+        let default_filter = MetadataFilter::new(&filters);
+        for (id, value) in values.into_iter().enumerate() {
+            // Same analyzed expression and candidate; only typed normalization changes.
+            assert!(
+                default_filter.matches(|_| Some(ScalarValue::UInt64(value))),
+                "{sql}, value {value:?}"
+            );
+            assert_eq!(
+                filter.matches(|_| Some(ScalarValue::UInt64(value))),
+                expected.contains(&(id as i32)),
+                "{sql}, value {value:?}, analyzed {}",
+                filters[0]
+            );
+        }
+    }
 }
