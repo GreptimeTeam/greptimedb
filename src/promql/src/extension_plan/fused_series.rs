@@ -1623,24 +1623,25 @@ fn tree_inputs_for_locality(root: &NativeNode) -> Vec<&crate::native::plan::Boun
     inputs
 }
 
-/// The owner count and routing policy required by a merge over aggregate state and its suffix.
+/// The aggregate whose state the nodes above it read, and whether a histogram suffix above it
+/// coarsens the routing key.
 ///
-/// State rows already carry the cut's full group labels. Histogram suffixes need a coarser key:
-/// every bound of one histogram and every histogram whose metadata-free outputs collide must
-/// meet, while the Final kernel still folds separately by the original group labels.
-///
-/// A reducer is the other node that reads state: it folds the state it is handed into state again,
-/// so its input needs the same owners a `Final` does, derived from the same binding. The two agree
-/// because a reduce hands on exactly the state it was handed - the group the `Final` above it
-/// finalizes by is the group the reduce folds by.
-fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
-    fn find(node: &NativeNode, histogram: bool) -> Option<(&Grouping, bool)> {
+/// The walk stops at the stage that produces the state, whatever the split has named it so far:
+/// `Final` for the merge, `PartialReduce` for the hop that folds state into state, and `Complete`
+/// for the tree the split has not been cut out of yet. All three are the same aggregate at
+/// different points of the split, so a caller may ask either shape the same question.
+fn state_cut(node: &NativeNode) -> Option<(AggregateStage, &Grouping, bool)> {
+    fn find(node: &NativeNode, histogram: bool) -> Option<(AggregateStage, &Grouping, bool)> {
         match &node.expr {
-            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final => {
-                Some((&op.group, histogram))
-            }
-            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::PartialReduce => {
-                Some((&op.group, histogram))
+            NativeExpr::Aggregate { op, .. }
+                if matches!(
+                    op.stage,
+                    AggregateStage::Final
+                        | AggregateStage::PartialReduce
+                        | AggregateStage::Complete
+                ) =>
+            {
+                Some((op.stage, &op.group, histogram))
             }
             NativeExpr::Vector { input, op } => find(
                 input,
@@ -1671,31 +1672,72 @@ fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
             NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => None,
         }
     }
-    let (group, histogram) = find(root, false)?;
+    find(node, false)
+}
+
+/// The owners and routing policy the state of `group` needs, and how a histogram suffix routes it.
+fn state_owners(group: &Grouping, histogram: bool) -> (StateGroup, SeriesRouting) {
     if histogram {
         let owners = if crate::native::split::histogram_group_is_single(group) {
             StateGroup::Single
         } else {
             StateGroup::Grouped
         };
-        Some((
+        (
             owners,
             SeriesRouting::CanonicalLabelsExcept(
                 HISTOGRAM_ROUTING_EXCLUDED_LABELS
                     .iter()
                     .copied()
                     .map(Arc::from)
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<Arc<str>>>()
                     .into(),
             ),
-        ))
+        )
     } else {
         let owners = match group {
             Grouping::By(labels) if labels.is_empty() => StateGroup::Single,
             _ => StateGroup::Grouped,
         };
-        Some((owners, SeriesRouting::CanonicalLabels))
+        (owners, SeriesRouting::CanonicalLabels)
     }
+}
+
+/// The owner count and routing policy required by a merge over aggregate state and its suffix.
+///
+/// State rows already carry the cut's full group labels. Histogram suffixes need a coarser key:
+/// every bound of one histogram and every histogram whose metadata-free outputs collide must
+/// meet, while the Final kernel still folds separately by the original group labels.
+///
+/// A reducer is the other node that reads state: it folds the state it is handed into state again,
+/// so its input needs the same owners a `Final` does, derived from the same binding. The two agree
+/// because a reduce hands on exactly the state it was handed - the group the `Final` above it
+/// finalizes by is the group the reduce folds by.
+fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
+    let (_, group, histogram) = state_cut(root)?;
+    Some(state_owners(group, histogram))
+}
+
+/// Whether the state a split exports can need more than one owner.
+///
+/// This is the test [`state_routing`] answers with [`StateGroup::Grouped`], asked by the planner
+/// that decides how many state hops a split takes: a cut whose group is one group is finished by
+/// the merge above the producers, so its split keeps one hop, while a cut that can have more than
+/// one group folds its exported state once more - per owner - before that merge finalizes it.
+pub fn state_needs_several_owners(root: &NativeNode) -> bool {
+    state_cut(root).is_some_and(|(_, group, histogram)| {
+        state_owners(group, histogram).0 == StateGroup::Grouped
+    })
+}
+
+/// Whether `root` finalizes the state it reads: the aggregate that folds that state is a `Final`.
+///
+/// This is the stage [`state_routing`]'s walk stops at, read for what it produces rather than for
+/// the owners it needs. The suffix a split moves above the cut - scalar arithmetic, maps, a
+/// histogram function - does not change which aggregate folds the state, so a tree that only
+/// exports or reduces state is not a consumer that turns it into values.
+pub fn state_is_finalized(root: &NativeNode) -> bool {
+    matches!(state_cut(root), Some((AggregateStage::Final, _, _)))
 }
 
 /// How many owners the groups of a state input have to be split across.

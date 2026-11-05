@@ -977,6 +977,33 @@ fn a_two_level_split_keeps_its_reducer_on_the_frontend() {
             "the producer reads the region's own scan: {text}"
         );
     }
+
+    // The reducer is not the plan's finalizing consumer: handed to the analyzer on its own it stays
+    // above the boundary, and only the producer below it is region work. A state exporter standing
+    // where the final half was does not inherit that half's placement.
+    let Some(merge) = fused_node(&split) else {
+        panic!("a split aggregate is a fused node: {split}")
+    };
+    let [reducer_only] = merge.children() else {
+        panic!("the split's merge has one input: {split}")
+    };
+    let analyzed = analyzer()
+        .analyze(reducer_only.clone(), &ConfigOptions::default())
+        .unwrap();
+    let text = analyzed.to_string();
+    let reducer = fused_node(&analyzed)
+        .unwrap_or_else(|| panic!("the reducer keeps its place above the boundary: {text}"));
+    assert!(
+        matches!(
+            &reducer.tree().root().expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::PartialReduce
+        ),
+        "the reducer stays where it was: {text}"
+    );
+    assert!(
+        find_merge_scan(&analyzed).is_some(),
+        "the producer below the reducer is region work: {text}"
+    );
 }
 
 /// The `FusedSeries` node `plan` is, if it is one.
