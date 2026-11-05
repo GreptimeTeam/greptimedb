@@ -364,6 +364,10 @@ metadata_cache_tti = "5m"
 ## Requires in-process region transport and the per-request
 ## query.experimental_native_promql=true extension. Default: false
 #+ experimental_native_promql = false
+## Enable the optional two-level aggregate split (`PartialReduce`) for the native
+## PromQL route. Also requires the per-request
+## query.experimental_native_split_reduce=true extension. Default: false
+#+ experimental_native_split_reduce = false
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
