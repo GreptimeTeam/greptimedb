@@ -210,6 +210,7 @@ jobs:
           --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
           --output-root "$BENCHMARK_ROOT/o11ybench/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
           --cache-policy warm > "$RUNNER_TEMP/vmbench-plans/warm.json"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py normalize-metrics "$RUNNER_TEMP/vmbench-plans/warm.json"
     - uses: actions/upload-artifact@v4
       with:
         name: vmbench-plan-${{ github.run_id }}-${{ github.run_attempt }}
@@ -354,16 +355,47 @@ jobs:
           --plan "$METADATA_ROOT/warm.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --dry-run \
           > "$METADATA_ROOT/warm-execution-plan.json"
         cat "$METADATA_ROOT/warm-execution-plan.json"
-    - name: Warm serial and concurrent benchmarks
-      env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+    - name: Generate shared dataset and split target plans
+      id: generate
       run: |
-        set -euo pipefail
-        python3 -u o11ybench/scripts/run_benchmark_plan.py \
-          --plan "$METADATA_ROOT/warm.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --execute \
-          2>&1 | tee "$METADATA_ROOT/warm-execution.log"
-        python3 o11ybench/scripts/check_run_benchmark_plan.py --artifacts "$ARTIFACT_ROOT-warm"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-prepare \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark Baseline GreptimeDB File
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.compare_greptimedb && inputs.greptimedb_storage != 's3' }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target greptimedb-baseline \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark Baseline GreptimeDB S3
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.compare_greptimedb && inputs.greptimedb_storage != 'file' }}
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target greptimedb-s3-baseline \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark GreptimeDB File
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.run_greptimedb && inputs.greptimedb_storage != 's3' }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target greptimedb \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark GreptimeDB S3
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.run_greptimedb && inputs.greptimedb_storage != 'file' }}
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target greptimedb-s3 \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark VictoriaMetrics
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.run_victoriametrics }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target victoriametrics \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Validate all selected target results
+      if: always() && steps.generate.outcome == 'success'
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-validate \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Clean up owned containers
       env:
         AWS_ACCESS_KEY_ID: ${{ inputs.greptimedb_storage != 'file' && secrets.AWS_ACCESS_KEY_ID || '' }}
@@ -371,8 +403,15 @@ jobs:
       if: always()
       run: |
         docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-warm" | xargs -r docker rm -fv
+        for name in greptimedb greptimedb-s3 greptimedb-baseline greptimedb-s3-baseline victoriametrics; do
+          plan="$METADATA_ROOT/$name.json"
+          [[ -f "$plan" ]] || continue
+          run_id=$(jq -r '.run_id // empty' "$plan")
+          [[ -n "$run_id" ]] || continue
+          docker ps -aq --filter "label=o11ybench.run-id=$run_id" | xargs -r docker rm -fv
+        done
         if [[ -d "$ARTIFACT_ROOT-warm" ]]; then
-          for probe in "$ARTIFACT_ROOT-warm"/*/s3-probe.json; do
+          for probe in "$ARTIFACT_ROOT-warm"/o11ybench/*/*/s3-probe.json; do
             [[ -f "$probe" ]] || continue
             python3 o11ybench/scripts/greptimedb_storage.py recover --runtime-image "$RESOLVED_RUNTIME_IMAGE" --output "${probe%/*}"
           done
@@ -380,11 +419,18 @@ jobs:
     - name: GreptimeDB version comparison
       if: always() && inputs.compare_greptimedb
       run: |
-        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind long-range --root "$ARTIFACT_ROOT-warm" >> "$GITHUB_STEP_SUMMARY"
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind long-range --root "$ARTIFACT_ROOT-warm" | tee -a "$ARTIFACT_ROOT-warm/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
     - name: Render storage comparison overview
+      if: always() && steps.generate.outcome == 'success'
       run: |
+        mkdir -p "$ARTIFACT_ROOT-warm/metadata"
+        cp "$METADATA_ROOT"/*-image.json "$ARTIFACT_ROOT-warm/metadata/"
         python3 o11ybench/scripts/build_query_performance_report.py --metrics "$ARTIFACT_ROOT-warm" \
           --output "$ARTIFACT_ROOT-warm-query-report.html" --json-output "$ARTIFACT_ROOT-warm-query-report.json"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py overview "$ARTIFACT_ROOT-warm-query-report.json" \
+          | tee -a "$ARTIFACT_ROOT-warm/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
+        python3 greptimedb/.github/scripts/o11ybench-storage.py audit --root "$ARTIFACT_ROOT-warm" \
+          --report "$ARTIFACT_ROOT-warm-query-report.json" --targets "$(jq -r '[.targets[].kind] | unique | join(",")' "$METADATA_ROOT/warm.json")"
     - name: Stage benchmark artifacts
       if: always()
       run: |

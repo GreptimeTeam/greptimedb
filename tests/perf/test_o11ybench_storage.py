@@ -14,6 +14,9 @@
 
 """Offline contracts for File/S3 benchmark arm selection."""
 import importlib.util
+import copy
+import json
+import tempfile
 from pathlib import Path
 import unittest
 
@@ -33,42 +36,75 @@ class StorageTests(unittest.TestCase):
                            ('S3_BUCKET', ''), ('RUN_GREPTIMEDB', 'false'), ('GREPTIMEDB_STORAGE', 'invalid')]:
             with self.assertRaises(ValueError):
                 storage.validate(dict(env, **{key: value}))
-    def test_target_arms_share_data(self):
-        command = ['bash', 'runner', '--stage', 'target', '--root', '/run', '--owner', 'owner']
-        primary, secondary = storage.commands(command, 'both')
-        self.assertEqual(primary[-2:], ['--greptimedb-storage', 'file'])
-        self.assertEqual(secondary[-2:], ['--greptimedb-storage', 's3'])
-        self.assertEqual(secondary[secondary.index('--root') + 1], '/run/s3')
-        self.assertEqual(secondary[secondary.index('--data-root') + 1], '/run')
-        self.assertEqual(secondary[secondary.index('--owner') + 1], 'owner-s3')
-        self.assertEqual(storage.commands(command, 's3')[0][-2:], ['--greptimedb-storage', 's3'])
-    def test_baseline_and_report(self):
-        command = ['python3', 'runner', '--stage', 'target', '--root', '/run/baseline',
-                   '--owner', 'owner-base', '--data-root', '/run']
-        _, secondary = storage.commands(command, 'both')
-        self.assertEqual(secondary[secondary.index('--data-root') + 1], '/run')
-        command = ['python3', 'runner', '--stage', 'report', '--root', '/run', '--owner', 'owner',
-                   '--targets', 'greptimedb,tempo', '--baseline-run', '/run/baseline/runs/greptimedb/run.json']
-        _, secondary = storage.commands(command, 'both')
-        self.assertEqual(secondary[secondary.index('--targets') + 1], 'greptimedb')
-        self.assertNotIn('--baseline-run', secondary)
+    def test_execution_must_not_expand_arms(self):
+        command = ['runner', '--stage', 'target', '--root', '/run', '--owner', 'owner']
+        with self.assertRaises(ValueError):
+            storage.commands(command, 'both')
+
+    def test_metrics_split_preserves_data_and_target_contract(self):
+        plan = dict(output_root='/tmp/o11ybench-test', run_id='test',
+                    data=dict(generate=True, data_home='/tmp/o11ybench-test/data'),
+                    targets=[dict(name='greptimedb', storage=dict(type='file')),
+                             dict(name='greptimedb-s3', storage=dict(type='s3', root='owned/prefix/'))],
+                    report=dict(root='old', index_html='old/index.html'),
+                    artifacts=dict(run_manifest='old/run-manifest.json'),
+                    query=dict(modes=['serial'], serial_tries=5))
+        original = copy.deepcopy(plan)
+        children = storage.split_metrics(plan)
+        self.assertEqual(plan, original)
+        for name, child in children.items():
+            self.assertEqual(child['query'], plan['query'])
+            self.assertEqual(child['data'], dict(plan['data'], generate=False))
+            self.assertEqual(len(child['targets']), 1)
+            self.assertEqual(child['targets'][0]['name'], name)
+            self.assertEqual(child['output_root'], '/tmp/o11ybench-test/o11ybench/o11ybench-' + name)
+            self.assertTrue(child['report']['root'].startswith(child['output_root']))
+        self.assertNotEqual(children['greptimedb']['run_id'], children['greptimedb-s3']['run_id'])
+
+    def test_missing_s3_arm_is_not_a_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / 'report.json'
+            report.write_text(json.dumps(dict(workloads=[dict(participants=[
+                dict(target='greptimedb', role='candidate', storage=dict(type='file'))], scenarios=[])])))
+            with self.assertRaisesRegex(ValueError, 'participant mismatch'):
+                storage.audit(root, report, ['greptimedb'], 'both')
+
+    def test_s3_summary_is_explicit_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            text = storage.summary('agent', Path(tmp), ['greptimedb'], 'benchmark', 'both')
+            self.assertIn('GreptimeDB File', text)
+            self.assertIn('GreptimeDB S3', text)
+            self.assertIn('S3 cleanup: **failed / unavailable**', text)
+
     def test_cleanup_both(self):
         command = ['runner', '--stage', 'cleanup', '--root', '/run', '--owner', 'owner']
         calls = storage.commands(command, 'both')
         self.assertEqual(len(calls), 2)
         self.assertTrue(all('--greptimedb-storage' not in c for c in calls))
+    def test_cleanup_s3_only_still_visits_primary_competitors(self):
+        command = ['runner', '--stage', 'cleanup', '--root', '/run', '--owner', 'owner']
+        calls = storage.commands(command, 's3')
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][calls[1].index('--root') + 1], '/run/s3')
+
     def test_workflow_wiring(self):
         for name in ('agent-observability', 'tracesbench', 'vmbench-long-range'):
             text = (ROOT / '.github/workflows' / (name + '.yml')).read_text()
             self.assertIn('options: [file, s3, both]', text)
             self.assertIn('o11ybench-storage.py validate', text)
-            self.assertIn('S3_REGION:', text)
+            self.assertIn('o11ybench-storage.py audit', text)
+            self.assertIn('ci-summary.md', text)
             self.assertIn('AWS_SECRET_ACCESS_KEY:', text)
+            self.assertNotIn('o11ybench-storage.py run -- bash o11ybench/scripts/run-agent-observability.sh --stage target', text)
             if name == 'vmbench-long-range':
-                self.assertIn('--greptimedb-storage "$GREPTIMEDB_STORAGE"', text)
-                self.assertIn('-e S3_BUCKET -e S3_REGION', text)
+                self.assertIn('name: Load and benchmark GreptimeDB File', text)
+                self.assertIn('name: Load and benchmark GreptimeDB S3', text)
+                self.assertIn('metrics-prepare', text)
+                self.assertIn('metrics-validate', text)
             else:
-                self.assertIn('o11ybench-storage.py run --', text)
+                self.assertIn('--stage target --greptimedb-storage file', text)
+                self.assertIn('--stage target --greptimedb-storage s3', text)
 
 
 if __name__ == '__main__':
