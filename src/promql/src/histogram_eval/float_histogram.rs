@@ -441,7 +441,11 @@ impl FloatHistogram {
     }
 
     /// Go `newCompensationHistogram`: the layout of `self` with zero counts.
-    fn new_compensation(&self) -> Self {
+    ///
+    /// This is the zero compensation a fold starts from, and the only zero a compensated add may be
+    /// seeded with: an [`Self::empty_like`] histogram has no bucket indices, while the Kahan update
+    /// indexes the compensation by the value's positions.
+    pub(crate) fn new_compensation(&self) -> Self {
         Self {
             reset_hint: self.reset_hint,
             start_timestamp: None,
