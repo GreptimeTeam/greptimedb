@@ -2302,6 +2302,19 @@ fn grid_end_ms(spec: GridSpec) -> i64 {
 /// skip, so it is reported instead of dropped.
 fn grid_position(grid: &EvalGrid, timestamp: i64) -> Result<usize> {
     let spec = grid.spec();
+    // This runs once per reported point, so the common case stays in `i64`: `div` and `rem` on the
+    // same operands become one machine divide, where the `i128` path below divides twice. A grid
+    // whose numbers do not fit, or a timestamp off the lattice, falls through to that path, which
+    // computes the same answer.
+    if spec.step_ms > 0
+        && let Some(offset) = timestamp.checked_sub(spec.start_ms)
+        && offset >= 0
+    {
+        let (position, remainder) = (offset / spec.step_ms, offset % spec.step_ms);
+        if remainder == 0 && (position as u64) < spec.len {
+            return Ok(position as usize);
+        }
+    }
     let offset = i128::from(timestamp) - i128::from(spec.start_ms);
     let step = i128::from(spec.step_ms);
     let position = offset.div_euclid(step);
