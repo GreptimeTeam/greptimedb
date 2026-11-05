@@ -1098,10 +1098,6 @@ max_log_dir_size = "0B"
 
 ## Whether to enable per-region query metrics and datanode manifest size metrics.
 ## These metrics can have high cardinality. Defaults to false.
-## Manifest size series are exposed only above the threshold (512 MiB by default),
-## and removed when the size falls to or below it. Override the threshold with
-## GREPTIME_REGION_MANIFEST_SIZE_METRIC_THRESHOLD_BYTES (integer bytes; 0 disables
-## filtering). The env is read once on first use; changes require a restart.
 enable_per_region_metrics = false
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
