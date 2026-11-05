@@ -466,7 +466,11 @@ impl NodeBuffer {
     /// kind. It labels the reservation, it does not key it: the pool accounts a consumer by its own
     /// id, so two nodes sharing a name stay separate reservations. This name is what the error
     /// context and the pool's top-consumer report print.
-    fn new(name: impl Into<String>, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {
+    pub(super) fn new(
+        name: impl Into<String>,
+        metrics: Arc<NodeMetrics>,
+        pool: &Arc<dyn MemoryPool>,
+    ) -> Self {
         let consumer = MemoryConsumer::new(name.into());
         Self {
             metrics,
@@ -2823,7 +2827,11 @@ impl NodeState {
         )
     }
 
-    fn new(name: impl Into<String>, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {
+    pub(super) fn new(
+        name: impl Into<String>,
+        metrics: Arc<NodeMetrics>,
+        pool: &Arc<dyn MemoryPool>,
+    ) -> Self {
         let name = name.into();
         Self {
             queued: VecDeque::new(),

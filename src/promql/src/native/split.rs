@@ -428,7 +428,7 @@ impl Split {
             histogram: _,
             label_rewrite: _,
         } = self;
-        let Some((kind, components)) = aggregate_state_binding(op.kind) else {
+        let Some((kind, components)) = aggregate_state_binding(op.kind, op.field_kind) else {
             return Ok(None);
         };
         let Some(grid) = schema.eval_grid.clone() else {

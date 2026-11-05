@@ -4680,7 +4680,7 @@ mod aggregate_state_acceptance {
     use super::*;
     use crate::series::aggregate_state::{
         AggregateStateKind as Kind, AggregateStateSchema, AggregateStateValues as Values,
-        StateComponent as Component, StateSeries,
+        StateComponent as Component, StatePayload, StateSeries,
     };
 
     fn state_schema(fields: &[&str], len: usize) -> SeriesSchema {
@@ -4700,7 +4700,7 @@ mod aggregate_state_acceptance {
         kind: Kind,
         schema: &SeriesSchema,
         spans: Vec<GridSpan>,
-        states: Vec<Vec<Option<Values>>>,
+        states: Vec<Vec<Option<StatePayload>>>,
         last: bool,
     ) -> (RecordBatch, SeriesFrameDecoder) {
         let components = match kind {
@@ -4718,6 +4718,26 @@ mod aggregate_state_acceptance {
             Kind::Stddev | Kind::Stdvar => {
                 vec![Component::Value, Component::Mean, Component::Count]
             }
+            Kind::HistogramSum => vec![
+                Component::HistogramValue,
+                Component::HistogramCompensation,
+                Component::Poisoned,
+                Component::IncompatibleLayout,
+                Component::CustomBoundsReconciled,
+                Component::CounterResetSeen,
+                Component::NotCounterResetSeen,
+            ],
+            Kind::HistogramAvg => vec![
+                Component::HistogramValue,
+                Component::HistogramCompensation,
+                Component::Count,
+                Component::IncrementalMean,
+                Component::Poisoned,
+                Component::IncompatibleLayout,
+                Component::CustomBoundsReconciled,
+                Component::CounterResetSeen,
+                Component::NotCounterResetSeen,
+            ],
         };
         let state = AggregateStateSchema::try_new(kind, components).unwrap();
         let time = TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap();
@@ -4749,7 +4769,7 @@ mod aggregate_state_acceptance {
         (batch, decoder)
     }
 
-    fn values(n: usize, seed: f64) -> Vec<Option<Values>> {
+    fn floats(n: usize, seed: f64) -> Vec<Option<Values>> {
         (0..n)
             .map(|i| {
                 Some(Values {
@@ -4763,6 +4783,26 @@ mod aggregate_state_acceptance {
             .collect()
     }
 
+    fn values(n: usize, seed: f64) -> Vec<Option<StatePayload>> {
+        floats(n, seed)
+            .into_iter()
+            .map(|value| value.map(StatePayload::Float))
+            .collect()
+    }
+
+    /// The payload one seeded position holds, cloned so a test can reuse its vector.
+    fn at(states: &[Option<StatePayload>], position: usize) -> Option<StatePayload> {
+        states[position].clone()
+    }
+
+    /// The numeric components of a state vector, which is what a walk hands on unchanged.
+    fn numeric(states: &[Option<StatePayload>]) -> Vec<Option<Values>> {
+        states
+            .iter()
+            .map(|state| state.as_ref().and_then(StatePayload::float).copied())
+            .collect()
+    }
+
     #[test]
     fn group_state_keeps_field_local_presence_through_ipc_and_slices() {
         let schema = state_schema(&["a", "b"], 6);
@@ -4771,7 +4811,12 @@ mod aggregate_state_acceptance {
             &schema,
             vec![GridSpan::new(0, 4)],
             vec![
-                vec![Some(Values::default()), None, Some(Values::default()), None],
+                vec![
+                    Some(StatePayload::Float(Values::default())),
+                    None,
+                    Some(StatePayload::Float(Values::default())),
+                    None,
+                ],
                 vec![None; 4],
             ],
             true,
@@ -4833,11 +4878,7 @@ mod aggregate_state_acceptance {
                 vec![GridSpan::new(1, 2), GridSpan::new(4, 1)],
                 vec![
                     values(3, 1.0),
-                    vec![
-                        None,
-                        Some(values(3, 1.0)[1].unwrap()),
-                        Some(values(3, 1.0)[2].unwrap()),
-                    ],
+                    vec![None, at(&values(3, 1.0), 1), at(&values(3, 1.0), 2)],
                 ],
                 true,
             );
@@ -4909,12 +4950,7 @@ mod aggregate_state_acceptance {
             let states = || {
                 vec![
                     source_values.clone(),
-                    vec![
-                        None,
-                        source_values[1],
-                        Some(values(4, 30.0)[2].unwrap()),
-                        None,
-                    ],
+                    vec![None, at(&source_values, 1), at(&values(4, 30.0), 2), None],
                 ]
             };
             // Two rows, so slicing and re-concatenating at an offset has something to shift: with
@@ -5113,7 +5149,12 @@ mod aggregate_state_acceptance {
         };
         // The dense fast path preserves the caller's field allocation and values verbatim.
         assert_eq!(walk.series.states[0].as_ptr(), allocation);
-        assert_eq!(walk.series.states, vec![values(4, 1.0), values(4, 5.0)]);
+        assert_eq!(
+            numeric(&walk.series.states[0]),
+            floats(4, 1.0),
+            "the dense walk keeps its states"
+        );
+        assert_eq!(numeric(&walk.series.states[1]), floats(4, 5.0));
         assert_eq!(
             walk.series
                 .time
@@ -5144,8 +5185,8 @@ mod aggregate_state_acceptance {
             &schema,
             vec![GridSpan::new(0, 3)],
             vec![
-                vec![Some(values[0].unwrap()), None, Some(values[2].unwrap())],
-                vec![None, Some(values[1].unwrap()), None],
+                vec![at(&values, 0), None, at(&values, 2)],
+                vec![None, at(&values, 1), None],
             ],
             true,
         );
@@ -5229,8 +5270,8 @@ mod aggregate_state_acceptance {
         let a = values(4, 1.0);
         let b = values(4, 5.0);
         let input = vec![
-            vec![Some(a[0].unwrap()), None, Some(a[2].unwrap()), None],
-            vec![None, Some(b[1].unwrap()), None, Some(b[3].unwrap())],
+            vec![at(&a, 0), None, at(&a, 2), None],
+            vec![None, at(&b, 1), None, at(&b, 3)],
         ];
         let time = TimeAxis::from_grid_spans(
             schema.eval_grid.clone().unwrap(),
@@ -5271,12 +5312,14 @@ mod aggregate_state_acceptance {
                 .collect::<Vec<_>>(),
             vec![(0, 1), (2, 1), (4, 1), (6, 1)]
         );
+        let a = numeric(&a);
+        let b = numeric(&b);
         assert_eq!(
-            walk.series.states[0],
+            numeric(&walk.series.states[0]),
             vec![Some(a[0].unwrap()), None, Some(a[2].unwrap()), None]
         );
         assert_eq!(
-            walk.series.states[1],
+            numeric(&walk.series.states[1]),
             vec![None, Some(b[1].unwrap()), None, Some(b[3].unwrap())]
         );
     }
@@ -5314,7 +5357,7 @@ mod aggregate_state_decoder_rejections {
     use super::*;
     use crate::series::aggregate_state::{
         AggregateStateKind as Kind, AggregateStateSchema, AggregateStateValues as Values,
-        StateComponent as Component, StateSeries,
+        StateComponent as Component, StatePayload, StateSeries,
     };
 
     fn fixture() -> (RecordBatch, SeriesFrameDecoder) {
@@ -5343,11 +5386,11 @@ mod aggregate_state_decoder_rejections {
                 metric: metric(Some("m"), &[]),
                 time,
                 states: vec![vec![
-                    Some(Values {
+                    Some(StatePayload::Float(Values {
                         value: 1.0,
                         compensation: 2.0,
                         ..Values::default()
-                    });
+                    }));
                     3
                 ]],
             },
@@ -5454,5 +5497,705 @@ mod aggregate_state_decoder_rejections {
                 .decode_aggregate_state(&replace_field(&batch, broken))
                 .is_err()
         );
+    }
+}
+
+mod aggregate_state_histogram_states {
+    use super::*;
+    use crate::series::aggregate_state::{
+        AggregateStateKind as Kind, AggregateStateSchema, HistogramState,
+        StateComponent as Component, StatePayload, StateSeries,
+    };
+    use crate::series::histogram::HistogramView;
+
+    const SUM_COMPONENTS: [Component; 7] = [
+        Component::HistogramValue,
+        Component::HistogramCompensation,
+        Component::Poisoned,
+        Component::IncompatibleLayout,
+        Component::CustomBoundsReconciled,
+        Component::CounterResetSeen,
+        Component::NotCounterResetSeen,
+    ];
+    const AVG_COMPONENTS: [Component; 9] = [
+        Component::HistogramValue,
+        Component::HistogramCompensation,
+        Component::Count,
+        Component::IncrementalMean,
+        Component::Poisoned,
+        Component::IncompatibleLayout,
+        Component::CustomBoundsReconciled,
+        Component::CounterResetSeen,
+        Component::NotCounterResetSeen,
+    ];
+
+    fn components(kind: Kind) -> Vec<Component> {
+        match kind {
+            Kind::HistogramSum => SUM_COMPONENTS.to_vec(),
+            Kind::HistogramAvg => AVG_COMPONENTS.to_vec(),
+            _ => unreachable!("only histogram kinds are built here"),
+        }
+    }
+
+    fn schema(fields: &[&str], len: usize) -> SeriesSchema {
+        let base = test_schema(fields);
+        SeriesSchema {
+            fields: base.fields,
+            eval_grid: Some(Arc::new(
+                EvalGrid::try_new(GridSpec::try_new(0, 1, len as u64).unwrap()).unwrap(),
+            )),
+        }
+    }
+
+    /// One histogram row: `sum`/`count` with the given positive span layout and bucket counts.
+    fn histogram(
+        spans: &[(i32, i32)],
+        buckets: &[f64],
+        bounds: &[f64],
+        schema: i32,
+    ) -> Arc<HistogramBatch> {
+        let (offsets, lengths): (Vec<i32>, Vec<i32>) = spans.iter().copied().unzip();
+        let counts = buckets.to_vec();
+        let none = BucketSideView {
+            span_offsets: &[],
+            span_lengths: &[],
+            buckets: &[],
+        };
+        let mut builder = HistogramBatchBuilder::new();
+        builder
+            .push(HistogramView {
+                schema,
+                zero_threshold: 0.001,
+                sum: 6.5,
+                count: 4.0,
+                zero_count: 1.0,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp: None,
+                custom_values: bounds,
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: &counts,
+                },
+                negative: none,
+            })
+            .unwrap();
+        builder.finish().unwrap()
+    }
+
+    fn batch(spans: &[(i32, i32)], buckets: &[f64]) -> Arc<HistogramBatch> {
+        histogram(spans, buckets, &[], 0)
+    }
+
+    /// A state whose compensation carries the live value's bucket layout.
+    fn state(spans: &[(i32, i32)], buckets: &[f64]) -> Box<HistogramState> {
+        Box::new(HistogramState {
+            value: batch(spans, buckets),
+            compensation: batch(spans, &vec![0.0; buckets.len()]),
+            count: 0.0,
+            incremental_mean: false,
+            poisoned: false,
+            incompatible_layout: false,
+            custom_bounds_reconciled: false,
+            counter_reset_seen: false,
+            not_counter_reset_seen: false,
+        })
+    }
+
+    fn payload(state: Box<HistogramState>) -> Option<StatePayload> {
+        Some(StatePayload::Histogram(state))
+    }
+
+    fn frame(
+        kind: Kind,
+        schema: &SeriesSchema,
+        spans: Vec<GridSpan>,
+        states: Vec<Vec<Option<StatePayload>>>,
+    ) -> (RecordBatch, SeriesFrameDecoder) {
+        let state = AggregateStateSchema::try_new(kind, components(kind)).unwrap();
+        let time = TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap();
+        let mut cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            schema,
+            StateSeries {
+                metric: metric(Some("m"), &[("job", "x")]),
+                time,
+                states,
+            },
+            true,
+        )
+        .unwrap();
+        let mut builder = SeriesFrameBuilder::try_new_aggregate_state(
+            &state,
+            schema,
+            FrameLabelMode::Explicit,
+            8,
+            1 << 20,
+        )
+        .unwrap();
+        assert!(cursor.append_to(&mut builder).unwrap().is_none());
+        let batch = builder.flush().unwrap().unwrap();
+        let decoder =
+            SeriesFrameDecoder::try_new_aggregate_state(&state, schema, FrameLabelMode::Explicit)
+                .unwrap();
+        (batch, decoder)
+    }
+
+    /// Compares two one-row histograms by every field a merge reads, independent of the encoding.
+    fn assert_histogram_eq(actual: &HistogramBatch, expected: &HistogramBatch) {
+        let actual = actual.view(0).unwrap();
+        let expected = expected.view(0).unwrap();
+        assert_eq!(actual.schema, expected.schema);
+        assert_eq!(
+            actual.zero_threshold.to_bits(),
+            expected.zero_threshold.to_bits()
+        );
+        assert_eq!(actual.sum.to_bits(), expected.sum.to_bits());
+        assert_eq!(actual.count.to_bits(), expected.count.to_bits());
+        assert_eq!(actual.zero_count.to_bits(), expected.zero_count.to_bits());
+        assert_eq!(actual.reset_hint, expected.reset_hint);
+        assert_eq!(actual.start_timestamp, expected.start_timestamp);
+        assert_eq!(actual.custom_values, expected.custom_values);
+        for (actual, expected) in [
+            (actual.positive, expected.positive),
+            (actual.negative, expected.negative),
+        ] {
+            assert_eq!(actual.span_offsets, expected.span_offsets);
+            assert_eq!(actual.span_lengths, expected.span_lengths);
+            assert_eq!(actual.buckets, expected.buckets);
+        }
+    }
+
+    /// Compares the payload a decoded row carries with the one it was encoded from.
+    fn assert_state_eq(actual: &StatePayload, expected: &StatePayload) {
+        let actual = actual.histogram().expect("a histogram state");
+        let expected = expected.histogram().expect("a histogram state");
+        assert_histogram_eq(actual.value.as_ref(), expected.value.as_ref());
+        assert_histogram_eq(actual.compensation.as_ref(), expected.compensation.as_ref());
+        assert_eq!(actual.count.to_bits(), expected.count.to_bits());
+        assert_eq!(actual.incremental_mean, expected.incremental_mean);
+        assert_eq!(actual.poisoned, expected.poisoned);
+        assert_eq!(actual.incompatible_layout, expected.incompatible_layout);
+        assert_eq!(
+            actual.custom_bounds_reconciled,
+            expected.custom_bounds_reconciled
+        );
+        assert_eq!(actual.counter_reset_seen, expected.counter_reset_seen);
+        assert_eq!(
+            actual.not_counter_reset_seen,
+            expected.not_counter_reset_seen
+        );
+    }
+
+    #[test]
+    fn histogram_state_spellings_are_canonical_and_refuse_unknowns() {
+        assert_eq!(Kind::HistogramSum.as_str(), "histogram_sum");
+        assert_eq!(Kind::HistogramAvg.as_str(), "histogram_avg");
+        assert_eq!(Kind::parse("histogram_sum").unwrap(), Kind::HistogramSum);
+        assert_eq!(Kind::parse("histogram_avg").unwrap(), Kind::HistogramAvg);
+        assert!(Kind::parse("histogram").is_err());
+        assert!(Kind::parse("histogramsum").is_err());
+        assert_eq!(Component::HistogramValue.as_str(), "histogram_value");
+        assert_eq!(
+            Component::parse("histogram_value").unwrap(),
+            Component::HistogramValue
+        );
+        assert_eq!(
+            Component::parse("not_counter_reset_seen").unwrap(),
+            Component::NotCounterResetSeen
+        );
+        assert!(Component::parse("hist_value").is_err());
+        assert_eq!(
+            AggregateStateSchema::from_text("histogram_sum", "histogram_value,histogram_compensation,poisoned,incompatible_layout,custom_bounds_reconciled,counter_reset_seen,not_counter_reset_seen")
+                .unwrap()
+                .kind,
+            Kind::HistogramSum
+        );
+        assert!(AggregateStateSchema::from_text("histogram_avg", "histogram_value").is_err());
+    }
+
+    #[test]
+    fn histogram_state_round_trips_in_sum_mode() {
+        let schema = schema(&["x", "y"], 6);
+        let mut first = state(&[(0, 2), (1, 1)], &[1.0, 2.0, 3.0]);
+        first.custom_bounds_reconciled = true;
+        first.counter_reset_seen = true;
+        let second = state(&[(-1, 3)], &[4.0, 5.0, 6.0]);
+        let expected = vec![
+            vec![payload(first), None, payload(second.clone())],
+            vec![None, payload(second), None],
+        ];
+        let (batch, decoder) = frame(
+            Kind::HistogramSum,
+            &schema,
+            vec![GridSpan::new(0, 3)],
+            expected.clone(),
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_eq!(rows.len(), 1);
+        let decoded = rows[0].to_state_series().unwrap();
+        assert_eq!(
+            decoded
+                .time
+                .positions()
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        for (field, values) in expected.iter().enumerate() {
+            for (position, value) in values.iter().enumerate() {
+                match value {
+                    Some(value) => {
+                        assert!(
+                            rows[0]
+                                .fields()
+                                .unwrap()
+                                .is_present(field, position)
+                                .unwrap()
+                        );
+                        assert_state_eq(decoded.states[field][position].as_ref().unwrap(), value);
+                    }
+                    None => assert!(decoded.states[field][position].is_none()),
+                }
+            }
+        }
+        // The payload nests a histogram struct inside a list item, one level deeper than a sample
+        // frame's histogram table, so it also has to survive the wire form and a slice of it.
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, &batch.schema()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let batches = StreamReader::try_new(std::io::Cursor::new(ipc), None)
+            .unwrap()
+            .map(|batch| batch.unwrap())
+            .collect::<Vec<_>>();
+        let joined = concat_batches(&batch.schema(), &batches).unwrap();
+        for batch in [joined.clone(), joined.slice(0, 1)] {
+            let rows = decoder.decode_aggregate_state(&batch).unwrap();
+            let decoded = rows[0].to_state_series().unwrap();
+            for (field, values) in expected.iter().enumerate() {
+                for (position, value) in values.iter().enumerate() {
+                    match value {
+                        Some(value) => assert_state_eq(
+                            decoded.states[field][position].as_ref().unwrap(),
+                            value,
+                        ),
+                        None => assert!(decoded.states[field][position].is_none()),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_state_round_trips_in_mean_mode() {
+        let schema = schema(&["x"], 4);
+        let mut mean = state(&[(0, 2), (2, 2)], &[0.25, 0.5, 0.75, 1.0]);
+        mean.count = 4.0;
+        mean.incremental_mean = true;
+        mean.custom_bounds_reconciled = true;
+        let sum = state(&[(0, 4)], &[1.0, 2.0, 3.0, 4.0]);
+        let expected = vec![vec![payload(mean), payload(sum), None, None]];
+        let (batch, decoder) = frame(
+            Kind::HistogramAvg,
+            &schema,
+            vec![GridSpan::new(0, 4)],
+            expected.clone(),
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        let decoded = rows[0].to_state_series().unwrap();
+        // Only the positions that carry a contribution are kept, so the two trailing holes are the
+        // axis' business and not the state vector's.
+        assert_eq!(
+            decoded
+                .time
+                .positions()
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        for (row, value) in expected[0].iter().take(2).enumerate() {
+            assert_state_eq(
+                decoded.states[0][row].as_ref().unwrap(),
+                value.as_ref().unwrap(),
+            );
+        }
+        // The mean mode bit and the count are components of their own, so they survive decoding even
+        // though both histogram payloads are otherwise alike.
+        let mean = decoded.states[0][0].as_ref().unwrap().histogram().unwrap();
+        assert!(mean.incremental_mean);
+        assert_eq!(mean.count, 4.0);
+        let sum = decoded.states[0][1].as_ref().unwrap().histogram().unwrap();
+        assert!(!sum.incremental_mean);
+        assert_eq!(
+            sum.count, 0.0,
+            "a state that was never switched keeps no count"
+        );
+    }
+
+    #[test]
+    fn compensation_with_the_same_buckets_spelled_differently_is_accepted() {
+        // `[(0, 2), (1, 1)]` and `[(0, 1), (0, 1), (1, 1)]` both expand to the bucket indices
+        // [0, 1, 3], so the two sides of one state are aligned even though their spans differ.
+        let schema = schema(&["x"], 1);
+        let mut state = state(&[(0, 2), (1, 1)], &[1.0, 2.0, 3.0]);
+        state.compensation = batch(&[(0, 1), (0, 1), (1, 1)], &[0.0, 0.0, 0.0]);
+        let (batch, decoder) = frame(
+            Kind::HistogramSum,
+            &schema,
+            vec![GridSpan::new(0, 1)],
+            vec![vec![payload(state.clone())]],
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        let decoded = rows[0].to_state_series().unwrap();
+        assert_state_eq(
+            decoded.states[0][0].as_ref().unwrap(),
+            &payload(state).unwrap(),
+        );
+    }
+
+    /// A poisoned position keeps its evidence and stays present, so no later crop can revive it.
+    #[test]
+    fn poisoned_histogram_state_round_trips_and_stays_present() {
+        let schema = schema(&["x"], 6);
+        let poisoned = Box::new(HistogramState {
+            value: batch(&[], &[]),
+            compensation: batch(&[], &[]),
+            count: 3.0,
+            incremental_mean: false,
+            poisoned: true,
+            incompatible_layout: true,
+            custom_bounds_reconciled: false,
+            counter_reset_seen: true,
+            not_counter_reset_seen: false,
+        });
+        let expected = vec![vec![payload(poisoned), None, None, None]];
+        let (batch, decoder) = frame(
+            Kind::HistogramAvg,
+            &schema,
+            vec![GridSpan::new(0, 4)],
+            expected.clone(),
+        );
+        let rows = decoder.decode_aggregate_state(&batch).unwrap();
+        // The two positions after the poisoned one carry nothing, so the chunk keeps only the
+        // position that has a contribution - and that position is the poisoned one.
+        assert_eq!(
+            rows[0]
+                .time()
+                .positions()
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert!(rows[0].fields().unwrap().is_present(0, 0).unwrap());
+        let decoded = rows[0].to_state_series().unwrap();
+        assert_state_eq(
+            decoded.states[0][0].as_ref().unwrap(),
+            expected[0][0].as_ref().unwrap(),
+        );
+        let decoded = decoded.states[0][0].as_ref().unwrap().histogram().unwrap();
+        assert!(decoded.poisoned);
+        assert!(decoded.incompatible_layout);
+        assert!(decoded.counter_reset_seen);
+        assert!(!decoded.not_counter_reset_seen);
+        assert_eq!(decoded.count, 3.0, "a poisoned point keeps its count");
+    }
+
+    #[test]
+    fn histogram_kind_carrying_numeric_components_is_refused() {
+        assert!(
+            AggregateStateSchema::try_new(
+                Kind::HistogramSum,
+                vec![Component::Value, Component::Compensation]
+            )
+            .is_err()
+        );
+        // And a frame that declares a histogram kind over numeric columns is not the frame this
+        // kind describes, so the decoder refuses it before reading a single row.
+        let numeric = schema(&["x"], 3);
+        let (batch, _) = numeric_frame(&numeric);
+        let histogram =
+            AggregateStateSchema::try_new(Kind::HistogramSum, SUM_COMPONENTS.to_vec()).unwrap();
+        let decoder = SeriesFrameDecoder::try_new_aggregate_state(
+            &histogram,
+            &numeric,
+            FrameLabelMode::Explicit,
+        )
+        .unwrap();
+        assert!(decoder.decode_aggregate_state(&batch).is_err());
+    }
+
+    #[test]
+    fn histogram_sum_cannot_declare_mean_mode() {
+        let components = vec![
+            Component::HistogramValue,
+            Component::HistogramCompensation,
+            Component::Count,
+            Component::IncrementalMean,
+            Component::Poisoned,
+            Component::IncompatibleLayout,
+            Component::CustomBoundsReconciled,
+            Component::CounterResetSeen,
+            Component::NotCounterResetSeen,
+        ];
+        assert!(AggregateStateSchema::try_new(Kind::HistogramSum, components.clone()).is_err());
+        assert!(AggregateStateSchema::try_new(Kind::HistogramAvg, components).is_ok());
+        assert!(
+            AggregateStateSchema::try_new(
+                Kind::HistogramSum,
+                SUM_COMPONENTS
+                    .iter()
+                    .copied()
+                    .chain([Component::IncrementalMean])
+                    .collect()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn numeric_kind_carrying_histogram_state_is_refused() {
+        let schema = schema(&["x"], 2);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 1)])
+                .unwrap();
+        assert!(
+            SeriesFrameCursor::try_new_aggregate_state(
+                &state,
+                &schema,
+                StateSeries {
+                    metric: metric(Some("m"), &[]),
+                    time,
+                    states: vec![vec![payload(state_of_sum(1.0))]],
+                },
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    fn state_of_sum(value: f64) -> Box<HistogramState> {
+        let mut state = self::state(&[(0, 1)], &[value]);
+        state.count = 0.0;
+        state
+    }
+
+    /// The producer refuses a compensation whose layout disagrees with its live value.
+    #[test]
+    fn compensation_layout_mismatch_is_refused_by_the_producer() {
+        let schema = schema(&["x"], 1);
+        let state =
+            AggregateStateSchema::try_new(Kind::HistogramSum, SUM_COMPONENTS.to_vec()).unwrap();
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 1)])
+                .unwrap();
+        let mut mismatched = self::state(&[(0, 2)], &[1.0, 2.0]);
+        mismatched.compensation = batch(&[(0, 3)], &[0.0, 0.0, 0.0]);
+        assert!(
+            SeriesFrameCursor::try_new_aggregate_state(
+                &state,
+                &schema,
+                StateSeries {
+                    metric: metric(Some("m"), &[]),
+                    time,
+                    states: vec![vec![payload(mismatched)]],
+                },
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    /// A frame carrying a mismatched compensation, with its poison bit cleared.
+    ///
+    /// A poisoned position is exempt from the layout check, which is how a mismatched pair can be
+    /// written at all; clearing the poison bit leaves a frame that claims to be live.
+    fn unpoisoned_mismatched_frame(
+        value: Arc<HistogramBatch>,
+        compensation: Arc<HistogramBatch>,
+    ) -> (RecordBatch, SeriesFrameDecoder) {
+        let schema = schema(&["x"], 1);
+        let state = Box::new(HistogramState {
+            value,
+            compensation,
+            count: 0.0,
+            incremental_mean: false,
+            poisoned: true,
+            incompatible_layout: true,
+            custom_bounds_reconciled: false,
+            counter_reset_seen: false,
+            not_counter_reset_seen: false,
+        });
+        let (batch, decoder) = frame(
+            Kind::HistogramSum,
+            &schema,
+            vec![GridSpan::new(0, 1)],
+            vec![vec![payload(state)]],
+        );
+        assert!(decoder.decode_aggregate_state(&batch).is_ok());
+        (
+            replace_component(&batch, 2, Arc::new(BooleanArray::from(vec![false]))),
+            decoder,
+        )
+    }
+
+    /// The decoder refuses the mismatch even when the frame was produced elsewhere.
+    #[test]
+    fn compensation_layout_mismatch_is_refused_by_the_decoder() {
+        let (mismatched, decoder) = unpoisoned_mismatched_frame(
+            batch(&[(0, 2)], &[1.0, 2.0]),
+            batch(&[(0, 3)], &[0.0, 0.0, 0.0]),
+        );
+        assert!(decoder.decode_aggregate_state(&mismatched).is_err());
+        // The same holds when the two sides share their bucket indices and only the custom bounds
+        // disagree.
+        let (mismatched, decoder) = unpoisoned_mismatched_frame(
+            histogram(&[(0, 2)], &[1.0, 2.0], &[1.0, 2.0], 2),
+            histogram(&[(0, 2)], &[0.0, 0.0], &[1.0, 3.0], 2),
+        );
+        assert!(decoder.decode_aggregate_state(&mismatched).is_err());
+    }
+
+    /// A present item that is missing a histogram component is refused, as it is for numeric state.
+    #[test]
+    fn present_item_missing_a_histogram_component_is_refused() {
+        let schema = schema(&["x"], 1);
+        let (batch, decoder) = frame(
+            Kind::HistogramSum,
+            &schema,
+            vec![GridSpan::new(0, 1)],
+            vec![vec![payload(self::state(&[(0, 1)], &[1.0]))]],
+        );
+        assert!(decoder.decode_aggregate_state(&batch).is_ok());
+        let component = match batch.schema().field(3).data_type() {
+            DataType::Struct(fields) => match fields[0].data_type() {
+                DataType::List(item) => match item.data_type() {
+                    DataType::Struct(components) => components[1].data_type().clone(),
+                    _ => unreachable!("a state item is a component struct"),
+                },
+                _ => unreachable!("a state field is a list"),
+            },
+            _ => unreachable!("the state fields column is a struct"),
+        };
+        let missing = replace_component(&batch, 1, new_null_component(&component));
+        assert!(decoder.decode_aggregate_state(&missing).is_err());
+    }
+
+    #[test]
+    fn state_charges_follow_the_histogram_payload_width() {
+        let narrow = vec![vec![payload(self::state(&[(0, 2)], &[1.0, 2.0]))]];
+        let mut wide_state = self::state(&[(0, 10)], &[1.0; 10]);
+        wide_state.compensation = batch(&[(0, 10)], &[0.0; 10]);
+        let wide = vec![vec![payload(wide_state)]];
+        let narrow_charge = super::state_charges(&narrow).unwrap();
+        let wide_charge = super::state_charges(&wide).unwrap();
+        // Eight more buckets on each of the two histograms, at eight bytes a bucket.
+        assert_eq!(wide_charge - narrow_charge, 2 * 8 * 8);
+        let numeric = vec![vec![Some(StatePayload::Float(Default::default()))]];
+        assert!(super::state_charges(&numeric).unwrap() < narrow_charge);
+    }
+
+    fn new_null_component(data_type: &DataType) -> ArrayRef {
+        arrow::array::new_null_array(data_type, 1)
+    }
+
+    /// Replaces one component of the first field's items, keeping the layout of everything else.
+    fn replace_component(
+        batch: &RecordBatch,
+        component: usize,
+        replacement: ArrayRef,
+    ) -> RecordBatch {
+        let fields = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let list = fields
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let item = list
+            .values()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let mut columns = item.columns().to_vec();
+        columns[component] = replacement;
+        let item = Arc::new(
+            StructArray::try_new(item.fields().clone(), columns, item.nulls().cloned()).unwrap(),
+        );
+        let list = Arc::new(
+            ListArray::try_new(
+                match list.data_type() {
+                    DataType::List(field) => field.clone(),
+                    _ => unreachable!(),
+                },
+                list.offsets().clone(),
+                item,
+                list.nulls().cloned(),
+            )
+            .unwrap(),
+        );
+        let mut columns = fields.columns().to_vec();
+        columns[0] = list;
+        let fields = Arc::new(
+            StructArray::try_new(fields.fields().clone(), columns, fields.nulls().cloned())
+                .unwrap(),
+        );
+        let mut columns = batch.columns().to_vec();
+        columns[3] = fields;
+        RecordBatch::try_new(batch.schema(), columns).unwrap()
+    }
+
+    /// A numeric `Sum` frame, for the frame-shape rejections above.
+    fn numeric_frame(schema: &SeriesSchema) -> (RecordBatch, SeriesFrameDecoder) {
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 3)])
+                .unwrap();
+        let mut cursor = SeriesFrameCursor::try_new_aggregate_state(
+            &state,
+            schema,
+            StateSeries {
+                metric: metric(Some("m"), &[]),
+                time,
+                states: vec![vec![
+                    Some(StatePayload::Float(AggregateStateValues {
+                        value: 1.0,
+                        compensation: 2.0,
+                        ..Default::default()
+                    }));
+                    3
+                ]],
+            },
+            true,
+        )
+        .unwrap();
+        let mut builder = SeriesFrameBuilder::try_new_aggregate_state(
+            &state,
+            schema,
+            FrameLabelMode::Explicit,
+            4,
+            4096,
+        )
+        .unwrap();
+        assert!(cursor.append_to(&mut builder).unwrap().is_none());
+        let batch = builder.flush().unwrap().unwrap();
+        let decoder =
+            SeriesFrameDecoder::try_new_aggregate_state(&state, schema, FrameLabelMode::Explicit)
+                .unwrap();
+        (batch, decoder)
     }
 }

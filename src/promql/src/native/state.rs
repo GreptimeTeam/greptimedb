@@ -28,13 +28,13 @@ use datafusion::arrow::array::Array;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::MemoryReservation;
 use datatypes::series::aggregate_state::{
-    AggregateStateKind, AggregateStateValues, StateComponent, StateSeries,
+    AggregateStateKind, StateComponent, StatePayload, StateSeries,
 };
 use datatypes::series::frame::StateFrameRow;
 use datatypes::series::time::{GridSpan, TimeAxis};
 
 use crate::aggregate::{AggregateOp, PartialAggregate};
-use crate::native::plan::AggregateStateSchema;
+use crate::native::plan::{AggregateStateSchema, BoundAggregate, aggregate_state_binding};
 
 /// One partition's aggregate state, either in producer series form or as a decoded consumer row.
 #[derive(Debug)]
@@ -52,60 +52,32 @@ pub(crate) enum StateChunk {
     Row(crate::aggregate::state::StateRow),
 }
 
-/// The state kind an aggregate's states are states of.
+/// Rejects a bound state whose kind or component layout is not what this node binds.
 ///
-/// Every kind this returns is one the kernel keeps a mergeable partial for; `quantile` and the
-/// other non-mergeable aggregates are rejected earlier, when the compiler binds the tree.
-pub(crate) fn state_kind(op: AggregateOp) -> AggregateStateKind {
-    match op {
-        AggregateOp::Sum => AggregateStateKind::Sum,
-        AggregateOp::Count => AggregateStateKind::Count,
-        AggregateOp::Avg => AggregateStateKind::Avg,
-        AggregateOp::Min => AggregateStateKind::Min,
-        AggregateOp::Max => AggregateStateKind::Max,
-        AggregateOp::Group => AggregateStateKind::Group,
-        AggregateOp::Stddev => AggregateStateKind::Stddev,
-        AggregateOp::Stdvar => AggregateStateKind::Stdvar,
-    }
-}
-
-/// The accumulator components an aggregate's state carries, in kernel order.
-///
-/// Derived from [`AggregateOp::state_fields`](crate::aggregate::AggregateOp::state_fields) so the
-/// frame layout and the kernel cannot drift apart: adding a component to a kernel adds a column to
-/// its state frames in the same change.
-fn state_components(op: AggregateOp) -> Vec<StateComponent> {
-    op.state_fields()
-        .iter()
-        .map(|field| match field {
-            crate::aggregate::StateField::Value => StateComponent::Value,
-            crate::aggregate::StateField::Mean => StateComponent::Mean,
-            crate::aggregate::StateField::Compensation => StateComponent::Compensation,
-            crate::aggregate::StateField::Count => StateComponent::Count,
-            crate::aggregate::StateField::IncrementalMean => StateComponent::IncrementalMean,
-        })
-        .collect()
-}
-
-/// Rejects a bound state whose kind or component layout is not what `op` produces.
-///
-/// Both halves matter. A frame carries its kind so a `sum` state is never merged as an `avg` one,
-/// and it carries the component list so a merge reads exactly the columns the producer wrote. Two
-/// states of one kind over the same field count and grid are still not interchangeable if their
-/// components differ, which is why the comparison is over the list and not over its length.
-fn ensure_bound_state(op: AggregateOp, state_schema: &AggregateStateSchema) -> Result<()> {
-    if state_schema.kind != state_kind(op) {
+/// Both halves matter. A frame carries its kind so a `sum` state is never merged as an `avg` one, and
+/// it carries the component list so a merge reads exactly the columns the producer wrote. The
+/// expected pair comes from the same binding the node was built from, so a histogram aggregate
+/// exports and accepts histogram state and a numeric one numeric state, with no second table to
+/// drift from the first.
+fn ensure_bound_state(op: &BoundAggregate, state_schema: &AggregateStateSchema) -> Result<()> {
+    let Some((expected_kind, expected_components)) =
+        aggregate_state_binding(op.kind, op.field_kind)
+    else {
+        return Err(DataFusionError::NotImplemented(format!(
+            "aggregate state is not defined for {:?}",
+            op.kind
+        )));
+    };
+    if state_schema.kind != expected_kind {
         return Err(DataFusionError::Execution(format!(
-            "aggregate state of kind {:?} is not {:?} state",
-            state_schema.kind,
-            state_kind(op)
+            "aggregate state of kind {:?} is not {expected_kind:?} state",
+            state_schema.kind
         )));
     }
-    let expected = state_components(op);
-    if state_schema.components.as_ref() != expected.as_slice() {
+    if state_schema.components.as_ref() != expected_components.as_slice() {
         return Err(DataFusionError::Execution(format!(
             "aggregate state components {:?} are not what {:?} produces: {:?}",
-            state_schema.components, op, expected
+            state_schema.components, op.kind, expected_components
         )));
     }
     Ok(())
@@ -119,8 +91,9 @@ fn ensure_bound_state(op: AggregateOp, state_schema: &AggregateStateSchema) -> R
 pub(crate) fn state_chunk_from_partial(
     partial: PartialAggregate,
     state_schema: Arc<AggregateStateSchema>,
+    op: &BoundAggregate,
 ) -> Result<StateChunk> {
-    ensure_bound_state(partial.op, state_schema.as_ref())?;
+    ensure_bound_state(op, state_schema.as_ref())?;
     Ok(StateChunk::Series {
         series: partial.groups,
         state_schema,
@@ -158,12 +131,15 @@ pub(crate) fn state_row_from_frame_row(
     })
 }
 
-/// The kernel aggregate a state kind merges into.
+/// The aggregate a state kind is the state of.
+///
+/// A histogram kind is the state of the same aggregate over a histogram input, so it merges with the
+/// same rules; what differs is the payload, which the merge reads from the kind itself.
 pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
     match kind {
-        AggregateStateKind::Sum => AggregateOp::Sum,
+        AggregateStateKind::Sum | AggregateStateKind::HistogramSum => AggregateOp::Sum,
         AggregateStateKind::Count => AggregateOp::Count,
-        AggregateStateKind::Avg => AggregateOp::Avg,
+        AggregateStateKind::Avg | AggregateStateKind::HistogramAvg => AggregateOp::Avg,
         AggregateStateKind::Min => AggregateOp::Min,
         AggregateStateKind::Max => AggregateOp::Max,
         AggregateStateKind::Group => AggregateOp::Group,
@@ -256,13 +232,20 @@ pub(crate) fn state_bytes(chunk: &StateChunk) -> usize {
         let fields = series
             .states
             .capacity()
-            .saturating_mul(size_of::<Vec<Option<AggregateStateValues>>>());
+            .saturating_mul(size_of::<Vec<Option<StatePayload>>>());
         let states = series.states.iter().fold(fields, |bytes, field| {
-            bytes.saturating_add(
-                field
-                    .capacity()
-                    .saturating_mul(size_of::<Option<AggregateStateValues>>()),
-            )
+            // The slot is sized for the payload family it holds; a histogram payload also owns its
+            // boxed state and both histograms' Arrow buffers, so its buckets are charged by width
+            // rather than estimated at a fixed size.
+            bytes
+                .saturating_add(
+                    field
+                        .capacity()
+                        .saturating_mul(size_of::<Option<StatePayload>>()),
+                )
+                .saturating_add(field.iter().flatten().fold(0usize, |heap, state| {
+                    heap.saturating_add(state.heap_bytes())
+                }))
         });
         total
             .saturating_add(size_of::<StateSeries>())

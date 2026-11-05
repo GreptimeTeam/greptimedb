@@ -74,6 +74,7 @@
 mod tests;
 
 use std::collections::{HashMap, HashSet};
+use std::mem::size_of;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -89,9 +90,13 @@ use serde::{Deserialize, Serialize};
 use crate::data_type::ConcreteDataType;
 use crate::error::{InvalidSeriesSnafu, Result};
 use crate::series::aggregate_state::{
-    AggregateStateSchema, AggregateStateValues, StateComponent, StateFieldsBatch, StateSeries,
+    AggregateStateSchema, AggregateStateValues, HistogramState, StateComponent, StateFieldsBatch,
+    StatePayload, StateSeries,
 };
-use crate::series::histogram::{HistogramBatch, fields as histogram_fields};
+use crate::series::histogram::{
+    BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
+    fields as histogram_fields,
+};
 use crate::series::raw::{RawSeriesChunk, RawTimestamps};
 use crate::series::samples::{
     DenseSamplesRef, FieldSpec, HistogramSamples, Samples, Series, SeriesFields, SeriesSchema,
@@ -561,13 +566,7 @@ pub fn aggregate_state_frame_schema(
     let components: Fields = state
         .components
         .iter()
-        .map(|component| {
-            let (ty, nullable) = match component {
-                StateComponent::IncrementalMean => (DataType::Boolean, true),
-                _ => (DataType::Float64, true),
-            };
-            Field::new(component.as_str(), ty, nullable)
-        })
+        .map(|component| Field::new(component.as_str(), component.element_type(), true))
         .collect();
     let member = DataType::List(Arc::new(Field::new(
         "item",
@@ -1180,6 +1179,23 @@ impl SeriesFrameCursor {
         {
             return invalid_series("aggregate state chunk grid does not match schema");
         }
+        // A position's payload has to be the family its kind declares, and a histogram payload has to
+        // keep its compensation aligned with its live value: the kernel indexes the compensation by
+        // the value's bucket positions, so a layout that drifted is an out-of-bounds add rather than
+        // a loss of precision. Both are refused here, at the producer, rather than written.
+        let histogram = state.kind.is_histogram();
+        for payload in series.states.iter().flatten().flatten() {
+            match payload {
+                StatePayload::Float(_) if histogram => {
+                    return invalid_series("a histogram state kind carries numeric state");
+                }
+                StatePayload::Histogram(_) if !histogram => {
+                    return invalid_series("a numeric state kind carries histogram state");
+                }
+                StatePayload::Histogram(payload) => payload.validate_layout()?,
+                StatePayload::Float(_) => {}
+            }
+        }
         let mut states = series.states;
         // A position is carried when some field of it was folded, which is what the axis says. When
         // every position is carried - the shape a fold produces whenever each group has a sample at
@@ -1550,7 +1566,7 @@ struct FrameRow {
 
 enum RowPayload {
     Samples(Vec<Samples>),
-    States(Vec<Vec<Option<AggregateStateValues>>>),
+    States(Vec<Vec<Option<StatePayload>>>),
 }
 
 /// How one row addresses the time of its samples.
@@ -1619,7 +1635,12 @@ fn sample_range_growth(
 }
 
 fn histogram_table_charge(values: &HistogramSamples) -> Result<usize> {
-    let table = values.batch().as_arrow();
+    histogram_array_charge(values.batch().as_arrow())
+}
+
+/// Bytes a histogram table holds: one row's fixed part per histogram plus every bucket, span and
+/// custom bound its list columns carry, so a layout with more buckets is charged more.
+fn histogram_array_charge(table: &StructArray) -> Result<usize> {
     checked_offset(table.len())?;
     let mut bytes = add_checked(
         HISTOGRAM_TABLE_CHARGE,
@@ -1650,14 +1671,70 @@ fn histogram_table_charge(values: &HistogramSamples) -> Result<usize> {
     Ok(bytes)
 }
 
-fn state_charges(fields: &[Vec<Option<AggregateStateValues>>]) -> Result<usize> {
+fn state_charges(fields: &[Vec<Option<StatePayload>>]) -> Result<usize> {
     fields.iter().try_fold(0usize, |bytes, values| {
         let mut charge = FIELD_CHARGE;
-        for _ in values.iter().flatten() {
-            charge = add_checked(charge, 8 * 4 + 1)?;
+        for payload in values.iter().flatten() {
+            charge = add_checked(charge, state_payload_charge(payload)?)?;
         }
         add_checked(bytes, charge)
     })
+}
+
+/// Bytes one position's state holds.
+///
+/// A numeric payload's components are inline and have always been charged as such. A histogram
+/// payload is charged for what it actually carries: the boxed state, then both histograms' rows,
+/// spans, buckets and custom bounds, so a wide bucket layout pays for itself and an empty
+/// placeholder costs almost nothing.
+fn state_payload_charge(payload: &StatePayload) -> Result<usize> {
+    match payload {
+        // The numeric components, inline: four `f64` and one flag.
+        StatePayload::Float(_) => Ok(8 * 4 + 1),
+        StatePayload::Histogram(payload) => {
+            let histograms = add_checked(
+                histogram_array_charge(payload.value.as_arrow())?,
+                histogram_array_charge(payload.compensation.as_arrow())?,
+            )?;
+            add_checked(histograms, size_of::<HistogramState>())
+        }
+    }
+}
+
+/// A histogram with no buckets: what an absent state position holds under the shared mask.
+fn empty_histogram() -> HistogramView<'static> {
+    let side = BucketSideView {
+        span_offsets: &[],
+        span_lengths: &[],
+        buckets: &[],
+    };
+    HistogramView {
+        schema: 0,
+        zero_threshold: 0.0,
+        sum: 0.0,
+        count: 0.0,
+        zero_count: 0.0,
+        reset_hint: CounterResetHint::Unknown,
+        start_timestamp: None,
+        custom_values: &[],
+        positive: side,
+        negative: side,
+    }
+}
+
+fn missing_state_component() -> crate::error::Error {
+    err("present aggregate state has a missing component")
+}
+
+/// The states one field of a state row carries, in the row's own position order.
+fn state_field(row: &FrameRow, index: usize) -> Result<&[Option<StatePayload>]> {
+    let RowPayload::States(fields) = &row.payload else {
+        return invalid_series("state frame row carries sample payload");
+    };
+    fields
+        .get(index)
+        .map(Vec::as_slice)
+        .ok_or_else(|| err("state field count mismatch"))
 }
 
 fn sample_charges(samples: &[Samples]) -> Result<usize> {
@@ -1902,53 +1979,85 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
                 .iter()
                 .any(|present| !present)
                 .then(|| NullBuffer::from(present.clone()));
+            // A column's name is the component it declares, so each array is built by reading that
+            // component off the payload; a payload that does not keep it is refused rather than
+            // written as a zero.
             let arrays: Vec<ArrayRef> = components
                 .iter()
                 .map(|component| {
-                    let component_name = component.name();
-                    let array: ArrayRef = match component_name.as_str() {
-                        "value" | "mean" | "compensation" | "count" => {
+                    let declared = StateComponent::parse(component.name())?;
+                    let array: ArrayRef = match declared {
+                        StateComponent::HistogramValue | StateComponent::HistogramCompensation => {
+                            // One histogram per position, so one batch carries the whole column. An
+                            // absent position holds an empty placeholder whose value the shared mask
+                            // makes unreadable, exactly as a null float slot holds a zero.
+                            let mut histograms = HistogramBatchBuilder::new();
+                            for row in rows {
+                                for state in state_field(row, index)? {
+                                    let Some(state) = state else {
+                                        histograms.push(empty_histogram())?;
+                                        continue;
+                                    };
+                                    let histogram = state
+                                        .histogram_component(declared)
+                                        .ok_or_else(missing_state_component)?;
+                                    if histogram.len() != 1 {
+                                        return invalid_series(
+                                            "a histogram state component carries exactly one histogram",
+                                        );
+                                    }
+                                    let view = histogram
+                                        .view(0)
+                                        .ok_or_else(missing_state_component)?;
+                                    histograms.push(view)?;
+                                }
+                            }
+                            let batch = histograms.finish()?;
+                            Arc::new(
+                                StructArray::try_new(
+                                    histogram_fields(),
+                                    batch.as_arrow().columns().to_vec(),
+                                    nulls.clone(),
+                                )
+                                .map_err(|error| err(error.to_string()))?,
+                            ) as ArrayRef
+                        }
+                        StateComponent::Value
+                        | StateComponent::Mean
+                        | StateComponent::Compensation
+                        | StateComponent::Count => {
                             let mut floats = Vec::with_capacity(positions);
                             for row in rows {
-                                let RowPayload::States(fields) = &row.payload else {
-                                    return invalid_series(
-                                        "state frame row carries sample payload",
-                                    );
-                                };
-                                for value in &fields[index] {
+                                for state in state_field(row, index)? {
                                     // A missing position's value is unreadable, so it holds the same
                                     // zero a null slot has always held here.
-                                    floats.push(value.map_or(0.0, |state| {
-                                        match component_name.as_str() {
-                                            "value" => state.value,
-                                            "mean" => state.mean,
-                                            "compensation" => state.compensation,
-                                            "count" => state.count,
-                                            _ => unreachable!(),
-                                        }
-                                    }));
+                                    floats.push(match state {
+                                        None => 0.0,
+                                        Some(state) => state
+                                            .float_component(declared)
+                                            .ok_or_else(missing_state_component)?,
+                                    });
                                 }
                             }
                             Arc::new(Float64Array::new(ScalarBuffer::from(floats), nulls.clone()))
                         }
-                        "incremental_mean" => {
+                        _ => {
                             let mut booleans = Vec::with_capacity(positions);
                             for row in rows {
-                                let RowPayload::States(fields) = &row.payload else {
-                                    return invalid_series(
-                                        "state frame row carries sample payload",
-                                    );
-                                };
-                                booleans.extend(fields[index].iter().map(|value| {
-                                    value.is_some_and(|state| state.incremental_mean)
-                                }));
+                                for state in state_field(row, index)? {
+                                    booleans.push(match state {
+                                        None => false,
+                                        Some(state) => state
+                                            .bool_component(declared)
+                                            .ok_or_else(missing_state_component)?,
+                                    });
+                                }
                             }
                             Arc::new(BooleanArray::new(
                                 BooleanBuffer::from(booleans),
                                 nulls.clone(),
                             ))
                         }
-                        _ => return invalid_series("unknown state component"),
                     };
                     Ok(array)
                 })
@@ -2350,6 +2459,7 @@ impl StateFrameRow {
     /// `None` for that field at that position, never a zero and never promoted to a sibling field.
     pub fn to_state_series(&self) -> Result<StateSeries> {
         let fields = self.fields()?;
+        let histogram = fields.kind().is_histogram();
         let mut states = Vec::with_capacity(fields.len());
         for field in 0..fields.len() {
             let mut values = Vec::with_capacity(self.time.len());
@@ -2358,38 +2468,7 @@ impl StateFrameRow {
                     values.push(None);
                     continue;
                 }
-                let mut value = AggregateStateValues::default();
-                for &component in fields.components() {
-                    match component {
-                        StateComponent::Value => {
-                            value.value = state_float(&fields, field, component, position)?
-                        }
-                        StateComponent::Mean => {
-                            value.mean = state_float(&fields, field, component, position)?
-                        }
-                        StateComponent::Compensation => {
-                            value.compensation = state_float(&fields, field, component, position)?
-                        }
-                        StateComponent::Count => {
-                            value.count = state_float(&fields, field, component, position)?
-                        }
-                        StateComponent::IncrementalMean => {
-                            value.incremental_mean = fields
-                                .field_bool_values(field, component)?
-                                .and_then(|array| {
-                                    (!array.is_null(position)).then(|| array.value(position))
-                                })
-                                .ok_or_else(|| {
-                                    InvalidSeriesSnafu {
-                                        reason: "present aggregate state has a missing component"
-                                            .to_string(),
-                                    }
-                                    .build()
-                                })?;
-                        }
-                    }
-                }
-                values.push(Some(value));
+                values.push(Some(state_payload(&fields, histogram, field, position)?));
             }
             states.push(values);
         }
@@ -2401,6 +2480,89 @@ impl StateFrameRow {
     }
 }
 
+/// Reads one present position's state as the payload family its kind keeps.
+///
+/// A histogram payload is checked against the compensation invariant as it is built, so a state
+/// whose compensation disagrees with its live value cannot be handed to a merge that would index the
+/// compensation by the value's bucket positions.
+fn state_payload(
+    fields: &StateFieldsBatch,
+    histogram: bool,
+    field: usize,
+    position: usize,
+) -> Result<StatePayload> {
+    if histogram {
+        let mut value = HistogramState {
+            value: Arc::new(state_histogram(
+                fields,
+                field,
+                StateComponent::HistogramValue,
+                position,
+            )?),
+            compensation: Arc::new(state_histogram(
+                fields,
+                field,
+                StateComponent::HistogramCompensation,
+                position,
+            )?),
+            count: 0.0,
+            incremental_mean: false,
+            poisoned: false,
+            incompatible_layout: false,
+            custom_bounds_reconciled: false,
+            counter_reset_seen: false,
+            not_counter_reset_seen: false,
+        };
+        for &component in fields.components() {
+            match component {
+                StateComponent::HistogramValue | StateComponent::HistogramCompensation => {}
+                StateComponent::Count => {
+                    value.count = state_float(fields, field, component, position)?
+                }
+                StateComponent::IncrementalMean => {
+                    value.incremental_mean = state_bool(fields, field, component, position)?
+                }
+                StateComponent::Poisoned => {
+                    value.poisoned = state_bool(fields, field, component, position)?
+                }
+                StateComponent::IncompatibleLayout => {
+                    value.incompatible_layout = state_bool(fields, field, component, position)?
+                }
+                StateComponent::CustomBoundsReconciled => {
+                    value.custom_bounds_reconciled = state_bool(fields, field, component, position)?
+                }
+                StateComponent::CounterResetSeen => {
+                    value.counter_reset_seen = state_bool(fields, field, component, position)?
+                }
+                StateComponent::NotCounterResetSeen => {
+                    value.not_counter_reset_seen = state_bool(fields, field, component, position)?
+                }
+                StateComponent::Value | StateComponent::Mean | StateComponent::Compensation => {
+                    return invalid_series("a histogram state kind carries a numeric component");
+                }
+            }
+        }
+        value.validate_layout()?;
+        return Ok(StatePayload::Histogram(Box::new(value)));
+    }
+    let mut value = AggregateStateValues::default();
+    for &component in fields.components() {
+        match component {
+            StateComponent::Value => value.value = state_float(fields, field, component, position)?,
+            StateComponent::Mean => value.mean = state_float(fields, field, component, position)?,
+            StateComponent::Compensation => {
+                value.compensation = state_float(fields, field, component, position)?
+            }
+            StateComponent::Count => value.count = state_float(fields, field, component, position)?,
+            StateComponent::IncrementalMean => {
+                value.incremental_mean = state_bool(fields, field, component, position)?
+            }
+            _ => return invalid_series("a numeric state kind carries a histogram component"),
+        }
+    }
+    Ok(StatePayload::Float(value))
+}
+
 fn state_float(
     fields: &StateFieldsBatch,
     field: usize,
@@ -2410,12 +2572,30 @@ fn state_float(
     fields
         .field_values(field, component)?
         .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
-        .ok_or_else(|| {
-            InvalidSeriesSnafu {
-                reason: "present aggregate state has a missing component".to_string(),
-            }
-            .build()
-        })
+        .ok_or_else(missing_state_component)
+}
+
+fn state_bool(
+    fields: &StateFieldsBatch,
+    field: usize,
+    component: StateComponent,
+    position: usize,
+) -> Result<bool> {
+    fields
+        .field_bool_values(field, component)?
+        .and_then(|array| (!array.is_null(position)).then(|| array.value(position)))
+        .ok_or_else(missing_state_component)
+}
+
+fn state_histogram(
+    fields: &StateFieldsBatch,
+    field: usize,
+    component: StateComponent,
+    position: usize,
+) -> Result<HistogramBatch> {
+    fields
+        .field_histogram(field, component, position)?
+        .ok_or_else(missing_state_component)
 }
 
 /// Reuses one prepared frame schema while decoding all batches of a stream.
@@ -2593,6 +2773,17 @@ impl SeriesFrameDecoder {
                                 return invalid_series(
                                     "present state item has a missing component",
                                 );
+                            }
+                        }
+                    }
+                    if state.kind.is_histogram() {
+                        // A histogram state's compensation must carry its value's bucket layout, or
+                        // the kernel's compensated add indexes it out of bounds. Deciding that means
+                        // reading both histograms: two span lists may spell the same buckets
+                        // differently, so comparing the wire bytes would refuse state that is fine.
+                        for position in 0..items.len() {
+                            if !items.is_null(position) {
+                                state_payload(&validated, true, field, position)?;
                             }
                         }
                     }
@@ -2931,6 +3122,14 @@ mod aggregate_state_contribution_tests {
     };
     use crate::series::samples::FieldSpec;
 
+    /// The numeric components of a state vector: what a walk hands on unchanged.
+    fn numeric(states: &[Option<StatePayload>]) -> Vec<Option<Values>> {
+        states
+            .iter()
+            .map(|state| state.as_ref().and_then(StatePayload::float).copied())
+            .collect()
+    }
+
     fn schema(len: usize) -> SeriesSchema {
         SeriesSchema {
             fields: ["a", "b"]
@@ -2950,7 +3149,7 @@ mod aggregate_state_contribution_tests {
         kind: Kind,
         schema: &SeriesSchema,
         spans: Vec<GridSpan>,
-        states: Vec<Vec<Option<Values>>>,
+        states: Vec<Vec<Option<StatePayload>>>,
     ) -> SeriesFrameCursor {
         let components = match kind {
             Kind::Group => vec![],
@@ -2980,10 +3179,10 @@ mod aggregate_state_contribution_tests {
             vec![
                 vec![
                     None,
-                    Some(Values::default()),
+                    Some(StatePayload::Float(Values::default())),
                     None,
                     None,
-                    Some(Values::default()),
+                    Some(StatePayload::Float(Values::default())),
                     None,
                     None,
                     None,
@@ -2993,10 +3192,10 @@ mod aggregate_state_contribution_tests {
                     None,
                     None,
                     None,
-                    Some(Values::default()),
+                    Some(StatePayload::Float(Values::default())),
                     None,
                     None,
-                    Some(Values::default()),
+                    Some(StatePayload::Float(Values::default())),
                     None,
                     None,
                 ],
@@ -3018,11 +3217,11 @@ mod aggregate_state_contribution_tests {
             vec![(1, 1), (3, 2), (8, 1)]
         );
         assert_eq!(
-            walk.series.states[0],
+            numeric(&walk.series.states[0]),
             vec![Some(Values::default()), None, Some(Values::default()), None]
         );
         assert_eq!(
-            walk.series.states[1],
+            numeric(&walk.series.states[1]),
             vec![None, Some(Values::default()), None, Some(Values::default())]
         );
 
@@ -3039,6 +3238,13 @@ mod aggregate_state_contribution_tests {
             walk.series.time.positions().collect::<Vec<_>>(),
             vec![(2, 0), (3, 1), (4, 2), (8, 3), (9, 4)]
         );
-        assert_eq!(walk.series.states, vec![vec![None; 5], vec![None; 5]]);
+        assert_eq!(
+            walk.series
+                .states
+                .iter()
+                .map(|field| numeric(field))
+                .collect::<Vec<_>>(),
+            vec![vec![None; 5], vec![None; 5]]
+        );
     }
 }

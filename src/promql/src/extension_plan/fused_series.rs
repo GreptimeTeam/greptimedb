@@ -1900,7 +1900,7 @@ fn validate_physical_tree(
 ///
 /// A field's samples are floats or native histograms: the raw frame keeps those two payloads apart,
 /// and a field never mixes them. The kind decides the Arrow column the conversion writes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FieldKind {
     /// One `Float64` cell per row.
     Float,

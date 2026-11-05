@@ -36,8 +36,8 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{Series, SeriesSchema};
 
 use crate::aggregate::{
-    AggregateOp, FloatAggregator, FloatMerger, Grouping, HistogramSamples, histogram_samples,
-    validate_aggregate_series,
+    AggregateOp, FloatAggregator, FloatMerger, Grouping, HistogramEvidence, HistogramSamples,
+    histogram_samples, validate_aggregate_series,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::series_bytes;
@@ -134,9 +134,10 @@ impl AggregateRuntime {
                 )));
             }
         };
-        let (state_kind, state_components) = aggregate_state_binding(op.kind).ok_or_else(|| {
-            DataFusionError::NotImplemented("aggregate kind has no mergeable state".into())
-        })?;
+        let (state_kind, state_components) = aggregate_state_binding(op.kind, op.field_kind)
+            .ok_or_else(|| {
+                DataFusionError::NotImplemented("aggregate kind has no mergeable state".into())
+            })?;
         let state_schema = schema.eval_grid.as_ref().map(|grid| {
             Arc::new(AggregateStateSchema {
                 group: op.group.clone(),
@@ -317,6 +318,9 @@ impl AggregateRuntime {
         if let Some(accumulator) = self.accumulator.take() {
             return match self.op.stage {
                 AggregateStage::Complete => {
+                    // What the fold recorded about its inputs is reported here, where this node's
+                    // answer is the whole answer.
+                    let evidence = accumulator.evidence_summary();
                     let output = accumulator.finish_budgeted(|total| {
                         buffer.resize(total.saturating_add(queue_bytes))
                     })?;
@@ -324,6 +328,7 @@ impl AggregateRuntime {
                         .capacity()
                         .saturating_mul(std::mem::size_of::<Series>());
                     charge_samples(buffer, &output, output_vec_bytes, queue_bytes)?;
+                    self.report_evidence(evidence);
                     Ok(Some(AggregateOutput::Samples(output)))
                 }
                 AggregateStage::Partial => {
@@ -334,24 +339,63 @@ impl AggregateRuntime {
                     // The fold builds the chunk's own representation, so handing it over costs no
                     // second copy and no second charge: what was admitted for the groups is what
                     // the chunk now holds.
+                    //
+                    // What the fold recorded travels in that state instead of being reported here:
+                    // one partition's evidence is a claim about a point the merge has not decided
+                    // yet, and a message cannot be taken back.
                     let partial = accumulator
                         .finish_partial_budgeted(|bytes| buffer.resize(bytes + queue_bytes))?;
-                    let chunk = state_chunk_from_partial(partial, state_schema)?;
+                    let chunk = state_chunk_from_partial(partial, state_schema, &self.op)?;
                     Ok(Some(AggregateOutput::State(chunk)))
                 }
                 AggregateStage::Final => Err(no_fold(&self.describe())),
             };
         }
         if let Some(merger) = self.merger.take() {
+            // The merge saw every partition's state, so this node is where the point's outcome is
+            // final and where its evidence is reported.
+            let evidence = merger.evidence_summary();
             let output =
                 merger.finish_budgeted(|total| buffer.resize(total.saturating_add(queue_bytes)))?;
             let output_vec_bytes = output
                 .capacity()
                 .saturating_mul(std::mem::size_of::<Series>());
             charge_samples(buffer, &output, output_vec_bytes, queue_bytes)?;
+            self.report_evidence(evidence);
             return Ok(Some(AggregateOutput::Samples(output)));
         }
         Err(no_fold(&self.describe()))
+    }
+
+    /// Reports what the fold or merge recorded about its inputs, once, where the answer is final.
+    ///
+    /// Only a `Complete` or a `Final` node reports: a `Partial` node hands its evidence on in the
+    /// state it exports, because a point's outcome is not decided until every partition has been
+    /// merged and a message cannot be withdrawn once it has been collected. The collector is the
+    /// node's own handle, so its children keep theirs.
+    ///
+    /// A poisoned point answers nothing, and the reconciliation its inputs needed is not reported
+    /// for it: the summary already dropped that bit, which is what makes the message set the same
+    /// whichever order the partitions arrived in.
+    fn report_evidence(&mut self, evidence: HistogramEvidence) {
+        if self.op.stage == AggregateStage::Partial {
+            return;
+        }
+        let Some(collector) = self.annotations.take() else {
+            return;
+        };
+        let name = self.aggregate_name();
+        if evidence.incompatible_layout {
+            collector.record_warning(format!(
+                "{name}: incompatible native histogram layouts, the result is removed"
+            ));
+        }
+        if evidence.custom_bounds_reconciled {
+            collector.record_info(format!("{name}: custom buckets reconciled"));
+        }
+        if evidence.counter_reset_seen && evidence.not_counter_reset_seen {
+            collector.record_warning(format!("{name}: contradictory reset hints"));
+        }
     }
 }
 
@@ -384,8 +428,8 @@ fn charge_samples(
 /// Wraps the error of a chunk this node cannot fold.
 ///
 /// Only a chunk that does not fit the schema is the node's own refusal; anything else is the
-/// kernel saying it does not compute this shape at all -- a native histogram in a float aggregate,
-/// for instance -- and a caller that falls back to another planner on `NotImplemented` still can.
+/// kernel saying it does not compute this shape at all -- exporting native histogram state, for
+/// instance -- and a caller that falls back to another planner on `NotImplemented` still can.
 /// Wrapping that one in an `Execution` would deny it.
 fn folded_chunk(aggregate: &str, error: DataFusionError) -> DataFusionError {
     match error {
@@ -402,4 +446,120 @@ fn no_fold(aggregate: &str) -> DataFusionError {
     DataFusionError::Execution(format!(
         "the `{aggregate}` aggregate already finished its fold, so it takes no more input"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_query::promql_annotations::PromqlAnnotationCollector;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datatypes::series::time::{EvalGrid, GridSpec};
+
+    use super::*;
+
+    fn schema() -> Arc<SeriesSchema> {
+        Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("value"),
+            }]
+            .into(),
+            eval_grid: Some(Arc::new(
+                EvalGrid::try_new(GridSpec::try_new(0, 1, 4).unwrap()).unwrap(),
+            )),
+        })
+    }
+
+    fn runtime(stage: AggregateStage) -> AggregateRuntime {
+        let pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool> =
+            Arc::new(datafusion::execution::memory_pool::UnboundedMemoryPool::default());
+        let mut buffer = NodeBuffer::new(
+            "test aggregate",
+            Arc::new(crate::native::metrics::NodeMetrics::default()),
+            &pool,
+        );
+        AggregateRuntime::new(
+            BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: BoundGrouping::By(Arc::new([])),
+                stage,
+                field_kind: crate::extension_plan::FieldKind::Histogram,
+            },
+            schema(),
+            &mut buffer,
+        )
+        .unwrap()
+    }
+
+    fn collected(collector: &PromqlAnnotationCollector) -> (Vec<String>, Vec<String>) {
+        let (mut warnings, mut infos) = (Vec::new(), Vec::new());
+        collector.append_to(&mut warnings, &mut infos);
+        (warnings, infos)
+    }
+
+    /// Only the node that finishes the answer reports what the fold recorded, and it says each thing
+    /// once. A `Partial` node reports nothing: one partition's evidence is a claim about a point the
+    /// merge has not decided yet, and a message cannot be taken back.
+    #[test]
+    fn only_the_finishing_node_reports_histogram_evidence() {
+        let evidence = HistogramEvidence {
+            // The summary a poisoned point produces keeps its reconciliation bit out, so this is
+            // what a merge hands over when a point is removed for its layout.
+            poisoned: true,
+            incompatible_layout: true,
+            custom_bounds_reconciled: false,
+            counter_reset_seen: true,
+            not_counter_reset_seen: true,
+        };
+        let mut partial = runtime(AggregateStage::Partial);
+        let collector = PromqlAnnotationCollector::default();
+        partial.set_annotations(collector.clone());
+        partial.report_evidence(evidence);
+        assert_eq!(
+            collected(&collector),
+            (Vec::new(), Vec::new()),
+            "a partial node reports nothing"
+        );
+
+        for stage in [AggregateStage::Complete, AggregateStage::Final] {
+            let mut finishing = runtime(stage);
+            let collector = PromqlAnnotationCollector::default();
+            finishing.set_annotations(collector.clone());
+            finishing.report_evidence(evidence);
+            // A second report is not a second message: the node handed its collector on with the
+            // first one.
+            finishing.report_evidence(evidence);
+            let (warnings, infos) = collected(&collector);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("incompatible native histogram layouts")),
+                "{stage:?} reported {warnings:?}"
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("contradictory reset hints")),
+                "{stage:?} reported {warnings:?}"
+            );
+            assert_eq!(warnings.len(), 2, "{stage:?} reported {warnings:?}");
+            assert!(infos.is_empty(), "{stage:?} reported {infos:?}");
+        }
+    }
+
+    /// A reconciled point that answered reports its reconciliation as information, once.
+    #[test]
+    fn a_live_point_reports_its_reconciliation() {
+        let mut runtime = runtime(AggregateStage::Complete);
+        let collector = PromqlAnnotationCollector::default();
+        runtime.set_annotations(collector.clone());
+        runtime.report_evidence(HistogramEvidence {
+            custom_bounds_reconciled: true,
+            ..HistogramEvidence::default()
+        });
+        let (warnings, infos) = collected(&collector);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(infos.len(), 1, "{infos:?}");
+        assert!(infos[0].contains("custom buckets reconciled"), "{infos:?}");
+    }
 }
