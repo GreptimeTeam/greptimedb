@@ -1442,7 +1442,6 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
     !sources.is_empty()
 }
 
-/// Whether the merge producer's entire prefix can run on each scan partition independently.
 /// Whether any canonical merge in `node` answers with histogram samples, given the kind its input
 /// carries.
 ///
@@ -1459,6 +1458,7 @@ fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
             .any(|child| merge_answers_histogram(child, input_kind))
 }
 
+/// Whether the merge producer's entire prefix can run on each scan partition independently.
 fn canonical_local_prefix(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) => true,

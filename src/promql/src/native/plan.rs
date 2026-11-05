@@ -478,10 +478,6 @@ impl NativeNode {
                     }
                 }
             }
-            // An aggregate folds float state only: the admission gate keeps a histogram from
-            // entering one, so whatever a histogram statement aggregates answers floats. Naming it
-            // here is what lets `sum(count_over_time(h[5m]))` - a float built from histograms -
-            // declare a float column instead of keeping the existing plan.
             // A canonical merge collects pieces of one label set: it assembles the samples it was
             // given and never converts them, so the field keeps the kind it had.
             NativeExpr::Merge { input } => kind_of(input),
@@ -494,6 +490,10 @@ impl NativeNode {
                 let left_kind = kind_of(left)?;
                 (left_kind == kind_of(right)?).then_some(left_kind)
             }
+            // An aggregate folds float state only: the admission gate keeps a histogram from
+            // entering one, so whatever a histogram statement aggregates answers floats. Naming it
+            // here is what lets `sum(count_over_time(h[5m]))` - a float built from histograms -
+            // declare a float column instead of keeping the existing plan.
             NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
             _ => None,
         }
