@@ -151,6 +151,11 @@ impl RegionEditQueue {
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Rejects queued region edit requests as region not found.
     pub(crate) fn reject_region_edit_queue_as_not_found(&mut self, region_id: RegionId) {
+        if let Some(queue) = self.pending_alters.remove(&region_id) {
+            for (_, sender) in queue {
+                sender.send(RegionNotFoundSnafu { region_id }.fail());
+            }
+        }
         if let Some(edit_queue) = self.region_edit_queues.remove(&region_id) {
             edit_queue.reject_all_as_not_found();
         }
@@ -205,6 +210,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id, true)
+            .await;
+        self.dispatch_pending_region_requests(change_result.region_id)
             .await;
     }
 
@@ -295,8 +302,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        if !region.is_writable() {
-            if region.state() == RegionRoleState::Leader(RegionLeaderState::Editing) {
+        if !region.is_writable() || self.flush_scheduler.has_pending_alter(region_id) {
+            if matches!(
+                region.state(),
+                RegionRoleState::Leader(RegionLeaderState::Editing | RegionLeaderState::Altering)
+            ) || (region.is_writable() && self.flush_scheduler.has_pending_alter(region_id))
+            {
                 self.region_edit_queues
                     .entry(region_id)
                     .or_insert_with(|| RegionEditQueue::new(region_id))
@@ -450,22 +461,64 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .await;
         }
 
-        let next_request =
-            if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
-                let request = edit_queue.dequeue();
-                if edit_queue.is_empty() {
-                    self.region_edit_queues.remove(&edit_result.region_id);
-                }
-                request
-            } else {
-                None
-            };
-        if let Some(request) = next_request {
-            self.handle_region_edit(request);
-        }
+        self.dispatch_pending_region_requests(edit_result.region_id)
+            .await;
 
         if need_compaction {
             self.schedule_compaction(&region).await;
+        }
+    }
+
+    /// ALTER has priority over the edit backlog. Flush-pending DDLs and the
+    /// Altering state retain that priority until their terminal notification.
+    pub(crate) async fn dispatch_pending_region_requests(&mut self, region_id: RegionId) {
+        loop {
+            if self.flush_scheduler.has_pending_alter(region_id) {
+                return;
+            }
+            if self.regions.get_region(region_id).is_some_and(|region| {
+                matches!(
+                    region.state(),
+                    RegionRoleState::Leader(
+                        RegionLeaderState::Editing | RegionLeaderState::Altering
+                    )
+                )
+            }) {
+                return;
+            }
+            let next = self
+                .pending_alters
+                .get_mut(&region_id)
+                .and_then(|q| q.pop_front());
+            let Some((request, sender)) = next else {
+                break;
+            };
+            self.execute_alter_request(region_id, request, sender).await;
+        }
+        self.pending_alters.remove(&region_id);
+        loop {
+            let next_request = self
+                .region_edit_queues
+                .get_mut(&region_id)
+                .and_then(|queue| queue.dequeue());
+            if self
+                .region_edit_queues
+                .get(&region_id)
+                .is_some_and(|queue| queue.is_empty())
+            {
+                self.region_edit_queues.remove(&region_id);
+            }
+            let Some(request) = next_request else {
+                return;
+            };
+            self.handle_region_edit(request);
+            if self.regions.get_region(region_id).is_some_and(|region| {
+                region.state() == RegionRoleState::Leader(RegionLeaderState::Editing)
+            }) {
+                return;
+            }
+            // A role change can reject dispatch synchronously. Drain the remaining
+            // waiters rather than leaving them without a completion notification.
         }
     }
 
