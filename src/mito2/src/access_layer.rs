@@ -349,6 +349,36 @@ impl AccessLayer {
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
+        self.write_sst_inner(request, write_opts, metrics, None)
+            .await
+    }
+
+    /// Writes an SST whose output is registered with `context.guard`.
+    ///
+    /// The write cache is bypassed, upload concurrency is fixed to one, and
+    /// the guard runs before either the SST or its index becomes visible.
+    /// `context.limits` bounds the encoder and footer workspace.
+    #[cfg(feature = "enterprise")]
+    pub(crate) async fn write_sst_with_guard(
+        &self,
+        request: SstWriteRequest,
+        write_opts: &WriteOptions,
+        metrics: &mut Metrics,
+        context: crate::sst::parquet::writer::SstWriteContext,
+    ) -> Result<SstInfoArray> {
+        self.write_sst_inner(request, write_opts, metrics, Some(context))
+            .await
+    }
+
+    async fn write_sst_inner(
+        &self,
+        request: SstWriteRequest,
+        write_opts: &WriteOptions,
+        metrics: &mut Metrics,
+        context: Option<crate::sst::parquet::writer::SstWriteContext>,
+    ) -> Result<SstInfoArray> {
+        let limits = context.as_ref().map(|context| context.limits);
+        let guard = context.map(|context| context.guard);
         let op_type = request.op_type;
         let region_id = request.metadata.region_id;
         let region_metadata = request.metadata.clone();
@@ -359,7 +389,9 @@ impl AccessLayer {
             request.max_sequence
         };
 
-        let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
+        let sst_info = if let Some(write_cache) = cache_manager.write_cache()
+            && guard.is_none()
+        {
             // Write to the write cache.
             write_cache
                 .write_and_upload_sst(
@@ -376,15 +408,20 @@ impl AccessLayer {
                 )
                 .await?
         } else {
-            // Write cache is disabled.
+            // Write cache is disabled, or bypassed by an SST write guard.
             let store = self.object_store.clone();
             let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
+            let puffin_factory = if limits.is_some() {
+                self.puffin_manager_factory
+                    .clone()
+                    .with_write_buffer_size(write_opts.write_buffer_size.as_bytes() as usize)
+            } else {
+                self.puffin_manager_factory.clone()
+            };
             let indexer_builder = IndexerBuilderImpl {
                 build_type: request.op_type.into(),
                 metadata: request.metadata.clone(),
-                puffin_manager: self
-                    .puffin_manager_factory
-                    .build(store, path_provider.clone()),
+                puffin_manager: puffin_factory.build(store, path_provider.clone()),
                 write_cache_enabled: false,
                 intermediate_manager: self.intermediate_manager.clone(),
                 index_options: request.index_options,
@@ -405,7 +442,14 @@ impl AccessLayer {
                 metrics,
             )
             .await
-            .with_file_cleaner(cleaner);
+            .with_file_cleaner(cleaner)
+            .with_write_concurrency(if guard.is_some() {
+                1
+            } else {
+                crate::sst::DEFAULT_WRITE_CONCURRENCY
+            })
+            .with_write_guard(guard)
+            .with_memory_limits(limits);
             match request.sst_write_format {
                 FormatType::PrimaryKey => {
                     writer

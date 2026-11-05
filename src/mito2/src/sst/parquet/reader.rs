@@ -2453,6 +2453,20 @@ impl ParquetReader {
     pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
         self.context.reader_builder().parquet_meta.clone()
     }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn fetched_store_page_bytes(&self) -> Result<u64> {
+        self.fetch_metrics
+            .data
+            .lock()
+            .map(|metrics| metrics.page_size_to_fetch_store)
+            .map_err(|_| {
+                crate::error::UnexpectedSnafu {
+                    reason: "Source fetch metrics lock poisoned",
+                }
+                .build()
+            })
+    }
 }
 
 /// Reader to read a row group of a parquet file in flat format, returning RecordBatch.

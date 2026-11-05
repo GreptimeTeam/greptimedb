@@ -582,16 +582,9 @@ fn output_sequence_metadata(
 }
 
 /// Computes the maximum target-domain sequence bound of the output of merging
-/// `inputs`. A bound can be a row maximum or an admission marker; compaction
-/// must preserve both for sequence-based pruning. Unknown bounds must remain
-/// unknown rather than being replaced with a partial maximum.
+/// `inputs`.
 fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
-    let mut max: Option<NonZeroU64> = None;
-    for input in inputs {
-        let sequence = input.meta_ref().sequence?;
-        max = Some(max.map_or(sequence, |current| current.max(sequence)));
-    }
-    max
+    crate::sst::file::known_max_input_sequence(inputs.iter().map(FileHandle::meta_ref))
 }
 
 #[async_trait::async_trait]

@@ -81,6 +81,12 @@ impl PuffinManagerFactory {
         })
     }
 
+    /// Overrides only this task's upload buffers, sharing the existing stager.
+    pub(crate) fn with_write_buffer_size(mut self, bytes: usize) -> Self {
+        self.write_buffer_size = Some(bytes);
+        self
+    }
+
     pub(crate) fn build(
         &self,
         store: ObjectStore,
