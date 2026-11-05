@@ -35,29 +35,26 @@ use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, s
 /// Whether `fused` is a canonical producer that may run inside one region.
 ///
 /// A canonical producer merges the pieces of one label set that its own input partitions hold, and
-/// its physical canonical router collects those pieces from exactly those partitions. In process the
-/// producer reads the region's own scans, so that region holds every piece its router has to see and
-/// the node belongs there. Ordinary consumers above it do not carry the producer marker and retain
-/// their normal placement requirements.
+/// its physical canonical router collects those pieces from exactly those partitions. It may only
+/// run where those partitions cover the whole table. In process that is the region's own read: the
+/// region holds every piece its router has to see and the node belongs there. Ordinary consumers
+/// above it do not carry the producer marker and retain their normal placement requirements.
 ///
-/// Over the wire the producer reads [`RawSeriesSource`] children instead - the wrapper that
-/// reconciles fragments several regions hold - so it is only admitted here when its children are the
-/// region's own scans. A producer planned below the raw sources runs once per region and its router
-/// then collects the pieces of the region it runs in and no others, which answers a label set from
-/// one region's share whenever the pieces are spread. Declining this classification is what keeps
-/// that from happening: the analyzer expands each raw source into a merge scan and the producer, with
-/// the router it inserts above itself, stays on the frontend over every region.
-fn canonical_boundary_region_node(fused: &FusedSeries) -> bool {
+/// Over the wire every selector input is a [`RawSeriesSource`] answered per region, so no region
+/// holds every piece of a label set. A producer placed below the raw sources would run once per
+/// region and its router would collect the pieces of the region it runs in and no others, which
+/// answers a label set from one region's share whenever the pieces are spread. Declining this
+/// classification is what keeps that from happening: the analyzer expands each raw source into a
+/// merge scan and the producer, with the router it inserts above itself, stays on the frontend over
+/// every region.
+fn canonical_boundary_region_node(fused: &FusedSeries, in_process_region_transport: bool) -> bool {
     if !fused.is_canonical_producer() {
         return false;
     }
-    fused.format() == FusedOutputFormat::SeriesFrame
+    in_process_region_transport
+        && fused.format() == FusedOutputFormat::SeriesFrame
         && fused.canonical_producer_prefix_is_local()
         && !fused.children().is_empty()
-        && fused
-            .children()
-            .iter()
-            .all(|child| matches!(child, LogicalPlan::TableScan(_)))
 }
 
 pub struct StepTransformAction {
@@ -125,6 +122,7 @@ impl Categorizer {
     pub fn check_plan(
         plan: &LogicalPlan,
         partition_cols: Option<AliasMapping>,
+        in_process_region_transport: bool,
     ) -> DfResult<Commutativity> {
         // Subquery is treated separately in `inspect_plan_with_subquery`. To avoid rewrite the
         // "maybe rewritten" plan, stop the check here.
@@ -218,9 +216,11 @@ impl Categorizer {
                     Commutativity::Unimplemented
                 }
             }
-            LogicalPlan::Extension(extension) => {
-                Self::check_extension_plan(extension.node.as_ref() as _, &partition_cols)
-            }
+            LogicalPlan::Extension(extension) => Self::check_extension_plan(
+                extension.node.as_ref() as _,
+                &partition_cols,
+                in_process_region_transport,
+            ),
             LogicalPlan::Distinct(_) => {
                 if partition_cols.is_empty() {
                     Commutativity::Commutative
@@ -246,6 +246,7 @@ impl Categorizer {
     pub fn check_extension_plan(
         plan: &dyn UserDefinedLogicalNode,
         partition_cols: &AliasMapping,
+        in_process_region_transport: bool,
     ) -> Commutativity {
         match plan.name() {
             name if name == SeriesDivide::name() => {
@@ -279,7 +280,7 @@ impl Categorizer {
                     // above the raw sources with its router. It must not fall through to the
                     // per-series rules below, which describe what a node computes and say nothing
                     // about where the pieces of one label set are.
-                    return if canonical_boundary_region_node(fused) {
+                    return if canonical_boundary_region_node(fused, in_process_region_transport) {
                         Commutativity::Commutative
                     } else {
                         Commutativity::NonCommutative
@@ -463,7 +464,7 @@ mod tests {
     };
     use promql::native::plan::{
         AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, Grouping,
-        NativeExpr, NativeNode, NativeType,
+        NativeExpr, NativeNode, NativeTree, NativeType,
     };
     use promql_parser::parser;
     use store_api::storage::RegionId;
@@ -489,7 +490,8 @@ mod tests {
             BTreeSet::from([Column::from_name("some_partition_col")]),
         )]);
 
-        let commutativity = Categorizer::check_extension_plan(&series_divide, &partition_cols);
+        let commutativity =
+            Categorizer::check_extension_plan(&series_divide, &partition_cols, false);
         assert!(matches!(commutativity, Commutativity::Commutative));
     }
 
@@ -624,6 +626,52 @@ mod tests {
                     binding,
                     vec![input],
                     output_schema,
+                )
+                .unwrap(),
+            ),
+        })
+    }
+
+    /// A canonical producer of `some_metric` over `input`.
+    ///
+    /// The tree says what the compiler says at a canonical boundary - one evaluated vector merged by
+    /// canonical label set - and the `Merge` root is what marks the node as the producer of that
+    /// collection. The children are exactly what the caller supplies, so a test can hand the node
+    /// the region's own scan and ask where such a node may run.
+    fn canonical_producer_plan(input: LogicalPlan) -> LogicalPlan {
+        let stmt = native_statement();
+        let grid = statement_grid(&stmt).unwrap();
+        let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: Some(Arc::clone(&grid)),
+        }));
+        let merge = NativeNode {
+            expr: NativeExpr::Merge {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        output: evaluated.clone(),
+                        source_index: 0,
+                        ordering: SeriesOrdering::KeyThenTime,
+                    }),
+                    output: evaluated.clone(),
+                }),
+            },
+            output: evaluated,
+        };
+        let binding = FusedSeriesBinding {
+            grid,
+            time_index: "ts".to_string(),
+            tags: Vec::new(),
+            metric_name: Some(Arc::from("some_metric")),
+        };
+        let tree = NativeTree::try_new(merge).unwrap();
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new_canonical_producer(
+                    Arc::from("some_metric"),
+                    tree,
+                    binding,
+                    vec![input],
                 )
                 .unwrap(),
             ),
@@ -799,7 +847,7 @@ mod tests {
         let plan = fused_series_plan(table_scan_plan());
 
         assert!(matches!(
-            Categorizer::check_plan(&plan, None).unwrap(),
+            Categorizer::check_plan(&plan, None, true).unwrap(),
             Commutativity::Commutative
         ));
     }
@@ -817,7 +865,7 @@ mod tests {
         let plan = fused_series_plan(input);
 
         assert!(matches!(
-            Categorizer::check_plan(&plan, None).unwrap(),
+            Categorizer::check_plan(&plan, None, true).unwrap(),
             Commutativity::NonCommutative
         ));
     }
@@ -829,7 +877,35 @@ mod tests {
         let plan = fused_series_plan_named(table_scan_plan(), None);
 
         assert!(matches!(
-            Categorizer::check_plan(&plan, None).unwrap(),
+            Categorizer::check_plan(&plan, None, true).unwrap(),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    /// The transport decides where a canonical producer runs, not the shape of its children: its
+    /// router collects the pieces of one label set from exactly the partitions the producer runs
+    /// on, so those partitions have to be the region's whole read - which is only true in process.
+    /// A bare scan underneath must not on its own admit the producer to a wire plan.
+    #[test]
+    fn a_canonical_producer_is_not_commutative_on_the_wire_even_over_a_bare_scan() {
+        let plan = canonical_producer_plan(table_scan_plan());
+        let LogicalPlan::Extension(extension) = &plan else {
+            unreachable!();
+        };
+        assert!(matches!(
+            Categorizer::check_extension_plan(
+                extension.node.as_ref(),
+                &AliasMapping::default(),
+                true
+            ),
+            Commutativity::Commutative
+        ));
+        assert!(matches!(
+            Categorizer::check_extension_plan(
+                extension.node.as_ref(),
+                &AliasMapping::default(),
+                false
+            ),
             Commutativity::NonCommutative
         ));
     }
@@ -891,7 +967,11 @@ mod tests {
             unreachable!();
         };
         assert!(matches!(
-            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
+            Categorizer::check_extension_plan(
+                extension.node.as_ref(),
+                &AliasMapping::default(),
+                true
+            ),
             Commutativity::Commutative
         ));
 
@@ -910,7 +990,11 @@ mod tests {
             unreachable!();
         };
         assert!(matches!(
-            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
+            Categorizer::check_extension_plan(
+                extension.node.as_ref(),
+                &AliasMapping::default(),
+                true
+            ),
             Commutativity::NonCommutative
         ));
     }
@@ -1180,7 +1264,7 @@ mod tests {
     fn a_split_aggregate_is_commutative_only_below_the_cut() {
         let plan = split_aggregate_plan(table_scan_plan());
         assert!(matches!(
-            Categorizer::check_plan(&plan, None).unwrap(),
+            Categorizer::check_plan(&plan, None, true).unwrap(),
             Commutativity::NonCommutative
         ));
 
@@ -1189,7 +1273,7 @@ mod tests {
             panic!("expected the final node to have one partial child: {plan}");
         };
         assert!(matches!(
-            Categorizer::check_plan(partial, None).unwrap(),
+            Categorizer::check_plan(partial, None, true).unwrap(),
             Commutativity::Commutative
         ));
     }
@@ -1376,7 +1460,7 @@ mod test {
             fetch: None,
         });
         assert!(matches!(
-            Categorizer::check_plan(&plan, Some(Default::default())).unwrap(),
+            Categorizer::check_plan(&plan, Some(Default::default()), false).unwrap(),
             Commutativity::Commutative
         ));
     }

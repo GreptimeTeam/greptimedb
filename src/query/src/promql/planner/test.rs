@@ -3989,6 +3989,8 @@ async fn native_fused_info_over_its_own_table_reads_two_scans_in_the_region() {
         crate::dist_plan::Categorizer::check_extension_plan(
             fused as &dyn datafusion::logical_expr::UserDefinedLogicalNode,
             &Default::default(),
+            // The node reads two scans of the region's own table, which is the in-process read.
+            true,
         ),
         crate::dist_plan::Commutativity::Commutative
     ));
