@@ -164,7 +164,7 @@ impl CompactionCoordinator {
     /// Builds a coordinator over `executor` with an independent capacity.
     ///
     /// Production code should prefer [`Self::new_local`], which derives both
-    /// numbers from one value; the admission premise only holds while fewer
+    /// numbers from one value; the admission premise only holds while no more
     /// units are admitted than the executor can run at once.
     pub(crate) fn new(executor: SchedulerRef, capacity: usize) -> Self {
         Self {
