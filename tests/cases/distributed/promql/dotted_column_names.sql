@@ -1,0 +1,1 @@
+../../standalone/promql/dotted_column_names.sql

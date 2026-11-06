@@ -21,26 +21,26 @@ Affected Rows: 0
 -- SQLNESS REPLACE (Hash.*) REDACTED
 tql explain (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr_optimize_not [2m]));
 
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                                                             |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeSort: aggr_optimize_not.a ASC NULLS LAST, aggr_optimize_not.b ASC NULLS LAST, aggr_optimize_not.c ASC NULLS LAST, aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                                                                       |
-|               |   MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                |
-|               | Sort: aggr_optimize_not.a ASC NULLS LAST, aggr_optimize_not.b ASC NULLS LAST, aggr_optimize_not.c ASC NULLS LAST, aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                                                                            |
-|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.greptime_timestamp]], aggr=[[prom_max(prom_max_over_time(greptime_timestamp_range,greptime_value)) AS max(prom_max_over_time(greptime_timestamp_range,greptime_value))]] |
-|               |     Filter: prom_max_over_time(greptime_timestamp_range,greptime_value) IS NOT NULL                                                                                                                                                                                              |
-|               |       Projection: aggr_optimize_not.greptime_timestamp, prom_max_over_time(greptime_timestamp_range, greptime_value) AS prom_max_over_time(greptime_timestamp_range,greptime_value), aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d          |
-|               |         PromRangeManipulate: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp], values=["greptime_value"]                                                                                                         |
-|               |           PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [true]                                                                                                                                                                                   |
-|               |             PromSeriesDivide: tags=["a", "b", "c", "d"]                                                                                                                                                                                                                          |
-|               |               Sort: aggr_optimize_not.a ASC NULLS FIRST, aggr_optimize_not.b ASC NULLS FIRST, aggr_optimize_not.c ASC NULLS FIRST, aggr_optimize_not.d ASC NULLS FIRST, aggr_optimize_not.greptime_timestamp ASC NULLS FIRST                                                     |
-|               |                 Filter: aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None) AND aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)                                                                                  |
-|               |                   TableScan: aggr_optimize_not, partial_filters=[aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None), aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)]                                           |
-|               | ]]                                                                                                                                                                                                                                                                               |
-| physical_plan | MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST]                                                                                                                                                                 |
-|               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                                                                                  |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries: max by (a, b, c) (max_over_time(aggr_optimize_not[2m]))                                                                                                                 |
+|               |   FusedSeries: max by (a, b, c) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                                        |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec: max by (a, b, c) (max_over_time(aggr_optimize_not[2m]))                                                                                                             |
+|               |   Aggregate: max by [a, b, c] final                                                                                                                                                  |
+|               |     Input: aggregate state                                                                                                                                                           |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: max by (a, b, c) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                                  |
+|               |   Aggregate: max by [a, b, c] partial                                                                                                                                                |
+|               |     Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                |
+|               |       Input: raw samples source=0, contiguous                                                                                                                                        |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -54,34 +54,25 @@ tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST] REDACTED
+| 0_| 0_|_FusedSeriesExec: max by (a, b, c) (max_over_time(aggr_optimize_not[2m])) REDACTED
+|_|_|_Aggregate: max by [a, b, c] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: max by (a, b, c) (max_over_time(aggr_optimize_not[2m])) (output: series_frame) REDACTED
+|_|_|_Aggregate: max by [a, b, c] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp, prom_max(prom_max_over_time(greptime_timestamp_range,greptime_value))@4 as max(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp], aggr=[prom_max(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[prom_max(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), a@0 as a, b@1 as b, c@2 as c] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 1_|_ProjectionExec: expr=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp, prom_max(prom_max_over_time(greptime_timestamp_range,greptime_value))@4 as max(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp], aggr=[prom_max(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[prom_max(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), a@0 as a, b@1 as b, c@2 as c] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -92,31 +83,26 @@ tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 -- SQLNESS REPLACE (Hash.*) REDACTED
 tql explain (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_optimize_not [2m]));
 
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                                                             |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Sort: aggr_optimize_not.a ASC NULLS LAST, aggr_optimize_not.b ASC NULLS LAST, aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                                                                                                                |
-|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.greptime_timestamp]], aggr=[[__sum_merge(__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) AS sum(prom_max_over_time(greptime_timestamp_range,greptime_value))]]      |
-|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                              |
-|               | Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.greptime_timestamp]], aggr=[[__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))]]                                                                                         |
-|               |   Filter: prom_max_over_time(greptime_timestamp_range,greptime_value) IS NOT NULL                                                                                                                                                                                                |
-|               |     Projection: aggr_optimize_not.greptime_timestamp, prom_max_over_time(greptime_timestamp_range, greptime_value) AS prom_max_over_time(greptime_timestamp_range,greptime_value), aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d            |
-|               |       PromRangeManipulate: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp], values=["greptime_value"]                                                                                                           |
-|               |         PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [true]                                                                                                                                                                                     |
-|               |           PromSeriesDivide: tags=["a", "b", "c", "d"]                                                                                                                                                                                                                            |
-|               |             Sort: aggr_optimize_not.a ASC NULLS FIRST, aggr_optimize_not.b ASC NULLS FIRST, aggr_optimize_not.c ASC NULLS FIRST, aggr_optimize_not.d ASC NULLS FIRST, aggr_optimize_not.greptime_timestamp ASC NULLS FIRST                                                       |
-|               |               Filter: aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None) AND aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)                                                                                    |
-|               |                 TableScan: aggr_optimize_not, partial_filters=[aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None), aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)]                                             |
-|               | ]]                                                                                                                                                                                                                                                                               |
-| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, greptime_timestamp@2 ASC NULLS LAST]                                                                                                                                                                           |
-|               |   SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, greptime_timestamp@2 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                                     |
-|               |     AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, greptime_timestamp@2 as greptime_timestamp], aggr=[__sum_merge(__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as sum(prom_max_over_time(greptime_timestamp_range,greptime_value))] |
-|               |       RepartitionExec: partitioning=REDACTED
-|               |         AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, greptime_timestamp@2 as greptime_timestamp], aggr=[__sum_merge(__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as sum(prom_max_over_time(greptime_timestamp_range,greptime_value))]      |
-|               |           RepartitionExec: partitioning=REDACTED
-|               |             MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                                                                                  |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries: sum by (a, b) (max_over_time(aggr_optimize_not[2m]))                                                                                                                    |
+|               |   FusedSeries: sum by (a, b) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                                           |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec: sum by (a, b) (max_over_time(aggr_optimize_not[2m]))                                                                                                                |
+|               |   Aggregate: sum by [a, b] final                                                                                                                                                     |
+|               |     Input: aggregate state                                                                                                                                                           |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: sum by (a, b) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                                     |
+|               |   Aggregate: sum by [a, b] partial                                                                                                                                                   |
+|               |     Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                |
+|               |       Input: raw samples source=0, contiguous                                                                                                                                        |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -130,33 +116,25 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_op
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, greptime_timestamp@2 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, greptime_timestamp@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, greptime_timestamp@2 as greptime_timestamp], aggr=[__sum_merge(__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as sum(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b, greptime_timestamp@2 as greptime_timestamp], aggr=[__sum_merge(__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as sum(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 0_| 0_|_FusedSeriesExec: sum by (a, b) (max_over_time(aggr_optimize_not[2m])) REDACTED
+|_|_|_Aggregate: sum by [a, b] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: sum by (a, b) (max_over_time(aggr_optimize_not[2m])) (output: series_frame) REDACTED
+|_|_|_Aggregate: sum by [a, b] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, greptime_timestamp@2 as greptime_timestamp], aggr=[__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), a@0 as a, b@1 as b] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, greptime_timestamp@2 as greptime_timestamp], aggr=[__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), a@0 as a, b@1 as b] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -167,31 +145,26 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_op
 -- SQLNESS REPLACE (Hash.*) REDACTED
 tql explain (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optimize_not [2m]));
 
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                                                   |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Sort: aggr_optimize_not.a ASC NULLS LAST, aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                                                                                                                                          |
-|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.greptime_timestamp]], aggr=[[__avg_merge(__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) AS avg(prom_max_over_time(greptime_timestamp_range,greptime_value))]]                 |
-|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                    |
-|               | Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.greptime_timestamp]], aggr=[[__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))]]                                                                                                    |
-|               |   Filter: prom_max_over_time(greptime_timestamp_range,greptime_value) IS NOT NULL                                                                                                                                                                                      |
-|               |     Projection: aggr_optimize_not.greptime_timestamp, prom_max_over_time(greptime_timestamp_range, greptime_value) AS prom_max_over_time(greptime_timestamp_range,greptime_value), aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d  |
-|               |       PromRangeManipulate: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp], values=["greptime_value"]                                                                                                 |
-|               |         PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [true]                                                                                                                                                                           |
-|               |           PromSeriesDivide: tags=["a", "b", "c", "d"]                                                                                                                                                                                                                  |
-|               |             Sort: aggr_optimize_not.a ASC NULLS FIRST, aggr_optimize_not.b ASC NULLS FIRST, aggr_optimize_not.c ASC NULLS FIRST, aggr_optimize_not.d ASC NULLS FIRST, aggr_optimize_not.greptime_timestamp ASC NULLS FIRST                                             |
-|               |               Filter: aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None) AND aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)                                                                          |
-|               |                 TableScan: aggr_optimize_not, partial_filters=[aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None), aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)]                                   |
-|               | ]]                                                                                                                                                                                                                                                                     |
-| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST, greptime_timestamp@1 ASC NULLS LAST]                                                                                                                                                                                     |
-|               |   SortExec: expr=[a@0 ASC NULLS LAST, greptime_timestamp@1 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                                               |
-|               |     AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, greptime_timestamp@1 as greptime_timestamp], aggr=[__avg_merge(__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as avg(prom_max_over_time(greptime_timestamp_range,greptime_value))] |
-|               |       RepartitionExec: partitioning=REDACTED
-|               |         AggregateExec: mode=Partial, gby=[a@0 as a, greptime_timestamp@1 as greptime_timestamp], aggr=[__avg_merge(__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as avg(prom_max_over_time(greptime_timestamp_range,greptime_value))]      |
-|               |           RepartitionExec: partitioning=REDACTED
-|               |             MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                                                                        |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries: avg by (a) (max_over_time(aggr_optimize_not[2m]))                                                                                                                       |
+|               |   FusedSeries: avg by (a) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                                              |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec: avg by (a) (max_over_time(aggr_optimize_not[2m]))                                                                                                                   |
+|               |   Aggregate: avg by [a] final                                                                                                                                                        |
+|               |     Input: aggregate state                                                                                                                                                           |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: avg by (a) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                                        |
+|               |   Aggregate: avg by [a] partial                                                                                                                                                      |
+|               |     Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                |
+|               |       Input: raw samples source=0, contiguous                                                                                                                                        |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -205,33 +178,25 @@ tql analyze (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optim
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, greptime_timestamp@1 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC NULLS LAST, greptime_timestamp@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, greptime_timestamp@1 as greptime_timestamp], aggr=[__avg_merge(__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as avg(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, greptime_timestamp@1 as greptime_timestamp], aggr=[__avg_merge(__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as avg(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 0_| 0_|_FusedSeriesExec: avg by (a) (max_over_time(aggr_optimize_not[2m])) REDACTED
+|_|_|_Aggregate: avg by [a] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: avg by (a) (max_over_time(aggr_optimize_not[2m])) (output: series_frame) REDACTED
+|_|_|_Aggregate: avg by [a] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, greptime_timestamp@1 as greptime_timestamp], aggr=[__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, greptime_timestamp@0 as greptime_timestamp], aggr=[__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), a@0 as a] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, greptime_timestamp@1 as greptime_timestamp], aggr=[__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, greptime_timestamp@0 as greptime_timestamp], aggr=[__avg_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), a@0 as a] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -242,26 +207,26 @@ tql analyze (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optim
 -- SQLNESS REPLACE (Hash.*) REDACTED
 tql explain (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time(aggr_optimize_not [2m]));
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                                                    |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeSort: aggr_optimize_not.a ASC NULLS LAST, aggr_optimize_not.b ASC NULLS LAST, aggr_optimize_not.c ASC NULLS LAST, aggr_optimize_not.d ASC NULLS LAST, aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                          |
-|               |   MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                       |
-|               | Sort: aggr_optimize_not.a ASC NULLS LAST, aggr_optimize_not.b ASC NULLS LAST, aggr_optimize_not.c ASC NULLS LAST, aggr_optimize_not.d ASC NULLS LAST, aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                               |
-|               |   Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d, aggr_optimize_not.greptime_timestamp]], aggr=[[count(prom_max_over_time(greptime_timestamp_range,greptime_value))]]                                          |
-|               |     Filter: prom_max_over_time(greptime_timestamp_range,greptime_value) IS NOT NULL                                                                                                                                                                                     |
-|               |       Projection: aggr_optimize_not.greptime_timestamp, prom_max_over_time(greptime_timestamp_range, greptime_value) AS prom_max_over_time(greptime_timestamp_range,greptime_value), aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d |
-|               |         PromRangeManipulate: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp], values=["greptime_value"]                                                                                                |
-|               |           PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [true]                                                                                                                                                                          |
-|               |             PromSeriesDivide: tags=["a", "b", "c", "d"]                                                                                                                                                                                                                 |
-|               |               Sort: aggr_optimize_not.a ASC NULLS FIRST, aggr_optimize_not.b ASC NULLS FIRST, aggr_optimize_not.c ASC NULLS FIRST, aggr_optimize_not.d ASC NULLS FIRST, aggr_optimize_not.greptime_timestamp ASC NULLS FIRST                                            |
-|               |                 Filter: aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None) AND aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)                                                                         |
-|               |                   TableScan: aggr_optimize_not, partial_filters=[aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None), aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)]                                  |
-|               | ]]                                                                                                                                                                                                                                                                      |
-| physical_plan | MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST]                                                                                                                                    |
-|               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                                                                         |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries: count by (a, b, c, d) (max_over_time(aggr_optimize_not[2m]))                                                                                                            |
+|               |   FusedSeries: count by (a, b, c, d) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                                   |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec: count by (a, b, c, d) (max_over_time(aggr_optimize_not[2m]))                                                                                                        |
+|               |   Aggregate: count by [a, b, c, d] final                                                                                                                                             |
+|               |     Input: aggregate state                                                                                                                                                           |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: count by (a, b, c, d) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                             |
+|               |   Aggregate: count by [a, b, c, d] partial                                                                                                                                           |
+|               |     Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                |
+|               |       Input: raw samples source=0, contiguous                                                                                                                                        |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -275,28 +240,25 @@ tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST] REDACTED
+| 0_| 0_|_FusedSeriesExec: count by (a, b, c, d) (max_over_time(aggr_optimize_not[2m])) REDACTED
+|_|_|_Aggregate: count by [a, b, c, d] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: count by (a, b, c, d) (max_over_time(aggr_optimize_not[2m])) (output: series_frame) REDACTED
+|_|_|_Aggregate: count by [a, b, c, d] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=SinglePartitioned, gby=[a@2 as a, b@3 as b, c@4 as c, d@5 as d, greptime_timestamp@0 as greptime_timestamp], aggr=[count(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), a@0 as a, b@1 as b, c@2 as c, d@3 as d] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 1_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=SinglePartitioned, gby=[a@2 as a, b@3 as b, c@4 as c, d@5 as d, greptime_timestamp@0 as greptime_timestamp], aggr=[count(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), a@0 as a, b@1 as b, c@2 as c, d@3 as d] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -307,31 +269,26 @@ tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 -- SQLNESS REPLACE (Hash.*) REDACTED
 tql explain (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr_optimize_not [2m]));
 
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                                                                                       |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Sort: aggr_optimize_not.b ASC NULLS LAST, aggr_optimize_not.c ASC NULLS LAST, aggr_optimize_not.d ASC NULLS LAST, aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                                                                                                      |
-|               |   Aggregate: groupBy=[[aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d, aggr_optimize_not.greptime_timestamp]], aggr=[[__prom_min_merge(__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) AS min(prom_max_over_time(greptime_timestamp_range,greptime_value))]] |
-|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                                        |
-|               | Aggregate: groupBy=[[aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d, aggr_optimize_not.greptime_timestamp]], aggr=[[__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))]]                                                                                         |
-|               |   Filter: prom_max_over_time(greptime_timestamp_range,greptime_value) IS NOT NULL                                                                                                                                                                                                                          |
-|               |     Projection: aggr_optimize_not.greptime_timestamp, prom_max_over_time(greptime_timestamp_range, greptime_value) AS prom_max_over_time(greptime_timestamp_range,greptime_value), aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d                                      |
-|               |       PromRangeManipulate: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp], values=["greptime_value"]                                                                                                                                     |
-|               |         PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [true]                                                                                                                                                                                                               |
-|               |           PromSeriesDivide: tags=["a", "b", "c", "d"]                                                                                                                                                                                                                                                      |
-|               |             Sort: aggr_optimize_not.a ASC NULLS FIRST, aggr_optimize_not.b ASC NULLS FIRST, aggr_optimize_not.c ASC NULLS FIRST, aggr_optimize_not.d ASC NULLS FIRST, aggr_optimize_not.greptime_timestamp ASC NULLS FIRST                                                                                 |
-|               |               Filter: aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None) AND aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)                                                                                                              |
-|               |                 TableScan: aggr_optimize_not, partial_filters=[aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None), aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)]                                                                       |
-|               | ]]                                                                                                                                                                                                                                                                                                         |
-| physical_plan | SortPreservingMergeExec: [b@0 ASC NULLS LAST, c@1 ASC NULLS LAST, d@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST]                                                                                                                                                                                 |
-|               |   SortExec: expr=[b@0 ASC NULLS LAST, c@1 ASC NULLS LAST, d@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                                           |
-|               |     AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, c@1 as c, d@2 as d, greptime_timestamp@3 as greptime_timestamp], aggr=[__prom_min_merge(__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as min(prom_max_over_time(greptime_timestamp_range,greptime_value))]       |
-|               |       RepartitionExec: partitioning=REDACTED
-|               |         AggregateExec: mode=Partial, gby=[b@0 as b, c@1 as c, d@2 as d, greptime_timestamp@3 as greptime_timestamp], aggr=[__prom_min_merge(__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as min(prom_max_over_time(greptime_timestamp_range,greptime_value))]            |
-|               |           RepartitionExec: partitioning=REDACTED
-|               |             MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                                                                                                            |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries: min by (b, c, d) (max_over_time(aggr_optimize_not[2m]))                                                                                                                 |
+|               |   FusedSeries: min by (b, c, d) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                                        |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                  |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | FusedSeriesExec: min by (b, c, d) (max_over_time(aggr_optimize_not[2m]))                                                                                                             |
+|               |   Aggregate: min by [b, c, d] final                                                                                                                                                  |
+|               |     Input: aggregate state                                                                                                                                                           |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=2                                                                                                                               |
+|               |     FusedSeriesExec: min by (b, c, d) (max_over_time(aggr_optimize_not[2m])) (output: series_frame)                                                                                  |
+|               |   Aggregate: min by [b, c, d] partial                                                                                                                                                |
+|               |     Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                |
+|               |       Input: raw samples source=0, contiguous                                                                                                                                        |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -345,33 +302,25 @@ tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_SortPreservingMergeExec: [b@0 ASC NULLS LAST, c@1 ASC NULLS LAST, d@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[b@0 ASC NULLS LAST, c@1 ASC NULLS LAST, d@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, c@1 as c, d@2 as d, greptime_timestamp@3 as greptime_timestamp], aggr=[__prom_min_merge(__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as min(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[b@0 as b, c@1 as c, d@2 as d, greptime_timestamp@3 as greptime_timestamp], aggr=[__prom_min_merge(__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))) as min(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 0_| 0_|_FusedSeriesExec: min by (b, c, d) (max_over_time(aggr_optimize_not[2m])) REDACTED
+|_|_|_Aggregate: min by [b, c, d] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: min by (b, c, d) (max_over_time(aggr_optimize_not[2m])) (output: series_frame) REDACTED
+|_|_|_Aggregate: min by [b, c, d] partial, REDACTED
+|_|_|_Window: max_over_time [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, c@1 as c, d@2 as d, greptime_timestamp@3 as greptime_timestamp], aggr=[__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[b@2 as b, c@3 as c, d@4 as d, greptime_timestamp@0 as greptime_timestamp], aggr=[__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), b@1 as b, c@2 as c, d@3 as d] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, c@1 as c, d@2 as d, greptime_timestamp@3 as greptime_timestamp], aggr=[__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[b@2 as b, c@3 as c, d@4 as d, greptime_timestamp@0 as greptime_timestamp], aggr=[__prom_min_state(prom_max_over_time(greptime_timestamp_range,greptime_value))] REDACTED
-|_|_|_FilterExec: prom_max_over_time(greptime_timestamp_range,greptime_value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_max_over_time(greptime_timestamp_range@6, greptime_value@5) as prom_max_over_time(greptime_timestamp_range,greptime_value), b@1 as b, c@2 as c, d@3 as d] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -382,28 +331,26 @@ tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 -- SQLNESS REPLACE (Hash.*) REDACTED
 tql explain sum(aggr_optimize_not);
 
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                 |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Sort: aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                                                                                                                            |
-|               |   Aggregate: groupBy=[[aggr_optimize_not.greptime_timestamp]], aggr=[[__sum_merge(__sum_state(aggr_optimize_not.greptime_value)) AS sum(aggr_optimize_not.greptime_value)]]                                          |
-|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                  |
-|               | Aggregate: groupBy=[[aggr_optimize_not.greptime_timestamp]], aggr=[[__sum_state(aggr_optimize_not.greptime_value)]]                                                                                                  |
-|               |   PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp]                                                                                                         |
-|               |     PromSeriesDivide: tags=["a", "b", "c", "d"]                                                                                                                                                                      |
-|               |       Sort: aggr_optimize_not.a ASC NULLS FIRST, aggr_optimize_not.b ASC NULLS FIRST, aggr_optimize_not.c ASC NULLS FIRST, aggr_optimize_not.d ASC NULLS FIRST, aggr_optimize_not.greptime_timestamp ASC NULLS FIRST |
-|               |         Filter: aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(-299999, None) AND aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(0, None)                                                |
-|               |           TableScan: aggr_optimize_not, partial_filters=[aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(-299999, None), aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(0, None)]         |
-|               | ]]                                                                                                                                                                                                                   |
-| physical_plan | SortPreservingMergeExec: [greptime_timestamp@0 ASC NULLS LAST]                                                                                                                                                       |
-|               |   SortExec: expr=[greptime_timestamp@0 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                 |
-|               |     AggregateExec: mode=FinalPartitioned, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_merge(__sum_state(aggr_optimize_not.greptime_value)) as sum(aggr_optimize_not.greptime_value)]               |
-|               |       RepartitionExec: partitioning=REDACTED
-|               |         AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_merge(__sum_state(aggr_optimize_not.greptime_value)) as sum(aggr_optimize_not.greptime_value)]                    |
-|               |           RepartitionExec: partitioning=REDACTED
-|               |             MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                      |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                               |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries: sum(aggr_optimize_not)                                                                                                                                |
+|               |   FusedSeries: sum(aggr_optimize_not) (output: series_frame)                                                                                                       |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                              |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(-300000, None) AND greptime_timestamp <= TimestampMillisecond(0, None)] |
+|               | ]]                                                                                                                                                                 |
+| physical_plan | FusedSeriesExec: sum(aggr_optimize_not)                                                                                                                            |
+|               |   Aggregate: sum by [] final                                                                                                                                       |
+|               |     Input: aggregate state                                                                                                                                         |
+|               |   SeriesRepartitionExec: outputs=1, input_partitions=2                                                                                                             |
+|               |     FusedSeriesExec: sum(aggr_optimize_not) (output: series_frame)                                                                                                 |
+|               |   Aggregate: sum by [] partial                                                                                                                                     |
+|               |     Instant: lookback 300000ms offset 0 on grid 0/300000x1                                                                                                         |
+|               |       Input: raw samples source=0, contiguous                                                                                                                      |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                    |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -417,29 +364,25 @@ tql analyze sum(aggr_optimize_not);
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_SortPreservingMergeExec: [greptime_timestamp@0 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[greptime_timestamp@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_merge(__sum_state(aggr_optimize_not.greptime_value)) as sum(aggr_optimize_not.greptime_value)] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_merge(__sum_state(aggr_optimize_not.greptime_value)) as sum(aggr_optimize_not.greptime_value)] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 0_| 0_|_FusedSeriesExec: sum(aggr_optimize_not) REDACTED
+|_|_|_Aggregate: sum by [] final, REDACTED
+|_|_|_Input: aggregate state_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: sum(aggr_optimize_not) (output: series_frame) REDACTED
+|_|_|_Aggregate: sum by [] partial, REDACTED
+|_|_|_Instant: lookback 300000ms offset 0 on grid 0/300000x1_|
+|_|_|_Input: raw samples source=0, contiguous_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_state(aggr_optimize_not.greptime_value)] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_state(aggr_optimize_not.greptime_value)] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, greptime_value@5 as greptime_value] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_state(aggr_optimize_not.greptime_value)] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_state(aggr_optimize_not.greptime_value)] REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, greptime_value@5 as greptime_value] REDACTED
-|_|_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "mode":"legacy" REDACTED
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -464,58 +407,38 @@ Affected Rows: 0
 -- SQLNESS REPLACE (Hash.*) REDACTED
 tql explain (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize_not [2m])) / sum by (a, b, c) (rate(aggr_optimize_not_count [2m]));
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Projection: aggr_optimize_not_count.a, aggr_optimize_not_count.b, aggr_optimize_not_count.c, aggr_optimize_not_count.greptime_timestamp, CAST(aggr_optimize_not.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))) AS Float64) / CAST(aggr_optimize_not_count.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))) AS Float64) AS aggr_optimize_not.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))) / aggr_optimize_not_count.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))) |
-|               |   Inner Join: aggr_optimize_not.a = aggr_optimize_not_count.a, aggr_optimize_not.b = aggr_optimize_not_count.b, aggr_optimize_not.c = aggr_optimize_not_count.c, aggr_optimize_not.greptime_timestamp = aggr_optimize_not_count.greptime_timestamp                                                                                                                                                                                                                                                                                                                                                                                        |
-|               |     MergeSort: aggr_optimize_not.a ASC NULLS LAST, aggr_optimize_not.b ASC NULLS LAST, aggr_optimize_not.c ASC NULLS LAST, aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-|               |       MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-|               | SubqueryAlias: aggr_optimize_not                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-|               |   Sort: aggr_optimize_not.a ASC NULLS LAST, aggr_optimize_not.b ASC NULLS LAST, aggr_optimize_not.c ASC NULLS LAST, aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-|               |     Aggregate: groupBy=[[aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.greptime_timestamp]], aggr=[[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))]]                                                                                                                                                                                                                                                                                                                                                                                                         |
-|               |       Filter: prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)) IS NOT NULL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-|               |         Projection: aggr_optimize_not.greptime_timestamp, prom_rate(greptime_timestamp_range, greptime_value, aggr_optimize_not.greptime_timestamp, Int64(120000)) AS prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), aggr_optimize_not.a, aggr_optimize_not.b, aggr_optimize_not.c, aggr_optimize_not.d                                                                                                                                                                                                                                                                                             |
-|               |           PromRangeManipulate: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp], values=["greptime_value"]                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-|               |             PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-|               |               PromSeriesDivide: tags=["a", "b", "c", "d"]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-|               |                 Sort: aggr_optimize_not.a ASC NULLS FIRST, aggr_optimize_not.b ASC NULLS FIRST, aggr_optimize_not.c ASC NULLS FIRST, aggr_optimize_not.d ASC NULLS FIRST, aggr_optimize_not.greptime_timestamp ASC NULLS FIRST                                                                                                                                                                                                                                                                                                                                                                                                            |
-|               |                   Filter: aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None) AND aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-|               |                     TableScan: aggr_optimize_not, partial_filters=[aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None), aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)]                                                                                                                                                                                                                                                                                                                                                                                                  |
-|               | ]]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-|               |     SubqueryAlias: aggr_optimize_not_count                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-|               |       Sort: aggr_optimize_not_count.a ASC NULLS LAST, aggr_optimize_not_count.b ASC NULLS LAST, aggr_optimize_not_count.c ASC NULLS LAST, aggr_optimize_not_count.greptime_timestamp ASC NULLS LAST                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-|               |         Aggregate: groupBy=[[aggr_optimize_not_count.a, aggr_optimize_not_count.b, aggr_optimize_not_count.c, aggr_optimize_not_count.greptime_timestamp]], aggr=[[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))]]                                                                                                                                                                                                                                                                                                                                                                             |
-|               |           Filter: prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)) IS NOT NULL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-|               |             Projection: aggr_optimize_not_count.greptime_timestamp, prom_rate(greptime_timestamp_range, greptime_value, aggr_optimize_not_count.greptime_timestamp, Int64(120000)) AS prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), aggr_optimize_not_count.a, aggr_optimize_not_count.b, aggr_optimize_not_count.c                                                                                                                                                                                                                                                                                |
-|               |               PromRangeManipulate: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp], values=["greptime_value"]                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-|               |                 PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-|               |                   PromSeriesDivide: tags=["a", "b", "c", "d"]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-|               |                     Sort: aggr_optimize_not_count.a ASC NULLS FIRST, aggr_optimize_not_count.b ASC NULLS FIRST, aggr_optimize_not_count.c ASC NULLS FIRST, aggr_optimize_not_count.d ASC NULLS FIRST, aggr_optimize_not_count.greptime_timestamp ASC NULLS FIRST                                                                                                                                                                                                                                                                                                                                                                          |
-|               |                       MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-|               | Filter: aggr_optimize_not_count.greptime_timestamp >= TimestampMillisecond(1752591744001, None) AND aggr_optimize_not_count.greptime_timestamp <= TimestampMillisecond(1752592164000, None)                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-|               |   TableScan: aggr_optimize_not_count, partial_filters=[aggr_optimize_not_count.greptime_timestamp >= TimestampMillisecond(1752591744001, None), aggr_optimize_not_count.greptime_timestamp <= TimestampMillisecond(1752592164000, None)]                                                                                                                                                                                                                                                                                                                                                                                                  |
-|               | ]]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| physical_plan | ProjectionExec: expr=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp, sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))@4 / sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))@5 as aggr_optimize_not.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))) / aggr_optimize_not_count.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))]                                                                                                                 |
-|               |   REDACTED
-|               |     CoalescePartitionsExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-|               |       AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))]                                                                                                                                                                                                                                                                                                                                                                                                               |
-|               |         RepartitionExec: partitioning=REDACTED
-|               |           AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))]                                                                                                                                                                                                                                                                                                                                                                                                                    |
-|               |             FilterExec: prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))@1 IS NOT NULL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-|               |               ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_rate(greptime_timestamp_range@6, greptime_value@5, greptime_timestamp@4, 120000) as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@0 as a, b@1 as b, c@2 as c]                                                                                                                                                                                                                                                                                                                                               |
-|               |                 PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-|               |                   PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-|               |                     PromSeriesDivideExec: tags=["a", "b", "c", "d"]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-|               |                       SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-|               |                         RepartitionExec: partitioning=REDACTED
-|               |                           MergeScanExec: REDACTED
-|               |     RepartitionExec: partitioning=REDACTED
-|               |       MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-|               |         SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-|               |           MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                       |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries: sum by (a, b, c) (rate(aggr_optimize_not[2m])) / sum by (a, b, c) (rate(aggr_optimize_not_count[2m]))                                                                         |
+|               |   FusedSeries: segment (output: series_frame)                                                                                                                                              |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                        |
+|               | RawSeriesSource: metric=aggr_optimize_not, tags=[a, b, c, d], fields=[greptime_value]                                                                                                      |
+|               |   TableScan: aggr_optimize_not, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)]       |
+|               | ]]                                                                                                                                                                                         |
+|               |   FusedSeries: segment (output: series_frame)                                                                                                                                              |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                                                                                                        |
+|               | RawSeriesSource: metric=aggr_optimize_not_count, tags=[a, b, c, d], fields=[greptime_value]                                                                                                |
+|               |   TableScan: aggr_optimize_not_count, partial_filters=[greptime_timestamp > TimestampMillisecond(1752591744000, None) AND greptime_timestamp <= TimestampMillisecond(1752592164000, None)] |
+|               | ]]                                                                                                                                                                                         |
+| physical_plan | FusedSeriesExec: sum by (a, b, c) (rate(aggr_optimize_not[2m])) / sum by (a, b, c) (rate(aggr_optimize_not_count[2m]))                                                                     |
+|               |   Binary: / ignoring [] one-to-one                                                                                                                                                         |
+|               |     Aggregate: sum by [a, b, c] complete                                                                                                                                                   |
+|               |       Input: evaluated samples source=0, contiguous                                                                                                                                        |
+|               |     Aggregate: sum by [a, b, c] complete                                                                                                                                                   |
+|               |       Input: evaluated samples source=1, contiguous                                                                                                                                        |
+|               |   SeriesRepartitionExec: outputs=1, input_partitions=2                                                                                                                                     |
+|               |     FusedSeriesExec: segment (output: series_frame)                                                                                                                                        |
+|               |   Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                                 |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                                |
+|               |       MergeScanExec: REDACTED
+|               |   SeriesRepartitionExec: outputs=1, input_partitions=2                                                                                                                                     |
+|               |     FusedSeriesExec: segment (output: series_frame)                                                                                                                                        |
+|               |   Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11                                                                                                                 |
+|               |     Input: raw samples source=0, contiguous                                                                                                                                                |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                                                            |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -529,30 +452,42 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp, sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))@4 / sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))@5 as aggr_optimize_not.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))) / aggr_optimize_not_count.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))] REDACTED
-|_|_|_REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))] REDACTED
-|_|_|_FilterExec: prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, prom_rate(greptime_timestamp_range@6, greptime_value@5, greptime_timestamp@4, 120000) as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@0 as a, b@1 as b, c@2 as c] REDACTED
-|_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 0_| 0_|_FusedSeriesExec: sum by (a, b, c) (rate(aggr_optimize_not[2m])) / sum by (a, b, c) (rate(aggr_optimize_not_count[2m])) REDACTED
+|_|_|_Binary: / ignoring [] one-to-one, REDACTED
+|_|_|_Aggregate: sum by [a, b, c] complete, REDACTED
+|_|_|_Input: evaluated samples source=0, contiguous_|
+|_|_|_Aggregate: sum by [a, b, c] complete, REDACTED
+|_|_|_Input: evaluated samples source=1, contiguous_|
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment (output: series_frame) REDACTED
+|_|_|_Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: segment (output: series_frame) REDACTED
+|_|_|_Window: rate [120000ms] offset 0 anchor - on grid 1752591864000/30000x11_|
+|_|_|_Input: raw samples source=0, contiguous_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 1_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
+|_|_|_|
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_RawSeriesSourceExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

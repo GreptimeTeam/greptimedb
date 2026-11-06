@@ -1,0 +1,74 @@
+{
+  "name": "rate-and-counter-reset",
+  "series": [
+    {
+      "labels": {"__name__": "requests_total", "host": "a"},
+      "samples": [
+        {"t": 0, "v": 100},
+        {"t": 60000, "v": 160},
+        {"t": 120000, "v": 220},
+        {"t": 180000, "v": 10},
+        {"t": 240000, "v": 70}
+      ]
+    },
+    {
+      "labels": {"__name__": "requests_total", "host": "sparse"},
+      "samples": [
+        {"t": 0, "v": 5},
+        {"t": 240000, "v": 25}
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "name": "rate over a window",
+      "expr": "rate(requests_total[2m])",
+      "kind": "instant",
+      "time": 120000
+    },
+    {
+      "name": "rate across a counter reset",
+      "expr": "rate(requests_total[5m])",
+      "kind": "instant",
+      "time": 240000
+    },
+    {
+      "name": "increase across a counter reset",
+      "expr": "increase(requests_total[5m])",
+      "kind": "instant",
+      "time": 240000
+    },
+    {
+      "name": "irate reads the last two samples",
+      "expr": "irate(requests_total[5m])",
+      "kind": "instant",
+      "time": 240000
+    },
+    {
+      "name": "delta over a gauge window",
+      "expr": "delta(requests_total[5m])",
+      "kind": "instant",
+      "time": 240000
+    },
+    {
+      "name": "rate with sparse samples",
+      "expr": "rate(requests_total{host=\"sparse\"}[5m])",
+      "kind": "instant",
+      "time": 240000
+    },
+    {
+      "name": "rate of a range evaluation",
+      "expr": "rate(requests_total[2m])",
+      "kind": "range",
+      "start": 0,
+      "end": 240000,
+      "step": 60000
+    },
+    {
+      "name": "increase of an empty match is empty",
+      "expr": "increase(requests_total{host=\"missing\"}[5m])",
+      "kind": "instant",
+      "time": 240000
+    }
+  ]
+}

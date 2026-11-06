@@ -1,0 +1,47 @@
+{
+  "name": "aggregation",
+  "series": [
+    {
+      "labels": {"__name__": "cpu_usage", "host": "a", "job": "api"},
+      "samples": [
+        {"t": 0, "v": 1},
+        {"t": 60000, "v": 3},
+        {"t": 120000, "v": 5}
+      ]
+    },
+    {
+      "labels": {"__name__": "cpu_usage", "host": "b", "job": "api"},
+      "samples": [
+        {"t": 0, "v": 2},
+        {"t": 60000, "v": 4},
+        {"t": 120000, "v": 6}
+      ]
+    },
+    {
+      "labels": {"__name__": "cpu_usage", "host": "c", "job": "batch"},
+      "samples": [
+        {"t": 0, "v": 10},
+        {"t": 60000, "v": 20},
+        {"t": 120000, "v": 30}
+      ]
+    }
+  ],
+  "queries": [
+    {"name": "sum over all series", "expr": "sum(cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "sum by job", "expr": "sum by (job) (cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "sum without host", "expr": "sum without (host) (cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "avg by job", "expr": "avg by (job) (cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "min by job", "expr": "min by (job) (cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "max by job", "expr": "max by (job) (cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "count by job", "expr": "count by (job) (cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "stddev by job", "expr": "stddev by (job) (cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "stdvar by job", "expr": "stdvar by (job) (cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "topk keeps two series", "expr": "topk(2, cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "bottomk keeps two series", "expr": "bottomk(2, cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "quantile over all series", "expr": "quantile(0.5, cpu_usage)", "kind": "instant", "time": 0},
+    {"name": "nested aggregation", "expr": "sum by (job) (sum without (job) (cpu_usage))", "kind": "instant", "time": 0},
+    {"name": "aggregation of an aggregation", "expr": "max(sum by (job) (cpu_usage))", "kind": "instant", "time": 0},
+    {"name": "sum over a range evaluation", "expr": "sum by (job) (cpu_usage)", "kind": "range", "start": 0, "end": 120000, "step": 60000},
+    {"name": "aggregate of a range function", "expr": "sum by (host) (rate(cpu_usage[2m]))", "kind": "instant", "time": 120000}
+  ]
+}

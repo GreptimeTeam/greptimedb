@@ -35,6 +35,7 @@ INSERT INTO TABLE kubernetes_build_info_multi VALUES
     (0, 'cluster_a', 'kubernetes', 'apiserver', '0', 1.0, 2.0),
     (0, 'cluster_b', 'kubernetes', 'apiserver', '0', 3.0, 4.0);
 
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') group by (cluster_name)(kubernetes_build_info_multi{service_name="kubernetes",job_name="apiserver"});
 
 DROP TABLE kubernetes_build_info_multi;

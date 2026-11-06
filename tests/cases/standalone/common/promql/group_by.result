@@ -20,11 +20,11 @@ Affected Rows: 3
 
 TQL EVAL (0, 0, '1s') sum(group by (cluster_name)(kubernetes_build_info{service_name="kubernetes",job_name="apiserver"}));
 
-+---------------------+----------------------+
-| ts                  | sum(max(Float64(1))) |
-+---------------------+----------------------+
-| 1970-01-01T00:00:00 | 2.0                  |
-+---------------------+----------------------+
++---------------------+-----+
+| ts                  | val |
++---------------------+-----+
+| 1970-01-01T00:00:00 | 2.0 |
++---------------------+-----+
 
 DROP TABLE kubernetes_build_info;
 
@@ -50,9 +50,15 @@ INSERT INTO TABLE kubernetes_build_info_multi VALUES
 
 Affected Rows: 2
 
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') group by (cluster_name)(kubernetes_build_info_multi{service_name="kubernetes",job_name="apiserver"});
 
-Error: 1001(Unsupported), Multi fields calculation is not supported in group()
++---------------------+-----+-----+--------------+
+| ts                  | cpu | mem | cluster_name |
++---------------------+-----+-----+--------------+
+| 1970-01-01T00:00:00 | 1.0 | 1.0 | cluster_a    |
+| 1970-01-01T00:00:00 | 1.0 | 1.0 | cluster_b    |
++---------------------+-----+-----+--------------+
 
 DROP TABLE kubernetes_build_info_multi;
 

@@ -1,0 +1,28 @@
+{
+  "name": "time-modifiers-and-subquery",
+  "series": [
+    {
+      "labels": {"__name__": "gauge_metric", "host": "a"},
+      "samples": [
+        {"t": 0, "v": 1},
+        {"t": 30000, "v": 2},
+        {"t": 60000, "v": 3},
+        {"t": 90000, "v": 4},
+        {"t": 120000, "v": 5}
+      ]
+    }
+  ],
+  "queries": [
+    {"name": "offset moves the read back", "expr": "gauge_metric offset 1m", "kind": "instant", "time": 120000},
+    {"name": "negative offset moves it forward", "expr": "gauge_metric offset -30s", "kind": "instant", "time": 60000},
+    {"name": "at pins the evaluation time", "expr": "gauge_metric @ 60000", "kind": "instant", "time": 120000},
+    {"name": "at with offset", "expr": "gauge_metric @ 60000 offset 30s", "kind": "instant", "time": 120000},
+    {"name": "range selector boundary is inclusive of the newest sample", "expr": "gauge_metric[2m]", "kind": "range", "start": 0, "end": 120000, "step": 60000},
+    {"name": "range selector reaching before the first sample", "expr": "gauge_metric[10m]", "kind": "range", "start": 0, "end": 120000, "step": 60000},
+    {"name": "subquery with an explicit step", "expr": "avg_over_time(gauge_metric[1m:30s])", "kind": "instant", "time": 120000},
+    {"name": "subquery with the default step", "expr": "avg_over_time(gauge_metric[2m:])", "kind": "instant", "time": 120000},
+    {"name": "max_over_time over a window", "expr": "max_over_time(gauge_metric[2m])", "kind": "instant", "time": 120000},
+    {"name": "increase over a subquery", "expr": "increase(gauge_metric[2m])", "kind": "instant", "time": 120000},
+    {"name": "range evaluation across the window", "expr": "max_over_time(gauge_metric[1m])", "kind": "range", "start": 60000, "end": 120000, "step": 30000}
+  ]
+}

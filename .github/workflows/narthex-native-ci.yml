@@ -1,0 +1,269 @@
+# Copyright 2023 Greptime Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Narthex Native CI
+
+# PromQL is moving to a native series-major route on `narthex`, but the legacy route is still a
+# fallback: a suite that passes with the switch on does not by itself show that a statement ran
+# natively. These jobs check the native route directly, each on its own axis:
+#
+#   promql-sqlness    every environment, each case against its own `.result`
+#   prometheus-compat GreptimeDB against the pinned Prometheus engine, answer by answer
+#   vm-performance    candidate, the narthex baseline and VictoriaMetrics on one machine
+#
+# The measurements that need a dedicated machine live in a separate reusable workflow so this file
+# stays about correctness.
+
+on:
+  # A caller supplies the ref to test, which is how the nightly job selects `narthex` from the
+  # default branch.
+  workflow_call:
+    inputs:
+      candidate_ref:
+        description: The GreptimeDB revision to build and test
+        type: string
+        required: false
+        default: ""
+  pull_request:
+    branches: [narthex]
+  push:
+    branches: [narthex]
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: GreptimeDB baseline SHA or ref for the performance comparison
+        required: false
+        default: ""
+      candidate_ref:
+        description: GreptimeDB candidate SHA or ref
+        required: false
+        default: ""
+  # GitHub runs a schedule from the default branch only, so this trigger does not fire from
+  # `narthex` itself. The nightly job checks out `narthex` explicitly and is registered by
+  # `.github/workflows/narthex-native-ci-nightly.yml` on the default branch.
+  schedule:
+    - cron: "30 19 * * *"
+
+concurrency:
+  group: narthex-native-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The native route is selected per request; the runner turns both halves on from one flag.
+  NARTHEX_BRANCH: narthex
+
+jobs:
+  # One build feeds every correctness job below, so the three of them agree on the binary.
+  build:
+    name: Build greptime and sqlness-runner
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.candidate_ref || github.event.pull_request.head.sha || github.sha }}
+      - name: Report the commit under test
+        run: |
+          # The backticks are markdown for the summary, not command substitution.
+          # shellcheck disable=SC2016
+          {
+            printf '## Narthex native CI\n\n'
+            printf -- '- Tested commit: `%s`\n' "$(git rev-parse HEAD)"
+            printf -- '- Base ref: `%s`\n' "${{ github.base_ref || env.NARTHEX_BRANCH }}"
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@3.23.4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "narthex-native-ci"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+      - name: Build binaries
+        run: cargo build --bin greptime --bin sqlness-runner
+      - name: Pack binaries
+        run: |
+          mkdir -p bins
+          cp target/debug/greptime bins/
+          cp target/debug/sqlness-runner bins/
+          chmod +x bins/greptime bins/sqlness-runner
+      - uses: actions/upload-artifact@v4
+        with:
+          name: narthex-native-bins
+          path: bins/
+          if-no-files-found: error
+          retention-days: 3
+
+  promql-sqlness:
+    name: PromQL sqlness (native expectations)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.candidate_ref || github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: narthex-native-bins
+          path: bins
+      - name: Restore the executable bit
+        # An artifact does not carry file modes, so a downloaded binary is not executable.
+        run: chmod +x bins/greptime bins/sqlness-runner
+      - name: Run every environment on the native route
+        run: |
+          set -o pipefail
+          RUST_BACKTRACE=1 ./bins/sqlness-runner bare \
+            -c tests/cases \
+            --bins-dir ./bins \
+            --enable-native-promql \
+            --preserve-state 2>&1 | tee "$RUNNER_TEMP/sqlness-native.log"
+          # `tee` would otherwise hide a runner that never started.
+          grep -q 'All sqlness tests passed' "$RUNNER_TEMP/sqlness-native.log"
+      - name: Record what the run changed
+        if: always()
+        # sqlness compares a case against its checked-in `.result` and writes what it just produced
+        # into that same file, which is how an expectation is updated. The review point is this diff
+        # against the commit, not the file the next run reads.
+        run: git diff -- tests/cases >"$RUNNER_TEMP/results.diff" || true
+      - name: Check that every planned statement ran natively
+        if: always()
+        # The `.result` files are this run's output: sqlness replaced each one it compared against.
+        # Only `TQL EXPLAIN`/`TQL ANALYZE` statements report a plan, so the check covers those.
+        run: |
+          files=$(find tests/cases -name '*.result')
+          # shellcheck disable=SC2086 # the paths are split into arguments on purpose
+          python3 .github/scripts/narthex-native-route.py --require-native --input $files
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: narthex-sqlness-native
+          path: |
+            ${{ runner.temp }}/sqlness-native.log
+            ${{ runner.temp }}/results.diff
+          retention-days: 7
+
+  prometheus-compat:
+    name: Prometheus conformance
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.candidate_ref || github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: narthex-native-bins
+          path: bins
+      - name: Restore the executable bit
+        # An artifact does not carry file modes, so a downloaded binary is not executable.
+        run: chmod +x bins/greptime
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/narthex-compat/go.mod
+          cache-dependency-path: tests/narthex-compat/go.sum
+      - name: Build the Prometheus oracle
+        working-directory: tests/narthex-compat
+        run: go build -o "$RUNNER_TEMP/oracle" ./oracle
+      - name: Compare the native route against the pinned engine
+        run: |
+          bash .github/scripts/narthex-prometheus-compat.sh \
+            "$PWD/bins/greptime" \
+            "$RUNNER_TEMP/oracle" \
+            "$PWD/tests/narthex-compat/cases" \
+            "$RUNNER_TEMP/compat-native" \
+            --native
+      - name: Compare the legacy route, for comparison
+        if: always()
+        # Informational only: the legacy route is deprecated on this branch and is not a gate. It
+        # answers the same files in the same harness so a difference that shows up here and not
+        # above can be told apart from a native regression - today, the metric name `or` leaves on
+        # the right-hand series. Failing the job on it would gate on a route nobody maintains.
+        continue-on-error: true
+        run: |
+          bash .github/scripts/narthex-prometheus-compat.sh \
+            "$PWD/bins/greptime" \
+            "$RUNNER_TEMP/oracle" \
+            "$PWD/tests/narthex-compat/cases" \
+            "$RUNNER_TEMP/compat-legacy"
+      - name: Summarize
+        if: always()
+        run: |
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import json, sys
+          from collections import Counter
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          for route in ("native", "legacy"):
+              path = root / f"compat-{route}" / "report.json"
+              print(f"\n### {route} route")
+              if not path.is_file():
+                  print("No report: the comparison did not reach the reporting step.")
+                  continue
+              results = json.loads(path.read_text())
+              counts = Counter(entry["status"] for entry in results)
+              print("| status | queries |")
+              print("| --- | --- |")
+              for status in sorted(counts):
+                  print(f"| {status} | {counts[status]} |")
+              known = [entry for entry in results if entry["status"] == "known-difference"]
+              if known:
+                  print("\nKnown differences (tests/narthex-compat/KNOWN-DIFFERENCES.md):")
+                  for entry in known:
+                      print(f"- `{entry['expr']}` ({entry['case']})")
+              failed = [entry for entry in results if entry["status"] == "failed"]
+              if failed:
+                  print("\nFailures:")
+                  for entry in failed:
+                      print(f"- `{entry['expr']}` ({entry['case']}): {entry['problems']}")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: narthex-prometheus-compat
+          path: |
+            ${{ runner.temp }}/compat-native/
+            ${{ runner.temp }}/compat-legacy/
+          retention-days: 7
+
+  vm-performance:
+    name: vmbench lite (candidate, narthex baseline, VictoriaMetrics)
+    needs: build
+    # Manual only, for now. The benchmark provisions an ephemeral cloud runner and needs the Aliyun
+    # or AWS credentials and a runner token, so it cannot run on a pull request from a fork; and it
+    # does not measure this build yet - with no image tags passed it compares the published
+    # `greptime/greptimedb:latest` against `greptime/greptimedb:v1.2.1`. Running that on a schedule
+    # would rent a machine every night to measure something else, so the schedule runs correctness
+    # only until a candidate image is wired in.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    uses: ./.github/workflows/vmbench-long-range.yml
+    with:
+      # No image tags are passed: the benchmark measures the published `greptime/greptimedb:latest`
+      # against its default comparison tag, not the binaries this workflow builds. Building and
+      # pushing an image for the ref under test is not wired here yet.
+      range_preset: 1w
+      compare_greptimedb: true
+      run_victoriametrics: true
+    secrets: inherit

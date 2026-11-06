@@ -1,0 +1,1 @@
+../../standalone/tql/partition.sql

@@ -186,8 +186,9 @@ INSERT INTO TABLE presence_metric VALUES
     (600000, 'i1', 'cpu0', 'b', 8.0),
     (600000, 'i2', 'cpu9', 'a', 103.0);
 
--- Ordinary NaN keeps `cpu0` present in the grouped count, while the NULL sample
--- on `cpu2` still leaves a zero-valued row in `count(...) by (cpu)`.
+-- Ordinary NaN is still a sample, so `cpu0` stays in the grouped count. A NULL is not a
+-- sample: at a step where `cpu2` has only NULLs the group is empty, and `count(...) by (cpu)`
+-- returns no row for it rather than a zero.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 600, '200s') count(presence_metric{instance="i1"}) by (cpu);
 
