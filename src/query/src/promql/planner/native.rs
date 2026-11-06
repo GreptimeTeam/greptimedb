@@ -62,8 +62,9 @@ use promql::extension_plan::{
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series, uniform_field_kind,
+    AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series,
+    uniform_field_kind,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
@@ -2651,13 +2652,21 @@ fn scan_operand(node: &NativeNode) -> bool {
 /// `count_over_time` over a histogram stays eligible.
 fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
     match &node.expr {
-        // An aggregate folds float state, so it is refused unless the kind entering it is
-        // provably a float. "Cannot name it" is not "not a histogram": a canonical merge
+        // An aggregate that folds the payload - `sum`, `avg` - is refused unless the kind entering
+        // it is provably a float. "Cannot name it" is not "not a histogram": a canonical merge
         // (`label_replace` collapsing a label) and a set operation both hand on the samples they
         // were given without the walk describing them, and reading that silence as float is what
         // admitted `sum(label_replace(h, ...))` to a native fold over histograms.
-        NativeExpr::Aggregate { input, .. } => {
-            !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float))
+        NativeExpr::Aggregate { input, op } => {
+            // Three kinds take a histogram and still run here: `count` and `group` count it as one
+            // present sample, and `min`/`max`/`stddev`/`stdvar` skip it the way Prometheus does.
+            // Only `sum` and `avg` would have to fold the payload, and this route has no histogram
+            // aggregate state yet, so only they refuse the kind entering them. `quantile` is not
+            // among the skipping kinds: the native runtime has no `quantile` kernel either, so it
+            // keeps the existing plan after this check instead of folding here.
+            let folds_payload = matches!(op.kind, AggregateKind::Sum | AggregateKind::Avg);
+            (folds_payload
+                && !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float)))
                 || aggregate_reads_histogram(input, input_kind)
         }
         NativeExpr::Input(_)

@@ -1054,16 +1054,26 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
         Samples::try_from_histogram(UInt32Array::from(vec![None]), batch).unwrap(),
     ])
     .unwrap();
+    // `count` and `group` ask only whether a sample is present, so a histogram is one
+    // contribution for them; the aggregates that read a value still refuse it.
     for op in OPS {
-        assert!(matches!(
-            aggregate_float(
-                &schema,
-                &[source.clone(), histogram.clone()],
-                op,
-                Grouping::By(&[])
+        let answer = aggregate_float(
+            &schema,
+            &[source.clone(), histogram.clone()],
+            op,
+            Grouping::By(&[]),
+        );
+        match op {
+            // `count`/`group` count the sample, `min`/`max` skip it the way Prometheus does.
+            AggregateOp::Count | AggregateOp::Group | AggregateOp::Min | AggregateOp::Max => {
+                assert!(answer.is_ok(), "{op:?} takes a histogram: {answer:?}");
+            }
+            // `sum`/`avg` fold the payload, which this route has no state for.
+            _ => assert!(
+                matches!(answer, Err(DataFusionError::NotImplemented(_))),
+                "{op:?} must refuse a histogram: {answer:?}"
             ),
-            Err(DataFusionError::NotImplemented(_))
-        ));
+        }
     }
     let mut invalid = source.clone();
     invalid.fields = SeriesFields::one(source.fields.get(0).unwrap().clone());
@@ -1989,6 +1999,156 @@ fn count_values_keeps_neighbours_of_a_power_of_two_apart() {
             ),
         ]
     );
+}
+
+/// `count` and `group` ask whether a sample is present, so a histogram is one contribution.
+///
+/// Prometheus counts every present sample whatever its type is, and answers `1` for a non-empty
+/// group. A native histogram therefore counts once - including one that observed nothing - and
+/// contributes nothing to a group that has no other sample. Every other aggregate reads the value,
+/// so it must still refuse a histogram rather than count it.
+#[test]
+fn count_and_group_count_histogram_samples() {
+    use crate::grid_series::reference::OwnedHistogram;
+    use crate::grid_series::{GridSample, GridSeriesBuilder};
+    use crate::histogram_eval::float_histogram::FloatHistogram;
+
+    // Two positions, so a series can be absent at the one under test: a series with no sample at
+    // all is not an input, so sparse is how a missing contribution really arrives.
+    let schema = schema_with_grid_len(&["value"], 2);
+    let histogram =
+        OwnedHistogram::parse("0/0/0/4000000000000000/3ff0000000000000/0/1_1/4000000000000000///");
+    let empty = OwnedHistogram::parse("0/0/0/0/0/0/////");
+    // `push_samples` takes one entry per field, so a position is one call.
+    let series = |job: &str, first: Option<GridSample>, second: Option<GridSample>| {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder.push_samples(0, &[first]).unwrap();
+        builder.push_samples(1, &[second]).unwrap();
+        builder
+            .finish(metric("m", &[("job", job)]))
+            .unwrap()
+            .unwrap()
+    };
+    let native = || {
+        GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+        ))
+    };
+    let zero_observations = || {
+        GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&empty.view()).unwrap(),
+        ))
+    };
+    let value = |series: &[Series]| {
+        let SampleRef::Float(value) = series[0].fields.as_slice()[0].sample(0) else {
+            panic!("count and group answer floats");
+        };
+        value
+    };
+
+    // Two histograms at the first position, one of which observed nothing, are two present
+    // samples there. The third series holds a float at the second position only, so the first
+    // position has no contribution from it.
+    let input = [
+        series("a", Some(native()), None),
+        series("b", Some(zero_observations()), None),
+        series("c", None, Some(GridSample::Float(5.0))),
+    ];
+    assert_eq!(
+        value(&aggregate_float(&schema, &input, AggregateOp::Count, Grouping::By(&[])).unwrap()),
+        2.0,
+        "every present histogram counts once"
+    );
+    assert_eq!(
+        value(&aggregate_float(&schema, &input, AggregateOp::Group, Grouping::By(&[])).unwrap()),
+        1.0,
+    );
+    // The sparse series must still contribute at the position it does hold: a fold that dropped it
+    // would answer the same count at the first position and nothing at the second.
+    let counted = aggregate_float(&schema, &input, AggregateOp::Count, Grouping::By(&[])).unwrap();
+    let SampleRef::Float(second) = counted[0].fields.as_slice()[0].sample(1) else {
+        panic!("a count is a float");
+    };
+    assert_eq!(second, 1.0, "the sparse series counts at its own position");
+
+    // A float beside a histogram is one more present sample, not a different kind of answer.
+    let mixed = [
+        series("a", Some(native()), None),
+        series("b", Some(GridSample::Float(5.0)), None),
+    ];
+    assert_eq!(
+        value(&aggregate_float(&schema, &mixed, AggregateOp::Count, Grouping::By(&[])).unwrap()),
+        2.0,
+    );
+
+    // An aggregate that reads the value still refuses the histogram instead of counting it.
+    for op in [AggregateOp::Sum, AggregateOp::Avg] {
+        let error = aggregate_float(
+            &schema,
+            &[series("a", Some(native()), None)],
+            op,
+            Grouping::By(&[]),
+        )
+        .expect_err("a payload-folding aggregate refuses a histogram");
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{op:?} answered {error:?}"
+        );
+    }
+}
+
+/// `min`, `max`, `stddev`, `stdvar` and `quantile` read a float value, so a histogram sample is
+/// skipped rather than refused - and a group holding only histograms has no answer at all.
+#[test]
+fn value_reading_aggregates_skip_histogram_samples() {
+    use crate::grid_series::reference::OwnedHistogram;
+    use crate::grid_series::{GridSample, GridSeriesBuilder};
+    use crate::histogram_eval::float_histogram::FloatHistogram;
+
+    let schema = schema_with_grid_len(&["value"], 2);
+    let histogram =
+        OwnedHistogram::parse("0/0/0/4000000000000000/3ff0000000000000/0/1_1/4000000000000000///");
+    let series = |job: &str, first: Option<GridSample>, second: Option<GridSample>| {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder.push_samples(0, &[first]).unwrap();
+        builder.push_samples(1, &[second]).unwrap();
+        builder
+            .finish(metric("m", &[("job", job)]))
+            .unwrap()
+            .unwrap()
+    };
+    let native = || {
+        GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+        ))
+    };
+    // Two float series and a histogram series: the histogram is skipped, so the answer is the
+    // floats' - and the second position, where only the histogram is present, has no value.
+    let input = [
+        series("a", Some(GridSample::Float(3.0)), None),
+        series("b", Some(GridSample::Float(7.0)), None),
+        series("c", Some(native()), Some(native())),
+    ];
+    for (op, expected) in [(AggregateOp::Min, 3.0), (AggregateOp::Max, 7.0)] {
+        let answer = aggregate_float(&schema, &input, op, Grouping::By(&[])).unwrap();
+        let SampleRef::Float(first) = answer[0].fields.as_slice()[0].sample(0) else {
+            panic!("{op:?} answers a float");
+        };
+        assert_eq!(first, expected, "{op:?} answered over the histogram sample");
+        assert!(
+            matches!(answer[0].fields.as_slice()[0].sample(1), SampleRef::Missing),
+            "{op:?} answered a group holding only histograms"
+        );
+    }
+    // `sum` and `avg` fold the payload, which this route has no state for: they still refuse it.
+    for op in [AggregateOp::Sum, AggregateOp::Avg] {
+        let error = aggregate_float(&schema, &input, op, Grouping::By(&[]))
+            .expect_err("a payload-folding aggregate refuses a histogram");
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{op:?} answered {error:?}"
+        );
+    }
 }
 
 /// Prometheus counts a histogram sample under the text `FloatHistogram.String` writes it as, so

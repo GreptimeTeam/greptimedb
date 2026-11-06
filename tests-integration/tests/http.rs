@@ -197,6 +197,7 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_v2_native_histogram,
                 test_remote_write_v2_histogram_prometheus_native_route,
                 test_remote_write_v2_histogram_float_prefix_native_route,
+                test_remote_write_v2_histogram_count_and_group_native_route,
                 test_remote_write_v2_histogram_native_annotations,
                 test_remote_write_v2_histogram_native_arithmetic,
                 test_remote_write_v2_histogram_flush_native_consistency,
@@ -5976,6 +5977,145 @@ pub async fn test_remote_write_v2_histogram_float_prefix_native_route(store_type
             "{query} executed a node that is not the fused producer: {fused:?}"
         );
     }
+}
+
+/// `count` and `group` answer over histograms, through the route that folds them.
+///
+/// Prometheus counts every present sample whatever its type is and answers `1` for a non-empty
+/// group, so neither reads a value. The witness writes two histogram samples of one series and
+/// checks both answers against the existing plan's, so a native answer that dropped the histogram
+/// samples - the shape a fold without the presence arm produces - cannot pass.
+pub async fn test_remote_write_v2_histogram_count_and_group_native_route(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_count_and_group",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "native_histogram_counted";
+    let mut request = remote_write_v2::request_with_labels_and_samples(
+        vec![(prom_store::METRIC_NAME_LABEL, metric), ("job", "api")],
+        vec![],
+    );
+    let name_ref = request
+        .symbols
+        .iter()
+        .position(|s| s == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let metric_ref = request.symbols.iter().position(|s| s == metric).unwrap() as u32;
+    let job_ref = request.symbols.iter().position(|s| s == "job").unwrap() as u32;
+    let api_ref = request.symbols.iter().position(|s| s == "api").unwrap() as u32;
+    // One series, two samples: a count over it is one sample per grid point, whether or not the
+    // second sample differs from the first.
+    let sample = |timestamp: i64, count: u64| Histogram {
+        count: Some(Count::CountInt(count)),
+        sum: 2.0 * count as f64,
+        schema: 1,
+        positive_spans: vec![BucketSpan {
+            offset: 0,
+            length: 1,
+        }],
+        positive_deltas: vec![count as i64],
+        reset_hint: 2,
+        start_timestamp: 1_500,
+        timestamp,
+        ..Default::default()
+    };
+    request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![name_ref, metric_ref, job_ref, api_ref],
+        histograms: vec![sample(2_000, 4), sample(4_000, 8)],
+        ..Default::default()
+    });
+    let payload = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let written = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(payload)
+        .send()
+        .await;
+    let status = written.status();
+    let body = written.text().await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "write rejected: {body}");
+
+    for (query, encoded, expected) in [
+        ("count(h)", "count(native_histogram_counted)", "1.0"),
+        ("group(h)", "group(native_histogram_counted)", "1.0"),
+    ] {
+        let url = format!("/v1/prometheus/api/v1/query?query={encoded}&time=4");
+        observer.clear();
+        let native = client
+            .get(&url)
+            .header("x-greptime-hints", "query.experimental_native_promql=true")
+            .send()
+            .await;
+        assert_eq!(native.status(), StatusCode::OK, "{query} failed natively");
+        let native: Value = native.json().await;
+        let legacy = client.get(&url).send().await;
+        assert_eq!(legacy.status(), StatusCode::OK, "{query} failed legacy");
+        let legacy: Value = legacy.json().await;
+        assert_eq!(
+            native["data"]["result"], legacy["data"]["result"],
+            "{query}: the native answer differs from the legacy one"
+        );
+        assert_eq!(
+            native["data"]["result"][0]["value"][1].as_str(),
+            Some(expected),
+            "{query}: {native}"
+        );
+        let fused = observer.take_all(query);
+        assert!(
+            fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+            "{query} executed a node that is not the fused producer: {fused:?}"
+        );
+    }
+
+    // `min` reads a float value, so a group holding only histograms answers nothing - and says why:
+    // Prometheus reports the samples it skipped instead of refusing the statement.
+    let url = "/v1/prometheus/api/v1/query?query=min(native_histogram_counted)&time=4";
+    observer.clear();
+    let response = client
+        .get(url)
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(
+        body["data"]["result"].as_array().map(Vec::len),
+        Some(0),
+        "a histogram-only group has no float to answer: {body}"
+    );
+    // The route has to have run before the annotation can exist: check that first, so a missing
+    // info is read as an annotation problem and not as a fall back to the existing plan.
+    let fused = observer.take_all("min(h)");
+    assert_eq!(fused[0].name(), "FusedSeriesExec");
+    let infos = body["infos"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no infos in {body}"));
+    assert!(
+        infos.iter().any(|info| info
+            .as_str()
+            .is_some_and(|text| text.contains("ignored native histogram samples"))),
+        "the skipped-sample info did not reach the response: {body}"
+    );
 }
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
