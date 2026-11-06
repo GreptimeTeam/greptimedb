@@ -3434,11 +3434,23 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
         "some_metric != some_metric",
         "some_metric < on(tag_0) some_metric",
         "some_metric >= bool on(tag_0) some_metric",
+        "some_metric + on() some_metric",
+        "some_metric - ignoring(tag_0) some_metric",
+        "some_metric * on(tag_0) group_left some_metric",
+        "some_metric * on(tag_0) group_right some_metric",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).expect("the plan holds a native node");
         assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
         assert_eq!(2, fused.inputs().len(), "{query}");
+        if query.contains("on()") || query.contains("ignoring(tag_0)") {
+            assert_eq!(vec!["field_0", "timestamp"], sorted_column_names(&plan));
+        } else if query.contains("group_left") || query.contains("group_right") {
+            assert_eq!(
+                vec!["field_0", "tag_0", "timestamp"],
+                sorted_column_names(&plan)
+            );
+        }
         let scans = fused
             .inputs()
             .iter()
@@ -3553,6 +3565,10 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
         "some_metric > on(tag_0) other_metric",
         "some_metric == bool other_metric",
         "(some_metric <= on(tag_0) other_metric) * 100",
+        "some_metric + on() other_metric",
+        "some_metric - ignoring(tag_0) other_metric",
+        "some_metric * on(tag_0) group_left other_metric",
+        "some_metric * on(tag_0) group_right other_metric",
     ] {
         let plan = build_native_fused_plan_with_provider(
             query,
@@ -3630,6 +3646,8 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
         // `or` reports the series of both sides, so its rows say each one's own name.
         let expected = if query.contains(" or ") {
             vec!["__name__", "field_0", "tag_0", "timestamp"]
+        } else if query.contains("on()") || query.contains("ignoring(tag_0)") {
+            vec!["field_0", "timestamp"]
         } else {
             vec!["field_0", "tag_0", "timestamp"]
         };

@@ -2608,16 +2608,12 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
 }
 
 pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
-    let (left, right, matching) = match &root.expr {
-        NativeExpr::Binary {
-            left,
-            right,
-            matching,
-        } => match (&left.expr, &right.expr) {
+    let (left, right) = match &root.expr {
+        NativeExpr::Binary { left, right, .. } => match (&left.expr, &right.expr) {
             (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => return false,
             (NativeExpr::Scalar(_), _) => return independent_scan_pair(right),
             (_, NativeExpr::Scalar(_)) => return independent_scan_pair(left),
-            _ => (left, right, matching),
+            _ => (left, right),
         },
         NativeExpr::Map { input, .. } => return independent_scan_pair(input),
         NativeExpr::Set { left, right, .. } => {
@@ -2629,14 +2625,7 @@ pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
         _ => return false,
     };
 
-    let supported_labels = match &matching.labels {
-        MatchingLabels::On(names) => !names.is_empty(),
-        MatchingLabels::Ignoring(names) => names.is_empty(),
-    };
-    matching.cardinality == Cardinality::OneToOne
-        && supported_labels
-        && scan_operand(left)
-        && scan_operand(right)
+    scan_operand(left) && scan_operand(right)
 }
 
 fn scan_operand(node: &NativeNode) -> bool {
@@ -2901,7 +2890,7 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                 _ => {
                     let kept = |tags: Vec<String>| -> Vec<String> {
                         match &matching.labels {
-                            MatchingLabels::On(names) if !names.is_empty() => tags
+                            MatchingLabels::On(names) => tags
                                 .into_iter()
                                 .filter(|tag| {
                                     names.iter().any(|name| name.as_ref() == tag.as_str())
@@ -2913,7 +2902,6 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                                     !names.iter().any(|name| name.as_ref() == tag.as_str())
                                 })
                                 .collect(),
-                            MatchingLabels::On(_) => tags,
                         }
                     };
                     let left_tags = native_output_tags(left, source_tags)?;
@@ -3304,8 +3292,8 @@ mod tests {
 
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
-        NativeType, collect_selectors, cut_segments, fused_output_schema, hybrid_binary_admitted,
-        independent_scan_pair, native_output_tags, native_promql_requested,
+        NativeType, collect_selectors, cut_segments, fused_output_schema, fused_output_tags,
+        hybrid_binary_admitted, independent_scan_pair, native_output_tags, native_promql_requested,
         native_raw_plan_bounds_region_reads, scan_time_filter,
     };
 
@@ -3451,6 +3439,11 @@ mod tests {
             "x == on(host) x",
             "x > bool x",
             "2 * (x != on(host) x)",
+            "x + on() x",
+            "2 * (x > on() x)",
+            "x + ignoring(host) x",
+            "x * on(host) group_left x",
+            "x * on(host) group_right x",
         ] {
             let tree = compiled_test_tree(query);
             assert_eq!(input_sources(tree.root()), vec![0, 1], "{query}");
@@ -3459,17 +3452,10 @@ mod tests {
         assert!(!independent_scan_pair(
             compiled_test_tree("sum(x) + x").root()
         ));
-        assert!(!independent_scan_pair(
-            compiled_test_tree("x + on() x").root()
-        ));
-        // A wrapper does not admit a core the pair itself refuses.
-        assert!(!independent_scan_pair(
-            compiled_test_tree("2 * (x > on() x)").root()
-        ));
     }
 
     #[test]
-    fn independent_scan_pair_admits_nested_one_to_one_matches() {
+    fn independent_scan_pair_admits_nested_matches() {
         for query in [
             "x + y + z",
             "(x - y) / on(host) z",
@@ -3479,22 +3465,18 @@ mod tests {
             "(x + y) unless on(host) z",
             "(x == on(host) y) + z",
             "x > bool y + z",
+            "(x * on(host) group_left y) + z",
+            "(x * on(host) group_right y) + z",
+            "(x + on() y) + z",
+            "(x > on() y) + z",
         ] {
             let tree = compiled_test_tree(query);
             assert_eq!(input_sources(tree.root()), vec![0, 1, 2], "{query}");
             assert!(independent_scan_pair(tree.root()), "{query}");
         }
-        for query in [
-            "x + y + sum(z)",
-            "(x * on(host) group_left y) + z",
-            "(x + on() y) + z",
-            "(x > on() y) + z",
-        ] {
-            assert!(
-                !independent_scan_pair(compiled_test_tree(query).root()),
-                "{query}"
-            );
-        }
+        assert!(!independent_scan_pair(
+            compiled_test_tree("x + y + sum(z)").root()
+        ));
     }
 
     #[test]
@@ -3512,10 +3494,8 @@ mod tests {
             native_output_tags(ignoring.root(), &sources)
         );
         let empty_on = compiled_test_tree("x + on() x");
-        assert_eq!(
-            Some(tags.clone()),
-            native_output_tags(empty_on.root(), &sources)
-        );
+        assert_eq!(Some(vec![]), native_output_tags(empty_on.root(), &sources));
+        assert_eq!(Some(vec![]), fused_output_tags(empty_on.root(), &sources));
 
         // Two tables with different tags: the left side's labels pass through a wrapper and a
         // match, and `or` adds the labels only the right side carries.
@@ -3612,6 +3592,27 @@ mod tests {
             ),
             native_output_tags(group_right.root(), &group_sources)
         );
+        for query in [
+            "x * on() group_left(workload) y",
+            "x * on() group_right(container) y",
+        ] {
+            let tree = compiled_test_tree(query);
+            let expected = if query.contains("group_left") {
+                vec!["cluster", "namespace", "pod", "container", "workload"]
+            } else {
+                vec![
+                    "cluster",
+                    "namespace",
+                    "pod",
+                    "workload",
+                    "workload_type",
+                    "container",
+                ]
+            };
+            let expected = Some(expected.into_iter().map(String::from).collect());
+            assert_eq!(expected, native_output_tags(tree.root(), &group_sources));
+            assert_eq!(expected, fused_output_tags(tree.root(), &group_sources));
+        }
         // An outer match narrows the labels the inner one already narrowed.
         let sources = [
             vec!["host".to_string(), "kind".to_string(), "zone".to_string()],
