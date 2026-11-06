@@ -17,6 +17,11 @@ on:
         type: boolean
         default: false
         required: false
+      run_prometheus:
+        description: Run Prometheus (requires a runtime image with managed Prometheus support)
+        type: boolean
+        default: false
+        required: false
       range_preset:
         description: Long-range query window (fixed dataset per preset)
         type: choice
@@ -45,8 +50,13 @@ on:
         type: string
         default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
         required: true
+      prometheus_tag:
+        description: Docker Hub prom/prometheus tag or tag@sha256 digest
+        type: string
+        default: v3.2.1@sha256:6927e0919a144aa7616fd0137d4816816d42f6b816de3af269ab065250859a62
+        required: true
       runtime_image:
-        description: 'Runtime image: auto = pinned S3 test runtime on ACR; explicit tag/digest overrides'
+        description: 'Runtime image: auto = pinned Prometheus/File/S3 runtime on ACR; explicit tag/digest overrides'
         type: string
         default: auto
         required: true
@@ -105,7 +115,8 @@ env:
   RANGE_PRESET: ${{ inputs.range_preset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:s3-test-b0cf5204d2fc@sha256:c2bf622db6056a2029842f4dc1cc1f37b82773bd45b134a0a83ffe2a8cd62214' }}
+  PROMETHEUS_TAG: ${{ inputs.prometheus_tag }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:345b6f7c-prometheus-s3@sha256:39d207f4a9c479b8614b8283e2d049fc8f430fcbd2b3362ce3035cfbf294edf9' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -163,6 +174,7 @@ jobs:
       env:
         RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
         RUN_VICTORIAMETRICS: ${{ inputs.run_victoriametrics }}
+        RUN_PROMETHEUS: ${{ inputs.run_prometheus }}
       run: |
         set -euo pipefail
         [[ "$BENCHMARK_ROOT" == /* && "$BENCHMARK_ROOT" != / && "$BENCHMARK_ROOT" != */ ]]
@@ -194,10 +206,11 @@ jobs:
           args+=(--target "greptimedb:name=greptimedb-baseline,image=greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG,url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range")
         fi
         # Tags become target-spec fields; reject separators before passing them to the planner.
-        for target in greptimedb victoriametrics; do
+        for target in greptimedb victoriametrics prometheus; do
           case "$target" in
             greptimedb) enabled=$RUN_GREPTIMEDB; tag=$GREPTIMEDB_TAG; repo=greptime/greptimedb; url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range ;;
             victoriametrics) enabled=$RUN_VICTORIAMETRICS; tag=$VICTORIAMETRICS_TAG; repo=victoriametrics/victoria-metrics; url=http://127.0.0.1:18428/api/v1/query_range ;;
+            prometheus) enabled=$RUN_PROMETHEUS; tag=$PROMETHEUS_TAG; repo=prom/prometheus; url=http://127.0.0.1:19090/api/v1/query_range ;;
           esac
           [[ "$enabled" == true ]] || continue
           [[ "$tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?$ ]]
@@ -391,6 +404,11 @@ jobs:
       run: |
         python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target victoriametrics \
           --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Load and benchmark Prometheus
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && inputs.run_prometheus }}
+      run: |
+        python3 greptimedb/.github/scripts/o11ybench-storage.py metrics-run --target prometheus \
+          --plan "$METADATA_ROOT/warm.json" --tools o11ybench --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Validate all selected target results
       if: always() && steps.generate.outcome == 'success'
       run: |
@@ -403,7 +421,7 @@ jobs:
       if: always()
       run: |
         docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-warm" | xargs -r docker rm -fv
-        for name in greptimedb greptimedb-s3 greptimedb-baseline greptimedb-s3-baseline victoriametrics; do
+        for name in greptimedb greptimedb-s3 greptimedb-baseline greptimedb-s3-baseline victoriametrics prometheus; do
           plan="$METADATA_ROOT/$name.json"
           [[ -f "$plan" ]] || continue
           run_id=$(jq -r '.run_id // empty' "$plan")
