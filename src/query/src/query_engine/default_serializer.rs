@@ -42,7 +42,7 @@ use substrait::substrait_proto_df::proto::{
 };
 use substrait::{DFLogicalSubstraitConvertor, Extensions, SubstraitPlan};
 
-use crate::dist_plan::MergeScanLogicalPlan;
+use crate::dist_plan::{DatanodeGroupedReadPlan, MergeScanLogicalPlan};
 use crate::query_engine::QueryEngineState;
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
@@ -69,6 +69,14 @@ impl SerializerRegistry for DefaultSerializer {
                 input,
             }
             .encode_to_vec())
+        } else if node.name() == DatanodeGroupedReadPlan::name() {
+            let grouped = node
+                .as_any()
+                .downcast_ref::<DatanodeGroupedReadPlan>()
+                .expect("Failed to downcast to DatanodeGroupedReadPlan");
+            // The envelope carries the payload bytes it was built with: the datanode validates
+            // them, so a malformed envelope reaches it to be rejected instead of failing to encode.
+            Ok(grouped.payload_bytes().to_vec())
         } else {
             ExtensionSerializer.serialize_logical_plan(node)
         }
@@ -83,6 +91,14 @@ impl SerializerRegistry for DefaultSerializer {
             // This registry has no session state; the query engine decodes `MergeScan` payloads.
             Err(DataFusionError::Substrait(format!(
                 "Unsupported plan node: {name}"
+            )))
+        } else if name == DatanodeGroupedReadPlan::name() {
+            // The envelope's schema is the schema of the nested plan it carries, which is not in
+            // the payload. A datanode peeks the envelope before decoding, so reaching this branch
+            // means the request was decoded as an ordinary plan: reject it instead of executing
+            // it against a single anchor region.
+            Err(DataFusionError::Substrait(format!(
+                "Unsupported plan node: {name} (grouped read envelopes are decoded by the region server)"
             )))
         } else {
             ExtensionSerializer.deserialize_logical_plan(name, bytes)
@@ -655,6 +671,53 @@ mod tests {
             .expect("Expect a MergeScan plan node");
         assert!(merge_scan.is_placeholder());
         assert_eq!(merge_scan.input().to_string(), numbers_scan().to_string());
+    }
+
+    #[tokio::test]
+    async fn grouped_read_peek_preserves_other_root_decoder_and_rejects_own_envelope() {
+        use crate::dist_plan::{GroupedReadPayload, peek_grouped_read_envelope};
+
+        let engine = QueryEngineFactory::new(
+            numbers_catalog_manager(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let decoder = plan_decoder(engine.as_ref());
+        let ordinary = merge_scan(numbers_scan(), true);
+        let bytes = encode_plan(&ordinary);
+        assert!(peek_grouped_read_envelope(&bytes).unwrap().is_none());
+        let decoded = decoder
+            .decode(bytes, request_catalog_list(), false)
+            .await
+            .unwrap();
+        assert!(matches!(decoded, LogicalPlan::Extension(_)));
+
+        let region = store_api::storage::RegionId::new(NUMBERS_TABLE_ID, 1);
+        let payload = GroupedReadPayload::try_new(
+            vec![region.as_u64()],
+            NUMBERS_TABLE_ID,
+            NUMBERS_TABLE_NAME.to_string(),
+            encode_plan(&numbers_scan()).to_vec(),
+        )
+        .unwrap();
+        let envelope = DatanodeGroupedReadPlan::try_new(payload, numbers_scan().schema().clone())
+            .unwrap()
+            .into_logical_plan();
+        let bytes = encode_plan(&envelope);
+        assert!(peek_grouped_read_envelope(&bytes).unwrap().is_some());
+        let error = decoder
+            .decode(bytes, request_catalog_list(), false)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("DatanodeGroupedRead"),
+            "{error:?}"
+        );
     }
 
     /// Payload table binding uses the engine catalog, not the request catalog.
