@@ -3610,6 +3610,108 @@ async fn distributed_native_promql_remote_refuses_unsupported_discovery_and_name
     }
 }
 
+/// The columns and `(timestamp, value)` rows of a statement that reads no table, whose time column
+/// is the statement's own rather than a table's.
+async fn data_free_rows(output: Output) -> (Vec<String>, Vec<(i64, f64)>) {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("PromQL query returns record batches"),
+    };
+    let mut columns = Vec::new();
+    let mut rows = Vec::new();
+    for batch in batches {
+        columns = batch
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let timestamps = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let values = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1, "one result value column");
+        let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((timestamps.value(row), values.value(row)));
+        }
+    }
+    rows.sort_by_key(|row| row.0);
+    (columns, rows)
+}
+
+/// A statement that reads no table plans natively over the wire, where there is no region to place
+/// anything in: the frontend evaluates one fused node, so the answer keeps the native column name
+/// instead of the one the existing planner derives from an expression.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_data_free_statement_plans_natively() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_data_free")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    for (expression, expected_columns, expected_rows) in [
+        // `start`/`end` are seconds, so this one-step range evaluates at 3000ms.
+        ("time()", &["time", "value"][..], &[(3000, 3.0)][..]),
+        (
+            r#"label_replace(vector(1), "host", "host1", "", "")"#,
+            &["time", "value", "host"][..],
+            &[(3000, 1.0)][..],
+        ),
+    ] {
+        let query = PromQuery {
+            query: expression.to_string(),
+            start: "3".to_string(),
+            end: "3".to_string(),
+            step: "1s".to_string(),
+            ..PromQuery::default()
+        };
+        let output = instance
+            .do_promql_query(&query, native_query_context(true, 2))
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.clone().expect("frontend physical plan");
+        let shape = native_plan_shape(&plan);
+        assert_eq!(
+            1, shape.fused,
+            "a data-free statement is one fused node: {plan:?}"
+        );
+        assert!(
+            shape.regions_per_scan.is_empty(),
+            "a data-free statement reads no region: {plan:?}"
+        );
+        let (columns, rows) = data_free_rows(output).await;
+        assert_eq!(expected_columns, columns, "{expression}");
+        assert_eq!(expected_rows, rows.as_slice(), "{expression}");
+
+        // The same statement through the existing planner answers the same rows; only the native
+        // route names the value column after the tree rather than after an expression.
+        let legacy = instance
+            .do_promql_query(&query, native_query_context(false, 2))
+            .await
+            .remove(0)
+            .unwrap();
+        let (_, legacy_rows) = data_free_rows(legacy).await;
+        assert_eq!(rows, legacy_rows, "{expression} must answer the same rows");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus_answers() {
     common_telemetry::init_default_ut_logging();
