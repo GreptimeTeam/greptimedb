@@ -2607,10 +2607,25 @@ async fn native_fused_plans_dynamic_scalars() {
         matches!(fused.tree().root().expr, NativeExpr::ScalarOf { .. }),
         "scalar() binds its own node: {plan}"
     );
-    // A broadcast whose scalar side reads the same scan keeps the previous planner: the tree is
-    // classified from the vector side, and the scalar side has to see that whole vector first.
-    let plan = build_native_fused_plan("some_metric > bool scalar(some_metric)", true).await;
-    assert!(find_fused_series(&plan).is_none(), "{plan}");
+    // The scalar side of a broadcast reads the whole vector, even when both sides read the same
+    // table. Both selector occurrences bind their own source and the tree gathers before evaluation.
+    let query = "some_metric > bool scalar(some_metric)";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("same-table scalar broadcast uses the native route: {plan}"));
+    assert_eq!(2, fused.inputs().len(), "{query}: {plan}");
+    assert_eq!(
+        vec!["some_metric".to_string(), "some_metric".to_string()],
+        fused_input_metrics(&plan),
+        "{query}: each selector occurrence binds its own source: {plan}"
+    );
+    assert!(
+        matches!(
+            input_locality(fused.tree().root()),
+            InputLocality::SinglePartition
+        ),
+        "{query}: scalar() must see the whole vector: {plan}"
+    );
 }
 
 /// An aggregate's parameter is part of the tree a data-free statement names its value field from.
@@ -5111,9 +5126,9 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
     }
 }
 
-/// A shape neither the split nor the node can keep correct keeps the existing plan: a sibling a
-/// call computes has no native node at all, a group by a value field cannot be named by the state
-/// rows, and a kernel the compiler does not fold keeps it too.
+/// A shape neither the split nor the node can keep correct keeps the existing plan: a group by a
+/// value field cannot be named by the state rows, and a kernel the compiler does not fold keeps it
+/// too.
 ///
 /// `sum(m) / m` and `m + sum(m)` are not on this list. The fold and the plain selector are two
 /// occurrences, so each reads its own source and the operation above them answers over both; the
@@ -5129,9 +5144,6 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     for query in [
         "quantile(0.5, some_metric)",
         "sum(quantile(0.5, some_metric))",
-        // A scalar a call computes is not a literal the split could keep: `scalar(...)` has no
-        // native node, so the statement keeps the existing plan.
-        "sum(some_metric) / scalar(some_metric)",
         "sum by (field_0) (some_metric)",
     ] {
         let native = build_native_fused_plan(query, true).await;
@@ -5154,14 +5166,15 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     }
 }
 
-/// A fold beside a plain selector is two occurrences, so each reads its own source and the fold and
-/// the match run above both. No partition needs to hold the whole of the input for that: the inputs
-/// are reconciled before the node evaluates them.
+/// A fold beside an independent selector is two occurrences, so each reads its own source and the
+/// operation runs above both. A scalar over the second occurrence requires the whole vector and
+/// therefore gathers the inputs before evaluation.
 #[tokio::test]
 async fn native_fused_aggregate_above_an_independent_selector_is_admitted() {
     for query in [
         "sum(some_metric) / some_metric",
         "some_metric + sum(some_metric)",
+        "sum(some_metric) / scalar(some_metric)",
     ] {
         let native = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&native).unwrap_or_else(|| panic!("`{query}`: {native}"));
@@ -5171,6 +5184,15 @@ async fn native_fused_aggregate_above_an_independent_selector_is_admitted() {
             fused_input_metrics(&native),
             "`{query}`: each selector occurrence reads its own source: {native}"
         );
+        if query.contains("scalar(") {
+            assert!(
+                matches!(
+                    input_locality(fused.tree().root()),
+                    InputLocality::SinglePartition
+                ),
+                "`{query}`: scalar() must see the whole vector: {native}"
+            );
+        }
         assert!(
             find_final_split(&native).is_none(),
             "`{query}`: a tree over two inputs is not a one-input split: {native}"

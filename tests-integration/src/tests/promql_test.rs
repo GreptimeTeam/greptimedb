@@ -9155,6 +9155,75 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
     );
 }
 
+/// A same-table scalar broadcast gathers simultaneous series from distinct physical regions.
+/// `scalar(m)` is NaN for two series, so `m == bool scalar(m)` answers zero for both. Evaluating
+/// the scalar separately in each region would instead compare each series to itself and answer one.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_same_table_partitioned_scalar_broadcast_gathers_whole_vector() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_partitioned_scalar_broadcast",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_partitioned_scalar (host STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY(host)) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm'); \
+         INSERT INTO native_partitioned_scalar VALUES ('a', 5000, 2), ('z', 5000, 7)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let sql =
+        "TQL EVAL (5, 5, '1s') native_partitioned_scalar == bool scalar(native_partitioned_scalar)";
+    observer.clear();
+    let rows = native_result_rows(native_tql_output(&instance, sql, true).await).await;
+    assert_eq!(
+        rows,
+        vec![(5_000, "a".to_string(), 0.0), (5_000, "z".to_string(), 0.0)],
+        "the global scalar is NaN and equality is false for both series"
+    );
+
+    let root = observer.root_plan();
+    let fused = find_plan_node(&root, "FusedSeriesExec").unwrap_or_else(|| {
+        panic!(
+            "the frontend must answer natively: {}",
+            display_plan_tree(&root)
+        )
+    });
+    assert_eq!(
+        observer.answering_node().as_deref(),
+        Some("FusedSeriesExec")
+    );
+    assert_eq!(
+        fused.children().len(),
+        2,
+        "one input per selector: {}",
+        display_plan_tree(&root)
+    );
+    assert_eq!(
+        fused.output_partitioning().partition_count(),
+        1,
+        "the whole vector is gathered: {}",
+        display_plan_tree(&root)
+    );
+    let shape = native_plan_shape(&root);
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![2, 2],
+        "each selector reads both declared host ranges: {}",
+        display_plan_tree(&root)
+    );
+    // The disjoint declared ranges place `a` and `z` in different physical regions; both scans
+    // select those regions. Compare the two NaN equalities with a literal false control as well.
+    let literal = "TQL EVAL (5, 5, '1s') native_partitioned_scalar == bool 0";
+    let legacy = native_result_rows(native_tql_output(&instance, literal, false).await).await;
+    assert_eq!(
+        rows, legacy,
+        "a literal false comparison yields the same labelled rows"
+    );
+}
+
 /// The `ts` and first `Float64` column of a `TQL EVAL` answer, as values.
 ///
 /// Answers are compared this way rather than as printed tables: the native route names a field
