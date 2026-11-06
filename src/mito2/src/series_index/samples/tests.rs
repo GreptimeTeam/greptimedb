@@ -1634,7 +1634,9 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
     )
     .await;
     let strategy = CacheStrategy::EnableAll(Arc::new(
-        CacheManager::builder().page_cache_size(16 * 1024 * 1024).build(),
+        CacheManager::builder()
+            .page_cache_size(16 * 1024 * 1024)
+            .build(),
     ));
     for cached in [false, true] {
         let mut reader = reader::SamplesReader::open(store.clone(), handle.clone())
