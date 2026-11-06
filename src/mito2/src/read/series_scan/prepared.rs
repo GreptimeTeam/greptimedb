@@ -24,6 +24,7 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_expr::utils::split_conjunction;
 use datatypes::arrow::array::{
@@ -349,7 +350,25 @@ impl ColumnarPreparedSource {
             .copied()
             .collect();
         for handle in index.version.samples.values().filter(|h| {
-            h.entry().sources_visible(&allowed) && assigned.iter().any(|id| h.entry().covers(*id))
+            if !h.entry().sources_visible(&allowed)
+                || !assigned.iter().any(|id| h.entry().covers(*id))
+            {
+                return false;
+            }
+            // Coverage validation above still needs every day of each source. Only
+            // opening readers can omit daily artifacts outside the query range.
+            if let (Some(day), Some(range)) = (h.entry().window, input.time_range.as_ref()) {
+                let bounds = day
+                    .checked_mul(86_400)
+                    .zip(day.checked_add(1).and_then(|next| next.checked_mul(86_400)));
+                if let Some((start, end)) = bounds {
+                    return range.intersects(
+                        &(Timestamp::new_second(start)..Timestamp::new_second(end)).into(),
+                    );
+                }
+                // Retain extreme days whose bounds cannot be represented in seconds.
+            }
+            true
         }) {
             let reader = crate::series_index::samples::reader::SamplesReader::open_cached(
                 index.store.clone(),

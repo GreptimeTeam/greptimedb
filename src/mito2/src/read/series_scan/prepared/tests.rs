@@ -1943,6 +1943,63 @@ async fn daily_samples_preserve_sparse_coverage_and_existing_groups() {
             file
         ));
     }
+    // Complete source coverage spans both days, but preparation must open only
+    // intersecting artifacts. Compare rows with the ordinary scanner as well.
+    for (start, end, expected_readers) in [
+        (0, 86_400_000, 1),
+        (86_400_000, LATER, 0),
+        (LATER, LATER + 1, 1),
+        (0, LATER + 1, 2),
+    ] {
+        let mut results = Vec::new();
+        for format in [SelectedFormat::Legacy, SelectedFormat::Columnar] {
+            let mut input = scan_input(
+                &region,
+                store.clone(),
+                format,
+                (0..region.version().metadata.column_metadatas.len()).collect(),
+            );
+            input.time_range = common_time::range::TimestampRange::new(
+                common_time::Timestamp::new_millisecond(start),
+                common_time::Timestamp::new_millisecond(end),
+            );
+            input.predicate = PredicateGroup::new(
+                &region.version().metadata,
+                &[
+                    col("tag_0").eq(lit("a")),
+                    col("field_0").gt(lit(0.0)),
+                    col("ts").gt_eq(lit(datafusion_common::ScalarValue::TimestampMillisecond(
+                        Some(start),
+                        None,
+                    ))),
+                    col("ts").lt(lit(datafusion_common::ScalarValue::TimestampMillisecond(
+                        Some(end),
+                        None,
+                    ))),
+                ],
+            )
+            .unwrap();
+            let scan = SeriesScan::new(input, false);
+            let chunks = scan
+                .scan_series_partition(
+                    &QueryScanContext::default(),
+                    &ExecutionPlanMetricsSet::new(),
+                    0,
+                    &labels(scan.metadata()),
+                )
+                .unwrap()
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            if format == SelectedFormat::Columnar {
+                let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
+                assert_eq!(prepared.samples.len(), expected_readers);
+            }
+            results.push(rows(&chunks));
+        }
+        assert_eq!(results[0], results[1]);
+    }
     write(&engine, &region, 0, 3000, Some(3.0)).await;
     flush_region(&engine, region.region_id, None).await;
     build(&engine, &region).await;
