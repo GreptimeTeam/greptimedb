@@ -47,12 +47,12 @@ ADMIN FLUSH_TABLE('metric_dictionary_regex_filter_physical');
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (2, 2, '1s') metric_dictionary_regex_filter{host=~"api-.*"};
 
-+-----+--------+---------------------+
-| val | host   | ts                  |
-+-----+--------+---------------------+
-| 1.0 | api-01 | 1970-01-01T00:00:02 |
-| 2.0 | api-02 | 1970-01-01T00:00:02 |
-+-----+--------+---------------------+
++---------------------+-----+--------+
+| ts                  | val | host   |
++---------------------+-----+--------+
+| 1970-01-01T00:00:02 | 1.0 | api-01 |
+| 1970-01-01T00:00:02 | 2.0 | api-02 |
++---------------------+-----+--------+
 
 SELECT host, ts, val
 FROM metric_dictionary_regex_filter

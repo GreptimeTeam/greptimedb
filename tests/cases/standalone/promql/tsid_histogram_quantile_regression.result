@@ -108,19 +108,16 @@ TQL ANALYZE (0, 10, '5s') histogram_quantile(0.5, tsid_no_aggr_histogram_bucket)
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_FusedSeriesExec: histogram_quantile(0.5, tsid_no_aggr_histogram_bucket)_|
-|_|_| NativeTree_|
-|_|_|_root Vector histogram_quantile 0.5_|
-|_|_|_input Input evaluated samples source=0, contiguous REDACTED
+| 0_| 0_|_FusedSeriesExec: histogram_quantile(0.5, tsid_no_aggr_histogram_bucket) REDACTED
+|_|_|_Vector: histogram_quantile 0.5, REDACTED
+|_|_|_Input: evaluated samples source=0, contiguous, REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SeriesRepartitionExec REDACTED
-|_|_|_FusedSeriesExec: segment_|
-|_|_| NativeTree_|
-|_|_|_root Instant lookback 300000ms offset 0 on grid 0/5000x3_|
-|_|_|_input Input raw samples source=0, contiguous_|
-|_|_| output: series_frame REDACTED
+|_|_|_FusedSeriesExec: segment (output: series_frame) REDACTED
+|_|_|_Instant: lookback 300000ms offset 0 on grid 0/5000x3, REDACTED
+|_|_|_Input: raw samples source=0, contiguous, REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|

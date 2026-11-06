@@ -429,9 +429,8 @@ TQL EXPLAIN (0, 10, '5s') topk(1, {"otel.m"});
 |_|_TableScan: otel.m, partial_filters=[ts.time > TimestampMillisecond(-300000, None) AND ts.time <= TimestampMillisecond(10000, None)] |
 |_| ]]_|
 | physical_plan | FusedSeriesExec: topk(1, {__name__="otel.m"})_|
-|_| NativeTree_|
-|_|_root Vector topk 1 by []_|
-|_|_input Input evaluated samples source=0, contiguous_|
+|_|_Vector: topk 1 by []_|
+|_|_Input: evaluated samples source=0, contiguous_|
 |_|_SeriesRepartitionExec: outputs=1, input_partitions=2_|
 |_|_MergeScanExec: REDACTED
 |_|_|
@@ -446,15 +445,15 @@ TQL EXPLAIN (5, 10, '5s') sum by ("service.name") (increase({"otel.m"}[10s]));
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| AggregateFinalize: sum by ("service.name") (increase({__name__="otel.m"}[10s])) [Sum By(["service.name"]) Complete]_|
+| logical_plan_| FusedSeries: sum by ("service.name") (increase({__name__="otel.m"}[10s]))_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| FusedSeries: sum by ("service.name") (increase({__name__="otel.m"}[10s])) [partial sum by (service.name) Complete]_|
+|_| FusedSeries: sum by ("service.name") (increase({__name__="otel.m"}[10s])) (output: series_frame)_|
 |_|_TableScan: otel.m, partial_filters=[ts.time > TimestampMillisecond(-5000, None) AND ts.time <= TimestampMillisecond(10000, None)] |
 |_| ]]_|
-| physical_plan | AggregateFinalizeExec: sum by ("service.name") (increase({__name__="otel.m"}[10s]))_|
-|_| NativeTree_|
-|_|_root Input evaluated samples source=0, contiguous_|
-|_|_CoalescePartitionsExec_|
+| physical_plan | FusedSeriesExec: sum by ("service.name") (increase({__name__="otel.m"}[10s]))_|
+|_|_Aggregate: sum by [service.name] final_|
+|_|_Input: aggregate state_|
+|_|_SeriesRepartitionExec: outputs=4, input_partitions=2_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -474,9 +473,8 @@ TQL EXPLAIN (0, 10, '5s') histogram_quantile(0.5, {"otel.h"});
 |_|_TableScan: otel.h, partial_filters=[ts.time > TimestampMillisecond(-300000, None) AND ts.time <= TimestampMillisecond(10000, None)] |
 |_| ]]_|
 | physical_plan | FusedSeriesExec: histogram_quantile(0.5, {__name__="otel.h"})_|
-|_| NativeTree_|
-|_|_root Vector histogram_quantile 0.5_|
-|_|_input Input evaluated samples source=0, contiguous_|
+|_|_Vector: histogram_quantile 0.5_|
+|_|_Input: evaluated samples source=0, contiguous_|
 |_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|

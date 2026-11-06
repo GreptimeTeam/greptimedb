@@ -41,26 +41,26 @@ tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bu
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_AggregateFinalizeExec: histogram_quantile(0.5, sum by (le) (histogram_gap_bucket))_|
-|_|_| NativeTree_|
-|_|_|_root Vector histogram_quantile 0.5_|
-|_|_|_input Input evaluated samples source=0, contiguous REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
+| 0_| 0_|_FusedSeriesExec: histogram_quantile(0.5, sum by (le) (histogram_gap_bucket)) REDACTED
+|_|_|_Vector: histogram_quantile 0.5, REDACTED
+|_|_|_Aggregate: sum by [le] final, REDACTED
+|_|_|_Input: aggregate state, REDACTED
+|_|_|_SeriesRepartitionExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_FusedSeriesExec: histogram_quantile(0.5, sum by (le) (histogram_gap_bucket))_|
-|_|_| NativeTree_|
-|_|_|_root Instant lookback 300000ms offset 0 on grid 0/10000x2_|
-|_|_|_input Input raw samples source=0, contiguous_|
-|_|_| partial state: sum by (le) Complete REDACTED
+| 1_| 0_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: histogram_quantile(0.5, sum by (le) (histogram_gap_bucket)) (output: series_frame) REDACTED
+|_|_|_Aggregate: sum by [le] partial, REDACTED
+|_|_|_Instant: lookback 300000ms offset 0 on grid 0/10000x2, REDACTED
+|_|_|_Input: raw samples source=0, contiguous, REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|
-| 1_| 1_|_FusedSeriesExec: histogram_quantile(0.5, sum by (le) (histogram_gap_bucket))_|
-|_|_| NativeTree_|
-|_|_|_root Instant lookback 300000ms offset 0 on grid 0/10000x2_|
-|_|_|_input Input raw samples source=0, contiguous_|
-|_|_| partial state: sum by (le) Complete REDACTED
+| 1_| 1_|_SeriesRepartitionExec REDACTED
+|_|_|_FusedSeriesExec: histogram_quantile(0.5, sum by (le) (histogram_gap_bucket)) (output: series_frame) REDACTED
+|_|_|_Aggregate: sum by [le] partial, REDACTED
+|_|_|_Instant: lookback 300000ms offset 0 on grid 0/10000x2, REDACTED
+|_|_|_Input: raw samples source=0, contiguous, REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScanExec: source=primary_key, fields=1, partitions=4 REDACTED
 |_|_|_|

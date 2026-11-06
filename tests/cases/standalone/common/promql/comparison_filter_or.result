@@ -50,13 +50,13 @@ Affected Rows: 2
 -- SQLNESS SORT_RESULT 2 1
 tql eval (0, 0, '1s') (a > b) or b or a;
 
-+---------------------+----------------+---+
-| ts                  | greptime_value | k |
-+---------------------+----------------+---+
-| 1970-01-01T00:00:00 | 2.0            | y |
-| 1970-01-01T00:00:00 | 3.0            | x |
-| 1970-01-01T00:00:00 | 5.0            | z |
-+---------------------+----------------+---+
++---------------------+----------------+---+----------+
+| ts                  | greptime_value | k | __name__ |
++---------------------+----------------+---+----------+
+| 1970-01-01T00:00:00 | 2.0            | y | b        |
+| 1970-01-01T00:00:00 | 3.0            | x | a        |
+| 1970-01-01T00:00:00 | 5.0            | z | a        |
++---------------------+----------------+---+----------+
 
 -- Regression: derived vector expressions may not have a concrete `ctx.table_name`.
 -- Function planning (which filters empty values) must not require a table name when the

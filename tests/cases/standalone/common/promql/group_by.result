@@ -50,6 +50,7 @@ INSERT INTO TABLE kubernetes_build_info_multi VALUES
 
 Affected Rows: 2
 
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') group by (cluster_name)(kubernetes_build_info_multi{service_name="kubernetes",job_name="apiserver"});
 
 +---------------------+-----+-----+--------------+

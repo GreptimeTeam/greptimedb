@@ -44,9 +44,11 @@ TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} > on(host) gauge_metric{devi
 TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} > bool on(host) gauge_metric{device="eth0"};
 
 -- `host1` carries two devices on both sides: the match group repeats on the one side.
+-- SQLNESS REPLACE \s+at\s+\d+\s+ms
 TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric;
 
 -- The one side is unique here, the many side is not, and no group modifier makes it explicit.
+-- SQLNESS REPLACE \s+at\s+\d+\s+ms
 TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric{device="eth0"};
 
 -- `group_left` takes the result labels from the many side.
@@ -124,6 +126,7 @@ INSERT INTO spread_left VALUES ('host1', 'eth0', 0, 10), ('host1', 'eth1', 0, 20
 
 INSERT INTO spread_right VALUES ('host1', 0, 2);
 
+-- SQLNESS REPLACE \s+at\s+\d+\s+ms
 TQL EVAL (0, 0, '5s') spread_left / on(host) spread_right;
 
 TQL EVAL (0, 0, '5s') spread_right / on(host) group_left spread_left;
