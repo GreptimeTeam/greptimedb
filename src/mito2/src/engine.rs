@@ -77,6 +77,8 @@ mod scan_test;
 mod sequence_test;
 #[cfg(test)]
 mod set_role_state_test;
+#[cfg(feature = "enterprise")]
+pub mod shared_sst;
 #[cfg(test)]
 mod skip_wal_test;
 #[cfg(test)]
@@ -826,7 +828,11 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    (!edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty())
+    edit.files_to_add
+        .iter()
+        .chain(&edit.files_to_remove)
+        .all(|file| file.level < crate::sst::file::LEVEL_SHARED)
+        && (!edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty())
         && matches!(
             edit,
             RegionEdit {

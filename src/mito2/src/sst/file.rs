@@ -114,8 +114,30 @@ where
 
 /// Type to store SST level.
 pub type Level = u8;
-/// Maximum level of SSTs.
-pub const MAX_LEVEL: Level = 2;
+/// Shared inputs rewritten by table compaction, never by a region picker.
+/// This is an ownership category, not a deeper ordinary compaction level.
+pub const LEVEL_SHARED: Level = 2;
+/// Number of supported SST levels (the exclusive upper bound).
+pub const MAX_LEVEL: Level = 3;
+
+fn serialize_level<S: serde::Serializer>(level: &Level, serializer: S) -> Result<S::Ok, S::Error> {
+    if *level >= MAX_LEVEL {
+        return Err(serde::ser::Error::custom(format!(
+            "Unsupported SST level {level}"
+        )));
+    }
+    serializer.serialize_u8(*level)
+}
+
+fn deserialize_level<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Level, D::Error> {
+    let level = Level::deserialize(deserializer)?;
+    if level >= MAX_LEVEL {
+        return Err(serde::de::Error::custom(format!(
+            "Unsupported SST level {level}"
+        )));
+    }
+    Ok(level)
+}
 /// Type to store index types for a column.
 pub type IndexTypes = SmallVec<[IndexType; 4]>;
 
@@ -212,7 +234,11 @@ pub struct FileMeta {
     /// Timestamp range of file. The timestamps have the same time unit as the
     /// data in the SST.
     pub time_range: FileTimeRange,
-    /// SST level of the file.
+    /// SST level of the file. Unknown persisted values are rejected before indexing levels.
+    #[serde(
+        serialize_with = "serialize_level",
+        deserialize_with = "deserialize_level"
+    )]
     pub level: Level,
     /// Size of the file.
     pub file_size: u64,
@@ -658,6 +684,11 @@ impl FileHandle {
 
     /// Mark the file as deleted and will delete it on drop asynchronously
     pub fn mark_deleted(&self) {
+        // Removing one region's reference cannot authorize deletion of a shared
+        // source. Cross-region GC owns its physical reclamation.
+        if self.level() == LEVEL_SHARED {
+            return;
+        }
         if !self.inner.lifetime.deleted.swap(true, Ordering::Relaxed) {
             self.inner
                 .lifetime
@@ -1174,6 +1205,37 @@ mod tests {
             partition_expr: None,
             num_series: 0,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn shared_sst_level_compatibility() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/compatibility/manifest/shared_sst/file-levels.json"
+        )))
+        .unwrap();
+        for legacy in fixture["legacy"].as_array().unwrap() {
+            let file: FileMeta = serde_json::from_value(legacy.clone()).unwrap();
+            assert!(file.level < LEVEL_SHARED);
+            assert_eq!(
+                file,
+                serde_json::from_slice::<FileMeta>(&serde_json::to_vec(&file).unwrap()).unwrap()
+            );
+        }
+        let shared: FileMeta = serde_json::from_value(fixture["shared"].clone()).unwrap();
+        assert_eq!(LEVEL_SHARED, shared.level);
+        assert_eq!(
+            shared,
+            serde_json::from_slice::<FileMeta>(&serde_json::to_vec(&shared).unwrap()).unwrap()
+        );
+        for unknown in fixture["unsupported"].as_array().unwrap() {
+            assert!(serde_json::from_value::<FileMeta>(unknown.clone()).is_err());
+            let file = FileMeta {
+                level: unknown["level"].as_u64().unwrap() as u8,
+                ..Default::default()
+            };
+            assert!(serde_json::to_vec(&file).is_err());
         }
     }
 

@@ -192,6 +192,9 @@ impl<S> RegionWorkerLoop<S> {
                 .levels()
                 .iter()
                 .flat_map(|level| level.files.iter())
+                // Shared input metadata belongs to table compaction. Rebuild
+                // target-local indexes after its L1 outputs are installed.
+                .filter(|(_, handle)| handle.level() != crate::sst::file::LEVEL_SHARED)
                 .filter(|(_, handle)| !handle.is_deleted() && !handle.compacting())
                 .map(|(id, handle)| (*id, handle.clone()))
                 .collect();

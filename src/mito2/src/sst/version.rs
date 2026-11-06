@@ -21,7 +21,7 @@ use common_time::{TimeToLive, Timestamp};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId};
 
-use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, Level, MAX_LEVEL};
+use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, LEVEL_SHARED, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
@@ -239,6 +239,9 @@ impl LevelMeta {
 
     /// Returns expired SSTs from current level.
     pub fn get_expired_files(&self, now: &Timestamp, ttl: &TimeToLive) -> Vec<FileHandle> {
+        if self.level == LEVEL_SHARED {
+            return Vec::new();
+        }
         self.files
             .values()
             .filter(|v| {

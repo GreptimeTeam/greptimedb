@@ -1,0 +1,5 @@
+{
+  "legacy": [{"level": 0}, {"level": 1}, {}],
+  "shared": {"level": 2},
+  "unsupported": [{"level": 3}, {"level": 255}]
+}
