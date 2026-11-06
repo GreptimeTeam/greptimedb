@@ -239,7 +239,7 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             _ => {
                 let kept = |tags: Vec<String>| -> Vec<String> {
                     match &matching.labels {
-                        MatchingLabels::On(names) if !names.is_empty() => tags
+                        MatchingLabels::On(names) => tags
                             .into_iter()
                             .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
                             .collect(),
@@ -247,16 +247,14 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                             .into_iter()
                             .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
                             .collect(),
-                        MatchingLabels::On(_) => tags,
                     }
                 };
                 let left_tags = fused_output_tags(left, source_tags)?;
                 let right_tags = fused_output_tags(right, source_tags)?;
-                // `on`/`ignoring` narrow which of the many side's labels survive; a group modifier
-                // then copies the names it lists *from the one side*, with that side's values. The
-                // names are bound in the modifier and the values come from the series, so both
-                // halves are needed to say what the output carries: a `group_left(container)`
-                // keeps the left side's labels and adds `container`, which only the right side has.
+                // One-to-one matching narrows the left side's labels with `on`/`ignoring`.
+                // A group retains the many side's labels and copies the named labels from the one
+                // side: `group_left(container)` keeps the left labels and adds `container` from
+                // the right.
                 let mut tags = match &matching.cardinality {
                     Cardinality::OneToOne => kept(left_tags.clone()),
                     Cardinality::ManyToOne(_) => left_tags.clone(),

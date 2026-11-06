@@ -49,6 +49,7 @@ use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sqlparser::ast::{AccessExpr, Value, visit_expressions_mut};
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::datafusion::QUERY_FALLBACK_HINT;
 use crate::dist_plan::DistPlannerOptions;
@@ -82,6 +83,9 @@ pub trait LogicalPlanner: Send + Sync {
 /// A remote native plan may place fused evaluation only above independent raw sources.
 /// In particular, a bare scan under FusedSeries would require shipping the process-local
 /// fused plan to a region, which this gate must not admit.
+///
+/// A fused node that reads no region is the one exception: it has nothing to place in a region, so
+/// the frontend evaluates it and the transport this gate protects is never used.
 fn remote_native_raw_plan_supported(plan: &LogicalPlan) -> bool {
     fn walk(plan: &LogicalPlan, found_raw: &mut bool) -> bool {
         if matches!(plan, LogicalPlan::TableScan(_)) {
@@ -102,7 +106,81 @@ fn remote_native_raw_plan_supported(plan: &LogicalPlan) -> bool {
         plan.inputs().iter().all(|child| walk(child, found_raw))
     }
     let mut found_raw = false;
-    walk(plan, &mut found_raw) && found_raw
+    walk(plan, &mut found_raw) && (found_raw || is_regionless_fused_plan(plan))
+}
+
+/// Whether `plan` is a native fused plan with no region below it.
+///
+/// Two shapes qualify, and both are already the finished plan: a statement that reads no data -
+/// `time()`, `vector(1)`, a label rewrite over one of them - is one node with no input at all,
+/// and a discovered selector that matched no metric table is planned over the typed empty frame
+/// [`is_empty_discovered_input`](crate::promql::planner::native::is_empty_discovered_input)
+/// builds. Neither has a scan to ship, so neither needs the remote transport.
+///
+/// The route stacks its own nodes above such an input: a split aggregate runs a `Final` half over
+/// the `Partial` half that reads it, and a segmented statement runs its parent over the segment's
+/// own node. So the inputs a node reads are followed through fused nodes only - never through
+/// another extension, and never through a scan - and every leaf that is not one of them rejects
+/// the shape.
+fn is_regionless_fused_plan(plan: &LogicalPlan) -> bool {
+    // `strip_tsid_column` publishes a statement's own columns over a node that reported the
+    // internal series id, which a data-free statement can synthesize with `label_replace`. That
+    // wrapper is this route's own, so it is read through when it drops exactly that one column.
+    if let LogicalPlan::Projection(projection) = plan {
+        return strips_only_tsid(plan, projection.input.as_ref())
+            && is_regionless_fused_chain(projection.input.as_ref());
+    }
+    is_regionless_fused_chain(plan)
+}
+
+/// Whether `plan` is a fused node whose inputs are fused nodes or the typed empty frame.
+fn is_regionless_fused_chain(plan: &LogicalPlan) -> bool {
+    let LogicalPlan::Extension(extension) = plan else {
+        return false;
+    };
+    let Some(fused) = extension
+        .node
+        .as_any()
+        .downcast_ref::<promql::extension_plan::FusedSeries>()
+    else {
+        return false;
+    };
+    fused.children().iter().all(|child| {
+        crate::promql::planner::native::is_empty_discovered_input(child)
+            || is_regionless_fused_chain(child)
+    })
+}
+
+/// Whether `plan` is the projection that drops exactly the internal series-id column of `inner`.
+///
+/// That is the projection `strip_tsid_column` builds: one plain column per field of its input,
+/// in order, except `__tsid__`. A computed expression, a reordering or a second dropped column is
+/// some other plan and is not read through.
+fn strips_only_tsid(plan: &LogicalPlan, inner: &LogicalPlan) -> bool {
+    let LogicalPlan::Projection(projection) = plan else {
+        return false;
+    };
+    if projection
+        .expr
+        .iter()
+        .any(|expr| !matches!(expr, DfExpr::Column(_)))
+    {
+        return false;
+    }
+    let stripped = inner
+        .schema()
+        .fields()
+        .iter()
+        .filter(|field| field.name() != DATA_SCHEMA_TSID_COLUMN_NAME)
+        .map(|field| field.name())
+        .collect::<Vec<_>>();
+    let projected = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name())
+        .collect::<Vec<_>>();
+    projected == stripped && projected.len() + 1 == inner.schema().fields().len()
 }
 
 pub struct DfLogicalPlanner {
@@ -405,8 +483,9 @@ impl DfLogicalPlanner {
         .map_err(BoxedError::new)
         .context(QueryPlanSnafu)?;
 
-        // Only per-selector raw sources have a supported remote transport. Decide while the
-        // original statement is still available: physical planning cannot fall back safely.
+        // Only per-selector raw sources have a supported remote transport, and a statement that
+        // reads no table needs none. Decide while the original statement is still available:
+        // physical planning cannot fall back safely.
         let plan = if native_requested
             && !self.engine_state.in_process_region_transport()
             && !remote_native_raw_plan_supported(&plan)
@@ -831,10 +910,16 @@ mod tests {
     use catalog::RegisterTableRequest;
     use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_query::OutputData;
+    use common_recordbatch::RecordBatch;
+    use common_recordbatch::util::collect_batches;
     use common_time::Timezone;
+    use datatypes::arrow::array::{Array, Float64Array, StringArray};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use session::context::{QueryContext, QueryContextBuilder};
+    use session::context::{
+        MetricDiscoveryScope, QueryContext, QueryContextBuilder, QueryContextRef,
+    };
     use store_api::metric_engine_consts::{
         DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
         METRIC_ENGINE_NAME,
@@ -1185,6 +1270,372 @@ mod tests {
                 assert!(display.contains("RawSeriesSource"), "{display}");
             }
         }
+    }
+
+    /// Plans `query` on the fixture engine with the native route requested. The engine reaches its
+    /// regions over the wire, which is the route the admission gate guards.
+    async fn plan_remote_native_promql(
+        engine: &QueryEngineRef,
+        query_ctx: &QueryContextRef,
+        query: &str,
+    ) -> LogicalPlan {
+        let stmt = QueryLanguageParser::parse_promql(
+            &PromQuery {
+                query: query.to_string(),
+                start: "0".to_string(),
+                end: "10".to_string(),
+                step: "5s".to_string(),
+                lookback: "300s".to_string(),
+                alias: None,
+            },
+            query_ctx,
+        )
+        .unwrap();
+        engine
+            .planner()
+            .plan(&stmt, query_ctx.clone())
+            .await
+            .unwrap()
+    }
+
+    /// A query context that asks for the native route and states what a nameless selector may
+    /// discover; the default context declines discovery altogether.
+    fn native_query_ctx(scope: MetricDiscoveryScope) -> QueryContextRef {
+        let mut ctx = (*QueryContext::arc()).clone();
+        ctx.set_metric_discovery_scope(scope);
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), "true".to_string());
+        Arc::new(ctx)
+    }
+
+    fn native_discovery_query_ctx() -> QueryContextRef {
+        native_query_ctx(MetricDiscoveryScope::Unrestricted)
+    }
+
+    /// The engine's physical plan for `plan` and the batches it answers.
+    async fn execute_plan(
+        engine: &QueryEngineRef,
+        plan: LogicalPlan,
+        query_ctx: &QueryContextRef,
+    ) -> (
+        Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        Vec<RecordBatch>,
+    ) {
+        let output = engine.execute(plan, query_ctx.clone()).await.unwrap();
+        let physical = output
+            .meta
+            .plan
+            .expect("the engine reports its physical plan");
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            other => panic!("a PromQL query answers rows, not {other:?}"),
+        }
+        .take();
+        (physical, batches)
+    }
+
+    /// Every node name in the tree rooted at `root`, the root included.
+    fn physical_plan_names(
+        root: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut stack = vec![Arc::clone(root)];
+        while let Some(node) = stack.pop() {
+            names.push(node.name().to_string());
+            stack.extend(node.children().into_iter().cloned());
+        }
+        names
+    }
+
+    /// Every logical plan node below `root`, the root included.
+    fn logical_plan_nodes(root: &LogicalPlan) -> Vec<&LogicalPlan> {
+        let mut nodes = Vec::new();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            nodes.push(node);
+            stack.extend(node.inputs());
+        }
+        nodes
+    }
+
+    fn fused_series_nodes(plan: &LogicalPlan) -> Vec<&promql::extension_plan::FusedSeries> {
+        logical_plan_nodes(plan)
+            .into_iter()
+            .filter_map(|node| match node {
+                LogicalPlan::Extension(extension) => extension
+                    .node
+                    .as_any()
+                    .downcast_ref::<promql::extension_plan::FusedSeries>(
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn numeric_values(batches: &[RecordBatch], column: &str) -> Vec<f64> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name(column)
+                    .unwrap_or_else(|| panic!("no `{column}` column"))
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect()
+    }
+
+    fn label_values(batches: &[RecordBatch], column: &str) -> Vec<String> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let array = batch
+                    .column_by_name(column)
+                    .unwrap_or_else(|| panic!("no `{column}` column"))
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("a label column is Utf8");
+                (0..array.len())
+                    .map(|row| array.value(row).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Asserts `plan` is a native plan that reads no region, and that every fused node in it binds
+    /// no metric: a data-free or zero-match statement has no table to name.
+    fn assert_regionless_native_plan(plan: &LogicalPlan, query: &str) {
+        let display = plan.display_indent().to_string();
+        assert!(display.contains("FusedSeries"), "{query}: {display}");
+        for absent in ["TableScan", "MergeScan", "RawSeriesSource"] {
+            assert!(
+                !display.contains(absent),
+                "{query} contains {absent}: {display}"
+            );
+        }
+        let fused = fused_series_nodes(plan);
+        assert!(!fused.is_empty(), "{query}: {display}");
+        for node in fused {
+            assert_eq!(
+                None,
+                node.binding().metric_name,
+                "{query} bound a metric to an input that reads no table: {display}"
+            );
+        }
+    }
+
+    /// Asserts every empty input under `plan` declares the typed empty raw series frame: the
+    /// planner's own definition of that input, and the frame a scan would have declared, so the
+    /// physical planner reads it as a frame producer instead of looking for a scan below it.
+    fn assert_typed_empty_inputs(plan: &LogicalPlan, query: &str) {
+        let empty = logical_plan_nodes(plan)
+            .into_iter()
+            .filter(|node| matches!(node, LogicalPlan::EmptyRelation(_)))
+            .collect::<Vec<_>>();
+        assert!(!empty.is_empty(), "{query} has no empty input");
+        for node in empty {
+            assert!(
+                crate::promql::planner::native::is_empty_discovered_input(node),
+                "{query}: {node:?}"
+            );
+            let LogicalPlan::EmptyRelation(relation) = node else {
+                unreachable!();
+            };
+            assert!(!relation.produce_one_row, "{query}: {relation:?}");
+            let schema = relation.schema.as_arrow();
+            for (key, expected) in [
+                ("greptime.series.content", "raw"),
+                ("greptime.series.labels", "explicit"),
+                ("greptime.series.ordering", "contiguous"),
+            ] {
+                assert_eq!(
+                    Some(expected),
+                    schema.metadata().get(key).map(String::as_str),
+                    "{query}: {key}"
+                );
+            }
+            // The one value field the empty input is bound to, named as the route names a value.
+            let fields = schema.field_with_name("fields").expect("a series frame");
+            let arrow_schema::DataType::Struct(payloads) = fields.data_type() else {
+                panic!("{query}: {fields:?}");
+            };
+            assert_eq!(
+                vec!["value"],
+                payloads
+                    .iter()
+                    .map(|field| field.name().as_str())
+                    .collect::<Vec<_>>(),
+                "{query}"
+            );
+        }
+    }
+
+    /// Asserts the physical plan of a regionless native statement: the fused node runs on the
+    /// frontend and no region read is planned.
+    fn assert_regionless_physical_plan(
+        physical: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        query: &str,
+    ) {
+        let names = physical_plan_names(physical);
+        assert!(
+            names.iter().any(|name| name == "FusedSeriesExec"),
+            "{query} is evaluated on the frontend by the fused node: {physical:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == "MergeScanExec"),
+            "{query} reads no region: {physical:?}"
+        );
+    }
+
+    /// A statement that reads no table plans natively over the wire, where there is no region to
+    /// place anything in: the frontend evaluates the fused node under the native column names
+    /// rather than the ones the existing planner derives from an expression.
+    #[tokio::test]
+    async fn test_remote_native_promql_plans_a_data_free_statement_natively() {
+        let engine = create_promql_test_engine_with(
+            crate::options::QueryOptions {
+                experimental_native_promql: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let query_ctx = native_discovery_query_ctx();
+        for (query, expected_columns, expected_values, expected_labels) in [
+            // `time()` answers the evaluation grid in seconds.
+            (
+                "time()",
+                &["time", "value"][..],
+                &[0.0, 5.0, 10.0][..],
+                &[][..],
+            ),
+            (
+                "vector(1)",
+                &["time", "value"][..],
+                &[1.0, 1.0, 1.0][..],
+                &[][..],
+            ),
+            (
+                r#"label_replace(vector(1), "host", "host1", "", "")"#,
+                &["time", "value", "host"][..],
+                &[1.0, 1.0, 1.0][..],
+                &[("host", "host1")][..],
+            ),
+            // A synthesized `__tsid` is published under the statement's own columns: the stripping
+            // projection above the node is read through rather than mistaken for a remote plan.
+            (
+                r#"label_replace(vector(1), "__tsid", "x", "", "")"#,
+                &["time", "value"][..],
+                &[1.0, 1.0, 1.0][..],
+                &[][..],
+            ),
+        ] {
+            let plan = plan_remote_native_promql(&engine, &query_ctx, query).await;
+            let display = plan.display_indent().to_string();
+            assert_regionless_native_plan(&plan, query);
+            assert!(
+                !display.contains("greptime_value"),
+                "{query} keeps the native value column: {display}"
+            );
+            // A data-free statement has no input at all, so nothing is scanned or left empty.
+            assert_eq!(
+                expected_columns,
+                plan.schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().as_str())
+                    .collect::<Vec<_>>(),
+                "{query}: {display}"
+            );
+            let (physical, batches) = execute_plan(&engine, plan, &query_ctx).await;
+            assert_regionless_physical_plan(&physical, query);
+            assert_eq!(
+                expected_values,
+                numeric_values(&batches, "value").as_slice(),
+                "{query}: {batches:?}"
+            );
+            for (label, value) in expected_labels {
+                assert_eq!(
+                    vec![value.to_string(); batches_row_count(&batches)],
+                    label_values(&batches, label),
+                    "{query}: label `{label}`: {batches:?}"
+                );
+            }
+        }
+    }
+
+    /// The rows every batch of `batches` holds.
+    fn batches_row_count(batches: &[RecordBatch]) -> usize {
+        batches.iter().map(|batch| batch.num_rows()).sum()
+    }
+
+    /// A nameless selector that matches no metric table has no region to read either, so the typed
+    /// empty input it is planned as stays that input on both routes and the node above it is
+    /// evaluated on the frontend. Binding a metric to it is what used to turn this statement into
+    /// an internal error over the wire.
+    #[tokio::test]
+    async fn test_remote_native_promql_plans_a_zero_match_selector_natively() {
+        let engine = create_promql_test_engine_with(
+            crate::options::QueryOptions {
+                experimental_native_promql: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let query_ctx = native_discovery_query_ctx();
+        for (query, expected_rows, expected_labels) in [
+            // The selection itself, over the typed empty frame.
+            (r#"{job="api"}"#, 0, &[][..]),
+            // A whole-vector operation over it, which the route plans as a segment: its parent node
+            // reads the segment's own fused node.
+            (r#"sort({job="api"})"#, 0, &[][..]),
+            // A fold splits into a `Final` half over the `Partial` half that reads the input.
+            (r#"sum({job="api"})"#, 0, &[][..]),
+            // `absent` answers one series per evaluation point over zero input, labelled by the
+            // selector's matchers. The grid holds three points.
+            (r#"absent({job="api"})"#, 3, &[("job", "api")][..]),
+        ] {
+            let plan = plan_remote_native_promql(&engine, &query_ctx, query).await;
+            let display = plan.display_indent().to_string();
+            assert_regionless_native_plan(&plan, query);
+            assert!(
+                display.contains("EmptyRelation"),
+                "{query} keeps the typed empty input: {display}"
+            );
+            assert_typed_empty_inputs(&plan, query);
+            let (physical, batches) = execute_plan(&engine, plan, &query_ctx).await;
+            assert_regionless_physical_plan(&physical, query);
+            // No table matched, so the answer is the empty vector, not an error.
+            assert_eq!(
+                expected_rows,
+                batches_row_count(&batches),
+                "{query} answered rows over a selector that matches no metric: {physical:?}"
+            );
+            for (label, value) in expected_labels {
+                assert_eq!(
+                    vec![value.to_string(); expected_rows],
+                    label_values(&batches, label),
+                    "{query}: label `{label}`: {batches:?}"
+                );
+            }
+        }
+
+        // An allowlist that admits no metric at all reaches the same empty input: the answer comes
+        // from the statement, not from whatever the catalog holds.
+        let query_ctx = native_query_ctx(MetricDiscoveryScope::allowed(std::iter::empty()));
+        let query = r#"{job="api"}"#;
+        let plan = plan_remote_native_promql(&engine, &query_ctx, query).await;
+        assert_regionless_native_plan(&plan, "denied discovery");
+        assert_typed_empty_inputs(&plan, "denied discovery");
+        let (physical, batches) = execute_plan(&engine, plan, &query_ctx).await;
+        assert_regionless_physical_plan(&physical, "denied discovery");
+        assert_eq!(
+            0,
+            batches_row_count(&batches),
+            "denied discovery: {physical:?}"
+        );
     }
 
     /// Plans `sql` and runs the DataFusion analyzer, which is where

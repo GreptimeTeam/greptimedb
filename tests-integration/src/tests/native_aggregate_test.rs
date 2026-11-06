@@ -97,7 +97,6 @@ use crate::standalone::GreptimeDbStandaloneBuilder;
 /// crate-private, so it is repeated here.
 const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
 /// The physical name of the fused producer.
-const FUSED_EXEC_NAME: &str = "FusedSeriesExec";
 /// The metric a fused producer registers for the values its own root node produced, per partition.
 const ROOT_OUTPUT_VALUES_METRIC: &str = "native.root.output_values";
 /// The number of sample positions consumed by the root node, per partition.
@@ -567,38 +566,38 @@ async fn native_hybrid_binary_05_06_08() {
             .map(|row| row.value.unwrap())
             .collect::<Vec<_>>()
     );
+    // The native route matches the whole right operand and checks the one-side groups itself, so
+    // it reports the duplicated `other` group that Prometheus reports. The legacy value above is
+    // the one that differs: copying the left matcher into the right scan drops every group without
+    // a partner, and a dropped group cannot be reported as duplicated. A partition column on the
+    // right table does not change that - the pair reads independent raw sources either way.
     let mark = observer.mark();
-    let (hybrid, capture) = run_query(&instance, &propagated, true, &observer).await;
-    assert_eq!(
-        vec![5.0],
-        hybrid
-            .rows
-            .iter()
-            .map(|row| row.value.unwrap())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        2,
-        capture.fused.len(),
-        "both binary operands use native execution"
-    );
-    let plans = observer.since(mark);
-    let frontend = plans
-        .iter()
-        .find(|plan| find_binary_join(plan).is_some())
-        .expect("frontend Join plan");
-    let join = find_binary_join(frontend).unwrap();
-    let uniqueness = join
-        .children()
-        .iter()
-        .map(|branch| uniqueness_operators_above_merge(branch))
-        .fold((false, false), |(window, filter), found| {
-            (window || found.0, filter || found.1)
-        });
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, SCAN_PARTITIONS.to_string());
+    query_ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+    let output = instance
+        .do_query(&tql_eval(&propagated), Arc::new(query_ctx))
+        .await
+        .remove(0)
+        .expect("the query plans");
+    let error = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream)
+            .await
+            .expect_err("a duplicate match group fails"),
+        other => panic!("`{propagated}` was expected to stream: {other:?}"),
+    };
     assert!(
-        uniqueness.0 && uniqueness.1,
-        "on(job) FE uniqueness operators: {}",
-        displayable(frontend.as_ref()).indent(false)
+        error.to_string().contains(
+            "found duplicate series for the match group {job=\"other\"} on the right hand-side"
+        ),
+        "{propagated}: {error}"
+    );
+    // The statement is admitted natively: a fallback to the legacy plan would have answered the
+    // value instead of reporting the duplicate.
+    let capture = NativeCapture::from_plans(&observer.since(mark));
+    assert!(
+        capture.fused.iter().any(|node| node.children().len() == 2),
+        "the partitioned pair runs as one native binary"
     );
 
     // The left selector is a nonempty single `api` series, while the unpartitioned RHS also
@@ -771,7 +770,6 @@ async fn check_reduced_label_matching(instance: &Arc<Instance>, observer: &Nativ
     );
     let (legacy, legacy_capture) = run_query(instance, &unique_query, false, observer).await;
     assert!(legacy_capture.fused.is_empty());
-    let mark = observer.mark();
     let (native, capture) = run_query(instance, &unique_query, true, observer).await;
     assert_eq!(
         legacy.rows.len(),
@@ -796,43 +794,15 @@ async fn check_reduced_label_matching(instance: &Arc<Instance>, observer: &Nativ
         native.rows.len(),
         "the matching instance filters leave one matching job"
     );
-    assert_eq!(2, capture.fused.len(), "{unique_query}");
-    let plans = observer.since(mark);
-    let frontend = plans
-        .iter()
-        .find(|plan| find_binary_join(plan).is_some())
-        .expect("frontend Join plan");
-    let join = find_binary_join(frontend).unwrap();
-    let uniqueness = join
-        .children()
-        .iter()
-        .map(|branch| uniqueness_operators_above_merge(branch))
-        .fold((false, false), |(window, assertion_filter), found| {
-            (window || found.0, assertion_filter || found.1)
-        });
+    // The whole binary is native: one fused node matches both operands above their own sources,
+    // and the duplicate-group check is the native matcher's, not a frontend WindowAgg/Filter pair.
     assert!(
-        uniqueness.0,
-        "on(job) requires a frontend uniqueness WindowAggExec above MergeScan: {}",
-        displayable(frontend.as_ref()).indent(false)
+        capture.fused.iter().any(|node| node.children().len() > 1),
+        "`{unique_query}` must run as one native binary: {:?}",
+        capture.fused
     );
-    assert!(
-        uniqueness.1,
-        "on(job) requires a frontend prom_assert_unique_match_group FilterExec above MergeScan: {}",
-        displayable(frontend.as_ref()).indent(false)
-    );
-    for branch in join.children() {
-        assert!(
-            contains_execution_node(branch, "MergeScanExec"),
-            "on(job) FE branch must retain remote boundary: {}",
-            displayable(frontend.as_ref()).indent(false)
-        );
-        assert!(
-            !contains_execution_node(branch, FUSED_EXEC_NAME),
-            "on(job) fused node must stay in region"
-        );
-    }
     for fused in &capture.fused {
-        assert_fused_reads_scan_directly(fused, &unique_query);
+        assert_fused_reads_sources(fused, &unique_query);
     }
 
     let duplicate_query = format!("{GAUGE_TABLE} / on(job) {COUNTER_RHS_TABLE}");
@@ -941,7 +911,10 @@ async fn check_hybrid_binary_cases(instance: &Arc<Instance>, observer: &NativePl
                 "one-to-one match must drop unmatched series"
             );
         }
-        assert_eq!(2, capture.fused.len(), "{promql}: plans since {mark}");
+        assert!(
+            !capture.fused.is_empty(),
+            "{promql}: the pair must stay native: plans since {mark}"
+        );
         let region_plans = observer
             .since(mark)
             .into_iter()
@@ -970,73 +943,35 @@ async fn check_hybrid_binary_cases(instance: &Arc<Instance>, observer: &NativePl
             scan_tables.contains(&COUNTER_RHS_TABLE),
             "{promql}: independent RHS scan missing: {scan_tables:?}"
         );
-        for fused in &capture.fused {
-            assert_fused_reads_scan_directly(fused, &format!("hybrid `{promql}`"));
-        }
-        for fused in &capture.fused {
-            let per_fused = NativeCapture {
-                fused: vec![Arc::clone(fused)],
-                finalize: Vec::new(),
-            };
-            let counts = fused_root_metric_per_partition(
-                &per_fused,
-                ROOT_OUTPUT_VALUES_METRIC,
-                &format!("hybrid `{promql}`"),
-            );
-            assert!(
-                counts.iter().all(|count| count.is_some_and(|n| n > 0)),
-                "{promql}: each scan partition must emit values, got {counts:?}"
-            );
-        }
-        let plans = observer.since(mark);
-        let frontend = plans
+        // The binary routes by label set, so its output partitions are keyed by the match group and
+        // an input partition may contribute nothing to a given one. What must still hold is that
+        // each operand registered its values on every partition it reads - the same check the
+        // unpartitioned pair makes with the operand metrics.
+        let binary = capture
+            .fused
             .iter()
-            .find(|plan| find_binary_join(plan).is_some())
-            .unwrap_or_else(|| panic!("{promql}: FE JoinExec missing; plans: {plans:#?}"));
-        let join = find_binary_join(frontend).unwrap();
-        assert_eq!(
-            2,
-            join.children().len(),
-            "{promql}: FE join branches: {}",
-            displayable(frontend.as_ref()).indent(false)
-        );
-        for branch in join.children() {
-            assert!(
-                contains_execution_node(branch, "MergeScanExec"),
-                "{promql}: FE Join branch lacks MergeScanExec: {}",
-                displayable(frontend.as_ref()).indent(false)
-            );
-            assert!(
-                !contains_execution_node(branch, FUSED_EXEC_NAME),
-                "{promql}: FusedSeriesExec leaked onto frontend: {}",
-                displayable(frontend.as_ref()).indent(false)
-            );
-        }
+            .find(|node| node.children().len() > 1)
+            .unwrap_or_else(|| panic!("{promql}: no native binary among {:?}", capture.fused));
+        let left =
+            fused_node_count_per_partition(binary, "native.root.left.output_values", &promql);
+        let right =
+            fused_node_count_per_partition(binary, "native.root.right.output_values", &promql);
         assert!(
-            !is_nested_under_merge(frontend, "HashJoinExec"),
-            "{promql}: FE Join is under MergeScan: {}",
-            displayable(frontend.as_ref()).indent(false)
+            left.iter().chain(&right).all(Option::is_some),
+            "{promql}: operand metrics must be registered for every partition: \
+             left={left:?}, right={right:?}"
         );
-        if index == 1 {
-            assert!(
-                has_projection_parent_of_join(frontend),
-                "06 outer scalar arithmetic must project above JoinExec: {}",
-                displayable(frontend.as_ref()).indent(false)
-            );
+        // The pair is matched by the native binary above its own sources; the frontend join and
+        // its uniqueness operators only existed while the binary could not be planned natively.
+        assert!(
+            capture.fused.iter().any(|node| node.children().len() > 1),
+            "{promql}: the pair must be one native binary: {:?}",
+            capture.fused
+        );
+        for fused in &capture.fused {
+            assert_fused_reads_sources(fused, &format!("hybrid `{promql}`"));
         }
     }
-}
-
-fn find_binary_join(plan: &Arc<dyn ExecutionPlan>) -> Option<&Arc<dyn ExecutionPlan>> {
-    if matches!(
-        plan.name(),
-        "HashJoinExec" | "NestedLoopJoinExec" | "CrossJoinExec"
-    ) {
-        return Some(plan);
-    }
-    plan.children()
-        .iter()
-        .find_map(|child| find_binary_join(child))
 }
 
 fn find_execution_node<'a>(
@@ -1053,48 +988,6 @@ fn find_execution_node<'a>(
 
 fn contains_execution_node(plan: &Arc<dyn ExecutionPlan>, name: &str) -> bool {
     find_execution_node(plan, name).is_some()
-}
-
-/// Finds the PromQL uniqueness validation operators on the frontend side of a remote scan.
-/// Traversal stops at each MergeScan so it cannot accidentally match region-side execution.
-fn uniqueness_operators_above_merge(plan: &Arc<dyn ExecutionPlan>) -> (bool, bool) {
-    if plan.name() == "MergeScanExec" {
-        return (false, false);
-    }
-
-    let mut has_window = matches!(plan.name(), "WindowAggExec" | "BoundedWindowAggExec");
-    let mut has_assertion_filter = plan.name() == "FilterExec"
-        && format!("{plan:?}").contains("prom_assert_unique_match_group");
-    for child in plan.children() {
-        let (child_window, child_filter) = uniqueness_operators_above_merge(child);
-        has_window |= child_window;
-        has_assertion_filter |= child_filter;
-    }
-    (has_window, has_assertion_filter)
-}
-
-fn is_nested_under_merge(plan: &Arc<dyn ExecutionPlan>, name: &str) -> bool {
-    fn walk(plan: &Arc<dyn ExecutionPlan>, under_merge: bool, name: &str) -> bool {
-        if under_merge && plan.name() == name {
-            return true;
-        }
-        plan.children()
-            .iter()
-            .any(|child| walk(child, under_merge || plan.name() == "MergeScanExec", name))
-    }
-    walk(plan, false, name)
-}
-
-fn has_projection_parent_of_join(plan: &Arc<dyn ExecutionPlan>) -> bool {
-    plan.name() == "ProjectionExec"
-        && plan
-            .children()
-            .iter()
-            .any(|child| find_binary_join(child).is_some())
-        || plan
-            .children()
-            .iter()
-            .any(|child| has_projection_parent_of_join(child))
 }
 
 /// Executes one statement and drops its result.
@@ -1512,6 +1405,31 @@ fn assert_fused_reads_scan_directly(fused: &Arc<dyn ExecutionPlan>, context: &st
         "{context}: `SeriesScanExec` must expose the {SCAN_PARTITIONS} scan partitions the fused \
          producer reads:\n{plan}"
     );
+}
+
+/// The fused node keeps its scan width and reads every operand through its own source: a single
+/// operand reads one scan, and a native binary takes one input per operand, each a raw source or a
+/// merge scan over the regions.
+fn assert_fused_reads_sources(fused: &Arc<dyn ExecutionPlan>, context: &str) {
+    let plan = displayable(fused.as_ref()).indent(false).to_string();
+    assert_eq!(
+        SCAN_PARTITIONS,
+        fused.properties().output_partitioning().partition_count(),
+        "{context}: the fused producer must keep the {SCAN_PARTITIONS} scan partitions:\n{plan}"
+    );
+    let children = fused.children();
+    assert!(
+        !children.is_empty(),
+        "{context}: the fused producer must read at least one input:\n{plan}"
+    );
+    for child in children {
+        assert!(
+            contains_execution_node(child, "SeriesScanExec")
+                || contains_execution_node(child, "MergeScanExec")
+                || contains_execution_node(child, "RawSeriesSourceExec"),
+            "{context}: every operand must read its own source:\n{plan}"
+        );
+    }
 }
 
 /// The node a transparent cooperative-scheduling wrapper stands in for, or `node` itself.

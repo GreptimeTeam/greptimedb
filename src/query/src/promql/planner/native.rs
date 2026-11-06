@@ -180,8 +180,8 @@ type DiscoveredSelectorMetadata = (Arc<SeriesSchema>, String, Vec<String>, Arc<s
 ///
 /// `partitioned` says whether the table behind that scan is split into regions along a partition
 /// column. Nothing in the scan itself carries this: a partition is a placement fact about the
-/// table, and the canonical route has to know it before it can claim a label-set answer covers the
-/// whole query rather than one region's share of it.
+/// table, and the in-process canonical route has to know it before it can claim a label-set answer
+/// covers the whole query rather than one region's share of it.
 type PreparedInput = (
     LogicalPlan,
     Arc<SeriesSchema>,
@@ -189,6 +189,9 @@ type PreparedInput = (
     String,
     Vec<String>,
     // `partitioned`: whether this input's table is split into regions along a partition column.
+    bool,
+    // `split_series`: whether that partition splits one series across regions, which a bare scan
+    // cannot reconcile. A partition on tags keeps every series whole in one region.
     bool,
 );
 
@@ -275,12 +278,10 @@ impl PromPlanner {
     async fn prepare_one_scan(
         &mut self,
         matchers: Matchers,
-        selector_count: usize,
         prom_expr: &PromExpr,
         logical_scan_id: &mut Option<u32>,
         logical_ids_differ: &mut bool,
         statement_kind: &mut Option<FieldKind>,
-        self_contained: bool,
     ) -> Result<Option<PreparedInput>> {
         let (Some(metric), Some(time)) = (
             self.ctx.table_name.clone(),
@@ -368,9 +369,10 @@ impl PromPlanner {
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
-        // A table split along a partition column lives in more than one region. The canonical
-        // boundary's router only collects the pieces its own region's producer holds, so the caller
-        // needs this fact to tell a whole-query label-set answer from one region's share of it.
+        // A table split along a partition column lives in more than one region. In process the
+        // canonical boundary's router only collects the pieces its own region's producer holds, so
+        // the caller needs this fact to tell a whole-query label-set answer from one region's share
+        // of it.
         let partitioned = table_meta.partition_column_names().next().is_some();
         // An engine without a raw-series scanner has no frame to give this node, and by the
         // time the physical planner asks, the logical plan is already this node: the refusal
@@ -403,19 +405,13 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        // Preserve the existing single-selector guard that its partition keys are tags. A partition
-        // column that is not a tag is the time index, so one series spans several regions; a bare
-        // scan cannot reconcile the fragments, which is why this route kept the existing plan for
-        // it. The raw source can, so the guard only holds the shapes that read a bare scan - the
-        // ones a region can run in process.
-        if selector_count == 1
-            && !self_contained
-            && !table_meta
-                .partition_column_names()
-                .all(|column| tags.iter().any(|tag| tag == column))
-        {
-            return Ok(None);
-        }
+        // A partition column that is not a tag splits one series across regions, and a bare scan
+        // cannot reconcile the fragments. A raw source can, so such a selector is admitted and its
+        // input is bound per source below; only the shapes that read a bare scan need the
+        // reconciliation to happen in one region.
+        let split_series = !table_meta
+            .partition_column_names()
+            .all(|column| tags.iter().any(|tag| tag == column));
         // This route declares one output column per field, so every field it binds carries
         // one kind: `Float64`, or the canonical native histogram struct. A field of any
         // other type - an integer, a `Float32`, a decimal, a string - keeps the existing
@@ -463,6 +459,7 @@ impl PromPlanner {
             time,
             tags,
             partitioned,
+            split_series,
         )))
     }
 
@@ -721,26 +718,26 @@ impl PromPlanner {
                     // The union reads every discovered metric's region, so one partitioned metric
                     // makes the whole input partitioned.
                     let mut discovered_partitioned = false;
+                    let mut discovered_split_series = false;
                     for table in metrics {
                         self.ctx.table_name = Some(table.table_info().name.clone());
                         if self.setup_context().await?.is_some() {
                             return Ok(None);
                         }
-                        let Some((scan, schema, metric, time, mut tags, partitioned)) = self
+                        let Some((scan, schema, metric, time, mut tags, partitioned, split_series)) = self
                             .prepare_one_scan(
                                 matchers.clone(),
-                                1,
                                 prom_expr,
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
                                 &mut statement_kind,
-                                self_contained,
                             )
                             .await?
                         else {
                             return Ok(None);
                         };
                         discovered_partitioned |= partitioned;
+                        discovered_split_series |= split_series;
                         let Some(metric) = metric else {
                             return Ok(None);
                         };
@@ -810,7 +807,7 @@ impl PromPlanner {
                             None,
                         )
                     };
-                    prepared.push((union, schema, metric, time, tags, discovered_partitioned));
+                    prepared.push((union, schema, metric, time, tags, discovered_partitioned, discovered_split_series));
                     continue;
                 }
                 let matchers =
@@ -827,12 +824,10 @@ impl PromPlanner {
                 let Some(one) = self
                     .prepare_one_scan(
                         matchers,
-                        selectors.len(),
                         prom_expr,
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
                         &mut statement_kind,
-                        self_contained,
                     )
                     .await?
                 else {
@@ -869,19 +864,13 @@ impl PromPlanner {
                 .map(|(scan, ..)| scan)
                 .filter(|scan| !is_empty_discovered_input(scan)),
         ) || logical_ids_differ;
-        // A multi-selector tree over a partitioned table has no in-process placement whose matching
-        // and uniqueness semantics equal the frontend route. One node over several scans of one
-        // partitioned table reads neither the other scans nor the fragments another region holds,
-        // and one node over several tables' sources matches every series those sources delivered,
-        // where the frontend route copies the operands' matchers into their scans first and checks
-        // uniqueness above the join. Keep the existing plan in process; the hybrid route lifts such
-        // a tree one operand at a time. Over the wire every occurrence is already its own raw source
-        // reconciled above the regions, so the route keeps those trees.
-        if selectors.len() > 1 && !self_contained && prepared.iter().any(|input| input.5) {
-            return Ok(None);
-        }
+        // A multi-selector tree over a partitioned table has no region-local placement: one node
+        // over several scans reads neither the other scans nor the fragments another region holds.
+        // It does have a frontend placement - each occurrence reads the table through its own raw
+        // source and the node matches above every region's contribution - so the tree is admitted
+        // on both routes and nothing is refused here.
         // The first input names the output's time index and, on one table, binds every scan.
-        let Some((_, _, metric, time, tags, _)) = prepared.first() else {
+        let Some((_, _, metric, time, tags, _, _)) = prepared.first() else {
             return Ok(None);
         };
         let (metric, time, tags) = (metric.clone(), time.clone(), tags.clone());
@@ -949,7 +938,7 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
-        for (index, (compiled_input, (scan, _, _, time, _, _))) in
+        for (index, (compiled_input, (scan, _, _, time, _, _, _))) in
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
             if compiled_input.source_index != index {
@@ -1052,28 +1041,67 @@ impl PromPlanner {
         }
         let source_tags = prepared
             .iter()
-            .map(|(_, _, _, _, tags, _)| tags.clone())
+            .map(|(_, _, _, _, tags, _, _)| tags.clone())
             .collect::<Vec<_>>();
         // Whether any input's table is split into regions along a partition column. The canonical
         // boundary is the only part of this route that claims a whole-query label-set answer, and a
         // region-local producer cannot see the pieces another region holds, so this fact decides
         // whether that boundary may be claimed at all.
         let any_partitioned = prepared.iter().any(|input| input.5);
+        // Admission and placement are separate: `independent_scan_pair` admits nested native
+        // matches, while the physical locality classification decides whether their inputs need
+        // gathering or segmentation.
+        // A label rewrite can give two series one label set, which every consumer that answers a
+        // whole label set has to see as one series. The pass puts a [`NativeExpr::Merge`] where that
+        // matters and nowhere else, so a tree with no collapsing rewrite keeps every partition.
+        let tree = match promql::native::canonicalize::merge_label_rewrites(
+            &compiled.tree,
+            &source_tags,
+        ) {
+            Ok(tree) => tree,
+            Err(_) => return Ok(None),
+        };
+        let root = tree.root();
+        // The placement facts the split and the segmentation below are chosen from, and the same
+        // facts that say whether one node can run over the scans at all.
+        let per_partition =
+            !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
+        let locality = input_locality(root);
+        let computed_key_case =
+            matches!(locality, InputLocality::SinglePartition) && matching_operands_drop_key(root);
+        let required_placement = !per_partition || computed_key_case;
+        // The node reads more than one input when the tree has more than one selector occurrence:
+        // the compiler binds one input per occurrence. What it needs from them is that each is
+        // bound to its own source - a raw source, in process or over the wire - or, where a region
+        // can run the node itself, one bare scan per occurrence. Either way the consumer above them
+        // reads every occurrence's contribution, so the metric-id fact this used to turn on is not
+        // what admission turns on.
+        let multi_input = selectors.len() > 1;
+        // A region runs one node over its own scans only when the table it reads is not split into
+        // regions and the tree's root is per-partition work: a partitioned table's region reads
+        // neither the other scans nor the fragments another region holds, and a whole-vector
+        // consumer has no region-local placement. Such a tree runs above the regions, and then each
+        // occurrence reads through its own raw source.
+        let per_source_inputs = cross_table
+            || self_contained
+            || (multi_input && (any_partitioned || required_placement));
         // A segment carries one source's identity. Keeping each occurrence's scan and metadata
         // aligned here lets the cutting step name that source independently of selector count.
+        // Read the split-series fact before `prepared` is consumed by the child mapping below.
+        let any_split_series = prepared.iter().any(|input| input.6);
         let bare_scans = prepared
             .iter()
             .map(|(scan, ..)| scan.clone())
             .collect::<Vec<_>>();
         let per_source = prepared
             .iter()
-            .map(|(_, _, metric, time_index, tags, _)| {
+            .map(|(_, _, metric, time_index, tags, _, _)| {
                 (metric.clone(), time_index.clone(), tags.clone())
             })
             .collect::<Vec<_>>();
         let children = prepared
             .into_iter()
-            .map(|(scan, schema, metric, _, tags, _)| {
+            .map(|(scan, schema, metric, _, tags, _, split_series)| {
                 // A discovered selector already carries its own sources: a single metric is one
                 // `RawSeriesSource`, several are a `Union` of them, and each names the metric it
                 // reads. Wrapping either again would nest a source in a source.
@@ -1083,11 +1111,22 @@ impl PromPlanner {
                         LogicalPlan::Extension(extension)
                             if extension.node.as_any().is::<RawSeriesSource>()
                     );
+                // The typed empty frame of a selector that matched no table is already the input:
+                // it reads no region, so there is no source to wrap it in and no metric to bind to
+                // it. Wrapping it would name a metric it does not have, which is why it stays
+                // itself on both routes.
+                if is_empty_discovered_input(&scan) {
+                    return Ok(scan);
+                }
                 // A scan stays bare only where a region runs the node over it in process. Over the
                 // wire every input is a raw source, whichever table it reads: the source is what the
                 // transport carries, and it is also what reconciles the fragments of a series that
-                // several regions hold.
-                if (!cross_table && !self_contained) || already_sourced {
+                // several regions hold. A partition that splits one series across regions has to
+                // be read through a raw source even in process: a bare scan would hand a region only
+                // its own fragment. A tree the regions cannot run as one node reads its occurrences
+                // through their own sources too, so the consumer above matches every region's
+                // contribution instead of the rows of one.
+                if (!per_source_inputs && !split_series) || already_sourced {
                     return Ok(scan);
                 }
                 let Some(metric) = metric else {
@@ -1124,11 +1163,22 @@ impl PromPlanner {
         // region-local producer only sees the partitions of the region it runs in. A table split
         // along a partition column is planned region by region, so each region would answer a
         // canonical label set from the piece it holds while the consumer above has no collection of
-        // the other regions' pieces. Without a proof that this query reads one region, decline the
-        // route instead of claiming a global canonical answer; the existing planner reads every
-        // region and reports what Prometheus reports. A tree with no canonical merge claims no such
-        // answer, so it is untouched: a per-series query on a partitioned table keeps fusing.
-        if any_partitioned && contains_canonical_merge(root) {
+        // the other regions' pieces.
+        //
+        // In process the producer reads the region's own scans, so that placement is the only one it
+        // has: without a proof that this query reads one region, decline the route instead of
+        // claiming a global canonical answer, and let the existing planner - which reads every
+        // region and reports what Prometheus reports - answer. A tree with no canonical merge claims
+        // no such answer, so it is untouched: a per-series query on a partitioned table keeps fusing.
+        //
+        // Over the wire the producer reads `RawSeriesSource` children, and
+        // `Categorizer::check_extension_plan` keeps such a producer out of a region
+        // (`canonical_boundary_region_node` admits only a region's own scans). The analyzer expands
+        // the raw sources into merge scans and the producer runs on the frontend above every region,
+        // with its canonical router above all of them, so each label set is collected from the
+        // producers of every region. That placement is what the remote route claims, and the shape it
+        // builds is the one the acceptance test asserts: no canonical producer below a merge scan.
+        if !self_contained && any_partitioned && contains_canonical_merge(root) {
             return Ok(None);
         }
         // The kind the tree's root answers with, which every output column follows. It is not the
@@ -1158,49 +1208,27 @@ impl PromPlanner {
             }
             Some(FieldKind::Float) | None => FieldKind::Float,
         };
-        // The split is only ever a one-child plan: it exports each partition's leaf state and merges
-        // them above the region. A tree over two metric logical tables of ONE physical table is not
-        // split, because a node whose locality is `SinglePartition` normalizes every input to one
-        // partition, so every group is folded in one place. Both of those inputs are `RawSeriesSource` children
-        // (the two ids made `cross_table` true), each answering from its own region with frames that
-        // carry their own labels, so the node is plannable above both. That plan needs no split to be
-        // correct, so it falls through to the node below.
+        // A tree over more than one input needs no split: each input already answers from its own
+        // source, and the one node above them folds every partition in one execution. The split is
+        // an optimization for the one-input shapes it can carry, and so is the segmentation below;
+        // the node over the inputs is what admits the rest.
         //
-        // A multi-selector tree whose inputs stay direct scans of one table is not admitted here: its
-        // scans are not raw sources, so the categorizer refuses to place the node region-locally
-        // (`Categorizer::check_extension_plan` is `NonCommutative` for a cross-series node over more
-        // than one scan) and the physical planner cannot bind a merged plain scan under it either. So
-        // such a tree keeps its one-selector-or-decline behaviour, unchanged.
-        //
-        // A selector whose scan carries no metric logical id - a Mito table's, for one - adds no
-        // id, so one Mito aggregate beside one metric aggregate is not a multi-input tree:
-        // `sum(m) + sum(mito)` keeps the existing plan. A second metric logical id does make the
-        // tree multi-input, and the one execution above then reads the Mito input through its own
-        // raw source as well.
-        let multi_input = selectors.len() > 1 && logical_ids_differ;
-        // The aggregate split folds float state, and the multi-input node reads several scans, so
-        // a histogram keeps the existing plan for both rather than running a tree whose output the
-        // runtime could not finish. The kind entering each aggregate is what decides, not the
+        // The aggregate split folds float state, and a node reading several sources runs over
+        // frames it reconciled rather than over its own scans, so a histogram keeps the existing
+        // plan for both rather than running a tree whose output the runtime could not finish. A
+        // node over bare scans is not that shape: a region runs it over each scan itself, exactly
+        // as it does for one selector. The kind entering each aggregate is what decides, not the
         // shape of the root: `sum(h) * 2` has a binary root and would otherwise hide the aggregate
         // under it.
         if let Some(kind @ FieldKind::Histogram) = statement_kind
-            && (multi_input || aggregate_reads_histogram(root, kind))
+            && ((multi_input && per_source_inputs) || aggregate_reads_histogram(root, kind))
         {
             return Ok(None);
         }
-        // A multi-input tree skips the split below, so the refusals the split makes for reasons that
-        // are not about what the runtime computes have to be made here.
-        //
-        // The aggregate split keeps its prefix per-series, which is why it declines an operation
-        // whose answer depends on the order its input arrives in. A multi-input node reads its
-        // inputs' partitions in the order they became ready, so that refusal is repeated here.
-        if (multi_input || (self_contained && children.len() > 1)) && depends_on_input_order(root) {
-            return Ok(None);
-        }
-        // Two sources that report groups by metric name need a column for that name: without one,
-        // groups that differ only by metric would be reported as the same label set. A discovered
-        // selector carries that column itself; several explicit selectors do not.
-        if (multi_input || (self_contained && children.len() > 1)) && groups_by_metric_name(root) {
+        // The split keeps its prefix per-series, which is why it declines an operation whose
+        // answer depends on the order its input arrives in. A node over more than one input reads
+        // its inputs' partitions in the order they became ready, so that refusal holds there too.
+        if multi_input && depends_on_input_order(root) {
             return Ok(None);
         }
         // The native output schema can name only compiled value fields, the time index and the tag
@@ -1229,8 +1257,7 @@ impl PromPlanner {
         // series frames, and a canonical router collects the pieces of one label set from every
         // partition. Declining here would hand the statement back to a path that answers it per
         // partition.
-        if !multi_input
-            && selectors.len() == 1
+        if selectors.len() == 1
             && matches!(&tree.root().expr, NativeExpr::Merge { input } if pointwise_operand(input) && canonical_local_prefix(input) && !contains_global_consumer(input))
             && let Some(plan) = canonical_boundary_plan(
                 prom_expr,
@@ -1246,13 +1273,6 @@ impl PromPlanner {
         {
             return Ok(Some((plan, single_input_context)));
         }
-        let root = tree.root();
-        let per_partition =
-            !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
-        let locality = input_locality(root);
-        let computed_key_case =
-            matches!(locality, InputLocality::SinglePartition) && matching_operands_drop_key(root);
-        let required_placement = !per_partition || computed_key_case;
         if required_placement {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather
             // than whole samples, so it moves less between the two halves than a sample boundary
@@ -1262,7 +1282,7 @@ impl PromPlanner {
             // without this route. Its producer reads whatever input the statement prepared: over
             // the wire that is the raw series source, and the partial/final halves stay on the
             // frontend above the regions, so per-series work keeps the scan width.
-            let split = if !multi_input && selectors.len() == 1 {
+            let split = if selectors.len() == 1 {
                 FusedSeries::split_aggregate(&tree, &time).context(DataFusionPlanningSnafu)?
             } else {
                 None
@@ -1302,11 +1322,6 @@ impl PromPlanner {
                 });
                 return Ok(Some((plan, single_input_context)));
             }
-            // Preserve the established refusal for repeated same-table operands unless
-            // segmentation is needed to preserve a computed matching key.
-            if selectors.len() != 1 && !cross_table && !computed_key_case {
-                return Ok(None);
-            }
         }
         // A segment over the wire keeps the raw source as its input rather than a bare scan: the
         // segment's prefixes run on the frontend above the regions, so the raw series source is
@@ -1327,20 +1342,27 @@ impl PromPlanner {
                 FusedOutputFormat::PlainRows,
                 contains_canonical_merge(root),
                 root_kind,
-                self_contained,
+                // A cut must keep the source whenever the table behind it can split a series
+                // across regions: a per-region prefix would evaluate a window over one region's
+                // fragment, so `rate` never sees the samples the other region holds. That is a
+                // partitioned table whose occurrences are source-backed, and always a partition on
+                // a column that is not a tag. An unpartitioned table's scans are whole in one
+                // region, so its cuts keep the bare-scan form.
+                self_contained || any_split_series || (per_source_inputs && any_partitioned),
             ))
             .await?;
             if let Some(plan) = plan {
                 return Ok(Some((plan, single_input_context)));
             }
-            // A raw scan alone does not prove a region contains all contributions required by a
-            // cross-series consumer. Without a split or segmentation, keep that consumer out of
-            // the region rather than treating its local gather as a global answer.
+            // One input with no split or segment above it leaves a raw scan doing the work of a
+            // cross-series consumer, and a single scan does not prove its region holds every
+            // contribution the consumer needs. Keep that consumer on the existing plan. A tree over
+            // more than one input is not this shape: every occurrence reaches it through its own
+            // source, so the node itself is the collection.
             if required_placement && !multi_input {
                 return Ok(None);
             }
         }
-        // Multi-input fused execution already reads every input in this execution.
         // The tags are asked for before the fields, because the walk answers for a tree the
         // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
         // the walk derives. If it cannot derive them, this route declines.
@@ -1368,14 +1390,12 @@ impl PromPlanner {
             return Ok(None);
         }
         let output_schema = fused_output_schema(&root_fields, &output_tags, &time, root_kind)?;
-        // Across tables the region scans are bound by their `RawSeriesSource` children, and this is
-        // also the binding a node over more than one input needs: such a node reads frames that
-        // already carry their own labels, so it binds neither tags nor one metric name of its own -
-        // each child names the metric it reads. A multi-input plan whose children stay direct
-        // scans reads one table through the one metric and tag set they share, and keeps this
-        // binding, which is the same identity those scans carry. The same holds over the wire,
-        // where every input is a raw source.
-        let (tags, metric) = if cross_table || self_contained {
+        // The children a node reads bind it: a `RawSeriesSource` child carries the frames and names
+        // the metric it reads, so a node over them binds neither tags nor one metric name of its
+        // own. A node whose children stay direct scans of one table reads that table through the
+        // one metric and tag set they share, and keeps this binding, which is the same identity
+        // those scans carry. The same holds over the wire, where every input is a raw source.
+        let (tags, metric) = if per_source_inputs {
             (Vec::new(), None)
         } else {
             (tags, metric)
@@ -1471,12 +1491,7 @@ impl PromPlanner {
 /// frame producer it is instead of looking for a region scan below the node. Its labels are
 /// explicit, which is the mode a producer names each series in rather than a scan's storage key.
 fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
-    let schema = Arc::new(SeriesSchema {
-        fields: Arc::from([FieldSpec {
-            name: Arc::from(DEFAULT_FIELD_COLUMN),
-        }]),
-        eval_grid: None,
-    });
+    let schema = empty_discovered_series_schema();
     let frame =
         raw_series_frame_schema_with_ordering(&schema, &RawLabelSource::Explicit, NATIVE_ORDERING)
             .context(DataFusionPlanningSnafu)?;
@@ -1487,15 +1502,41 @@ fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
         ),
     });
     // No table stands behind this input, so no region splits it along a partition column.
-    Ok((input, schema, None, time_index, Vec::new(), false))
+    Ok((input, schema, None, time_index, Vec::new(), false, false))
+}
+
+/// The raw series schema of the typed empty input [`empty_discovered_input`] builds.
+fn empty_discovered_series_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from(DEFAULT_FIELD_COLUMN),
+        }]),
+        eval_grid: None,
+    })
 }
 
 /// Whether `plan` is the typed empty input [`empty_discovered_input`] builds.
 ///
 /// It reads no region and holds no scan, so it is not one of the tables a node's binding is derived
-/// from: two selectors are "of one table" only if the tables they scan are one.
-fn is_empty_discovered_input(plan: &LogicalPlan) -> bool {
-    matches!(plan, LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row)
+/// from: two selectors are "of one table" only if the tables they scan are one. The remote
+/// admission gate reads the same shape back, to tell a node with nothing to ship from one that does
+/// read regions, so the declared frame is part of the check: an empty relation that does not
+/// declare the raw explicit-label frame is some other plan, not this input.
+pub(crate) fn is_empty_discovered_input(plan: &LogicalPlan) -> bool {
+    let LogicalPlan::EmptyRelation(relation) = plan else {
+        return false;
+    };
+    if relation.produce_one_row {
+        return false;
+    }
+    let Ok(frame) = raw_series_frame_schema_with_ordering(
+        &empty_discovered_series_schema(),
+        &RawLabelSource::Explicit,
+        NATIVE_ORDERING,
+    ) else {
+        return false;
+    };
+    relation.schema.as_arrow() == frame.as_ref()
 }
 
 /// The subtrees a [`NativeNode`] reads, in the order the node evaluates them.
@@ -2030,6 +2071,10 @@ fn build_evaluated_segment(
             .samples()
             .is_some_and(|schema| schema.eval_grid.is_some())
             || is_raw_series_source(&child)
+            // The typed empty frame of a selector that matched no table is an input in its own
+            // right: it reads no region and carries no metric, so there is nothing to wrap it in.
+            // A segment over it is still an explicit-label frame with no series.
+            || is_empty_discovered_input(&child)
         {
             inputs.push(child);
             local_tags.push(source_tags.get(index)?.clone());
@@ -2608,16 +2653,12 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
 }
 
 pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
-    let (left, right, matching) = match &root.expr {
-        NativeExpr::Binary {
-            left,
-            right,
-            matching,
-        } => match (&left.expr, &right.expr) {
+    let (left, right) = match &root.expr {
+        NativeExpr::Binary { left, right, .. } => match (&left.expr, &right.expr) {
             (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => return false,
             (NativeExpr::Scalar(_), _) => return independent_scan_pair(right),
             (_, NativeExpr::Scalar(_)) => return independent_scan_pair(left),
-            _ => (left, right, matching),
+            _ => (left, right),
         },
         NativeExpr::Map { input, .. } => return independent_scan_pair(input),
         NativeExpr::Set { left, right, .. } => {
@@ -2629,14 +2670,7 @@ pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
         _ => return false,
     };
 
-    let supported_labels = match &matching.labels {
-        MatchingLabels::On(names) => !names.is_empty(),
-        MatchingLabels::Ignoring(names) => names.is_empty(),
-    };
-    matching.cardinality == Cardinality::OneToOne
-        && supported_labels
-        && scan_operand(left)
-        && scan_operand(right)
+    scan_operand(left) && scan_operand(right)
 }
 
 fn scan_operand(node: &NativeNode) -> bool {
@@ -2901,7 +2935,7 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                 _ => {
                     let kept = |tags: Vec<String>| -> Vec<String> {
                         match &matching.labels {
-                            MatchingLabels::On(names) if !names.is_empty() => tags
+                            MatchingLabels::On(names) => tags
                                 .into_iter()
                                 .filter(|tag| {
                                     names.iter().any(|name| name.as_ref() == tag.as_str())
@@ -2913,7 +2947,6 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                                     !names.iter().any(|name| name.as_ref() == tag.as_str())
                                 })
                                 .collect(),
-                            MatchingLabels::On(_) => tags,
                         }
                     };
                     let left_tags = native_output_tags(left, source_tags)?;
@@ -3304,8 +3337,8 @@ mod tests {
 
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
-        NativeType, collect_selectors, cut_segments, fused_output_schema, hybrid_binary_admitted,
-        independent_scan_pair, native_output_tags, native_promql_requested,
+        NativeType, collect_selectors, cut_segments, fused_output_schema, fused_output_tags,
+        hybrid_binary_admitted, independent_scan_pair, native_output_tags, native_promql_requested,
         native_raw_plan_bounds_region_reads, scan_time_filter,
     };
 
@@ -3451,6 +3484,11 @@ mod tests {
             "x == on(host) x",
             "x > bool x",
             "2 * (x != on(host) x)",
+            "x + on() x",
+            "2 * (x > on() x)",
+            "x + ignoring(host) x",
+            "x * on(host) group_left x",
+            "x * on(host) group_right x",
         ] {
             let tree = compiled_test_tree(query);
             assert_eq!(input_sources(tree.root()), vec![0, 1], "{query}");
@@ -3459,17 +3497,10 @@ mod tests {
         assert!(!independent_scan_pair(
             compiled_test_tree("sum(x) + x").root()
         ));
-        assert!(!independent_scan_pair(
-            compiled_test_tree("x + on() x").root()
-        ));
-        // A wrapper does not admit a core the pair itself refuses.
-        assert!(!independent_scan_pair(
-            compiled_test_tree("2 * (x > on() x)").root()
-        ));
     }
 
     #[test]
-    fn independent_scan_pair_admits_nested_one_to_one_matches() {
+    fn independent_scan_pair_admits_nested_matches() {
         for query in [
             "x + y + z",
             "(x - y) / on(host) z",
@@ -3479,22 +3510,18 @@ mod tests {
             "(x + y) unless on(host) z",
             "(x == on(host) y) + z",
             "x > bool y + z",
+            "(x * on(host) group_left y) + z",
+            "(x * on(host) group_right y) + z",
+            "(x + on() y) + z",
+            "(x > on() y) + z",
         ] {
             let tree = compiled_test_tree(query);
             assert_eq!(input_sources(tree.root()), vec![0, 1, 2], "{query}");
             assert!(independent_scan_pair(tree.root()), "{query}");
         }
-        for query in [
-            "x + y + sum(z)",
-            "(x * on(host) group_left y) + z",
-            "(x + on() y) + z",
-            "(x > on() y) + z",
-        ] {
-            assert!(
-                !independent_scan_pair(compiled_test_tree(query).root()),
-                "{query}"
-            );
-        }
+        assert!(!independent_scan_pair(
+            compiled_test_tree("x + y + sum(z)").root()
+        ));
     }
 
     #[test]
@@ -3512,10 +3539,8 @@ mod tests {
             native_output_tags(ignoring.root(), &sources)
         );
         let empty_on = compiled_test_tree("x + on() x");
-        assert_eq!(
-            Some(tags.clone()),
-            native_output_tags(empty_on.root(), &sources)
-        );
+        assert_eq!(Some(vec![]), native_output_tags(empty_on.root(), &sources));
+        assert_eq!(Some(vec![]), fused_output_tags(empty_on.root(), &sources));
 
         // Two tables with different tags: the left side's labels pass through a wrapper and a
         // match, and `or` adds the labels only the right side carries.
@@ -3612,6 +3637,27 @@ mod tests {
             ),
             native_output_tags(group_right.root(), &group_sources)
         );
+        for query in [
+            "x * on() group_left(workload) y",
+            "x * on() group_right(container) y",
+        ] {
+            let tree = compiled_test_tree(query);
+            let expected = if query.contains("group_left") {
+                vec!["cluster", "namespace", "pod", "container", "workload"]
+            } else {
+                vec![
+                    "cluster",
+                    "namespace",
+                    "pod",
+                    "workload",
+                    "workload_type",
+                    "container",
+                ]
+            };
+            let expected = Some(expected.into_iter().map(String::from).collect());
+            assert_eq!(expected, native_output_tags(tree.root(), &group_sources));
+            assert_eq!(expected, fused_output_tags(tree.root(), &group_sources));
+        }
         // An outer match narrows the labels the inner one already narrowed.
         let sources = [
             vec!["host".to_string(), "kind".to_string(), "zone".to_string()],

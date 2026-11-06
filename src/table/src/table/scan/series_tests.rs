@@ -58,6 +58,7 @@ struct State {
     stream_schema: Option<Arc<SeriesSchema>>,
     stream_source: Option<RawLabelSource>,
     raw_none: bool,
+    explicit_labels: bool,
     raw_error: bool,
     fail_first_poll: bool,
     error_after_poll: Option<usize>,
@@ -201,6 +202,9 @@ impl RegionScanner for TestScanner {
             .clone()
             .unwrap_or_else(|| self.raw_schema.clone()))
     }
+    fn raw_series_has_explicit_labels(&self, _source: &RawLabelSource) -> Result<bool, BoxedError> {
+        Ok(self.state.lock().unwrap().explicit_labels)
+    }
     fn scan_series_partition(
         &self,
         _ctx: &QueryScanContext,
@@ -227,7 +231,11 @@ impl RegionScanner for TestScanner {
                 .stream_schema
                 .clone()
                 .unwrap_or_else(|| self.raw_schema.clone().unwrap()),
-            label_decode_spec: common_query::series_frame::label_decode_spec(&source),
+            label_decode_spec: if state.explicit_labels {
+                None
+            } else {
+                common_query::series_frame::label_decode_spec(&source)
+            },
             source,
             chunks: self.chunks.clone(),
             state: self.state.clone(),
@@ -1390,4 +1398,36 @@ async fn raw_series_admission_captures_scanner_ordering_before_execution() {
         assert_eq!(state.polls, 0);
         assert_eq!(state.drops, 0);
     }
+}
+
+#[tokio::test]
+async fn bound_source_can_declare_explicit_labels_and_detect_representation_change() {
+    let schema = series_schema();
+    let (scan, state) = fixture(Some(schema.clone()), vec![chunk(&schema)]);
+    let source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("cpu_usage"),
+        physical_metadata: scan.scanner.lock().unwrap().metadata(),
+        logical_tags: Arc::from([]),
+    };
+    state.lock().unwrap().explicit_labels = true;
+    let plan = scan.try_to_series_scan(source).unwrap().unwrap();
+    assert!(matches!(plan.label_source(), RawLabelSource::Explicit));
+    let frames = plan
+        .execute(0, context())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(frames[0].schema(), plan.schema());
+    let decoded = datatypes::series::frame::unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Explicit,
+        None,
+        &frames[0],
+    )
+    .unwrap();
+    assert_eq!(decoded[0].metric, chunk(&schema).metric);
+    state.lock().unwrap().explicit_labels = false;
+    assert!(plan.execute(0, context()).is_err());
+    assert_eq!(state.lock().unwrap().raw_calls, 1);
 }

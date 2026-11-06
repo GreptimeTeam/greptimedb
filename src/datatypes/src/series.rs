@@ -22,7 +22,11 @@ pub mod time;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::any::Any;
+use std::sync::{Arc, OnceLock};
+
+use arrow::array::{Array, StringArray};
+use arrow::record_batch::RecordBatch;
 
 use crate::error::{InvalidSeriesSnafu, Result};
 
@@ -67,10 +71,10 @@ pub struct Label {
 /// The metric name is only the `__name__` value (see [`Self::name`]); this type is
 /// the whole label set a PromQL series shows. It is neither a canonical
 /// matching/grouping identity nor a storage identity (read key / primary key).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub struct SeriesLabels {
     name: Option<Arc<str>>,
-    tags: Arc<[Label]>,
+    tags: LabelStorage,
 }
 
 impl serde::Serialize for SeriesLabels {
@@ -78,7 +82,7 @@ impl serde::Serialize for SeriesLabels {
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        (&self.name, self.tags.as_ref()).serialize(serializer)
+        (&self.name, self.tags()).serialize(serializer)
     }
 }
 impl<'de> serde::Deserialize<'de> for SeriesLabels {
@@ -88,6 +92,129 @@ impl<'de> serde::Deserialize<'de> for SeriesLabels {
         let (name, tags): (Option<Arc<str>>, Vec<Label>) =
             serde::Deserialize::deserialize(deserializer)?;
         Self::try_new(name, tags).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Shared, bounded series metadata and the owner of its memory reservation.
+/// Columns map logical label names to UTF-8 arrays; null labels are absent.
+pub struct SeriesLabelBatch {
+    batch: RecordBatch,
+    columns: Vec<(Arc<str>, usize)>,
+    _owner: Arc<dyn Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for SeriesLabelBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeriesLabelBatch")
+            .field("rows", &self.batch.num_rows())
+            .field("columns", &self.columns)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SeriesLabelBatch {
+    /// Validates mappings once. The owner must account for the retained backing buffers.
+    pub fn try_new(
+        batch: RecordBatch,
+        mut columns: Vec<(Arc<str>, usize)>,
+        owner: Arc<dyn Any + Send + Sync>,
+    ) -> Result<Self> {
+        columns.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        if columns.iter().any(|(name, index)| {
+            name.as_ref() == "__name__"
+                || batch
+                    .columns()
+                    .get(*index)
+                    .is_none_or(|a| !a.as_any().is::<StringArray>())
+        }) || columns.windows(2).any(|p| p[0].0 == p[1].0)
+        {
+            return invalid_series("invalid batch label mapping");
+        }
+        Ok(Self {
+            batch,
+            columns,
+            _owner: owner,
+        })
+    }
+
+    /// Estimates retained buffers and one row view per batch row, including lazy
+    /// owned-label materialization. Shared buffers are conservatively counted per
+    /// array. Additional independent views of a row need their own reservation.
+    /// This is a reservation estimate, not an allocator-exact accounting contract.
+    pub fn estimated_size(&self) -> usize {
+        let arc_header = 2 * std::mem::size_of::<usize>();
+        let row_views = self
+            .batch
+            .num_rows()
+            .saturating_mul(std::mem::size_of::<BatchLabels>() + arc_header);
+        let mut bytes = self
+            .batch
+            .get_array_memory_size()
+            .saturating_add(std::mem::size_of::<Self>() + arc_header)
+            .saturating_add(
+                self.columns
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(Arc<str>, usize)>()),
+            )
+            .saturating_add(row_views);
+        for (name, column) in &self.columns {
+            bytes = bytes.saturating_add(name.len() + arc_header);
+            for row in 0..self.batch.num_rows() {
+                if let Some(value) = self.value(*column, row) {
+                    // Vec-to-Arc conversion may temporarily retain both label arrays.
+                    bytes = bytes
+                        .saturating_add(2 * std::mem::size_of::<Label>())
+                        .saturating_add(value.len())
+                        .saturating_add(arc_header + std::mem::align_of::<usize>());
+                }
+            }
+        }
+        bytes.saturating_add(self.batch.num_rows().saturating_mul(arc_header))
+    }
+
+    fn value(&self, column: usize, row: usize) -> Option<&str> {
+        let strings = self
+            .batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<StringArray>()?;
+        (!strings.is_null(row)).then(|| strings.value(row))
+    }
+}
+
+#[derive(Clone, Debug)]
+enum LabelStorage {
+    Owned(Arc<[Label]>),
+    Batch(Arc<BatchLabels>),
+}
+
+#[derive(Debug)]
+struct BatchLabels {
+    batch: Arc<SeriesLabelBatch>,
+    row: usize,
+    // Existing consumers requesting owned labels share one lazy materialization.
+    materialized: OnceLock<Arc<[Label]>>,
+}
+
+impl PartialEq for SeriesLabels {
+    fn eq(&self, other: &Self) -> bool {
+        if self.name != other.name {
+            return false;
+        }
+        if let (LabelStorage::Batch(a), LabelStorage::Batch(b)) = (&self.tags, &other.tags)
+            && Arc::ptr_eq(a, b)
+        {
+            return true;
+        }
+        self.tags() == other.tags()
+    }
+}
+impl Eq for SeriesLabels {}
+
+impl std::hash::Hash for SeriesLabels {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.name, state);
+        std::hash::Hash::hash(self.tags(), state);
     }
 }
 
@@ -103,7 +230,7 @@ impl SeriesLabels {
         }
         Ok(Self {
             name,
-            tags: tags.into(),
+            tags: LabelStorage::Owned(tags.into()),
         })
     }
 
@@ -114,18 +241,60 @@ impl SeriesLabels {
 
     /// Returns ordinary labels sorted by name.
     pub fn tags(&self) -> &[Label] {
-        &self.tags
+        match &self.tags {
+            LabelStorage::Owned(tags) => tags,
+            LabelStorage::Batch(labels) => labels.materialized.get_or_init(|| {
+                labels
+                    .batch
+                    .columns
+                    .iter()
+                    .filter_map(|(name, column)| {
+                        labels.batch.value(*column, labels.row).map(|value| Label {
+                            name: name.clone(),
+                            value: Arc::from(value),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            }),
+        }
+    }
+
+    /// Creates a shared row view without encoding keys or allocating owned label strings.
+    pub fn from_batch(
+        name: Option<Arc<str>>,
+        batch: Arc<SeriesLabelBatch>,
+        row: usize,
+    ) -> Result<Self> {
+        if row >= batch.batch.num_rows() {
+            return invalid_series("series label row out of bounds");
+        }
+        Ok(Self {
+            name,
+            tags: LabelStorage::Batch(Arc::new(BatchLabels {
+                batch,
+                row,
+                materialized: OnceLock::new(),
+            })),
+        })
     }
 
     /// Returns a label value, distinguishing absence from an empty value.
     pub fn get(&self, label: &str) -> Option<&str> {
         if label == "__name__" {
             self.name()
+        } else if let LabelStorage::Batch(labels) = &self.tags {
+            let i = labels
+                .batch
+                .columns
+                .binary_search_by(|(name, _)| name.as_ref().cmp(label))
+                .ok()?;
+            labels.batch.value(labels.batch.columns[i].1, labels.row)
         } else {
-            self.tags
+            self.tags()
                 .binary_search_by(|tag| tag.name.as_ref().cmp(label))
                 .ok()
-                .map(|index| self.tags[index].value.as_ref())
+                .map(|index| self.tags()[index].value.as_ref())
         }
     }
 
@@ -136,16 +305,16 @@ impl SeriesLabels {
             return Ok(());
         }
         match self
-            .tags
+            .tags()
             .binary_search_by(|tag| tag.name.as_ref().cmp(label))
         {
             Ok(index) => {
-                let mut tags = self.tags.to_vec();
+                let mut tags = self.tags().to_vec();
                 tags[index].value = value;
-                self.tags = tags.into();
+                self.tags = LabelStorage::Owned(tags.into());
             }
             Err(index) => {
-                let mut tags = self.tags.to_vec();
+                let mut tags = self.tags().to_vec();
                 tags.insert(
                     index,
                     Label {
@@ -153,7 +322,7 @@ impl SeriesLabels {
                         value,
                     },
                 );
-                self.tags = tags.into();
+                self.tags = LabelStorage::Owned(tags.into());
             }
         }
         Ok(())
@@ -164,12 +333,12 @@ impl SeriesLabels {
         if label == "__name__" {
             self.name = None;
         } else if let Ok(index) = self
-            .tags
+            .tags()
             .binary_search_by(|tag| tag.name.as_ref().cmp(label))
         {
-            let mut tags = self.tags.to_vec();
+            let mut tags = self.tags().to_vec();
             tags.remove(index);
-            self.tags = tags.into();
+            self.tags = LabelStorage::Owned(tags.into());
         }
     }
 
@@ -179,13 +348,13 @@ impl SeriesLabels {
             self.name = None;
         }
         let kept: Vec<_> = self
-            .tags
+            .tags()
             .iter()
             .filter(|tag| labels.contains(&tag.name.as_ref()))
             .cloned()
             .collect();
-        if kept.len() != self.tags.len() {
-            self.tags = kept.into();
+        if kept.len() != self.tags().len() {
+            self.tags = LabelStorage::Owned(kept.into());
         }
     }
 
@@ -195,13 +364,13 @@ impl SeriesLabels {
             self.name = None;
         }
         let kept: Vec<_> = self
-            .tags
+            .tags()
             .iter()
             .filter(|tag| !labels.contains(&tag.name.as_ref()))
             .cloned()
             .collect();
-        if kept.len() != self.tags.len() {
-            self.tags = kept.into();
+        if kept.len() != self.tags().len() {
+            self.tags = LabelStorage::Owned(kept.into());
         }
     }
 }

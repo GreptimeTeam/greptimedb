@@ -2206,7 +2206,7 @@ impl FusedSeriesExec {
 
         fn is_complete_series_input(plan: &dyn ExecutionPlan) -> bool {
             if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
-                return bound_tags_cover_primary_key(scan.label_source());
+                return bound_tags_cover_primary_key(scan.scan_binding());
             }
             if let Some(cooperative) = plan.downcast_ref::<CooperativeExec>() {
                 return cooperative

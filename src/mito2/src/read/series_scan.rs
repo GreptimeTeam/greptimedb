@@ -915,6 +915,16 @@ impl RegionScanner for SeriesScan {
             .map(|(preparation, _)| preparation.schema))
     }
 
+    fn raw_series_has_explicit_labels(&self, labels: &RawLabelSource) -> Result<bool, BoxedError> {
+        let Some((mut raw, columnar)) = self.prepare_raw_scan(labels)? else {
+            return Ok(false);
+        };
+        Ok(columnar
+            && prepared::sample_merge_schema(&self.stream_ctx, &mut raw)
+                .map_err(BoxedError::new)?
+                .is_some())
+    }
+
     fn scan_series_partition(
         &self,
         ctx: &QueryScanContext,
@@ -936,6 +946,7 @@ impl RegionScanner for SeriesScan {
                     .build(),
                 ));
             }
+            let explicit_labels = self.raw_series_has_explicit_labels(label_source)?;
             let future = self.prepare_series(ctx, metrics_set, label_source);
             let schema = preparation.schema;
             let labels = label_source.clone();
@@ -951,6 +962,7 @@ impl RegionScanner for SeriesScan {
                 schema,
                 labels,
                 self.raw_ordering(prepared_columnar),
+                explicit_labels,
                 Box::pin(stream),
             )));
         }

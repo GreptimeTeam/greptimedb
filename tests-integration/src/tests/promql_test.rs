@@ -1868,6 +1868,21 @@ fn observed_physical_nodes(
     nodes
 }
 
+/// The region reads a native node answers from, descending through cooperative wrappers and the
+/// segments a statement cut out of itself.
+fn native_region_inputs(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    out: &mut Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+) {
+    for child in plan.children() {
+        if child.is::<MergeScanExec>() {
+            out.push(Arc::clone(child));
+        } else {
+            native_region_inputs(child, out);
+        }
+    }
+}
+
 fn observed_series_scans(observer: &NativePlanObserver) -> Vec<Arc<dyn ExecutionPlan>> {
     observed_physical_nodes(observer)
         .into_iter()
@@ -2880,11 +2895,11 @@ fn repeated_selector_fixture_inserts(prefix: &str) -> String {
 }
 
 /// Real two-datanode TCP acceptance for a repeated selector over ONE partitioned metric table.
-/// Over the wire every prepared scan becomes its own raw source with its own time bounds, so two
-/// occurrences of the same fragmented table - a ratio of two windows, or a binary expression over
-/// two identical ones - stay independent instead of falling back. In process the same expression
-/// would place one node region-locally over both scans of the one table, which no region can serve,
-/// so this admission is remote-only.
+/// Every prepared scan becomes its own raw source with its own time bounds, so two occurrences of
+/// the same fragmented table - a ratio of two windows, or a binary expression over two identical
+/// ones - stay independent instead of falling back. Over the wire the transport carries those
+/// sources; in process they keep the node out of the region, which cannot serve one node over both
+/// scans of the one table.
 #[tokio::test(flavor = "multi_thread")]
 async fn distributed_native_promql_repeated_selector_over_partitioned_table() {
     common_telemetry::init_default_ut_logging();
@@ -3028,6 +3043,289 @@ async fn distributed_native_promql_repeated_selector_over_partitioned_table() {
         }
         assert_eq!(control_rows, rows, "{expression}");
     }
+}
+
+/// The rows a collapsing rewrite joins into one series without a collision: the two stored series
+/// are ten minutes apart, twice the five-minute lookback, so exactly one of them holds a value at
+/// each evaluation point and the label set they share carries both points.
+fn canonical_merge_fixture_inserts(prefix: &str) -> String {
+    format!(
+        "INSERT INTO {prefix}_b (host, val, ts) VALUES ('first', 10, 0), ('second', 20, 600000)"
+    )
+}
+
+/// The rows a collapsing rewrite can only reject: the second series is two minutes after the first,
+/// inside the lookback, so both hold a value at the same evaluation point while the declared partition
+/// column stores the two hosts under values that place them in different regions.
+fn canonical_collision_fixture_inserts(prefix: &str) -> String {
+    format!("INSERT INTO {prefix}_c (host, val, ts) VALUES ('early', 10, 0), ('late', 20, 120000)")
+}
+
+/// Real two-datanode TCP acceptance for a canonical merge over a tag-partitioned metric table.
+///
+/// A rewrite that writes a label its input carries can give two stored series one label set. The two
+/// series are stored under different values of the declared partition column, so that partition puts
+/// the pieces of the one label set in different regions: no region holds the set whole. A
+/// region-local producer merges only the pieces its own region holds, so the boundary has to be
+/// placed above the regions: the frontend runs the producer over the reconciled raw sources, and the
+/// canonical router it inserts above itself collects each label set from every region.
+///
+/// The test states that in the three ways it can be observed: the values (against the same rows in
+/// one unpartitioned table), the plan (the producer is a frontend node reading a merge scan, with its
+/// canonical router above it), and the error (a collision two different regions hold is reported,
+/// which no single region could see).
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_canonical_merge_over_partitioned_table() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_canonical")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_canon_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) PARTITION ON COLUMNS (host) (host < 'first', host >= 'first' AND host < 'second', host >= 'second') ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_canon_b", "dist_native_canon_c"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_canon_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &canonical_merge_fixture_inserts("dist_native_canon"),
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &canonical_collision_fixture_inserts("dist_native_canon"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The semantic reference: the same rows in one unpartitioned physical table, where one region
+    // holds every piece of a label set. Its evaluation is what the partitioned plan has to reproduce.
+    execute_all(
+        &instance,
+        "CREATE TABLE dist_native_canon_ctl_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('physical_metric_table'='true')",
+        QueryContext::arc(),
+    )
+    .await;
+    for table in ["dist_native_canon_ctl_b", "dist_native_canon_ctl_c"] {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='dist_native_canon_ctl_phy')"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        &canonical_merge_fixture_inserts("dist_native_canon_ctl"),
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &canonical_collision_fixture_inserts("dist_native_canon_ctl"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // Two stored series rewritten to one label set, holding their values at different evaluation
+    // points, are one series carrying both points - and the hosts they are stored under land in
+    // different host ranges, so the two pieces are in different regions.
+    let expression = r#"label_replace(dist_native_canon_b, "host", "same", "host", ".*")"#;
+    let query = PromQuery {
+        query: expression.to_string(),
+        start: "0".to_string(),
+        end: "600".to_string(),
+        step: "600s".to_string(),
+        ..PromQuery::default()
+    };
+    let expected = vec![
+        (0, "same".to_string(), 10.0),
+        (600_000, "same".to_string(), 20.0),
+    ];
+    let control = expression.replace("dist_native_canon_", "dist_native_canon_ctl_");
+    for (route, native) in [("native", true), ("existing", false)] {
+        let control_rows = native_result_rows(
+            instance
+                .do_promql_query(
+                    &PromQuery {
+                        query: control.clone(),
+                        ..query.clone()
+                    },
+                    native_query_context(native, 2),
+                )
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            control_rows, expected,
+            "the control over one region defines every row: {route}: {control}"
+        );
+    }
+
+    let output = instance
+        .do_promql_query(&query, native_query_context(true, 2))
+        .await
+        .remove(0)
+        .unwrap();
+    let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+    let shape = native_plan_shape(plan);
+    assert_eq!(
+        shape.regions_per_scan,
+        vec![3],
+        "the selector reads all three host ranges: {expression}: {plan:?}"
+    );
+    // Declaring a partition on a primary-key column that is not the time index proves the regions
+    // hold disjoint series, so the merge scan publishes them whole and the boundary above the
+    // regions only ever sees complete stored series.
+    assert!(
+        shape
+            .scan_orderings
+            .iter()
+            .all(|ordering| ordering.as_deref() == Some("contiguous")),
+        "a declared partition on a primary-key column that excludes the time index proves the \
+         regions hold disjoint series (physical_regions_disjoint), so the merge scan publishes \
+         whole series, not fragments: {expression}: {:?}: {plan:?}",
+        shape.scan_orderings
+    );
+    // The boundary's two halves are both frontend nodes: the producer merges what each execution
+    // partition holds and the consumer above it publishes the routed frames. A producer planned
+    // inside a region would leave this tree with one fused node and no canonical producer in it.
+    assert_eq!(
+        shape.fused, 2,
+        "the canonical producer and the consumer above it run on the frontend: {expression}: \
+         {plan:?}"
+    );
+    let producer = native_plan_nodes(plan)
+        .into_iter()
+        .find(|node| promql::extension_plan::is_canonical_producer_exec(node.as_ref()))
+        .unwrap_or_else(|| {
+            panic!(
+                "the canonical producer must be a frontend node above the regions, not a region's \
+                 own producer: {expression}: {plan:?}"
+            )
+        });
+    // What the producer reads is every region's own stored series, each already whole: one merge
+    // scan over all three regions, with no raw-key repartition below it.
+    let below_producer = native_plan_nodes(&producer);
+    assert!(
+        below_producer
+            .iter()
+            .any(|node| node.downcast_ref::<MergeScanExec>().is_some()),
+        "the producer reads the regions through a merge scan: {expression}: {plan:?}"
+    );
+    assert!(
+        below_producer
+            .iter()
+            .all(|node| node.name() != "SeriesRepartitionExec"),
+        "no raw-key repartition sits below the producer: each input partition already holds whole \
+         stored series, since the partition covers the primary key and only the label set crosses \
+         regions: {expression}: {plan:?}"
+    );
+    // The router is the boundary's middle stage: it sits above the producer and collects each label
+    // set from every partition the producer ran on, which is what a region-local boundary cannot do.
+    let router = native_plan_nodes(plan)
+        .into_iter()
+        .find(|node| {
+            node.name() == "SeriesRepartitionExec"
+                && node
+                    .children()
+                    .iter()
+                    .any(|child| promql::extension_plan::is_canonical_producer_exec(child.as_ref()))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the canonical router must read the producer above the regions: {expression}: \
+                 {plan:?}"
+            )
+        });
+    assert_eq!(
+        router.children()[0].name(),
+        "FusedSeriesExec",
+        "the router reads the canonical producer: {expression}: {plan:?}"
+    );
+    assert_eq!(
+        router.properties().output_partitioning().partition_count(),
+        producer
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "the router keeps the producer's width instead of gathering every piece: {expression}: \
+         {plan:?}"
+    );
+    let rows = native_result_rows(output).await;
+    assert_eq!(
+        rows, expected,
+        "the partitioned plan answers the control's rows: {expression}"
+    );
+
+    // A collision two regions hold is the error Prometheus reports for two metrics with one label
+    // set. A region-local producer cannot see it: each region would hold one piece and publish it,
+    // and the answer would be two series under one label set. The control over one region reports it
+    // as well, which is the answer the partitioned plan owes.
+    let collision = r#"label_replace(dist_native_canon_c, "host", "same", "host", ".*")"#;
+    let collision_query = PromQuery {
+        query: collision.to_string(),
+        start: "120".to_string(),
+        end: "120".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let collision_control = collision.replace("dist_native_canon_", "dist_native_canon_ctl_");
+    let control_error = instance
+        .do_promql_query(
+            &PromQuery {
+                query: collision_control.clone(),
+                ..collision_query.clone()
+            },
+            native_query_context(true, 2),
+        )
+        .await
+        .remove(0);
+    let control_error = match control_error {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        control_error.contains("cannot contain metrics with the same labelset"),
+        "the control over one region reports the overlap: {collision_control}: {control_error}"
+    );
+    let partitioned = instance
+        .do_promql_query(&collision_query, native_query_context(true, 2))
+        .await
+        .remove(0);
+    let partitioned_error = match partitioned {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        partitioned_error.contains("cannot contain metrics with the same labelset"),
+        "a label set whose pieces two regions hold is collected by the router and rejected, not \
+         published twice: {collision}: {partitioned_error}"
+    );
 }
 
 /// The rows of the disjoint fixture, inserted into the logical tables `{prefix}_a` and
@@ -3607,6 +3905,108 @@ async fn distributed_native_promql_remote_refuses_unsupported_discovery_and_name
             0,
             "two sources cannot report groups that differ only by metric name: {plan:?}"
         );
+    }
+}
+
+/// The columns and `(timestamp, value)` rows of a statement that reads no table, whose time column
+/// is the statement's own rather than a table's.
+async fn data_free_rows(output: Output) -> (Vec<String>, Vec<(i64, f64)>) {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("PromQL query returns record batches"),
+    };
+    let mut columns = Vec::new();
+    let mut rows = Vec::new();
+    for batch in batches {
+        columns = batch
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let timestamps = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let values = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1, "one result value column");
+        let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((timestamps.value(row), values.value(row)));
+        }
+    }
+    rows.sort_by_key(|row| row.0);
+    (columns, rows)
+}
+
+/// A statement that reads no table plans natively over the wire, where there is no region to place
+/// anything in: the frontend evaluates one fused node, so the answer keeps the native column name
+/// instead of the one the existing planner derives from an expression.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_data_free_statement_plans_natively() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_data_free")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    for (expression, expected_columns, expected_rows) in [
+        // `start`/`end` are seconds, so this one-step range evaluates at 3000ms.
+        ("time()", &["time", "value"][..], &[(3000, 3.0)][..]),
+        (
+            r#"label_replace(vector(1), "host", "host1", "", "")"#,
+            &["time", "value", "host"][..],
+            &[(3000, 1.0)][..],
+        ),
+    ] {
+        let query = PromQuery {
+            query: expression.to_string(),
+            start: "3".to_string(),
+            end: "3".to_string(),
+            step: "1s".to_string(),
+            ..PromQuery::default()
+        };
+        let output = instance
+            .do_promql_query(&query, native_query_context(true, 2))
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.clone().expect("frontend physical plan");
+        let shape = native_plan_shape(&plan);
+        assert_eq!(
+            1, shape.fused,
+            "a data-free statement is one fused node: {plan:?}"
+        );
+        assert!(
+            shape.regions_per_scan.is_empty(),
+            "a data-free statement reads no region: {plan:?}"
+        );
+        let (columns, rows) = data_free_rows(output).await;
+        assert_eq!(expected_columns, columns, "{expression}");
+        assert_eq!(expected_rows, rows.as_slice(), "{expression}");
+
+        // The same statement through the existing planner answers the same rows; only the native
+        // route names the value column after the tree rather than after an expression.
+        let legacy = instance
+            .do_promql_query(&query, native_query_context(false, 2))
+            .await
+            .remove(0)
+            .unwrap();
+        let (_, legacy_rows) = data_free_rows(legacy).await;
+        assert_eq!(rows, legacy_rows, "{expression} must answer the same rows");
     }
 }
 
@@ -6202,16 +6602,80 @@ async fn native_promql_info_enriches_from_the_info_table() {
     }
 }
 
-/// A two-selector query over a table split into regions never fuses the binary itself.
+/// A window over a table partitioned on a column that is not a tag sees the whole series.
 ///
-/// A fused node with more than one input has no placement on such a table — the dist analyzer
-/// refuses it with "only accept plan with at most one child" — so admitting one used to make the
-/// whole query fail instead of falling back. Each operand may still be fused on its own: that is a
-/// single-input node over a region-local scan, which places fine, and it is what the hybrid
-/// operand route does. What must never appear is a fused node with two children, so that is what
-/// is asserted rather than "no fused node at all".
+/// Such a table splits one series across regions, so a per-region prefix evaluates `rate` over a
+/// fragment and loses every window that straddles the boundary. The cut therefore has to keep each
+/// occurrence's raw source and run the prefix above the reconciliation, exactly as the remote route
+/// does. The fixture puts the two samples of one series on either side of the boundary and compares
+/// the native answer with the existing plan's.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfused() {
+async fn native_promql_window_over_a_time_partitioned_table_keeps_whole_series() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_time_partitioned_window",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_time_partitioned (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:30', \
+         ts >= '1970-01-01 00:02:30')",
+        QueryContext::arc(),
+    )
+    .await;
+    // One series, one sample in each region: the second is 240s after the first, and the boundary
+    // sits between them, so neither region holds a complete window on its own.
+    execute_all(
+        &instance,
+        "INSERT INTO native_time_partitioned VALUES ('h0', 60000, 60), ('h0', 240000, 240)",
+        QueryContext::arc(),
+    )
+    .await;
+    for query in [
+        "rate(native_time_partitioned[5m]) + rate(native_time_partitioned[5m])",
+        "(rate(native_time_partitioned[5m]) + rate(native_time_partitioned[5m])) \
+         + rate(native_time_partitioned[5m])",
+    ] {
+        let sql = format!("TQL EVAL (300, 300, '1m') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !native.is_empty(),
+            "{query}: the native plan answered nothing"
+        );
+        assert_eq!(
+            native, legacy,
+            "{query}: the native plan must match the existing one"
+        );
+        let root = observer.root_plan();
+        let mut inputs = Vec::new();
+        native_region_inputs(&root, &mut inputs);
+        assert!(
+            !inputs.is_empty(),
+            "{query}: the window runs above the region reads: {:?}",
+            display_plan_tree(&root)
+        );
+        // A fallback plan also produces the existing plan's rows, so the admission has to be
+        // asserted separately: the frontend tree must carry a fused node.
+        assert!(
+            find_plan_node(&root, "FusedSeriesExec").is_some(),
+            "{query}: the tree must run natively, not on the existing plan: {:?}",
+            display_plan_tree(&root)
+        );
+    }
+}
+
+/// A query over two selectors of one partitioned table matches above the regions.
+///
+/// A fused node over the bare scans of such a table has no placement in a region — the dist
+/// analyzer refuses it with "only accept plan with at most one child" — so each selector
+/// occurrence reads that table through its own raw region input instead. Every input is one read of
+/// the whole table, and the matching the query asks for runs once above them, over every region's
+/// contribution: two inputs for a two-selector query, three for a three-selector one.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independent_regions() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_partitioned_pair",
     ))
@@ -6231,10 +6695,11 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
         QueryContext::arc(),
     )
     .await;
-    for (query, expected) in [
+    for (query, expected, sources) in [
         (
             "native_partitioned_pair{kind=\"a\"} and on(host) native_partitioned_pair{kind=\"b\",host=\"h0\"}",
             vec![(5_000, "h0".to_string(), 1.0)],
+            2,
         ),
         (
             "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"}",
@@ -6242,8 +6707,10 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
                 (5_000, "h0".to_string(), -1.0),
                 (5_000, "h2".to_string(), -1.0),
             ],
+            2,
         ),
-        // Three selectors: the inner pair may take the hybrid route under the outer join.
+        // Three selectors: the inner pair matches above its own two region inputs, under the outer
+        // match.
         (
             "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"} \
              + on(host) native_partitioned_pair{kind=\"a\"}",
@@ -6251,19 +6718,30 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
                 (5_000, "h0".to_string(), 0.0),
                 (5_000, "h2".to_string(), 2.0),
             ],
+            3,
         ),
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        if let Some(fused) = observer.fused() {
-            assert_eq!(
-                fused.children().len(),
-                1,
-                "`{query}` fused the two-selector binary, which has no placement on a partitioned \
-                 table: {fused:?}"
-            );
-        }
+        // The frontend's own tree: the fused node above the regions, not the region-side plan the
+        // observer also wraps.
+        let root = observer.root_plan();
+        let mut inputs = Vec::new();
+        native_region_inputs(&root, &mut inputs);
+        assert_eq!(
+            sources,
+            inputs.len(),
+            "`{query}` reads one region input per selector occurrence: {:?}",
+            display_plan_tree(&root)
+        );
+        // The values alone cannot tell native matching from a legacy frontend join that reads the
+        // same regions, so require the native binary in the frontend tree.
+        assert!(
+            find_plan_node(&root, "FusedSeriesExec").is_some(),
+            "`{query}` must match natively above its region inputs: {:?}",
+            display_plan_tree(&root)
+        );
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");
@@ -6696,16 +7174,20 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     let on_empty_sql = format!(
         r#"TQL EVAL (1, 1, '1s') {table}{{host="h001"}} - on() ({table}{{host="h001"}} * 2)"#
     );
-    async fn unlabeled_rows(output: Output) -> Vec<(i64, f64, bool)> {
+    async fn unlabeled_rows(output: Output) -> Vec<(i64, f64)> {
         let batches = match output.data {
             OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
             OutputData::RecordBatches(batches) => batches,
             _ => unreachable!("TQL EVAL returns record batches"),
         };
+        let schema = batches.schema();
+        let schema = schema.arrow_schema();
+        assert_eq!(schema.fields().len(), 2, "only timestamp and value");
+        assert!(schema.field_with_name("host").is_err());
+        assert!(schema.field_with_name("__name__").is_err());
         batches
             .iter()
             .flat_map(|batch| {
-                assert!(batch.column_by_name("host").is_none());
                 let timestamps = batch
                     .column_by_name("ts")
                     .unwrap()
@@ -6720,13 +7202,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
                 assert_eq!(values.len(), 1);
                 let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
                 (0..batch.num_rows())
-                    .map(|row| {
-                        (
-                            timestamps.value(row),
-                            values.value(row),
-                            batch.num_columns() == 2,
-                        )
-                    })
+                    .map(|row| (timestamps.value(row), values.value(row)))
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -6734,8 +7210,10 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     observer.clear();
     let on_empty_rows =
         unlabeled_rows(native_tql_output(&instance, &on_empty_sql, true).await).await;
-    assert!(observer.fused().is_none(), "{on_empty_sql}");
-    assert_eq!(on_empty_rows, vec![(1_000, -1_001.0, true)]);
+    let on_empty_plan = observer.two_input_fused();
+    assert_eq!(on_empty_plan.name(), "FusedSeriesExec", "{on_empty_sql}");
+    assert_eq!(on_empty_plan.schema().fields().len(), 2, "{on_empty_sql}");
+    assert_eq!(on_empty_rows, vec![(1_000, -1_001.0)]);
     let on_empty_legacy =
         unlabeled_rows(native_tql_output(&instance, &on_empty_sql, false).await).await;
     assert_eq!(on_empty_rows, on_empty_legacy);
@@ -6753,29 +7231,122 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         native_result_rows(native_tql_output(&instance, &different_matchers, false).await).await;
     assert_eq!(different_matcher_rows, different_matcher_legacy);
 
-    // Group matching drops the full series identity, and a subquery stays on the ordinary planner path.
-    let fallback_expected = expected[..HOSTS].to_vec();
-    for (sql, expected_rows) in [
+    // Group matching executes natively; the subquery case remains on the ordinary path, unchanged.
+    let grouped_expected = expected[..HOSTS].to_vec();
+    for (index, (sql, expected_rows)) in [
         (
             format!(
                 r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
             ),
-            fallback_expected.clone(),
+            grouped_expected,
         ),
         (
             format!(r#"TQL EVAL (1, 1, '1s') rate({table}{{host="h000"}}[2s:1s])"#),
             vec![(1_000, "h000".to_string(), 0.5)],
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         observer.clear();
         let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert!(
-            observer.fused().is_none(),
-            "a fallback shape must not plan a fused node: {sql}"
-        );
+        if index == 0 {
+            let plan = observer.two_input_fused();
+            assert_two_source_native_plan(&observer, &plan, false);
+        } else {
+            assert!(
+                observer.fused().is_none(),
+                "a fallback shape must not plan a fused node: {sql}"
+            );
+        }
         assert_eq!(rows, expected_rows, "{sql}");
         let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(rows, legacy_rows, "{sql}");
+    }
+}
+
+/// Empty-key grouped matches retain the many side's labels and report kernel cardinality errors.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_hybrid_binary_empty_on_grouped_matching_and_errors() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_binary_empty_on_matching",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_empty_match (host STRING, kind STRING, zone_name STRING, \
+         ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, kind, zone_name)); \
+         INSERT INTO native_empty_match VALUES \
+         ('h0', 'a', '', 0, 10), ('h0', 'b', '', 0, 20), ('h0', 'c', 'z', 0, 2)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let labels = |kind: &str| {
+        [
+            ("host".to_string(), "h0".to_string()),
+            ("kind".to_string(), kind.to_string()),
+            ("zone_name".to_string(), "z".to_string()),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    for (query, expected) in [
+        (
+            r#"native_empty_match{kind=~"a|b"} - on() group_left(zone_name) native_empty_match{kind="c"}"#,
+            vec![(0, labels("a"), 8.0), (0, labels("b"), 18.0)],
+        ),
+        (
+            r#"native_empty_match{kind="c"} - on() group_right(zone_name) native_empty_match{kind=~"a|b"}"#,
+            vec![(0, labels("a"), -8.0), (0, labels("b"), -18.0)],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let (columns, rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.two_input_fused();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(columns, vec!["host", "kind", "ts", "val", "zone_name"]);
+        assert_eq!(rows, expected, "{query}");
+        let (_, legacy) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(rows, legacy, "legacy: {query}");
+    }
+
+    for (query, expected_error) in [
+        (
+            r#"native_empty_match{kind="c"} - on() native_empty_match{kind=~"a|b"}"#,
+            "found duplicate series for the match group {} on the right hand-side of the operation at 0 ms",
+        ),
+        (
+            r#"native_empty_match{kind=~"a|b"} - on() native_empty_match{kind="c"}"#,
+            "multiple matches for labels {} at 0 ms: many-to-one matching must be explicit",
+        ),
+        (
+            r#"native_empty_match{kind="c"} - on() group_left() native_empty_match{kind=~"a|b"}"#,
+            "found duplicate series for the match group {} on the right hand-side of the operation at 0 ms",
+        ),
+        (
+            r#"native_empty_match{kind=~"a|b"} - on() group_right() native_empty_match{kind="c"}"#,
+            "found duplicate series for the match group {} on the left hand-side of the operation at 0 ms",
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let result = instance
+            .do_query(&sql, native_query_context(true, 4))
+            .await
+            .remove(0);
+        let error = match result {
+            Ok(output) => collect_error(output).await,
+            Err(error) => error.to_string(),
+        };
+        let plan = observer.two_input_fused();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert!(error.contains(expected_error), "{query}: {error}");
     }
 }
 
@@ -6889,7 +7460,7 @@ async fn native_promql_rate_and_abs_rate_match_legacy_across_storage_encodings()
                 .expect("fused node reads a prepared series scan");
             let RawLabelSource::PrimaryKey {
                 physical_metadata, ..
-            } = series_scan.label_source()
+            } = series_scan.scan_binding()
             else {
                 panic!("fused scan must materialize labels from the primary key");
             };
@@ -7269,7 +7840,7 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // selector, over the scan bound to that selector's metric.
         fn scan_metric(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> Option<String> {
             if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
-                return match scan.label_source() {
+                return match scan.scan_binding() {
                     store_api::region_engine::RawLabelSource::PrimaryKey {
                         metric_name, ..
                     } => Some(metric_name.to_string()),
@@ -8149,10 +8720,14 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
         metric_name,
         physical_metadata,
         logical_tags,
-    } = series_scan.label_source()
+    } = series_scan.scan_binding()
     else {
-        panic!("the fused scan must materialize labels from the primary key");
+        panic!("the fused scan must bind labels from the primary key");
     };
+    assert!(matches!(
+        series_scan.label_source(),
+        RawLabelSource::Explicit
+    ));
     assert_eq!(metric_name.as_ref(), TABLE);
     assert_eq!(
         logical_tags
@@ -8215,6 +8790,19 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
     assert_eq!(native_rows, legacy_rows, "same rows on both routes");
     assert!(observer.fused().is_none(), "the legacy route must not fuse");
+    // An instant selector preserves identities across scan partitions even when frames carry
+    // explicit labels. The binding, rather than the frame encoding, proves completeness.
+    observer.clear();
+    let instant = format!("TQL EVAL (120, 120, '1m') {TABLE}");
+    native_result_rows(native_tql_output(&instance, &instant, true).await).await;
+    let instant_plan = observer.take();
+    let fused = instant_plan
+        .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+        .unwrap();
+    assert!(fused.has_partition_disjoint_identities());
+    let matched = format!("TQL EVAL (120, 120, '1m') sum_over_time({TABLE}{{host=\"b\"}}[2m])");
+    let matched_rows = native_result_rows(native_tql_output(&instance, &matched, true).await).await;
+    assert_eq!(matched_rows, vec![(120_000, "b".to_string(), 80.0)]);
 }
 
 /// No published series index: the columnar `Float64` selector must answer from the raw memtable
