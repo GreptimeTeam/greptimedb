@@ -30,13 +30,18 @@ use crate::error::{InvalidSeriesSnafu, Result};
 ///
 /// Every series has strictly increasing sample positions, including across chunks; positions
 /// are raw timestamps or, for evaluated series, current-stage evaluation times or grid positions.
-/// They need not all be explicit times on the grid. No mode permits
-/// duplicate positions. `Interleaved` permits A1, B1, A2; only the latter two modes keep each
-/// series contiguous. `KeyThenTime` also orders by this stream's series identity, then time:
+/// They need not all be explicit times on the grid. Within one series or producer fragment,
+/// no mode permits duplicate positions. `Interleaved` permits A1, B1, A2; only the latter two modes
+/// keep each series contiguous. `KeyThenTime` also orders by this stream's series identity, then time:
 /// raw streams use the complete bound-compatible identity (not just a TSID or hash), while
 /// evaluated streams use current name/label identity, not storage primary keys or object address/hash.
-/// This ordering
-/// is not a query-global ordering, partition-ownership rule, or finality guarantee.
+/// This ordering is not a query-global ordering, partition-ownership rule, or finality guarantee.
+///
+/// A raw frame adapter accepts only a subset of `Interleaved`: it transports independently closed
+/// producer fragment chains in sequence, allowing the same key and overlapping timestamps in
+/// different fragment chains. Finality closes a fragment, not necessarily the logical series. The
+/// adapter rejects switching keys before a chain closes; it does not support arbitrary multiplexing
+/// of open chains, even though the general ordering permits it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum SeriesOrdering {
     /// Series chunks may interleave; positions within each series remain strictly increasing.

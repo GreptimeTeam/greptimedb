@@ -648,6 +648,7 @@ struct RawScript {
     ordering: SeriesOrdering,
     gate: Option<Arc<Switch>>,
     gate_chunks: bool,
+    fail_after_gate: bool,
 }
 
 impl Stream for RawScript {
@@ -668,6 +669,11 @@ impl Stream for RawScript {
         {
             gate.wait(cx);
             return Poll::Pending;
+        }
+        if std::mem::take(&mut self.fail_after_gate) {
+            return Poll::Ready(Some(Err(boxed(DataFusionError::Execution(
+                "late raw scripted failure".into(),
+            )))));
         }
         Poll::Ready(None)
     }
@@ -694,6 +700,7 @@ struct RawScripted {
     series_schema: Arc<SeriesSchema>,
     decode: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
+    fail_after_gate: bool,
     properties: Arc<PlanProperties>,
 }
 
@@ -706,6 +713,14 @@ impl RawScripted {
     fn plan_with_ordering(
         partitions: Vec<RawPartition>,
         ordering: SeriesOrdering,
+    ) -> Arc<dyn ExecutionPlan> {
+        Self::plan_with_ordering_and_failure(partitions, ordering, false)
+    }
+
+    fn plan_with_ordering_and_failure(
+        partitions: Vec<RawPartition>,
+        ordering: SeriesOrdering,
+        fail_after_gate: bool,
     ) -> Arc<dyn ExecutionPlan> {
         let series_schema = raw_schema();
         let frame = common_query::series_frame::raw_series_frame_schema_with_ordering(
@@ -725,6 +740,7 @@ impl RawScripted {
             series_schema,
             decode: None,
             ordering,
+            fail_after_gate,
             properties,
         })
     }
@@ -754,6 +770,7 @@ impl RawScripted {
             series_schema,
             decode: Some(decode),
             ordering: SeriesOrdering::KeyThenTime,
+            fail_after_gate: false,
             properties,
         })
     }
@@ -815,6 +832,7 @@ impl ExecutionPlan for RawScripted {
             ordering: self.ordering,
             gate: spec.gate,
             gate_chunks: spec.gate_chunks,
+            fail_after_gate: self.fail_after_gate,
         }))
     }
 }

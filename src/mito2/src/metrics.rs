@@ -203,6 +203,14 @@ lazy_static! {
     )
     .unwrap();
     pub static ref READ_STAGE_FETCH_PAGES: Histogram = READ_STAGE_ELAPSED.with_label_values(&["fetch_pages"]);
+    /// Aggregated columnar reader work, published once per stream.
+    pub static ref COLUMNAR_READ_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_columnar_read_count", "Columnar read operations by kind", &[TYPE_LABEL]
+    ).unwrap();
+    /// Payload bytes requested and fetched, excluding metadata.
+    pub static ref COLUMNAR_READ_BYTES: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_columnar_read_bytes", "Columnar payload bytes by kind", &[TYPE_LABEL]
+    ).unwrap();
     /// Number of in-progress scan per partition.
     pub static ref IN_PROGRESS_SCAN: IntGaugeVec = register_int_gauge_vec!(
         "greptime_mito_in_progress_scan",
@@ -665,5 +673,41 @@ impl StagerNotifier for StagerMetrics {
 
     fn on_recycle_clear(&self, size: u64) {
         self.recycle_cache_bytes.sub(size as i64);
+    }
+}
+
+/// Stream-local counters avoid contended metric updates for every tiny sample block.
+/// Stage durations sum elapsed work within a stream, not CPU time or query wall latency.
+/// Stages ending in `_wall` include awaits; concurrent streams can overlap.
+#[derive(Default)]
+pub(crate) struct ColumnarReadMetrics {
+    pub(crate) counts: std::collections::BTreeMap<&'static str, u64>,
+    pub(crate) bytes: std::collections::BTreeMap<&'static str, u64>,
+    elapsed: std::collections::BTreeMap<&'static str, Duration>,
+}
+
+impl ColumnarReadMetrics {
+    pub(crate) fn add_elapsed(&mut self, stage: &'static str, elapsed: Duration) {
+        *self.elapsed.entry(stage).or_default() += elapsed;
+    }
+}
+
+impl Drop for ColumnarReadMetrics {
+    fn drop(&mut self) {
+        for (stage, elapsed) in &self.elapsed {
+            READ_STAGE_ELAPSED
+                .with_label_values(&[stage])
+                .observe(elapsed.as_secs_f64());
+        }
+        for (kind, count) in &self.counts {
+            COLUMNAR_READ_COUNT
+                .with_label_values(&[kind])
+                .inc_by(*count);
+        }
+        for (kind, bytes) in &self.bytes {
+            COLUMNAR_READ_BYTES
+                .with_label_values(&[kind])
+                .inc_by(*bytes);
+        }
     }
 }

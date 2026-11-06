@@ -51,9 +51,15 @@ pub fn map_arithmetic_series(
     scalar: ScalarSeriesOperand<'_>,
 ) -> Result<Option<Series>> {
     let metric = drop_metric_name(&vector.metric)?;
-    map_grid_scalar(schema, vector, scalar, metric, |left, right, _| {
-        Some(op.calculate(left, right))
-    })
+    let (output, _) = map_grid_scalar(
+        schema,
+        vector,
+        scalar,
+        metric,
+        NonFloatSample::Impossible,
+        |left, right, _| Some(op.calculate(left, right)),
+    )?;
+    Ok(output)
 }
 
 /// Compares against a time-varying scalar. Filter keeps vector values and labels; bool emits
@@ -61,20 +67,30 @@ pub fn map_arithmetic_series(
 ///
 /// Shares [`map_arithmetic_series`]'s alignment and row-keeping contract. Each field is compared
 /// independently; a row is kept where any field passes a filter.
+///
+/// A histogram has no ordering against a scalar, so the positions it holds answer nothing; the
+/// second element of the answer reports whether one was dropped so the caller can say so. The
+/// literal-scalar form ([`crate::map::map_compare_literal`]) applies the same rule, and both exist
+/// because a time-varying scalar cannot be folded into a constant.
 pub fn map_compare_series(
     schema: &Arc<SeriesSchema>,
     vector: &Series,
     comparison: Comparison,
     scalar: ScalarSeriesOperand<'_>,
-) -> Result<Option<Series>> {
+) -> Result<(Option<Series>, bool)> {
     let metric = if matches!(comparison, Comparison::Bool(_)) {
         drop_metric_name(&vector.metric)?
     } else {
         vector.metric.clone()
     };
-    map_grid_scalar(schema, vector, scalar, metric, |left, right, sample| {
-        comparison.apply(left, right, sample)
-    })
+    map_grid_scalar(
+        schema,
+        vector,
+        scalar,
+        metric,
+        NonFloatSample::Drop,
+        |left, right, sample| comparison.apply(left, right, sample),
+    )
 }
 
 /// `max_of(a, b)` and `min_of(a, b)`, which Prometheus evaluates with Go's `math.Max` and
@@ -120,13 +136,15 @@ pub fn map_scalar_function(
     right: &Series,
 ) -> Result<Option<Series>> {
     validate_scalar(schema, left)?;
-    map_grid_scalar(
+    let (output, _) = map_grid_scalar(
         schema,
         left,
         ScalarSeriesOperand::Right(right),
         left.metric.clone(),
+        NonFloatSample::Impossible,
         |left, right, _| Some(function.apply(left, right)),
-    )
+    )?;
+    Ok(output)
 }
 
 /// A math function whose parameters are scalar expressions, which Prometheus evaluates at every
@@ -222,14 +240,29 @@ pub fn map_math_with_parameters(
 }
 
 /// Calls `calculate(left, right, vector_sample)` at each index where both operands exist.
+/// What a vector sample that holds no float value means to the kernel being applied.
+#[derive(Clone, Copy, Debug)]
+enum NonFloatSample {
+    /// The caller proved the vector holds floats only, so a histogram here is a bug.
+    Impossible,
+    /// The operation has no answer for it: the position answers nothing and the caller is told
+    /// that a sample was dropped, which is what Prometheus does with a histogram under an operator
+    /// it has no meaning for.
+    Drop,
+}
+
 fn map_grid_scalar(
     schema: &Arc<SeriesSchema>,
     vector: &Series,
     scalar: ScalarSeriesOperand<'_>,
     metric: SeriesLabels,
+    non_float: NonFloatSample,
     calculate: impl Fn(f64, f64, f64) -> Option<f64>,
-) -> Result<Option<Series>> {
-    let vector_time = validate_float_series(schema, vector)?;
+) -> Result<(Option<Series>, bool)> {
+    let vector_time = match non_float {
+        NonFloatSample::Impossible => validate_float_series(schema, vector)?,
+        NonFloatSample::Drop => validate_grid_series(schema, vector)?,
+    };
     let (scalar_series, scalar_left) = match scalar {
         ScalarSeriesOperand::Left(s) => (s, true),
         ScalarSeriesOperand::Right(s) => (s, false),
@@ -246,6 +279,7 @@ fn map_grid_scalar(
         .map(|field| field.cursor())
         .collect::<Vec<_>>();
     let mut row = Vec::with_capacity(field_samples.len());
+    let mut dropped_histogram = false;
     for pair in vector_time.intersect_runs(scalar_time) {
         for offset in 0..pair.len {
             let scalar = float_sample(
@@ -255,11 +289,22 @@ fn map_grid_scalar(
             );
             row.clear();
             for field in &mut field_samples {
-                let sample = float_sample(
-                    field
-                        .at(pair.row + offset)
-                        .expect("the shared run lies inside the vector axis"),
-                );
+                let sample = match field
+                    .at(pair.row + offset)
+                    .expect("the shared run lies inside the vector axis")
+                {
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Missing => None,
+                    SampleRef::Histogram(_) => {
+                        match non_float {
+                            NonFloatSample::Drop => dropped_histogram = true,
+                            NonFloatSample::Impossible => {
+                                unreachable!("validated as float")
+                            }
+                        }
+                        None
+                    }
+                };
                 row.push(scalar.zip(sample).and_then(|(scalar, sample)| {
                     if scalar_left {
                         calculate(scalar, sample, sample)
@@ -271,7 +316,7 @@ fn map_grid_scalar(
             builder.push(pair.position + offset, &row)?;
         }
     }
-    builder.finish(metric)
+    Ok((builder.finish(metric)?, dropped_histogram))
 }
 
 pub(crate) fn validate_scalar<'a>(

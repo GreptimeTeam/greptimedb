@@ -35,6 +35,7 @@ use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::native_histogram::is_native_histogram_value_type;
+use common_query::promql_annotations::promql_annotation_collector;
 use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{debug, tracing};
@@ -493,10 +494,11 @@ async fn do_instant_query(
     query_ctx: QueryContextRef,
 ) -> PrometheusJsonResponse {
     let (metric_name, result_type) = retrieve_metric_name_and_result_type(prom_query.expr());
-    let query_id = query_ctx.remote_query_id().map(str::to_string);
+    // Create the collector here so one strong reference spans planning, execution and the response;
+    // the planner and executor find it by query id through the registry.
+    let collector = query_ctx.remote_query_id().map(promql_annotation_collector);
     let result = handler.do_query_parsed(prom_query, query_ctx).await;
-    PrometheusJsonResponse::from_query_result(result, metric_name, result_type, query_id.as_deref())
-        .await
+    PrometheusJsonResponse::from_query_result(result, metric_name, result_type, collector).await
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -629,19 +631,16 @@ async fn do_range_query(
     query_ctx: QueryContextRef,
 ) -> PrometheusJsonResponse {
     let (metric_name, _) = retrieve_metric_name_and_result_type(prom_query.expr());
-    let query_id = query_ctx.remote_query_id().map(str::to_string);
+    // Create the collector here so one strong reference spans planning, execution and the response;
+    // the planner and executor find it by query id through the registry.
+    let collector = query_ctx.remote_query_id().map(promql_annotation_collector);
     // Matrix serialization sorts samples and series, so execution order never
     // reaches the response.
     let result = handler
         .do_query_parsed(prom_query.with_unordered_output(), query_ctx)
         .await;
-    PrometheusJsonResponse::from_query_result(
-        result,
-        metric_name,
-        ValueType::Matrix,
-        query_id.as_deref(),
-    )
-    .await
+    PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix, collector)
+        .await
 }
 
 #[derive(Debug, Default, Serialize)]

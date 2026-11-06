@@ -26,9 +26,9 @@
 //! identity or provenance, and neither side is authenticated as field provenance. This adapter
 //! preserves
 //! scan candidates only; it is not a residual filter, authorization check, remote transport, or
-//! compaction boundary. Only
-//! [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] are accepted for raw frames and
-//! only `Contiguous` for evaluated ones; `Interleaved` is rejected before any poll.
+//! compaction boundary. Raw frames accept all three [`SeriesOrdering`] declarations, while evaluated
+//! frames accept only `Contiguous`. Raw `Interleaved` supports independently closed producer
+//! fragment chains in sequence, including recurring keys; it does not multiplex open chains.
 //!
 //! An evaluated frame is the same physical family: [`pack_evaluated_series`] and
 //! [`unpack_evaluated_series`] carry computed values under complete labels and grid positions, so a
@@ -86,8 +86,7 @@ pub type SendableStateFrameStream =
 
 /// Builds the canonical raw frame schema with the producer's label binding and ordering.
 ///
-/// Ordering records a producer guarantee; it is not inferred from frame contents. `Interleaved`
-/// has no wire representation and is rejected before the schema is assembled. The label binding
+/// Ordering records a producer guarantee; it is not inferred from frame contents. The label binding
 /// determines both the label mode and, for a primary-key binding, the self-describing label decode
 /// description written into the schema, so a frame can never declare a label layout it does not
 /// describe.
@@ -130,11 +129,7 @@ pub fn frame_schema_with(
     let ordering = match ordering {
         SeriesOrdering::Contiguous => "contiguous",
         SeriesOrdering::KeyThenTime => "read_key_then_time",
-        SeriesOrdering::Interleaved => {
-            return Err(invalid(
-                "interleaved series ordering has no wire representation",
-            ));
-        }
+        SeriesOrdering::Interleaved => "interleaved",
     };
     let schema = series_frame_schema(schema, mode, decode).map_err(codec_error)?;
     let mut metadata = schema.metadata().clone();
@@ -202,19 +197,22 @@ pub fn series_frame_ordering(schema: &ArrowSchema) -> datafusion_common::Result<
     match schema.metadata().get(ORDERING_KEY).map(String::as_str) {
         Some("contiguous") => Ok(SeriesOrdering::Contiguous),
         Some("read_key_then_time") => Ok(SeriesOrdering::KeyThenTime),
+        Some("interleaved") => Ok(SeriesOrdering::Interleaved),
         None | Some(_) => Err(invalid("missing or unknown series ordering")),
     }
 }
 
 /// Packs a storage raw-series stream into DataFusion record batches incrementally.
 ///
-/// Only [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] streams are accepted; an
-/// `Interleaved` declaration is rejected before the first poll, including for an empty stream. Rows
-/// accumulate across chunks into batches bounded by the builder's row and estimated payload limits;
-/// one legal oversized row may be emitted alone, and these limits are a work bound, not a
-/// resident-memory cap. A ready batch is yielded without polling the source again. Producers must
-/// keep each series' chunks contiguous. Validation checks adjacent chunk conditions but does not
-/// certify nonadjacent recurrence for `Contiguous` ordering.
+/// Rows accumulate across chunks into batches bounded by the builder's row and estimated payload
+/// limits; one legal oversized row may be emitted alone, and these limits are a work bound, not a
+/// resident-memory cap. A ready batch is yielded without polling the source again.
+///
+/// Even under [`SeriesOrdering::Interleaved`], each producer fragment chain must close before
+/// another starts; arbitrary multiplexing of open chains is rejected. Closed fragment chains may
+/// recur with the same key and overlapping timestamps. Finality closes a producer fragment, not
+/// necessarily the logical series. For `Contiguous`, validation checks adjacent chunk conditions
+/// but does not certify nonadjacent recurrence.
 ///
 /// The stream's own declaration is the only decode input: a frame unpacked without a scan-bound
 /// [`RawLabelSource`] round trips unchanged instead of being re-declared from a binding it does not
@@ -224,7 +222,6 @@ pub fn pack_raw_series(
     source: SendableRawSeriesStream,
 ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
     let ordering = source.ordering();
-    ensure_supported_ordering(ordering)?;
     let schema = source.schema().clone();
     let decode = source.label_decode_spec().cloned();
     let labels = declared_label_mode(&decode);
@@ -417,11 +414,10 @@ pub fn unpack_aggregate_state(
 ///
 /// The frame is the sole source of decode information: the payload fields, the label mode, the
 /// label decode description, and the producer ordering are all read from the stream's own schema,
-/// so unpacking a frame a producer wrote needs no local copy of its binding. Only
-/// [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] streams are accepted; an
-/// `Interleaved` declaration is rejected before the stream is returned, including for an empty
-/// stream. Producers must keep each series' chunks contiguous. Validation checks adjacent chunk
-/// conditions but does not certify nonadjacent recurrence for `Contiguous` ordering.
+/// so unpacking a frame a producer wrote needs no local copy of its binding. Like packing, unpacking
+/// accepts `Interleaved` only when every producer fragment chain closes before the next starts; it
+/// rejects multiplexed open chains. Closed fragment chains may recur with the same key and overlapping
+/// timestamps. Validation does not certify nonadjacent recurrence for `Contiguous` ordering.
 ///
 /// Every frame is validated here, unconditionally. The declared layout must be this revision's, the
 /// label decode description must parse, name a known version, and agree with the declared label
@@ -453,7 +449,6 @@ pub fn unpack_raw_series(
         ensure_declared_schema(&schema, expected)?;
     }
     let ordering = series_frame_ordering(frame_schema.as_ref())?;
-    ensure_supported_ordering(ordering)?;
     let decoder =
         SeriesFrameDecoder::try_new(&schema, labels, declared.as_ref()).map_err(codec_error)?;
     // Validate even empty streams' declared schema and layout before returning the stream.
@@ -588,21 +583,11 @@ fn declared_label_mode(declared: &Option<LabelDecodeSpec>) -> FrameLabelMode {
     }
 }
 
-/// Rejects orderings this adapter cannot validate; a bad declaration is an error, not a fallback.
-fn ensure_supported_ordering(ordering: SeriesOrdering) -> datafusion_common::Result<()> {
-    match ordering {
-        SeriesOrdering::Contiguous | SeriesOrdering::KeyThenTime => Ok(()),
-        SeriesOrdering::Interleaved => {
-            Err(invalid("interleaved raw series ordering is not supported"))
-        }
-    }
-}
-
 /// Rejects an evaluated frame that claims more order than its producer promised.
 ///
 /// Computed values have no storage key to be ordered by, so `read_key_then_time` is not a claim this
-/// layer can honour; `Interleaved` is not consumable at all. Treating either as `contiguous` would
-/// silently weaken a guarantee a consumer may rely on.
+/// layer can honour; `Interleaved` is not supported for evaluated frames. Treating either as
+/// `contiguous` would silently weaken a guarantee a consumer may rely on.
 fn ensure_contiguous_ordering(ordering: SeriesOrdering) -> datafusion_common::Result<()> {
     match ordering {
         SeriesOrdering::Contiguous => Ok(()),
@@ -630,10 +615,11 @@ fn invalid(reason: impl Into<String>) -> DataFusionError {
     )))
 }
 
-/// Cross-chunk validation state for raw chains. The producer must keep each series' chunks
-/// contiguous; this validator checks adjacent chunks only and never sees `Interleaved` streams. It
-/// retains only the previous complete owned key (not an Arrow buffer), timestamp, metric, and
-/// finality.
+/// Cross-chunk validation state for raw producer fragment chains. Every chain's chunks must be
+/// contiguous, including for `Interleaved`; this validator checks adjacent chunks only and retains
+/// the previous owned key (not an Arrow buffer), timestamp, metric, and finality. An `Interleaved`
+/// chain releases that state on closure, so later fragment chains may recur with the same key,
+/// labels, and timestamps independently.
 struct SequenceValidator {
     ordering: SeriesOrdering,
     previous_key: Option<Vec<u8>>,
@@ -697,10 +683,17 @@ impl SequenceValidator {
                 }
             }
         }
-        self.previous_key = Some(key.to_vec());
-        self.previous_timestamp = Some(timestamp);
-        self.previous_metric = chunk.metric.clone();
-        self.previous_is_last = chunk.is_last;
+        if self.ordering == SeriesOrdering::Interleaved && chunk.is_last {
+            self.previous_key = None;
+            self.previous_timestamp = None;
+            self.previous_metric = None;
+            self.previous_is_last = false;
+        } else {
+            self.previous_key = Some(key.to_vec());
+            self.previous_timestamp = Some(timestamp);
+            self.previous_metric = chunk.metric.clone();
+            self.previous_is_last = chunk.is_last;
+        }
         Ok(())
     }
 }

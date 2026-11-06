@@ -748,15 +748,189 @@ mod tests {
     use datafusion::error::DataFusionError;
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit as DfMemoryLimit};
     use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
+    use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
     use datafusion_common::config::SpillCompression;
+    use promql::extension_plan::{FusedSeries, RawSeriesSource};
     use session::context::QueryContext;
 
     use super::*;
+    use crate::dist_plan::{MergeScanExec, MergeScanLogicalPlan};
     use crate::options::{QueryOptions, QuerySpillCompression, QuerySpillMode};
     use crate::query_engine::runtime::{
         DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider,
         QueryRuntimeProviderRef,
     };
+    use datafusion_expr::UserDefinedLogicalNode;
+
+    #[derive(Default)]
+    struct TestRawMergePlanner {
+        disjoint: bool,
+    }
+
+    #[async_trait]
+    impl ExtensionPlanner for TestRawMergePlanner {
+        async fn plan_extension(
+            &self,
+            _planner: &dyn PhysicalPlanner,
+            node: &dyn UserDefinedLogicalNode,
+            _logical_inputs: &[&DfLogicalPlan],
+            _physical_inputs: &[Arc<dyn ExecutionPlan>],
+            session: &dyn Session,
+            _planning_ctx: &PhysicalPlanningContext,
+        ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
+            let Some(scan) = node.as_any().downcast_ref::<MergeScanLogicalPlan>() else {
+                return Ok(None);
+            };
+            let session = session.as_any().downcast_ref::<SessionState>().unwrap();
+            let merge = MergeScanExec::new(
+                session,
+                table::table_name::TableName::new("c", "s", "metric"),
+                vec![
+                    store_api::storage::RegionId::new(1, 1),
+                    store_api::storage::RegionId::new(1, 2),
+                ],
+                scan.input().clone(),
+                scan.schema().as_arrow(),
+                Arc::new(crate::region_query::tests::PlanningOnlyRegionQueryHandler),
+                QueryContext::arc(),
+                session.config().target_partitions(),
+                None,
+                false,
+            )?
+            .with_raw_series_disjoint(self.disjoint)?;
+            Ok(Some(Arc::new(merge)))
+        }
+    }
+
+    /// Run the real analyzer and normal DataFusion optimizer pipeline, not a hand-built projection.
+    #[tokio::test]
+    async fn analyzer_to_fused_reconciles_only_fragmented_raw_frames() {
+        use common_query::series_frame::series_frame_ordering;
+        use datafusion::datasource::DefaultTableSource;
+        use datafusion_expr::{Extension, LogicalPlanBuilder};
+        use datafusion_optimizer::analyzer::AnalyzerRule;
+        use datatypes::series::SeriesOrdering;
+        use datatypes::series::samples::{FieldSpec, SeriesSchema};
+        use datatypes::series::time::{EvalGrid, GridSpec};
+        use promql::extension_plan::{FusedSeriesBinding, SeriesRepartitionExec};
+        use promql::native::plan::{
+            BoundInput, BoundInstant, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+        };
+        use store_api::storage::RegionId;
+
+        let table = LogicalPlanBuilder::scan(
+            "metric",
+            Arc::new(DefaultTableSource::new(Arc::new(
+                crate::optimizer::test_util::mock_table_provider(RegionId::new(1, 1)),
+            ))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let raw = RawSeriesSource::try_new(
+            Arc::from("metric"),
+            vec!["host".into()],
+            vec!["v0".into()],
+            table,
+        )
+        .unwrap();
+        let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 1).unwrap()).unwrap());
+        let raw_type = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vec![FieldSpec { name: "v0".into() }].into(),
+            eval_grid: None,
+        }));
+        let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vec![FieldSpec { name: "v0".into() }].into(),
+            eval_grid: Some(Arc::clone(&grid)),
+        }));
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        source_index: 0,
+                        output: raw_type.clone(),
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: raw_type,
+                }),
+                op: BoundInstant {
+                    lookback_ms: 0,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value: InstantValue::Sample,
+                    output_grid: Arc::clone(&grid),
+                },
+            },
+            output: evaluated,
+        })
+        .unwrap();
+        let output = datafusion_common::DFSchema::from_unqualified_fields(
+            vec![
+                arrow_schema::Field::new(
+                    "time",
+                    arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+                    false,
+                ),
+                arrow_schema::Field::new("v0", arrow_schema::DataType::Float64, true),
+                arrow_schema::Field::new("host", arrow_schema::DataType::Utf8, true),
+            ]
+            .into(),
+            Default::default(),
+        )
+        .unwrap();
+        let raw_plan = DfLogicalPlan::Extension(Extension {
+            node: Arc::new(raw),
+        });
+        for (disjoint, needs_router) in [(true, false), (false, true)] {
+            let fused = FusedSeries::try_new(
+                Arc::from("metric"),
+                tree.clone(),
+                FusedSeriesBinding {
+                    grid: Arc::clone(&grid),
+                    time_index: "time".into(),
+                    tags: vec!["host".into()],
+                    metric_name: Some(Arc::from("metric")),
+                },
+                vec![raw_plan.clone()],
+                Arc::new(output.clone()),
+            )
+            .unwrap();
+            let logical = DfLogicalPlan::Extension(Extension {
+                node: Arc::new(fused),
+            });
+            let analyzed = DistPlannerAnalyzer::new(false)
+                .analyze(
+                    logical,
+                    &datafusion_common::config::ConfigOptions::default(),
+                )
+                .unwrap();
+            let session = SessionStateBuilder::new().with_default_features().build();
+            let physical = DefaultPhysicalPlanner::with_extension_planners(vec![
+                Arc::new(PromExtensionPlanner),
+                Arc::new(TestRawMergePlanner { disjoint }),
+            ])
+            .create_physical_plan(&analyzed, &session)
+            .await
+            .unwrap();
+            let child = physical.children()[0];
+            assert_eq!(
+                child.downcast_ref::<SeriesRepartitionExec>().is_some(),
+                needs_router,
+                "disjoint={disjoint}: {analyzed}"
+            );
+            if let Some(router) = child.downcast_ref::<SeriesRepartitionExec>() {
+                assert_eq!(
+                    series_frame_ordering(router.children()[0].schema().as_ref()).unwrap(),
+                    SeriesOrdering::Interleaved
+                );
+            }
+            assert_eq!(
+                series_frame_ordering(child.schema().as_ref()).unwrap(),
+                SeriesOrdering::Contiguous
+            );
+        }
+    }
 
     fn new_query_engine_state() -> QueryEngineState {
         new_query_engine_state_with(Plugins::default(), QueryOptions::default())

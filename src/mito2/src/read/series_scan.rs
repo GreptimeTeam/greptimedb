@@ -253,6 +253,27 @@ impl SeriesScan {
             .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
     }
 
+    /// Whether every selected *field* is a `Float64`, which is all the columnar prepared reader
+    /// serves.
+    ///
+    /// Only field columns count: the projection also carries tags and the time index, and those are
+    /// no part of the samples the prepared reader hands over. Checking them here would send an
+    /// ordinary `Float64` query down the ordinary scan just because it projects a timestamp.
+    fn columnar_fields_supported(&self) -> bool {
+        let metadata = self.stream_ctx.input.mapper.metadata();
+        let selected = self.stream_ctx.input.mapper.output_schema();
+        selected
+            .column_schemas()
+            .iter()
+            .filter(|output| {
+                metadata.column_metadatas.iter().any(|column| {
+                    column.column_schema.name == output.name
+                        && column.semantic_type == SemanticType::Field
+                })
+            })
+            .all(|output| output.data_type == ConcreteDataType::float64_datatype())
+    }
+
     /// Returns whether raw series come from the columnar prepared source.
     ///
     /// Derived only from the pinned series index version and every configured partition range, so
@@ -356,6 +377,12 @@ impl SeriesScan {
         let selected = input.mapper.output_schema();
         let mut fields = Vec::new();
         let mut specs = Vec::new();
+        // The columnar prepared reader serves `Float64` fields only. A selection carrying another
+        // kind the raw path supports - a native histogram struct, today - is read by the ordinary
+        // scan instead: the columnar samples are an artifact beside the SST rows, so the same
+        // sources are still reachable, and the frame schema and ordering follow the reader that
+        // actually answers.
+        let columnar_fields_supported = self.columnar_fields_supported();
         for output in selected.column_schemas() {
             let Some(column) = metadata.column_metadatas.iter().find(|column| {
                 column.column_schema.name == output.name
@@ -384,9 +411,9 @@ impl SeriesScan {
                     .build(),
                 ));
             };
-            if (self.uses_columnar() && *data_type != ConcreteDataType::float64_datatype())
-                || (!data_type.is_numeric() && !is_native_histogram_value_type(data_type))
-            {
+            // The raw converter casts a numeric field to `Float64` and converts a native histogram
+            // struct into histogram samples; nothing else has a raw representation.
+            if !data_type.is_numeric() && !is_native_histogram_value_type(data_type) {
                 debug!(
                     "Raw series scan preflight rejected field type: region_id={}, column_id={}",
                     metadata.region_id, column.column_id,
@@ -416,7 +443,7 @@ impl SeriesScan {
         }
         // Structural eligibility errors still reject the raw path; ordinary scans cover sources
         // without columnar artifacts, so missing coverage is not an error here.
-        let prepared_columnar = self.uses_prepared_columnar()?;
+        let prepared_columnar = self.uses_prepared_columnar()? && columnar_fields_supported;
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,
@@ -869,8 +896,13 @@ impl RegionScanner for SeriesScan {
     }
 
     fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
+        // The reader is chosen from the selected fields as well as the stored artifacts, so the
+        // guarantee follows the reader: a histogram selection is read by the ordinary scan even
+        // where the columnar artifacts are ready.
         self.uses_prepared_columnar()
-            .map(|prepared_columnar| self.raw_ordering(prepared_columnar))
+            .map(|prepared_columnar| {
+                self.raw_ordering(prepared_columnar && self.columnar_fields_supported())
+            })
             .map_err(BoxedError::new)
     }
 
