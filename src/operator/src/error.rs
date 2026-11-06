@@ -785,6 +785,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Retention TTL is not supported on metric logical tables; set `ttl` on the physical table instead"
+    ))]
+    RetentionTtlOnLogicalTable {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid partition rule: {}", reason))]
     InvalidPartitionRule {
         reason: String,
@@ -1097,7 +1105,8 @@ impl ErrorExt for Error {
             Error::EmptyDdlExpr { .. }
             | Error::InvalidPartitionRule { .. }
             | Error::ParseSqlValue { .. }
-            | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidTimestampRange { .. }
+            | Error::RetentionTtlOnLogicalTable { .. } => StatusCode::InvalidArguments,
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
             Error::BuildRecordBatch { source, .. } => source.status_code(),
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
