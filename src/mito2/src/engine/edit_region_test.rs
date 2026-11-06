@@ -1022,8 +1022,57 @@ async fn test_alter_precedes_edit_backlog() {
         assert_eq!(None, region_file_sequence(&region, file_id));
         assert!(!queued.is_finished());
         assert!(late.as_ref().is_none_or(|task| !task.is_finished()));
+        // Queue another ALTER while the first is waiting to notify the worker.
+        drain_worker_recv_events(&mut rx);
+        let e = engine.clone();
+        let second_alter = tokio::spawn(async move {
+            e.handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::AddColumns {
+                        columns: vec![AddColumn {
+                            column_metadata: store_api::metadata::ColumnMetadata {
+                                column_schema: datatypes::schema::ColumnSchema::new(
+                                    "new_field_2",
+                                    datatypes::data_type::ConcreteDataType::float64_datatype(),
+                                    true,
+                                ),
+                                semantic_type: api::v1::SemanticType::Field,
+                                column_id: 101,
+                            },
+                            location: None,
+                        }],
+                    },
+                }),
+            )
+            .await
+        });
+        wait_worker_recv_event(&mut rx).await;
         listener.release.notify_one();
-        alter.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), alter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), listener.altering.notified())
+            .await
+            .unwrap();
+        // Completing the first ALTER must hand off to the next ALTER before edits.
+        assert_eq!(None, region_file_sequence(&region, file_id));
+        assert!(!queued.is_finished());
+        assert!(late.as_ref().is_none_or(|task| !task.is_finished()));
+        listener.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), second_alter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let metadata = region.metadata();
+        assert_eq!(metadata.column_by_name("new_field").unwrap().column_id, 100);
+        assert_eq!(
+            metadata.column_by_name("new_field_2").unwrap().column_id,
+            101
+        );
         first.await.unwrap().unwrap();
         tokio::time::timeout(Duration::from_secs(10), queued)
             .await
@@ -1032,7 +1081,11 @@ async fn test_alter_precedes_edit_backlog() {
             .unwrap();
         assert!(region_file_sequence(&region, file_id).is_some());
         if let Some(late) = late {
-            late.await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), late)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
         }
     }
 }
