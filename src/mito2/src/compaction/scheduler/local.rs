@@ -13,18 +13,22 @@
 // limitations under the License.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_meta::key::SchemaMetadataManagerRef;
+use prometheus::IntGauge;
 use store_api::compaction_task::{self, CompactionTaskEntry};
 use store_api::storage::RegionId;
 
 use crate::compaction::compactor::{CompactionContext, CompactionRegion};
 use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
-use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
+use crate::compaction::scheduler::{
+    CompactionCoordinator, CompactionScheduler, CompactionTransition, ReadyUnit,
+};
 use crate::compaction::task::CompactionTask;
 use crate::compaction::unit::CompactionUnit;
 use crate::error::{self, Error};
@@ -46,9 +50,34 @@ struct UnitExecution {
     released: AtomicBool,
 }
 
+/// Balances the inflight charge for a polled job on completion, unwind or drop.
+/// An unpolled job never acquires a charge.
+struct InflightCompaction(IntGauge);
+
+impl InflightCompaction {
+    /// Runs the job inside the same accounting scope on every exit path.
+    async fn run(job: impl Future<Output = ()>, gauge: IntGauge) {
+        let _inflight = Self::start(gauge);
+        job.await;
+    }
+
+    fn start(gauge: IntGauge) -> Self {
+        gauge.inc();
+        Self(gauge)
+    }
+}
+
+impl Drop for InflightCompaction {
+    fn drop(&mut self) {
+        self.0.dec();
+    }
+}
+
 /// A request's local units. All transitions run on the owning region worker.
 #[derive(Debug)]
 pub(crate) struct LocalCompaction {
+    coordinator: Arc<CompactionCoordinator>,
+    region_id: RegionId,
     /// All pending and submitted units, retained until task exit. Tasks own their input leases.
     /// Keyed by each unit's execution plan ID, allocated from the scheduler's `next_plan_id`;
     /// it equals `CompactionExecution::plan_id()` and the `plan_id` in unit notifications.
@@ -171,6 +200,7 @@ impl LocalCompaction {
             }
         }
         self.cancellation_requested |= result != RequestCancelResult::TooLateToCancel;
+        self.coordinator.cancel_pending(self.region_id);
         result
     }
 
@@ -244,6 +274,8 @@ impl CompactionScheduler {
             );
         }
         let mut local = LocalCompaction {
+            coordinator: self.coordinator.clone(),
+            region_id: region.region_id,
             units: HashMap::new(),
             unit_states: Arc::from([]),
             #[cfg(test)]
@@ -319,6 +351,8 @@ impl CompactionScheduler {
                 return;
             };
             let id = task.execution.plan_id();
+            let state = task.state.clone();
+            let input_bytes = task.unit.estimated_input_bytes();
             let sender = self.request_sender.clone();
             let completion = Box::pin(async move {
                 let _ = sender
@@ -330,14 +364,17 @@ impl CompactionScheduler {
                     }))
                     .await;
             });
-            let job = Box::pin(async move {
-                INFLIGHT_COMPACTION_COUNT.inc();
-                task.run().await;
-                drop(task);
-                INFLIGHT_COMPACTION_COUNT.dec();
-            });
-            if let Err(err) = self.scheduler.schedule_with_completion(job, completion)
-                && let Some(local) = self.local_units_mut(region_id)
+            let job = Box::pin(InflightCompaction::run(
+                async move {
+                    task.run().await;
+                    drop(task);
+                },
+                INFLIGHT_COMPACTION_COUNT.clone(),
+            ));
+            if let Err(err) = self.coordinator.schedule(
+                region_id,
+                ReadyUnit::new(state, input_bytes, job, completion),
+            ) && let Some(local) = self.local_units_mut(region_id)
             {
                 local.finish(id, Err(Arc::new(err)));
                 local.release_unit(id);
@@ -382,15 +419,15 @@ impl CompactionScheduler {
         if !local.units.contains_key(&id) {
             return CompactionTransition::NoAction;
         }
-        local.finish(
-            id,
-            Err(Arc::new(
-                error::UnexpectedSnafu {
-                    reason: "Compaction unit exited without a terminal notification",
-                }
-                .build(),
-            )),
-        );
+        let missing_result = if local.units[&id].state.is_cancelled() {
+            error::CompactionCancelledSnafu.build()
+        } else {
+            error::UnexpectedSnafu {
+                reason: "Compaction unit exited without a terminal notification",
+            }
+            .build()
+        };
+        local.finish(id, Err(Arc::new(missing_result)));
         local.release_unit(id);
         self.dispatch_local_units(region_id);
         self.finish_local_units(region_id, manifest, schemas).await
@@ -431,6 +468,9 @@ impl CompactionScheduler {
 
 #[cfg(test)]
 mod tests {
+    use futures::FutureExt;
+    use tokio::sync::oneshot;
+
     use super::*;
 
     fn local_compaction() -> LocalCompaction {
@@ -448,6 +488,11 @@ mod tests {
             })
             .collect();
         LocalCompaction {
+            coordinator: Arc::new(CompactionCoordinator::new(
+                Arc::new(crate::test_util::scheduler_util::VecScheduler::default()),
+                2,
+            )),
+            region_id: RegionId::from_u64(1),
             unit_states: units.values().cloned().collect(),
             publication_count: Arc::new(AtomicUsize::new(0)),
             units,
@@ -457,6 +502,61 @@ mod tests {
             made_progress: false,
             cancellation_requested: false,
         }
+    }
+
+    #[rstest::rstest]
+    #[case::completed(false)]
+    #[case::panicked(true)]
+    #[tokio::test]
+    async fn test_inflight_job_balances_count_on_exit(#[case] panics: bool) {
+        let gauge = IntGauge::new("test_inflight_compaction", "isolated inflight gauge").unwrap();
+        let (resume, paused) = oneshot::channel();
+        let job = InflightCompaction::run(
+            async move {
+                paused.await.unwrap();
+                if panics {
+                    panic!("inflight job panic fixture");
+                }
+            },
+            gauge.clone(),
+        );
+        let mut job = Box::pin(std::panic::AssertUnwindSafe(job).catch_unwind());
+
+        assert_eq!(0, gauge.get());
+        assert!(futures::poll!(job.as_mut()).is_pending());
+        // Assertions outside catch_unwind cannot masquerade as the fixture panic.
+        assert_eq!(1, gauge.get());
+        resume.send(()).unwrap();
+        let outcome = job.await;
+        if panics {
+            let payload = outcome.unwrap_err();
+            assert_eq!(
+                Some("inflight job panic fixture"),
+                payload.downcast_ref::<&str>().copied()
+            );
+        } else {
+            assert!(outcome.is_ok());
+        }
+        assert_eq!(0, gauge.get());
+    }
+
+    #[rstest::rstest]
+    #[case::unpolled(false)]
+    #[case::started(true)]
+    #[tokio::test]
+    async fn test_inflight_job_drop_balances_started_count(#[case] started: bool) {
+        let gauge = IntGauge::new("test_inflight_compaction", "isolated inflight gauge").unwrap();
+        let mut job = Box::pin(InflightCompaction::run(
+            std::future::pending::<()>(),
+            gauge.clone(),
+        ));
+        assert_eq!(0, gauge.get());
+        if started {
+            assert!(futures::poll!(job.as_mut()).is_pending());
+            assert_eq!(1, gauge.get());
+        }
+        drop(job);
+        assert_eq!(0, gauge.get());
     }
 
     fn task_entry() -> CompactionTaskEntry {

@@ -39,8 +39,6 @@ use crate::schedule::CancellableTaskState;
 use crate::sst::file::UncommittedSsts;
 use crate::worker::WorkerListener;
 
-pub const MAX_PARALLEL_COMPACTION: usize = 1;
-
 /// One local atomic unit. The scheduler owns request waiters and sibling units.
 pub(crate) struct CompactionTask {
     pub(crate) state: CancellableTaskState,

@@ -25,6 +25,9 @@ use datafusion_expr::{col, lit};
 use store_api::mito_engine_options::{
     COMPACTION_TYPE, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
 };
+use store_api::region_request::{
+    EnterStagingRequest, RegionTruncateRequest, StagingPartitionDirective,
+};
 use store_api::storage::FileId;
 use tokio::sync::{Barrier, mpsc, oneshot};
 
@@ -42,7 +45,8 @@ use crate::error::InvalidSchedulerStateSnafu;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics::COMPACTION_MEMORY_REJECTED;
 use crate::region::ManifestContext;
-use crate::request::{BackgroundNotify, OutputTx, WorkerRequest};
+use crate::request::{BackgroundNotify, CompactionUnitNotification, OutputTx, WorkerRequest};
+use crate::schedule::CancellableTaskState;
 use crate::schedule::remote_job_scheduler::{RemoteJob, RemoteJobSchedulerRef};
 use crate::schedule::scheduler::{Job, Scheduler};
 use crate::sst::FormatType;
@@ -1082,7 +1086,14 @@ async fn test_pick_result_installs_history_after_unrelated_flush() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    // A single-unit batch keeps the history assertions below focused on plan
+    // acceptance. Multi-window batching is covered separately by the automatic
+    // planning tests.
+    let config = MitoConfig {
+        max_background_compactions: 1,
+        ..Default::default()
+    };
+    let mut scheduler = env.mock_compaction_scheduler_with_config(tx, config);
     let mut builder = VersionControlBuilder::new();
     for start in [0, 3_600_000] {
         for offset in 0..4 {
@@ -1224,13 +1235,126 @@ async fn test_pick_result_local_submission_failure_releases_and_notifies_once() 
         .merge_waiter(OptionOutputTx::from(waiter_tx));
 
     scheduler
-        .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+        .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager.clone())
+        .await;
+
+    let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let WorkerRequest::Background {
+        notify: BackgroundNotify::CompactionUnit(CompactionUnitNotification::Released { plan_id }),
+        ..
+    } = request.request
+    else {
+        panic!("expected rejected unit's resource-release notification");
+    };
+    scheduler
+        .on_unit_released(region_id, plan_id, &manifest_ctx, schema_metadata_manager)
         .await;
 
     assert!(waiter_rx.await.unwrap().is_err());
     assert!(selected.iter().all(|file| !file.compacting()));
     assert!(scheduler.region_status.contains_key(&region_id));
     assert!(!scheduler.is_compacting(region_id));
+}
+
+#[rstest::rstest]
+#[case::truncate(DdlRequest::Truncate(RegionTruncateRequest::All))]
+#[case::enter_staging(DdlRequest::EnterStaging(EnterStagingRequest {
+    partition_directive: StagingPartitionDirective::RejectAllWrites,
+}))]
+#[tokio::test]
+async fn test_cancelled_queued_unit_releases_fenced_ddl(#[case] ddl_request: DdlRequest) {
+    let executor = Arc::new(VecScheduler::default());
+    let env = SchedulerEnv::new().await.scheduler(executor.clone());
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler_with_config(
+        tx,
+        MitoConfig {
+            max_background_compactions: 1,
+            ..Default::default()
+        },
+    );
+    // Another region holds the only slot without polling its job. The tested
+    // unit must be withdrawn from the coordinator, not cancelled during execution.
+    scheduler
+        .coordinator
+        .schedule(
+            RegionId::new(99, 1),
+            ReadyUnit::new(
+                CancellableTaskState::new(),
+                1,
+                Box::pin(async {}),
+                Box::pin(async {}),
+            ),
+        )
+        .unwrap();
+    let version = compactable_version();
+    let region_id = version.region_id();
+    let (finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let selected = selected_files(&finished);
+    let (waiter_tx, mut waiter_rx) = oneshot::channel();
+    scheduler
+        .region_status
+        .get_mut(&region_id)
+        .unwrap()
+        .merge_waiter(waiter_tx.into());
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
+        .await;
+    assert_eq!(1, executor.num_jobs());
+    assert!(!selected.is_empty());
+    assert!(selected.iter().all(FileHandle::compacting));
+
+    let expected_ddl = std::mem::discriminant(&ddl_request);
+    let (ddl_tx, mut ddl_rx) = oneshot::channel();
+    assert!(
+        scheduler
+            .try_cancel_and_add_ddl(region_id, ddl_tx.into(), ddl_request, |request| request)
+            .is_ok()
+    );
+    let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let WorkerRequest::Background {
+        region_id: released_region,
+        notify: BackgroundNotify::CompactionUnit(CompactionUnitNotification::Released { plan_id }),
+    } = request.request
+    else {
+        panic!("expected only Released for the withdrawn unit");
+    };
+    assert_eq!(region_id, released_region);
+    assert!(selected.iter().all(|file| !file.compacting()));
+
+    let transition = scheduler
+        .on_unit_released(region_id, plan_id, &manifest, schemas)
+        .await;
+    assert_matches!(
+        waiter_rx.try_recv().unwrap(),
+        Err(Error::CompactionCancelled { .. })
+    );
+    assert!(!scheduler.is_compacting(region_id));
+    assert_eq!(1, executor.num_jobs());
+    let CompactionTransition::DdlReady(mut ddls) = transition else {
+        panic!("cancelled queued work must hand off its fenced DDL");
+    };
+    assert_eq!(1, ddls.len());
+    let ddl = ddls.pop().unwrap();
+    assert_eq!(region_id, ddl.region_id);
+    assert_eq!(expected_ddl, std::mem::discriminant(&ddl.request));
+    assert_matches!(ddl_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    ddl.sender.send(Ok(0));
+    assert_eq!(
+        0,
+        tokio::time::timeout(Duration::from_secs(5), ddl_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1421,7 +1545,14 @@ async fn test_execution_finished_drains_until_no_plan() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    // This harness never runs the submitted units, so the first batch keeps
+    // occupying one admission slot. Leave a spare slot so the chained follow-up
+    // still reaches the executor regardless of the host's CPU-derived capacity.
+    let config = MitoConfig {
+        max_background_compactions: 2,
+        ..Default::default()
+    };
+    let mut scheduler = env.mock_compaction_scheduler_with_config(tx, config);
     let mut builder = VersionControlBuilder::new();
     let purger = builder.file_purger();
     let region_id = builder.region_id();
@@ -1604,7 +1735,13 @@ async fn test_time_range_compaction_when_compaction_in_progress() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    // The first batch is never run here and keeps one admission slot occupied,
+    // so the pending manual request needs a second slot to reach the executor.
+    let config = MitoConfig {
+        max_background_compactions: 2,
+        ..Default::default()
+    };
+    let mut scheduler = env.mock_compaction_scheduler_with_config(tx, config);
     let mut builder = VersionControlBuilder::new();
     let purger = builder.file_purger();
     let region_id = builder.region_id();
@@ -1832,7 +1969,13 @@ async fn test_ranged_compaction_stops_without_followup() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    // The ranged execution's units are never run here and keep one admission
+    // slot occupied, so the follow-up pick needs a second slot to be submitted.
+    let config = MitoConfig {
+        max_background_compactions: 2,
+        ..Default::default()
+    };
+    let mut scheduler = env.mock_compaction_scheduler_with_config(tx, config);
 
     let mut builder = VersionControlBuilder::new();
     for offset in [0, 10, 20, 30] {
@@ -1918,14 +2061,20 @@ async fn test_automatic_trigger_during_execution_clears_continuation_scope() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let mut scheduler = env.mock_compaction_scheduler_with_config(
+        tx,
+        MitoConfig {
+            max_background_compactions: 4,
+            ..Default::default()
+        },
+    );
 
     let mut builder = VersionControlBuilder::new();
-    for offset in [0, 10, 20, 30] {
-        builder.push_l0_file(offset, 1_000);
-    }
-    for offset in [0, 10, 20, 30] {
-        builder.push_l0_file(2 * 3_600_000 + offset, 2 * 3_600_000 + 1_000);
+    // Two windows remain eligible while the manual unit reserves window 0.
+    for window_start in [0, 2 * 3_600_000, 4 * 3_600_000] {
+        for offset in [0, 10, 20, 30] {
+            builder.push_l0_file(window_start + offset, window_start + 1_000);
+        }
     }
     let region_id = builder.region_id();
     let version_control = Arc::new(builder.build());
@@ -2003,18 +2152,20 @@ async fn test_automatic_trigger_during_execution_clears_continuation_scope() {
     let CompactionPlanningResult::Prepared(prepared) = continuation.result else {
         panic!("expected the unrestricted follow-up to select out-of-range windows");
     };
-    assert!(
-        prepared
-            .picker_output
-            .outputs
-            .iter()
-            .flat_map(|output| &output.inputs)
-            .any(|file| file.time_range().1 >= Timestamp::new_millisecond(2 * 3_600_000))
-    );
+    assert_eq!(2, prepared.picker_output.outputs.len());
+    assert_eq!(4, prepared.compaction_region.max_parallelism);
+    let windows: std::collections::HashSet<_> = prepared
+        .picker_output
+        .outputs
+        .iter()
+        .flat_map(|output| &output.inputs)
+        .map(|file| file.time_range().0.value() / 3_600_000)
+        .collect();
+    assert_eq!(std::collections::HashSet::from([2, 4]), windows);
 }
 
 #[tokio::test]
-async fn test_automatic_planning_picks_one_output_before_repicking() {
+async fn test_automatic_planning_prepares_independent_windows_up_to_global_capacity() {
     let env = SchedulerEnv::new().await;
     let (tx, mut rx) = mpsc::channel(4);
     let config = MitoConfig {
@@ -2067,13 +2218,98 @@ async fn test_automatic_planning_picks_one_output_before_repicking() {
         panic!("expected prepared compaction");
     };
 
-    assert_eq!(1, prepared.picker_output.outputs.len());
-    assert!(
-        prepared.picker_output.outputs[0]
-            .inputs
-            .iter()
-            .all(|file| { file.time_range().0 >= Timestamp::new_millisecond(2 * 3_600_000) })
-    );
+    assert_eq!(2, prepared.picker_output.outputs.len());
+    assert_eq!(4, prepared.compaction_region.max_parallelism);
+    let windows: std::collections::HashSet<_> = prepared
+        .picker_output
+        .outputs
+        .iter()
+        .map(|o| o.inputs[0].time_range().0.value() / 3_600_000)
+        .collect();
+    assert_eq!(std::collections::HashSet::from([0, 2]), windows);
+}
+
+#[rstest::rstest]
+#[case::single_runner(1)]
+#[case::multiple_runners(4)]
+#[tokio::test]
+async fn test_scheduler_env_runs_compactions_up_to_configured_capacity(#[case] capacity: usize) {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let config = MitoConfig {
+        max_background_compactions: capacity,
+        ..Default::default()
+    };
+    let scheduler = env.mock_compaction_scheduler_with_config(tx, config);
+    let (started, mut starts) = mpsc::unbounded_channel();
+    // Dropping the senders also unblocks jobs if an assertion fails.
+    let mut resumes = Vec::new();
+    for id in 0..=capacity {
+        let (resume, paused) = oneshot::channel();
+        resumes.push(resume);
+        let started = started.clone();
+        scheduler
+            .coordinator
+            .schedule(
+                RegionId::from_u64(1),
+                ReadyUnit::new(
+                    CancellableTaskState::new(),
+                    1,
+                    Box::pin(async move {
+                        let _ = started.send(id);
+                        let _ = paused.await;
+                    }),
+                    Box::pin(async {}),
+                ),
+            )
+            .unwrap();
+    }
+
+    let mut first_starts = Vec::new();
+    for _ in 0..capacity {
+        first_starts.push(
+            tokio::time::timeout(Duration::from_secs(5), starts.recv())
+                .await
+                .expect("configured compaction runner did not start")
+                .unwrap(),
+        );
+    }
+    first_starts.sort_unstable();
+    assert_eq!((0..capacity).collect::<Vec<_>>(), first_starts);
+    assert!(starts.try_recv().is_err());
+
+    resumes.remove(0).send(()).unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(capacity, next);
+    drop(resumes);
+    tokio::time::timeout(Duration::from_secs(5), scheduler.coordinator.stop())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_env_submits_compactions_to_injected_executor() {
+    let injected = Arc::new(VecScheduler::default());
+    let env = SchedulerEnv::new().await.scheduler(injected.clone());
+    let (tx, _rx) = mpsc::channel(4);
+    let scheduler = env.mock_compaction_scheduler(tx);
+    scheduler
+        .coordinator
+        .schedule(
+            RegionId::from_u64(1),
+            ReadyUnit::new(
+                CancellableTaskState::new(),
+                1,
+                Box::pin(async {}),
+                Box::pin(async {}),
+            ),
+        )
+        .unwrap();
+    assert_eq!(1, injected.num_jobs());
 }
 
 #[tokio::test]
@@ -3325,6 +3561,27 @@ async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_fir
         .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
         .await;
     let shared = scheduler.region_status[&region_id].shared_state.clone();
+    let rejected = if reject_after_first { UNITS - 1 } else { 0 };
+    // Admission is engine-wide now: the executor rejects the units it cannot take and
+    // the worker observes each rejection through the asynchronous Released notification.
+    for _ in 0..rejected {
+        let message = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("rejected unit did not report release")
+            .expect("request channel closed");
+        let WorkerRequest::Background {
+            region_id: notified_region,
+            notify:
+                BackgroundNotify::CompactionUnit(CompactionUnitNotification::Released { plan_id }),
+        } = message.request
+        else {
+            panic!("expected a release notification");
+        };
+        assert_eq!(notified_region, region_id);
+        scheduler
+            .on_unit_released(region_id, plan_id, &manifest, schemas.clone())
+            .await;
+    }
     let CompactionPhase::Units(local) = &scheduler.region_status[&region_id].active.phase else {
         panic!("expected admitted local units");
     };
@@ -3336,7 +3593,6 @@ async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_fir
     assert!(references >= 2);
     let mut ids = local.unit_ids_for_test();
     ids.sort_unstable();
-    let rejected = if reject_after_first { UNITS - 1 } else { 0 };
     assert_eq!(local.released_units_for_test(), rejected);
     assert_eq!(ids.len(), UNITS - rejected);
     assert_eq!(jobs.jobs.num_jobs(), UNITS - rejected);
