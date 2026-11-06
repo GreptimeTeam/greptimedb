@@ -446,6 +446,14 @@ enum RewriterStatus {
 
 #[derive(Debug, Default)]
 struct PlanRewriter {
+    /// Whether every region this pass reads is reached in process.
+    ///
+    /// [`Categorizer`] needs it to place canonical producers: their router collects the pieces of
+    /// one label set from the partitions the producer runs on, so the producer belongs inside a
+    /// region only when region reads are served in process. It is a fact about the transport, not
+    /// about the plan, and every check this pass makes is a placement decision for the same
+    /// transport.
+    in_process_region_transport: bool,
     /// Whether the whole plan encodes, allowing per-node checks to be skipped.
     whole_plan_encodable: bool,
     /// Whether an in-process root fused plan was recognized for placement-gate evaluation.
@@ -638,6 +646,7 @@ impl PlanRewriter {
             .encode(plan, DefaultSerializer)
             .is_ok();
         Self {
+            in_process_region_transport,
             in_process_fused_root,
             whole_plan_encodable,
             ..Default::default()
@@ -688,7 +697,11 @@ impl PlanRewriter {
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
-            let comm = Categorizer::check_plan(plan, self.partition_cols.clone())?;
+            let comm = Categorizer::check_plan(
+                plan,
+                self.partition_cols.clone(),
+                self.in_process_region_transport,
+            )?;
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -713,7 +726,11 @@ impl PlanRewriter {
             }
         }
 
-        match Categorizer::check_plan(plan, self.partition_cols.clone())? {
+        match Categorizer::check_plan(
+            plan,
+            self.partition_cols.clone(),
+            self.in_process_region_transport,
+        )? {
             Commutativity::Commutative => {
                 // PATCH: we should reconsider SORT's commutativity instead of doing this trick.
                 // explain: for a fully commutative SeriesDivide, its child Sort plan only serves it. I.e., that

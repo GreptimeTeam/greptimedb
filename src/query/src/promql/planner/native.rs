@@ -180,8 +180,8 @@ type DiscoveredSelectorMetadata = (Arc<SeriesSchema>, String, Vec<String>, Arc<s
 ///
 /// `partitioned` says whether the table behind that scan is split into regions along a partition
 /// column. Nothing in the scan itself carries this: a partition is a placement fact about the
-/// table, and the canonical route has to know it before it can claim a label-set answer covers the
-/// whole query rather than one region's share of it.
+/// table, and the in-process canonical route has to know it before it can claim a label-set answer
+/// covers the whole query rather than one region's share of it.
 type PreparedInput = (
     LogicalPlan,
     Arc<SeriesSchema>,
@@ -368,9 +368,10 @@ impl PromPlanner {
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
-        // A table split along a partition column lives in more than one region. The canonical
-        // boundary's router only collects the pieces its own region's producer holds, so the caller
-        // needs this fact to tell a whole-query label-set answer from one region's share of it.
+        // A table split along a partition column lives in more than one region. In process the
+        // canonical boundary's router only collects the pieces its own region's producer holds, so
+        // the caller needs this fact to tell a whole-query label-set answer from one region's share
+        // of it.
         let partitioned = table_meta.partition_column_names().next().is_some();
         // An engine without a raw-series scanner has no frame to give this node, and by the
         // time the physical planner asks, the logical plan is already this node: the refusal
@@ -1124,11 +1125,22 @@ impl PromPlanner {
         // region-local producer only sees the partitions of the region it runs in. A table split
         // along a partition column is planned region by region, so each region would answer a
         // canonical label set from the piece it holds while the consumer above has no collection of
-        // the other regions' pieces. Without a proof that this query reads one region, decline the
-        // route instead of claiming a global canonical answer; the existing planner reads every
-        // region and reports what Prometheus reports. A tree with no canonical merge claims no such
-        // answer, so it is untouched: a per-series query on a partitioned table keeps fusing.
-        if any_partitioned && contains_canonical_merge(root) {
+        // the other regions' pieces.
+        //
+        // In process the producer reads the region's own scans, so that placement is the only one it
+        // has: without a proof that this query reads one region, decline the route instead of
+        // claiming a global canonical answer, and let the existing planner - which reads every
+        // region and reports what Prometheus reports - answer. A tree with no canonical merge claims
+        // no such answer, so it is untouched: a per-series query on a partitioned table keeps fusing.
+        //
+        // Over the wire the producer reads `RawSeriesSource` children, and
+        // `Categorizer::check_extension_plan` keeps such a producer out of a region
+        // (`canonical_boundary_region_node` admits only a region's own scans). The analyzer expands
+        // the raw sources into merge scans and the producer runs on the frontend above every region,
+        // with its canonical router above all of them, so each label set is collected from the
+        // producers of every region. That placement is what the remote route claims, and the shape it
+        // builds is the one the acceptance test asserts: no canonical producer below a merge scan.
+        if !self_contained && any_partitioned && contains_canonical_merge(root) {
             return Ok(None);
         }
         // The kind the tree's root answers with, which every output column follows. It is not the
