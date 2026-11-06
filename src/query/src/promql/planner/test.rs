@@ -2655,7 +2655,7 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
 }
 
 #[tokio::test]
-async fn native_fused_time_partitioned_table_falls_back() {
+async fn native_fused_time_partitioned_table_reads_through_a_raw_source() {
     let table_provider = native_engine_provider(vec![1]).await;
     let native =
         build_native_fused_plan_with_provider("rate(some_metric[2m])", true, table_provider).await;
@@ -2663,12 +2663,24 @@ async fn native_fused_time_partitioned_table_falls_back() {
     let without_flag =
         build_native_fused_plan_with_provider("rate(some_metric[2m])", false, fallback_provider)
             .await;
-    let display = native.display_indent().to_string();
-    assert!(!display.contains("FusedSeries"), "{display}");
-    assert_eq!(
-        display,
-        without_flag.display_indent().to_string(),
-        "a time-partitioned table must keep the existing plan, not an approximation of it"
+    // A table partitioned on its time index splits one series across regions, so the selector reads
+    // it through a raw source and the window is evaluated above the reconciliation. Previously the
+    // route declined here, which meant the existing plan did that work instead.
+    let fused = find_fused_series(&native).expect("a split-series table is read natively");
+    assert!(
+        matches!(
+            fused.inputs().first(),
+            Some(LogicalPlan::Extension(extension))
+                if extension.node.as_any().is::<promql::extension_plan::RawSeriesSource>()
+        ),
+        "{}",
+        native.display_indent()
+    );
+    assert!(
+        !without_flag
+            .display_indent()
+            .to_string()
+            .contains("FusedSeries")
     );
 }
 

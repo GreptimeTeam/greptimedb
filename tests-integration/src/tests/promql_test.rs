@@ -6210,6 +6210,60 @@ async fn native_promql_info_enriches_from_the_info_table() {
 /// single-input node over a region-local scan, which places fine, and it is what the hybrid
 /// operand route does. What must never appear is a fused node with two children, so that is what
 /// is asserted rather than "no fused node at all".
+/// A window over a table partitioned on its time index sees the whole series.
+///
+/// One selector is enough: such a partition splits a series across regions, so a per-region window
+/// would evaluate over a fragment and drop every range that straddles the boundary. The selector
+/// therefore reads the table through a raw source and the window runs above the reconciliation.
+/// The fixture puts one series' two samples on either side of the boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_time_partitioned_selector_reads_whole_series() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_time_partitioned_selector",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_time_split (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:30', \
+         ts >= '1970-01-01 00:02:30')",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "INSERT INTO native_time_split VALUES ('h0', 60000, 60), ('h0', 240000, 240)",
+        QueryContext::arc(),
+    )
+    .await;
+    for query in [
+        "rate(native_time_split[5m])",
+        "sum(rate(native_time_split[5m]))",
+    ] {
+        let sql = format!("TQL EVAL (300, 300, '1m') {query}");
+        observer.clear();
+        let (_, native) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.root_plan();
+        assert!(
+            find_plan_node(&plan, "FusedSeriesExec").is_some(),
+            "{query}: the frontend tree must run natively, not on the existing plan: {:?}",
+            display_plan_tree(&plan)
+        );
+        let (_, legacy) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !native.is_empty(),
+            "{query}: the native plan answered nothing"
+        );
+        assert_eq!(
+            native, legacy,
+            "{query}: the native plan must match the existing one"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfused() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(

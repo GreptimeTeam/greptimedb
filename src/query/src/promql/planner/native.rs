@@ -190,6 +190,9 @@ type PreparedInput = (
     Vec<String>,
     // `partitioned`: whether this input's table is split into regions along a partition column.
     bool,
+    // `split_series`: whether that partition splits one series across regions, which a bare scan
+    // cannot reconcile. A partition on tags keeps every series whole in one region.
+    bool,
 );
 
 pub(crate) fn hybrid_binary_admitted(
@@ -275,12 +278,10 @@ impl PromPlanner {
     async fn prepare_one_scan(
         &mut self,
         matchers: Matchers,
-        selector_count: usize,
         prom_expr: &PromExpr,
         logical_scan_id: &mut Option<u32>,
         logical_ids_differ: &mut bool,
         statement_kind: &mut Option<FieldKind>,
-        self_contained: bool,
     ) -> Result<Option<PreparedInput>> {
         let (Some(metric), Some(time)) = (
             self.ctx.table_name.clone(),
@@ -403,19 +404,13 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        // Preserve the existing single-selector guard that its partition keys are tags. A partition
-        // column that is not a tag is the time index, so one series spans several regions; a bare
-        // scan cannot reconcile the fragments, which is why this route kept the existing plan for
-        // it. The raw source can, so the guard only holds the shapes that read a bare scan - the
-        // ones a region can run in process.
-        if selector_count == 1
-            && !self_contained
-            && !table_meta
-                .partition_column_names()
-                .all(|column| tags.iter().any(|tag| tag == column))
-        {
-            return Ok(None);
-        }
+        // A partition column that is not a tag splits one series across regions, and a bare scan
+        // cannot reconcile the fragments. A raw source can, so such a selector is admitted and its
+        // input is bound per source below; only the shapes that read a bare scan need the
+        // reconciliation to happen in one region.
+        let split_series = !table_meta
+            .partition_column_names()
+            .all(|column| tags.iter().any(|tag| tag == column));
         // This route declares one output column per field, so every field it binds carries
         // one kind: `Float64`, or the canonical native histogram struct. A field of any
         // other type - an integer, a `Float32`, a decimal, a string - keeps the existing
@@ -463,6 +458,7 @@ impl PromPlanner {
             time,
             tags,
             partitioned,
+            split_series,
         )))
     }
 
@@ -721,26 +717,26 @@ impl PromPlanner {
                     // The union reads every discovered metric's region, so one partitioned metric
                     // makes the whole input partitioned.
                     let mut discovered_partitioned = false;
+                    let mut discovered_split_series = false;
                     for table in metrics {
                         self.ctx.table_name = Some(table.table_info().name.clone());
                         if self.setup_context().await?.is_some() {
                             return Ok(None);
                         }
-                        let Some((scan, schema, metric, time, mut tags, partitioned)) = self
+                        let Some((scan, schema, metric, time, mut tags, partitioned, split_series)) = self
                             .prepare_one_scan(
                                 matchers.clone(),
-                                1,
                                 prom_expr,
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
                                 &mut statement_kind,
-                                self_contained,
                             )
                             .await?
                         else {
                             return Ok(None);
                         };
                         discovered_partitioned |= partitioned;
+                        discovered_split_series |= split_series;
                         let Some(metric) = metric else {
                             return Ok(None);
                         };
@@ -810,7 +806,7 @@ impl PromPlanner {
                             None,
                         )
                     };
-                    prepared.push((union, schema, metric, time, tags, discovered_partitioned));
+                    prepared.push((union, schema, metric, time, tags, discovered_partitioned, discovered_split_series));
                     continue;
                 }
                 let matchers =
@@ -827,12 +823,10 @@ impl PromPlanner {
                 let Some(one) = self
                     .prepare_one_scan(
                         matchers,
-                        selectors.len(),
                         prom_expr,
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
                         &mut statement_kind,
-                        self_contained,
                     )
                     .await?
                 else {
@@ -881,7 +875,7 @@ impl PromPlanner {
             return Ok(None);
         }
         // The first input names the output's time index and, on one table, binds every scan.
-        let Some((_, _, metric, time, tags, _)) = prepared.first() else {
+        let Some((_, _, metric, time, tags, _, _)) = prepared.first() else {
             return Ok(None);
         };
         let (metric, time, tags) = (metric.clone(), time.clone(), tags.clone());
@@ -949,7 +943,7 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
-        for (index, (compiled_input, (scan, _, _, time, _, _))) in
+        for (index, (compiled_input, (scan, _, _, time, _, _, _))) in
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
             if compiled_input.source_index != index {
@@ -1052,7 +1046,7 @@ impl PromPlanner {
         }
         let source_tags = prepared
             .iter()
-            .map(|(_, _, _, _, tags, _)| tags.clone())
+            .map(|(_, _, _, _, tags, _, _)| tags.clone())
             .collect::<Vec<_>>();
         // Whether any input's table is split into regions along a partition column. The canonical
         // boundary is the only part of this route that claims a whole-query label-set answer, and a
@@ -1061,19 +1055,21 @@ impl PromPlanner {
         let any_partitioned = prepared.iter().any(|input| input.5);
         // A segment carries one source's identity. Keeping each occurrence's scan and metadata
         // aligned here lets the cutting step name that source independently of selector count.
+        // Read the split-series fact before `prepared` is consumed by the child mapping below.
+        let any_split_series = prepared.iter().any(|input| input.6);
         let bare_scans = prepared
             .iter()
             .map(|(scan, ..)| scan.clone())
             .collect::<Vec<_>>();
         let per_source = prepared
             .iter()
-            .map(|(_, _, metric, time_index, tags, _)| {
+            .map(|(_, _, metric, time_index, tags, _, _)| {
                 (metric.clone(), time_index.clone(), tags.clone())
             })
             .collect::<Vec<_>>();
         let children = prepared
             .into_iter()
-            .map(|(scan, schema, metric, _, tags, _)| {
+            .map(|(scan, schema, metric, _, tags, _, split_series)| {
                 // A discovered selector already carries its own sources: a single metric is one
                 // `RawSeriesSource`, several are a `Union` of them, and each names the metric it
                 // reads. Wrapping either again would nest a source in a source.
@@ -1087,7 +1083,9 @@ impl PromPlanner {
                 // wire every input is a raw source, whichever table it reads: the source is what the
                 // transport carries, and it is also what reconciles the fragments of a series that
                 // several regions hold.
-                if (!cross_table && !self_contained) || already_sourced {
+                // A partition that splits one series across regions has to be read through a raw
+                // source even in process: a bare scan would hand a region only its own fragment.
+                if (!cross_table && !self_contained && !split_series) || already_sourced {
                     return Ok(scan);
                 }
                 let Some(metric) = metric else {
@@ -1327,7 +1325,9 @@ impl PromPlanner {
                 FusedOutputFormat::PlainRows,
                 contains_canonical_merge(root),
                 root_kind,
-                self_contained,
+                // A split-series table must keep the raw source under the cut: a bare-scan segment
+                // would evaluate a window over one region's fragment on the frontend.
+                self_contained || any_split_series,
             ))
             .await?;
             if let Some(plan) = plan {
@@ -1487,7 +1487,7 @@ fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
         ),
     });
     // No table stands behind this input, so no region splits it along a partition column.
-    Ok((input, schema, None, time_index, Vec::new(), false))
+    Ok((input, schema, None, time_index, Vec::new(), false, false))
 }
 
 /// Whether `plan` is the typed empty input [`empty_discovered_input`] builds.
