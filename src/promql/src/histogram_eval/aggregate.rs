@@ -141,7 +141,7 @@ fn aggregate_point<'a>(
         }
         SampleRef::Histogram(view) => Some(FloatHistogram::try_from_view(&view)),
     });
-    let value = sum_or_avg(op, histograms.by_ref())?;
+    let (value, _) = sum_or_avg(op, histograms.by_ref())?;
     // A fold stopped by mixed bucket kinds still reports conversion errors of later samples.
     for histogram in histograms {
         histogram?;
@@ -158,14 +158,19 @@ fn aggregate_point<'a>(
 /// `avg_over_time` run the same steps as the aggregations. Histograms are consumed one at a
 /// time, so the first error ends the fold. The result is derived, so it carries no start
 /// timestamp.
+///
+/// The flag reports whether any add had to reconcile two different custom-bucket sets, which is
+/// what Prometheus annotates with an info. It is carried out of the fold rather than recomputed:
+/// the fold already calls [`FloatHistogram::kahan_add`] and receives that outcome.
 pub(crate) fn sum_or_avg(
     op: HistogramAggregate,
     histograms: impl IntoIterator<Item = Result<FloatHistogram>>,
-) -> Result<Option<FloatHistogram>> {
+) -> Result<(Option<FloatHistogram>, bool)> {
     let mut value: Option<FloatHistogram> = None;
     let mut compensation: Option<FloatHistogram> = None;
     let mut mean: Option<FloatHistogram> = None;
     let mut count = 0.0;
+    let mut custom_reconciled = false;
     for h in histograms {
         let h = h?;
         count += 1.0;
@@ -175,17 +180,19 @@ pub(crate) fn sum_or_avg(
         };
         // Go drops the result with a warning for this addition error only; others propagate.
         if current.uses_custom_buckets() != h.uses_custom_buckets() {
-            return Ok(None);
+            return Ok((None, custom_reconciled));
         }
         match op {
             HistogramAggregate::Sum => {
-                let (c, _) = current.kahan_add(&h, compensation.take())?;
+                let (c, outcome) = current.kahan_add(&h, compensation.take())?;
+                custom_reconciled |= outcome.custom_bounds_reconciled;
                 compensation = Some(c);
             }
             HistogramAggregate::Avg => {
                 if mean.is_none() {
                     let mut sum = current.clone();
-                    let (c, _) = sum.kahan_add(&h, compensation.clone())?;
+                    let (c, outcome) = sum.kahan_add(&h, compensation.clone())?;
+                    custom_reconciled |= outcome.custom_bounds_reconciled;
                     if !sum.has_overflow() {
                         *current = sum;
                         compensation = Some(c);
@@ -207,13 +214,14 @@ pub(crate) fn sum_or_avg(
                 to_add.div(count);
                 let mean = mean.as_mut().expect("set above");
                 mean.mul(q);
-                let (c, _) = mean.kahan_add(&to_add, compensation.take())?;
+                let (c, outcome) = mean.kahan_add(&to_add, compensation.take())?;
+                custom_reconciled |= outcome.custom_bounds_reconciled;
                 compensation = Some(c);
             }
         }
     }
     let Some(mut value) = value else {
-        return Ok(None);
+        return Ok((None, custom_reconciled));
     };
     match op {
         HistogramAggregate::Sum => {
@@ -243,5 +251,5 @@ pub(crate) fn sum_or_avg(
     // what drop the field otherwise, which would make the payload depend on the sample count.
     // The bucket layout is left as the fold built it -- compaction belongs to the caller.
     value.start_timestamp = None;
-    Ok(Some(value))
+    Ok((Some(value), custom_reconciled))
 }

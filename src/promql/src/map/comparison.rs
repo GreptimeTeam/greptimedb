@@ -15,13 +15,13 @@
 use std::sync::Arc;
 
 use datafusion::error::Result;
-use datatypes::series::samples::{Series, SeriesSchema};
+use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 use datatypes::series::time::GridRange;
 
 use crate::grid_series::GridSeriesBuilder;
 use crate::map::{
     ArithmeticOp, ScalarOperand, constant_series, drop_metric_name, float_sample, map_arithmetic,
-    validate_float_series,
+    validate_float_series, validate_grid_series,
 };
 
 /// IEEE comparisons: NaN only satisfies `NotEqual`, and signed zeros compare equal.
@@ -87,6 +87,62 @@ pub fn map_compare(
     builder.finish(metric)
 }
 
+/// Compares a vector with a constant scalar, dropping the samples that have no comparison rather
+/// than failing the query.
+///
+/// Prometheus compares float samples only: a histogram has no ordering against a scalar, so the
+/// position it holds answers nothing. The existing planner says so with an info and answers no
+/// value there (`NativeHistogramDrop`, `prom_token_to_binary_expr_builder` in
+/// `query::promql::planner`), which is the behaviour mirrored here. The second element of the
+/// answer reports whether a histogram was dropped, so the caller can record that info once per
+/// chunk instead of once per position.
+///
+/// `None` still means nothing passed a filter, the same contract as [`map_compare`].
+pub fn map_compare_literal(
+    schema: &Arc<SeriesSchema>,
+    series: &Series,
+    comparison: Comparison,
+    scalar: ScalarOperand,
+) -> Result<(Option<Series>, bool)> {
+    // Whatever kinds the fields carry: a histogram position is dropped, not rejected, so the axis
+    // and the schema are checked without requiring float samples.
+    let time = validate_grid_series(schema, series)?;
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    let mut dropped_histogram = false;
+    let mut fields = series
+        .fields
+        .iter()
+        .map(|field| field.iter())
+        .collect::<Vec<_>>();
+    let mut row = Vec::with_capacity(fields.len());
+    for (position, _) in time.positions() {
+        row.clear();
+        for field in &mut fields {
+            row.push(match field.next().expect("validated length") {
+                SampleRef::Float(sample) => {
+                    let (left, right) = match scalar {
+                        ScalarOperand::Left(scalar) => (scalar, sample),
+                        ScalarOperand::Right(scalar) => (sample, scalar),
+                    };
+                    comparison.apply(left, right, sample)
+                }
+                SampleRef::Histogram(_) => {
+                    dropped_histogram = true;
+                    None
+                }
+                SampleRef::Missing => None,
+            });
+        }
+        builder.push(position, &row)?;
+    }
+    let metric = if matches!(comparison, Comparison::Bool(_)) {
+        drop_metric_name(&series.metric)?
+    } else {
+        series.metric.clone()
+    };
+    Ok((builder.finish(metric)?, dropped_histogram))
+}
+
 /// Evaluates scalar–scalar arithmetic as an unlabelled, single-field series on `range`.
 pub fn scalar_arithmetic(
     schema: &SeriesSchema,
@@ -115,6 +171,24 @@ impl Comparison {
             Self::Filter(op) => op.apply(left, right).then_some(vector),
             Self::Bool(op) => Some(f64::from(op.apply(left, right))),
         }
+    }
+}
+
+impl std::fmt::Display for Comparison {
+    /// The operator as the query wrote it, which is how the existing planner names it in the info
+    /// it records for a dropped histogram sample.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let op = match self {
+            Self::Filter(op) | Self::Bool(op) => op,
+        };
+        f.write_str(match op {
+            ComparisonOp::Equal => "==",
+            ComparisonOp::NotEqual => "!=",
+            ComparisonOp::Less => "<",
+            ComparisonOp::LessEqual => "<=",
+            ComparisonOp::Greater => ">",
+            ComparisonOp::GreaterEqual => ">=",
+        })
     }
 }
 

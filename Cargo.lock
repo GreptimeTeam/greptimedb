@@ -6101,7 +6101,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=9533078d6fd4bdaddbca0750cb9bf7ad64b2e568#9533078d6fd4bdaddbca0750cb9bf7ad64b2e568"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f51cb5312bf7feaf1199361ce16edc63a0ad40b2#f51cb5312bf7feaf1199361ce16edc63a0ad40b2"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -14641,6 +14641,7 @@ dependencies = [
  "promql",
  "prost 0.14.1",
  "snafu 0.8.6",
+ "tokio",
 ]
 
 [[package]]

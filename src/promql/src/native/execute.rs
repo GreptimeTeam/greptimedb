@@ -22,6 +22,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -41,7 +42,7 @@ use crate::grid_series::{
     series_bytes, table_bytes,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
-use crate::histogram_eval::{evaluate_histograms, map_native_histogram};
+use crate::histogram_eval::{evaluate_histograms_with_annotations, map_native_histogram};
 use crate::info::{InfoSelector, info_with_reservation};
 use crate::instant_eval::{
     info_sample_times, select_instant_at, select_instants, timestamp_of_evaluated,
@@ -49,8 +50,8 @@ use crate::instant_eval::{
 };
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
-    drop_metric_name, is_float_series, map_arithmetic, map_arithmetic_series, map_compare,
-    map_compare_series, map_math, map_math_with_parameters,
+    drop_metric_name, is_float_series, map_arithmetic_literal, map_arithmetic_series,
+    map_compare_literal, map_compare_series, map_math, map_math_with_parameters,
 };
 use crate::map_time::{self, DateFunction};
 use crate::native::aggregate::{AggregateOutput, AggregateRuntime};
@@ -1767,6 +1768,7 @@ struct VectorRuntime {
     merge_input: bool,
     /// Whether the kernel has run. It runs at most once: the input it read is gone afterwards.
     computed: bool,
+    annotations: Option<PromqlAnnotationCollector>,
 }
 
 impl VectorRuntime {
@@ -1804,6 +1806,7 @@ impl VectorRuntime {
             input: RetainedInput::default(),
             merge_input: false,
             computed: false,
+            annotations: None,
         })
     }
 
@@ -1851,7 +1854,7 @@ impl VectorRuntime {
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             let _timer = metrics.timer();
-            vector_series(&self.op, &self.schema, assembled)?
+            vector_series(&self.op, &self.schema, assembled, self.annotations.as_ref())?
         };
         self.input.release();
         self.computed = true;
@@ -1873,6 +1876,7 @@ fn vector_series(
     op: &BoundVectorOp,
     schema: &Arc<SeriesSchema>,
     series: Vec<Series>,
+    collector: Option<&PromqlAnnotationCollector>,
 ) -> Result<Vec<Series>> {
     let grouping = |group: &Grouping| match group {
         Grouping::By(labels) => select::Grouping::By(labels.to_vec()),
@@ -1890,9 +1894,12 @@ fn vector_series(
         // The kernel groups bucket series by label set and takes one native histogram series per
         // set, so pieces of one label set -- an empty tag and an absent one, or what a map folded
         // -- are merged first, and two of them holding one point fail as they do elsewhere.
-        BoundVectorOp::Histogram(function) => {
-            evaluate_histograms(*function, schema, &merge_same_labelset(schema, series)?)
-        }
+        BoundVectorOp::Histogram(function) => evaluate_histograms_with_annotations(
+            *function,
+            schema,
+            &merge_same_labelset(schema, series)?,
+            collector,
+        ),
         BoundVectorOp::CountValues { label, group } => {
             let (by, labels) = match group {
                 Grouping::By(labels) => (true, labels),
@@ -2062,6 +2069,7 @@ struct BroadcastRuntime {
     sample_schema: Arc<SeriesSchema>,
     /// The bytes charged for the scalar's value, which [`BroadcastScalar::Dynamic`] keeps.
     scalar_bytes: usize,
+    annotations: Option<PromqlAnnotationCollector>,
 }
 
 /// What a map with scalar parameters holds: its function and output layout, and each parameter's
@@ -2130,6 +2138,22 @@ impl BroadcastRuntime {
         }
     }
 
+    /// Reports the samples a binary operation had to drop because it has no histogram form.
+    ///
+    /// Prometheus answers no value for a histogram under an operator it has no meaning for — a
+    /// scalar divided by a histogram, a histogram ordered against a scalar — and the existing
+    /// planner states the same rule with this wording and at `info` level
+    /// (`NativeHistogramDrop`). Failing the query instead would turn one unsupported sample into
+    /// no answer at all, and saying nothing would leave the reader unable to tell a dropped sample
+    /// from one that was never there.
+    fn record_dropped_histograms(&self, dropped_histogram: bool, op: impl std::fmt::Display) {
+        if dropped_histogram && let Some(collector) = &self.annotations {
+            collector.record_info(format!(
+                "{op}: dropped native histogram samples because this binary operation is not supported for native histograms"
+            ));
+        }
+    }
+
     /// The label set a chunk of the vector side's `metric` becomes under this operation.
     ///
     /// It is what a series closes under when the operation emptied every position: the labels say
@@ -2151,14 +2175,21 @@ impl BroadcastRuntime {
     fn apply(&self, chunk: &EvaluatedChunk) -> Result<Option<Series>> {
         let output = match &self.scalar {
             BroadcastScalar::Literal(operand) => match self.op {
-                BroadcastOp::Arithmetic(op) => Some(map_arithmetic(
-                    &self.sample_schema,
-                    &chunk.series,
-                    op,
-                    *operand,
-                )?),
+                BroadcastOp::Arithmetic(op) => {
+                    let (output, dropped_histogram) =
+                        map_arithmetic_literal(&self.sample_schema, &chunk.series, op, *operand)?;
+                    self.record_dropped_histograms(dropped_histogram, op);
+                    Some(output)
+                }
                 BroadcastOp::Compare(comparison) => {
-                    map_compare(&self.sample_schema, &chunk.series, comparison, *operand)?
+                    let (output, dropped_histogram) = map_compare_literal(
+                        &self.sample_schema,
+                        &chunk.series,
+                        comparison,
+                        *operand,
+                    )?;
+                    self.record_dropped_histograms(dropped_histogram, comparison);
+                    output
                 }
             },
             BroadcastScalar::Dynamic { left, value } => {
@@ -2174,10 +2205,23 @@ impl BroadcastRuntime {
                 };
                 match self.op {
                     BroadcastOp::Arithmetic(op) => {
+                        if !is_float_series(&chunk.series) {
+                            return Err(DataFusionError::NotImplemented(
+                                "dynamic scalar arithmetic does not support histogram or mixed samples"
+                                    .into(),
+                            ));
+                        }
                         map_arithmetic_series(&self.sample_schema, &chunk.series, op, operand)?
                     }
                     BroadcastOp::Compare(comparison) => {
-                        map_compare_series(&self.sample_schema, &chunk.series, comparison, operand)?
+                        let (output, dropped_histogram) = map_compare_series(
+                            &self.sample_schema,
+                            &chunk.series,
+                            comparison,
+                            operand,
+                        )?;
+                        self.record_dropped_histograms(dropped_histogram, comparison);
+                        output
                     }
                 }
             }
@@ -2382,12 +2426,19 @@ fn map_workspace_bytes(ops: &[MapOp], series: &Series) -> Result<usize> {
     Ok(bound)
 }
 
-/// An upper bound of what a kernel that maps each dense segment of `series` into a float array of
-/// its length allocates: float math over a series of floats and arithmetic against a constant.
+/// An upper bound of what a kernel that maps each dense segment of `series` into a new array of its
+/// length allocates: float math over a series of floats, and arithmetic against a constant, which
+/// also rebuilds a histogram field sample by sample.
 ///
 /// A mapped segment holds its values, rounded up to Arrow's 64-byte alignment, behind the header
 /// of the allocation they share, and keeps the input's validity and axis; the result is assembled
 /// as [`assembly_bytes`] counts it.
+///
+/// A histogram row is not one `f64`: the kernel copies the whole payload into a builder, buckets
+/// included, so charging a float per row under-counts a wide histogram by three orders of
+/// magnitude. The largest row in the field is the one to charge, for the same reason
+/// [`Self::largest_histograms`] charges it: any row can be the one a position picks, and a series
+/// that carries histograms is rebuilt position by position.
 fn mapped_workspace_bytes(series: &Series) -> Result<usize> {
     let segments = series
         .fields
@@ -2396,12 +2447,17 @@ fn mapped_workspace_bytes(series: &Series) -> Result<usize> {
         .fold(0usize, usize::saturating_add);
     let bound = || {
         let mut bytes = assembly_bytes(series.fields.len(), segments, &series.metric)?;
-        for segment in series.fields.iter().flat_map(|field| field.segments()) {
-            bytes = segment
-                .len()
-                .checked_mul(std::mem::size_of::<f64>())?
-                .checked_add(64 + BUFFER_HEADER_BYTES)?
-                .checked_add(bytes)?;
+        for field in series.fields.iter() {
+            let row = histogram_row_bytes(field).map_or(std::mem::size_of::<f64>(), |histogram| {
+                histogram.max(std::mem::size_of::<f64>())
+            });
+            for segment in field.segments() {
+                bytes = segment
+                    .len()
+                    .checked_mul(row)?
+                    .checked_add(64 + BUFFER_HEADER_BYTES)?
+                    .checked_add(bytes)?;
+            }
         }
         Some(bytes)
     };
@@ -2757,6 +2813,7 @@ pub struct NativeExecutionState {
     inputs: Vec<InputSlot>,
     /// A constant root waiting for its only pull; operand scalars remain chunkless.
     scalar_root: Option<(Arc<EvalGrid>, f64, NodeState)>,
+    annotations: Option<PromqlAnnotationCollector>,
 }
 
 impl NodeState {
@@ -2948,6 +3005,8 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Window {
                         input: Box::new(child),
+                        // The collector arrives through `set_annotations` before the first pull;
+                        // a fresh evaluator records nothing until then.
                         window: Some(RangeEvaluator::try_new(
                             &input_schema,
                             Arc::clone(&op.output_grid),
@@ -3437,6 +3496,57 @@ impl RuntimeNode {
 /// is what makes the whole descent exclusive. No node therefore has to know where in the tree it
 /// sits, and the topology stays the one the tree was built with.
 impl RuntimeNode {
+    fn set_annotations(&mut self, collector: PromqlAnnotationCollector) {
+        match &mut self.op {
+            RuntimeOp::Window { input, window, .. } => {
+                if let Some(window) = window {
+                    window.set_annotations(Some(collector.clone()));
+                }
+                input.set_annotations(collector);
+            }
+            // A map's kernels record nothing: float math and the native-histogram readers answer
+            // a value per sample with no message of their own, so only its child needs the
+            // collector.
+            RuntimeOp::Map { input, .. } => input.set_annotations(collector),
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                input.set_annotations(collector.clone());
+                for parameter in parameters {
+                    parameter.set_annotations(collector.clone());
+                }
+            }
+            RuntimeOp::VectorOf { input, .. }
+            | RuntimeOp::Instant { input, .. }
+            | RuntimeOp::Merge { input, .. } => input.set_annotations(collector),
+            RuntimeOp::Binary { left, right, .. } => {
+                left.set_annotations(collector.clone());
+                right.set_annotations(collector);
+            }
+            RuntimeOp::Broadcast {
+                left,
+                right,
+                broadcast,
+                ..
+            } => {
+                if let Some(broadcast) = broadcast {
+                    broadcast.annotations = Some(collector.clone());
+                }
+                left.set_annotations(collector.clone());
+                right.set_annotations(collector);
+            }
+            RuntimeOp::Aggregate { input, .. } => input.set_annotations(collector),
+            RuntimeOp::Timestamp { input, .. } => input.set_annotations(collector),
+            RuntimeOp::Vector { input, vector, .. } => {
+                if let Some(vector) = vector {
+                    vector.annotations = Some(collector.clone());
+                }
+                input.set_annotations(collector);
+            }
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
+        }
+    }
+
     /// Pulls the next chunk this node hands over, taking what its children owe it.
     ///
     /// `inputs_finished` is the caller's word that no more source chunks will arrive. A node that
@@ -4306,7 +4416,15 @@ impl NativeExecutionState {
             root,
             inputs,
             scalar_root,
+            annotations: None,
         })
+    }
+
+    pub fn set_annotations(&mut self, collector: Option<PromqlAnnotationCollector>) {
+        self.annotations = collector.clone();
+        if let Some(collector) = collector {
+            self.root.set_annotations(collector);
+        }
     }
 
     /// Registers the metric handles of every node of this execution's tree with `set`.
@@ -6135,6 +6253,7 @@ fn broadcast_runtime(
         op: broadcast_op(matching)?,
         sample_schema,
         scalar_bytes: 0,
+        annotations: None,
     })
 }
 

@@ -75,6 +75,7 @@ use crate::options::ScheduledTimeExtension;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
+use crate::region_query::RegionReadLimiter;
 use crate::{QueryEngine, metrics};
 
 /// Query parallelism hint key.
@@ -187,6 +188,18 @@ impl DatafusionQueryEngine {
         } else {
             physical_plan
         };
+
+        // A region read is a remote body that streams until drained, so a query reading several
+        // sources would otherwise run one body per source and partition. Bound the reads of the
+        // plan shape that can hold the budget: the native raw PromQL topology, whose only
+        // multi-input node polls every input at once. A plan with any other multi-input node (a
+        // join, or the union a discovered selector builds) keeps its per-scan bounds only rather
+        // than take a query-wide budget its topology has not been checked against.
+        if crate::promql::planner::native::native_raw_plan_bounds_region_reads(&physical_plan) {
+            let target_partitions = ctx.state().config().target_partitions();
+            ctx.config_mut()
+                .set_extension(Arc::new(RegionReadLimiter::new(target_partitions)));
+        }
 
         let stream = self.execute_stream(&ctx, &physical_plan)?;
 
@@ -622,6 +635,21 @@ impl QueryEngine for DatafusionQueryEngine {
                 query_ctx: query_ctx.clone(),
                 state: self.engine_state().function_state(),
             });
+
+        // The PromQL planner registers the query's annotation collector in the session state it
+        // planned with. Execution builds its task context from a fresh state, so the same
+        // collector is looked up again by query id here; without it a native kernel's warnings
+        // and infos would be recorded into an object nobody reads.
+        if let Some(collector) = query_ctx
+            .remote_query_id()
+            .map(common_query::promql_annotations::promql_annotation_collector)
+        {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(collector);
+        }
 
         // Carry scheduled Flow time through ConfigOptions.extensions so that
         // the distributed plan analyzer can read it during expression

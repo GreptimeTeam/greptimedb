@@ -22,6 +22,8 @@ pub use native::{NATIVE_PROMQL_EXTENSION_KEY, discovers_metric_name};
 mod set_operator;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow::datatypes::IntervalDayTime;
@@ -308,6 +310,11 @@ pub struct PromPlanner {
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
 
+/// [`PromPlanner::try_plan_native_operand`]'s future, boxed; see
+/// [`PromPlanner::native_operand_future`] for why it is not kept inline.
+type NativeOperandFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<(LogicalPlan, PromPlannerContext)>>> + Send + 'a>>;
+
 impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
@@ -342,7 +349,10 @@ impl PromPlanner {
         // a range function and the math functions over it into one tree: offered any later, the
         // expression has already been split into the nodes those functions would have shared. A
         // shape it does not accept is planned by the existing path exactly as if it were not here.
-        if let Some(plan) = planner.try_plan_native_fused(&stmt.expr).await? {
+        if let Some(plan) = planner
+            .try_plan_native_fused(&stmt.expr, query_engine_state)
+            .await?
+        {
             return planner.strip_tsid_column(plan);
         }
         let plan = planner
@@ -1167,6 +1177,63 @@ impl PromPlanner {
         })
     }
 
+    /// Boxes [`Self::try_plan_native_operand`]'s future.
+    ///
+    /// The planner re-enters [`Self::prom_expr_to_plan_inner`] and
+    /// [`Self::prom_binary_expr_to_plan`] once per nesting level of the statement, and both frames
+    /// are large in a debug build. The native route's future is large as well, so a caller that
+    /// also plans the same expression with the existing path would carry a copy of it on the stack
+    /// at every level. Built here, the future moves into the box before that recursion starts, and
+    /// only the attempt itself pays for it.
+    fn native_operand_future<'a>(
+        &'a mut self,
+        expr: &'a PromExpr,
+        query_engine_state: &'a QueryEngineState,
+    ) -> NativeOperandFuture<'a> {
+        Box::pin(self.try_plan_native_operand(expr, query_engine_state))
+    }
+
+    /// Re-plans one operand that [`matching_filters::propagate`] rewrote, publishing the plan and
+    /// its context through `context`.
+    ///
+    /// A copied matcher belongs to the scan, not to the operand's identity: `absent()` turns
+    /// `selector_matcher` into the labels it reports, so the re-planned context keeps the matchers
+    /// the operand was written with.
+    ///
+    /// A natively planned operand is re-planned natively: the matcher has to reach the fused node's
+    /// own scan, or the join keeps the non-joining rows that node reported. The route decides per
+    /// expression, so a decline falls back to the existing plan exactly as it would have on its own.
+    async fn replan_rewritten_operand(
+        &mut self,
+        rewritten: &PromExpr,
+        used_native: bool,
+        query_engine_state: &QueryEngineState,
+        context: &mut PromPlannerContext,
+    ) -> Result<LogicalPlan> {
+        let selectors = std::mem::take(&mut context.selector_matcher);
+        let native = if used_native {
+            self.native_operand_future(rewritten, query_engine_state)
+                .await?
+        } else {
+            None
+        };
+        let plan = match native {
+            Some((plan, replanned)) => {
+                *context = replanned;
+                plan
+            }
+            None => {
+                let plan = self
+                    .prom_expr_to_plan(rewritten, query_engine_state)
+                    .await?;
+                *context = self.ctx.clone();
+                plan
+            }
+        };
+        context.selector_matcher = selectors;
+        Ok(plan)
+    }
+
     async fn prom_binary_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
@@ -1378,8 +1445,10 @@ impl PromPlanner {
                     self.native_fused && native::hybrid_binary_admitted(*op, modifier, lhs, rhs);
                 let native = if native_pair {
                     match (
-                        self.try_plan_native_operand(lhs).await?,
-                        self.try_plan_native_operand(rhs).await?,
+                        self.try_plan_native_operand(lhs, query_engine_state)
+                            .await?,
+                        self.try_plan_native_operand(rhs, query_engine_state)
+                            .await?,
                     ) {
                         (Some(left), Some(right)) => Some((left, right)),
                         _ => None,
@@ -1414,33 +1483,32 @@ impl PromPlanner {
                 // Both operands are planned first because only the planned contexts tell a tag
                 // from a value field. The rewrite merely adds matchers to a selector, so the
                 // table reference, time index and field columns captured above stay valid.
-                if !used_native
-                    && let Some(rewritten) = matching_filters::propagate(
-                        binary_expr,
-                        &left_context.tag_columns,
-                        &right_context.tag_columns,
-                        &left_context.aggregation_field_labels,
-                        &right_context.aggregation_field_labels,
-                    )
-                {
-                    // A copied matcher belongs to the scan, not to the operand's identity:
-                    // `absent()` turns `selector_matcher` into the labels it reports, so the
-                    // re-planned context keeps the matchers the operand was written with.
+                if let Some(rewritten) = matching_filters::propagate(
+                    binary_expr,
+                    &left_context.tag_columns,
+                    &right_context.tag_columns,
+                    &left_context.aggregation_field_labels,
+                    &right_context.aggregation_field_labels,
+                ) {
                     if rewritten.lhs.as_ref() != lhs.as_ref() {
-                        let selectors = std::mem::take(&mut left_context.selector_matcher);
                         left_input = self
-                            .prom_expr_to_plan(&rewritten.lhs, query_engine_state)
+                            .replan_rewritten_operand(
+                                &rewritten.lhs,
+                                used_native,
+                                query_engine_state,
+                                &mut left_context,
+                            )
                             .await?;
-                        left_context = self.ctx.clone();
-                        left_context.selector_matcher = selectors;
                     }
                     if rewritten.rhs.as_ref() != rhs.as_ref() {
-                        let selectors = std::mem::take(&mut right_context.selector_matcher);
                         right_input = self
-                            .prom_expr_to_plan(&rewritten.rhs, query_engine_state)
+                            .replan_rewritten_operand(
+                                &rewritten.rhs,
+                                used_native,
+                                query_engine_state,
+                                &mut right_context,
+                            )
                             .await?;
-                        right_context = self.ctx.clone();
-                        right_context.selector_matcher = selectors;
                     }
                     // The code below reads `self.ctx` as the right operand's context.
                     self.ctx = right_context.clone();
@@ -2460,7 +2528,10 @@ impl PromPlanner {
             ANALYZE_NODE_NAME
             | ANALYZE_VERBOSE_NODE_NAME
             | EXPLAIN_NODE_NAME
-            | EXPLAIN_VERBOSE_NODE_NAME => self.try_plan_native_fused(&children[0]).await?,
+            | EXPLAIN_VERBOSE_NODE_NAME => {
+                self.try_plan_native_fused(&children[0], query_engine_state)
+                    .await?
+            }
             _ => None,
         };
         let plan = match native_plan {

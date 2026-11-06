@@ -57,12 +57,16 @@ impl Drop for NativeNodeDepthGuard {
     }
 }
 
+use datafusion::arrow::datatypes::DataType;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 
+use common_query::native_histogram::native_histogram_arrow_type;
+
+use crate::extension_plan::FieldKind;
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::info::InfoSelector;
 use crate::map::MathOp;
@@ -377,6 +381,121 @@ impl NativeType {
             (Self::Samples(mine), Self::Samples(theirs)) => **mine == **theirs,
             (Self::AggregateState(mine), Self::AggregateState(theirs)) => **mine == **theirs,
             _ => false,
+        }
+    }
+}
+
+/// The [`FieldKind`] every referenced field of a scan carries, or `None` when they disagree or one
+/// is a type this route does not answer.
+///
+/// The route declares one output column per field, so a statement whose selectors carry different
+/// kinds has no column to declare them in and keeps the existing plan. `Float64` and the canonical
+/// native histogram struct are the two kinds this route answers.
+pub fn uniform_field_kind<'a>(
+    kinds: impl IntoIterator<Item = Option<&'a DataType>>,
+) -> Option<FieldKind> {
+    let mut answer = None;
+    for kind in kinds {
+        let this = match kind? {
+            DataType::Float64 => FieldKind::Float,
+            data_type if data_type == &native_histogram_arrow_type() => FieldKind::Histogram,
+            _ => return None,
+        };
+        match answer {
+            None => answer = Some(this),
+            Some(seen) if seen == this => {}
+            Some(_) => return None,
+        }
+    }
+    answer
+}
+
+impl NativeNode {
+    /// The kind this node's output field carries, given the kind its input carries.
+    ///
+    /// `None` means this walk cannot name it: a shape whose samples the model does not describe
+    /// keeps the existing plan rather than declaring a column the first batch might not fill.
+    pub fn output_field_kind(&self, input: FieldKind) -> Option<FieldKind> {
+        let kind_of = |node: &NativeNode| node.output_field_kind(input);
+        match &self.expr {
+            NativeExpr::Input(_) => Some(input),
+            // `timestamp()` replaces each input sample with its evaluation timestamp as a float.
+            NativeExpr::Timestamp { .. } => Some(FieldKind::Float),
+            // The window functions that answer with a histogram are the ones the range kernel says
+            // yield one; every other range function reduces its window to a float.
+            NativeExpr::Window { input, op } => {
+                let inner = kind_of(input)?;
+                (!op.function.yields_histograms())
+                    .then_some(FieldKind::Float)
+                    .or(Some(inner))
+            }
+            // An instant selection reads one sample of the field, so it keeps the kind; the two
+            // timestamp forms replace the sample with a float of its own time.
+            NativeExpr::Instant { input, op } => match op.value {
+                InstantValue::Sample => kind_of(input),
+                InstantValue::Timestamp | InstantValue::InfoTimestamp => Some(FieldKind::Float),
+            },
+            // `histogram_count` and the other native-histogram readers answer with one float per
+            // sample; the map kernels that keep the samples keep their kind as well.
+            NativeExpr::Map { input, op } => {
+                let mut kind = kind_of(input)?;
+                for op in op.ops.iter() {
+                    kind = match op {
+                        // The native-histogram readers answer one float per sample.
+                        MapOp::Histogram(_) => FieldKind::Float,
+                        // A label rewrite writes labels only, so the samples it passes on are the
+                        // ones it was given, kind included.
+                        MapOp::Label(_) => kind,
+                        // No math function keeps a histogram, so a histogram reaching one is a
+                        // shape this walk does not name rather than a silent float.
+                        MapOp::Math(_) if kind == FieldKind::Histogram => return None,
+                        MapOp::Math(_) => FieldKind::Float,
+                    };
+                }
+                Some(kind)
+            }
+            // A constant beside a vector is broadcast over it, so the operation answers with the
+            // vector's own samples: a histogram times a float is still a histogram. Two vectors are
+            // only one column if both sides carry the same kind; a mixed result needs two columns
+            // per field, which this route does not declare.
+            NativeExpr::Binary {
+                left,
+                right,
+                matching,
+            } => {
+                // `bool` makes a comparison answer 1 or 0 whatever its operands hold, which is
+                // what the kernel does before it looks at the kinds.
+                if matching.return_bool {
+                    return Some(FieldKind::Float);
+                }
+                match (&left.expr, &right.expr) {
+                    (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => Some(FieldKind::Float),
+                    (NativeExpr::Scalar(_), _) => kind_of(right),
+                    (_, NativeExpr::Scalar(_)) => kind_of(left),
+                    (_, _) => {
+                        let left_kind = kind_of(left)?;
+                        (left_kind == kind_of(right)?).then_some(left_kind)
+                    }
+                }
+            }
+            // A canonical merge collects pieces of one label set: it assembles the samples it was
+            // given and never converts them, so the field keeps the kind it had.
+            NativeExpr::Merge { input } => kind_of(input),
+            // A set operation keeps the payloads it selects - `and` and `unless` keep the left
+            // samples, `or` keeps the left's and the right's unmatched ones - so a pair of
+            // different kinds would answer a field carrying both. This route declares one type per
+            // field, so it names the answer only when both sides agree. That is this planner's
+            // condition for a uniformly typed column, not a rule Prometheus states.
+            NativeExpr::Set { left, right, .. } => {
+                let left_kind = kind_of(left)?;
+                (left_kind == kind_of(right)?).then_some(left_kind)
+            }
+            // An aggregate folds float state only: the admission gate keeps a histogram from
+            // entering one, so whatever a histogram statement aggregates answers floats. Naming it
+            // here is what lets `sum(count_over_time(h[5m]))` - a float built from histograms -
+            // declare a float column instead of keeping the existing plan.
+            NativeExpr::Aggregate { .. } => Some(FieldKind::Float),
+            _ => None,
         }
     }
 }
