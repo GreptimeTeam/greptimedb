@@ -52,7 +52,7 @@ pub(crate) fn decompress(bytes: &[u8], compression: u16, decoded: usize) -> Resu
     let output = match compression {
         0 => bytes.to_vec(),
         1 => {
-            let decoder = zstd::stream::read::Decoder::new(bytes)
+            let decoder = zstd::stream::read::Decoder::with_buffer(bytes)
                 .map_err(|e| invalid(format!("series zstd header: {e}")))?;
             let mut output = Vec::new();
             // Never let a frame's claimed size control allocation or output growth.
@@ -66,6 +66,67 @@ pub(crate) fn decompress(bytes: &[u8], compression: u16, decoded: usize) -> Resu
     };
     require(output.len() == decoded, "series decoded length mismatch")?;
     Ok(output)
+}
+
+/// Scratch state for synchronous decoding of one sample block's columns.
+/// The caller reserves decoded column memory before allocating this output buffer.
+/// No buffer or context is shared with another stream or retained in a cache.
+#[derive(Default)]
+pub(crate) struct PayloadDecoder {
+    context: Option<zstd::zstd_safe::DCtx<'static>>,
+    output: Vec<u8>,
+}
+
+impl PayloadDecoder {
+    pub(crate) fn decompress<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+        compression: u16,
+        decoded: usize,
+    ) -> Result<&'a [u8]> {
+        require(
+            decoded <= COLUMN_LIMIT,
+            "series decoded payload exceeds limit",
+        )?;
+        match compression {
+            0 => {
+                require(bytes.len() == decoded, "series decoded length mismatch")?;
+                Ok(bytes)
+            }
+            1 => {
+                if self.context.is_none() {
+                    self.context = Some(
+                        zstd::zstd_safe::DCtx::try_create()
+                            .ok_or_else(|| invalid("cannot allocate series decoder context"))?,
+                    );
+                }
+                let context = self
+                    .context
+                    .as_mut()
+                    .ok_or_else(|| invalid("missing series decoder context"))?;
+                // Reset even after a previous corrupt, truncated, or oversized frame.
+                context
+                    .reset(zstd::zstd_safe::ResetDirective::SessionOnly)
+                    .map_err(|e| invalid(format!("series decoder reset: {e}")))?;
+                self.output.clear();
+                // The bounded, validated metadata length controls the allocation,
+                // never the frame's claimed size. One extra byte detects overflow.
+                self.output
+                    .try_reserve_exact(decoded + 1)
+                    .map_err(|e| invalid(format!("series decode allocation: {e}")))?;
+                zstd::stream::read::Decoder::with_context(bytes, context)
+                    .take(decoded as u64 + 1)
+                    .read_to_end(&mut self.output)
+                    .map_err(|e| invalid(format!("series decompression: {e}")))?;
+                require(
+                    self.output.len() == decoded,
+                    "series decoded length mismatch",
+                )?;
+                Ok(&self.output)
+            }
+            id => Err(unsupported(format!("series compression {id}"))),
+        }
+    }
 }
 
 pub(crate) fn put_u32(out: &mut Vec<u8>, value: u32) {

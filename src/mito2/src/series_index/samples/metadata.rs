@@ -88,6 +88,17 @@ impl PayloadReference {
         )?;
         codec::decompress(bytes, self.compression, self.decoded as usize)
     }
+    pub fn unpack_with_decoder<'a>(
+        &self,
+        bytes: &'a [u8],
+        decoder: &'a mut codec::PayloadDecoder,
+    ) -> Result<&'a [u8]> {
+        require(
+            bytes.len() == self.stored as usize && codec::checksum(bytes) == self.checksum,
+            "sample checksum mismatch",
+        )?;
+        decoder.decompress(bytes, self.compression, self.decoded as usize)
+    }
 }
 pub(super) fn pack(
     bytes: &[u8],

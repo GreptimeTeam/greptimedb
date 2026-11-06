@@ -354,7 +354,11 @@ async fn load_metadata_page(
     .await
 }
 /// Keep column loads separate from metadata for future Mito cache integration.
-fn load_column_chunk(buffers: &HashMap<u64, bytes::Bytes>, column: &Column) -> Result<Vec<u8>> {
+fn load_column_chunk<'a>(
+    buffers: &'a HashMap<u64, bytes::Bytes>,
+    column: &Column,
+    decoder: &'a mut codec::PayloadDecoder,
+) -> Result<&'a [u8]> {
     let allowed = match column.role {
         1 => matches!(column.payload.encoding, 1 | 2),
         2 => matches!(column.payload.encoding, 3 | 4),
@@ -368,7 +372,7 @@ fn load_column_chunk(buffers: &HashMap<u64, bytes::Bytes>, column: &Column) -> R
     let bytes = buffers
         .get(&column.payload.offset)
         .ok_or_else(|| invalid("missing prefetched sample column"))?;
-    column.payload.unpack(bytes)
+    column.payload.unpack_with_decoder(bytes, decoder)
 }
 fn timestamp_array(values: impl Iterator<Item = i64>, unit: TimestampUnit) -> ArrayRef {
     match unit {
@@ -423,6 +427,7 @@ async fn read_block(
             .try_grow(bytes)
             .context(crate::error::ScanMemoryExhaustedSnafu)?;
     }
+    let mut decoder = codec::PayloadDecoder::default();
     let mut buffers = HashMap::new();
     if boundary {
         fetch_columns(reader, &[&block.columns[0]], &mut buffers, metrics).await?;
@@ -435,7 +440,7 @@ async fn read_block(
     if needs_time {
         let column = &block.columns[0];
         let values = codec::decode_numbers(
-            &load_column_chunk(&buffers, column)?,
+            load_column_chunk(&buffers, column, &mut decoder)?,
             column.payload.encoding,
             block.rows as usize,
         )?;
@@ -485,7 +490,7 @@ async fn read_block(
             3 => {
                 let column = &block.columns[1];
                 let values = codec::decode_numbers(
-                    &load_column_chunk(&buffers, column)?,
+                    load_column_chunk(&buffers, column, &mut decoder)?,
                     column.payload.encoding,
                     block.rows as usize,
                 )?;
@@ -503,7 +508,7 @@ async fn read_block(
             4 => {
                 let column = &block.columns[2];
                 let values = codec::decode_operations(
-                    &load_column_chunk(&buffers, column)?,
+                    load_column_chunk(&buffers, column, &mut decoder)?,
                     column.payload.encoding,
                     block.rows as usize,
                 )?;
@@ -515,7 +520,7 @@ async fn read_block(
                 let id = manifest.fields[field - 5].column_id;
                 if let Some(column) = block.columns.iter().find(|c| c.role == 4 && c.id == id) {
                     let values = codec::decode_float(
-                        &load_column_chunk(&buffers, column)?,
+                        load_column_chunk(&buffers, column, &mut decoder)?,
                         block.rows as usize,
                         column.nulls,
                     )?;
