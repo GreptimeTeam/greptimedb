@@ -3571,7 +3571,8 @@ async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_fir
             .expect("request channel closed");
         let WorkerRequest::Background {
             region_id: notified_region,
-            notify: BackgroundNotify::CompactionUnit(CompactionUnitNotification::Released { plan_id }),
+            notify:
+                BackgroundNotify::CompactionUnit(CompactionUnitNotification::Released { plan_id }),
         } = message.request
         else {
             panic!("expected a release notification");
