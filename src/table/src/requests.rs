@@ -62,6 +62,9 @@ pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 /// Table data model used by the JSON2-based OTLP trace pipeline.
 pub const TABLE_DATA_MODEL_TRACE_V2: &str = "greptime_trace_v2";
+/// Table data model of OTLP log tables auto-created with the v1 built-in schema.
+/// Log tables without this marker keep the legacy built-in schema.
+pub const TABLE_DATA_MODEL_LOG_V1: &str = "greptime_log_v1";
 
 /// Returns true for the Trace V1 and V2 data models supported
 /// by semantic graph derivation.

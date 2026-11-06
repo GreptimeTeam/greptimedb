@@ -10334,7 +10334,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         )
         .await;
         assert_eq!(StatusCode::OK, res.status());
-        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"]]";
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,null,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,null],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,null,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,null]]";
         validate_data(
             "otlp_logs",
             &client,
@@ -10360,8 +10360,26 @@ pub async fn test_otlp_logs(store_type: StorageType) {
             &client,
             "select count(*) from information_schema.tables where table_name = 'opentelemetry_logs' \
              and create_options like '%greptime.semantic.signal_type=log%' \
-             and create_options like '%greptime.semantic.source=opentelemetry%';",
+             and create_options like '%greptime.semantic.source=opentelemetry%' \
+             and create_options like '%table_data_model=greptime_log_v1%' \
+             and create_options like '%greptime.semantic.pipeline=greptime_log_v1%';",
             "[[1]]",
+        )
+        .await;
+        validate_data(
+            "otlp_logs_v1_keys_and_indexes",
+            &client,
+            "select column_name, constraint_name, ordinal_position from information_schema.key_column_usage \
+             where table_name = 'opentelemetry_logs' order by constraint_name, ordinal_position, column_name;",
+            r#"[["service_name","PRIMARY",1],["scope_name","PRIMARY",2],["timestamp","TIME INDEX",1]]"#,
+        )
+        .await;
+        validate_data(
+            "otlp_logs_v1_column_indexes",
+            &client,
+            "select index_name, column_name from information_schema.statistics \
+             where table_name = 'opentelemetry_logs' and index_name like '%INDEX_%' order by index_name;",
+            r#"[["FULLTEXT_INDEX_body","body"],["SKIPPING_INDEX_trace_id","trace_id"]]"#,
         )
         .await;
 
@@ -10413,7 +10431,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         .await;
         assert_eq!(StatusCode::OK, res.status());
 
-        let expected = "[[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,\"server2\"],[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"10\",\"server1\"]]";
+        let expected = "[[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,null,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,null,null,\"server2\"],[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,null,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,null,\"10\",\"server1\"]]";
         validate_data(
             "otlp_logs_with_selector",
             &client,
@@ -10453,12 +10471,57 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         .await;
         assert_eq!(StatusCode::OK, res.status());
 
-        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\",\"fromwhere\":\"log_attr\"},0,\"\",\"\",{\"fromwhere\":\"scope\"},\"\",{\"fromwhere\":\"resource\"},\"https://opentelemetry.io/schemas/1.4.0\",\"log_attr\"]]";
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\",\"fromwhere\":\"log_attr\"},0,null,\"\",\"\",{\"fromwhere\":\"scope\"},\"\",{\"fromwhere\":\"resource\"},\"https://opentelemetry.io/schemas/1.4.0\",null,null,\"log_attr\"]]";
         validate_data(
             "otlp_logs_with_selector_overlapping",
             &client,
             "select * from logs2;",
             expected,
+        )
+        .await;
+    }
+
+    {
+        // The built-in `service_name` comes from the resource `service.name`, and log
+        // tables declare no entity.
+        let table_name = "otlp_logs_semantic";
+        let now_nanos = common_time::util::current_time_millis() * 1_000_000;
+        let mut record = make_log_record(
+            "00000000000000000000000000000005",
+            "0000000000000005",
+            now_nanos,
+            "semantic layer",
+            vec![],
+        );
+        record["eventName"] = json!("checkout.completed");
+        record["observedTimeUnixNano"] = json!((now_nanos + 1).to_string());
+        let mut req = make_log_request(vec![record]);
+        req.resource_logs[0].resource.as_mut().unwrap().attributes =
+            serde_json::from_value(json!([
+                {"key": "service.name", "value": {"stringValue": "checkout"}}
+            ]))
+            .unwrap();
+        // The first write creates the v1 table; the second reads its marker back.
+        for _ in 0..2 {
+            let res = send_log_req(&client, table_name, None, req.clone(), false).await;
+            assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+        }
+
+        validate_data(
+            "otlp_logs_semantic_table_semantics",
+            &client,
+            &format!(
+                "select signal_type, source, pipeline, entity_declarations from information_schema.table_semantics where table_name = '{table_name}';"
+            ),
+            r#"[["log","opentelemetry","greptime_log_v1",null]]"#,
+        )
+        .await;
+        let row = format!(r#"["checkout","checkout.completed",{}]"#, now_nanos + 1);
+        validate_data(
+            "otlp_logs_semantic_v1_columns",
+            &client,
+            &format!("select service_name, event_name, observed_timestamp from {table_name};"),
+            &format!("[{row},{row}]"),
         )
         .await;
     }
@@ -10498,6 +10561,14 @@ pub async fn test_otlp_logs(store_type: StorageType) {
             &client,
             "select column_name, semantic_type from information_schema.columns where table_name = 'otlp_logs_existing_schema' and column_name in ('timestamp', 'trace_id', 'host', 'scope_name') order by column_name;",
             r#"[["host","TAG"],["scope_name","FIELD"],["timestamp","TIMESTAMP"],["trace_id","TAG"]]"#,
+        )
+        .await;
+        // Tables without the v1 marker keep the legacy built-in columns.
+        validate_data(
+            "otlp_logs_existing_schema_no_v1_columns",
+            &client,
+            "select count(*) from information_schema.columns where table_name = 'otlp_logs_existing_schema' and column_name in ('service_name', 'event_name', 'observed_timestamp');",
+            "[[0]]",
         )
         .await;
     }
