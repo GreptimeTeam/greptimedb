@@ -405,6 +405,12 @@ impl TestEnv {
         }
     }
 
+    /// Sets the node identity used by engines created in this environment.
+    pub fn with_node_id(mut self, node_id: u64) -> Self {
+        self.file_ref_manager = Arc::new(FileReferenceManager::new(Some(node_id)));
+        self
+    }
+
     /// Overwrites the original `log_store_factory`.
     pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;

@@ -19,7 +19,9 @@ use api::v1::region::StrictWindow;
 use api::v1::region::compact_request::Options;
 use common_datasource::compression::CompressionType;
 use common_meta::key::schema_name::SchemaNameValue;
+use common_recordbatch::filter::MetadataFilter;
 use common_time::{DatabaseTimeToLive, Timestamp};
+use datafusion_expr::{col, lit};
 use store_api::mito_engine_options::{
     COMPACTION_TYPE, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
 };
@@ -367,7 +369,7 @@ async fn test_resident_region_survives_terminal_cycles_and_truncate() {
     let mut scheduler = env.mock_compaction_scheduler(tx);
     let version = Arc::new(VersionControlBuilder::new().build());
     let id = version.region_id();
-    scheduler.register_region(&version, &env.access_layer);
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
     assert!(!scheduler.is_compacting(id));
     assert!(scheduler.region_status.contains_key(&id));
     for cancelled in [false, true] {
@@ -375,7 +377,7 @@ async fn test_resident_region_survives_terminal_cycles_and_truncate() {
         status.start_picking(7);
         let (reply, response) = oneshot::channel();
         status.merge_waiter(reply.into());
-        scheduler.register_region(&version, &env.access_layer);
+        scheduler.register_region(&version, &env.access_layer, &Default::default());
         assert!(
             scheduler.is_compacting(id),
             "duplicate registration must retain the active cycle"
@@ -397,13 +399,13 @@ async fn test_resident_region_survives_terminal_cycles_and_truncate() {
     assert!(!scheduler.is_compacting(id));
     scheduler.on_region_closed(id);
     assert!(!scheduler.region_status.contains_key(&id));
-    scheduler.register_region(&version, &env.access_layer);
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
     let (reply, response) = oneshot::channel();
     let status = scheduler.region_status.get_mut(&id).unwrap();
     status.start_picking(8);
     status.merge_waiter(reply.into());
     let replacement = Arc::new(VersionControlBuilder::new().build());
-    scheduler.register_region(&replacement, &env.access_layer);
+    scheduler.register_region(&replacement, &env.access_layer, &Default::default());
     assert!(response.await.unwrap().is_err());
     assert!(Arc::ptr_eq(
         &scheduler.region_status[&id].version_control,
@@ -421,7 +423,7 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
     let mut scheduler = env.mock_compaction_scheduler(tx);
     let version = Arc::new(VersionControlBuilder::new().build());
     let id = version.region_id();
-    scheduler.register_region(&version, &env.access_layer);
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
     let key = PickKey {
         window: 0,
         class: PickClass::FileReduction,
@@ -439,7 +441,7 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
         .promoted_since_for_test(key, later);
     assert!(priority.is_some());
     scheduler.region_status.get_mut(&id).unwrap().become_idle();
-    scheduler.register_region(&version, &env.access_layer);
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
     assert_eq!(
         priority,
         scheduler.region_status[&id]
@@ -477,7 +479,7 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
             .promoted_since_for_test(key, later)
     );
     let replacement = Arc::new(VersionControlBuilder::new().build());
-    scheduler.register_region(&replacement, &env.access_layer);
+    scheduler.register_region(&replacement, &env.access_layer, &Default::default());
     assert!(
         scheduler.region_status[&id]
             .pick_history
@@ -500,7 +502,7 @@ async fn test_empty_plan_prunes_history_but_failed_plan_preserves_it(#[case] fai
         .mock_manifest_context(version.current().version.metadata.clone())
         .await;
     let (schemas, _) = mock_schema_metadata_manager();
-    scheduler.register_region(&version, &env.access_layer);
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
     let status = scheduler.region_status.get_mut(&id).unwrap();
     let key = PickKey {
         window: 0,
@@ -576,7 +578,7 @@ async fn test_resident_region_ddl_handoff_and_late_replies() {
         .mock_manifest_context(version.current().version.metadata.clone())
         .await;
     let (schemas, _) = mock_schema_metadata_manager();
-    scheduler.register_region(&version, &env.access_layer);
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
     scheduler
         .region_status
         .get_mut(&id)
@@ -633,7 +635,7 @@ async fn test_resident_region_ddl_handoff_and_late_replies() {
     scheduler.on_ddl_complete(id, old_generation, first);
     scheduler.on_ddl_complete(id, old_generation, first);
     scheduler.on_region_truncated(id);
-    scheduler.register_region(&version, &env.access_layer);
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
     assert!(
         scheduler.region_status[&id].has_ddl(),
         "duplicate replies and truncate must not end the batch"
@@ -646,7 +648,7 @@ async fn test_resident_region_ddl_handoff_and_late_replies() {
 
     scheduler.on_region_closed(id);
     let reopened = Arc::new(VersionControlBuilder::new().build());
-    scheduler.register_region(&reopened, &env.access_layer);
+    scheduler.register_region(&reopened, &env.access_layer, &Default::default());
     scheduler
         .region_status
         .get_mut(&id)
@@ -745,7 +747,7 @@ async fn test_schedule_empty() {
 
     // Only one file, picker won't compact it.
     let version_control = Arc::new(builder.push_l0_file(0, 1000).build());
-    scheduler.register_region(&version_control, &env.access_layer);
+    scheduler.register_region(&version_control, &env.access_layer, &Default::default());
     let (output_tx, output_rx) = oneshot::channel();
     let waiter = OptionOutputTx::from(output_tx);
     let scheduled = scheduler
@@ -997,7 +999,7 @@ async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
     let mut scheduler = env.mock_compaction_scheduler(tx);
     let version_control = compactable_version();
     let region_id = version_control.current().version.metadata.region_id;
-    scheduler.register_region(&version_control, &env.access_layer);
+    scheduler.register_region(&version_control, &env.access_layer, &Default::default());
     // Real discovery prunes this obsolete key only in its private snapshot.
     let key = PickKey {
         window: -999,
@@ -1044,7 +1046,7 @@ async fn test_cancelled_prepared_plan_preserves_resident_history() {
     let mut scheduler = env.mock_compaction_scheduler(tx);
     let version = compactable_version();
     let id = version.region_id();
-    scheduler.register_region(&version, &env.access_layer);
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
     // This obsolete key is pruned by real automatic discovery, but that private
     // result must not leak into the resident history before/without acceptance.
     let key = PickKey {
@@ -1092,7 +1094,7 @@ async fn test_pick_result_installs_history_after_unrelated_flush() {
     options.time_window = Some(Duration::from_secs(3600));
     let version_control = Arc::new(crate::region::version::VersionControl::new(version));
     let region_id = version_control.region_id();
-    scheduler.register_region(&version_control, &env.access_layer);
+    scheduler.register_region(&version_control, &env.access_layer, &Default::default());
     let selected_key = PickKey {
         window: 0,
         class: PickClass::L0Merge,
@@ -2310,7 +2312,7 @@ async fn test_try_cancel_and_add_ddl_returns_request_when_not_running() {
     let mut scheduler = env.mock_compaction_scheduler(tx);
     let region_id = RegionId::new(1, 1);
     let version = Arc::new(VersionControlBuilder::new().build());
-    scheduler.register_region(&version, &env.access_layer);
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
     assert!(scheduler.region_status.contains_key(&region_id));
     assert!(!scheduler.is_compacting(region_id));
     let (ddl_tx, ddl_rx) = oneshot::channel();
@@ -2897,7 +2899,7 @@ async fn test_disable_compaction_scheduling(#[case] options: Options) {
     scheduler.disable_compaction = true;
     let version_control = compactable_version();
     let region_id = version_control.region_id();
-    scheduler.register_region(&version_control, &env.access_layer);
+    scheduler.register_region(&version_control, &env.access_layer, &Default::default());
     let manifest_ctx = env
         .mock_manifest_context(version_control.current().version.metadata.clone())
         .await;
@@ -2960,4 +2962,446 @@ async fn test_disable_compaction_scheduling(#[case] options: Options) {
         finished.result,
         CompactionPlanningResult::Prepared(_)
     ));
+}
+
+#[tokio::test]
+async fn test_compaction_tasks_pending_identity_and_lifecycle() {
+    let env = SchedulerEnv::new().await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let (mut finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let all = MetadataFilter::default();
+    let rows = scheduler.inspect_tasks(&all, Some(7));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (&*rows[0].trigger_type, &*rows[0].phase),
+        ("automatic", "planning")
+    );
+    assert!(rows[0].effective_options.is_none());
+    let automatic_id = rows[0].task_id.clone();
+    scheduler
+        .schedule_manual_compaction(
+            Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            &version,
+            &env.access_layer,
+            OptionOutputTx::none(),
+            &manifest,
+            schemas.clone(),
+            2,
+            None,
+        )
+        .unwrap();
+    let rows = scheduler.inspect_tasks(&all, Some(7));
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0].task_id, rows[1].task_id);
+    let phases: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.trigger_type.as_ref(),
+                row.state.as_ref(),
+                row.phase.as_ref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            ("automatic", "running", "planning"),
+            ("manual", "queued", "waiting")
+        ]
+    );
+    let region_id = version.region_id();
+    for (filter, expected_rows) in [
+        (
+            col(compaction_task::REGION_ID).eq(lit(region_id.as_u64())),
+            2,
+        ),
+        (
+            col(compaction_task::REGION_ID).eq(lit(region_id.as_u64() + 1)),
+            0,
+        ),
+        (
+            col(compaction_task::TABLE_ID).eq(lit(region_id.table_id())),
+            2,
+        ),
+        (
+            col(compaction_task::TABLE_ID).eq(lit(region_id.table_id() + 1)),
+            0,
+        ),
+    ] {
+        let rows = scheduler.inspect_tasks(&MetadataFilter::new(&[filter]), Some(7));
+        assert_eq!(rows.len(), expected_rows);
+        assert!(rows.iter().all(|row| row.region_id == region_id));
+    }
+    let manual = MetadataFilter::new(&[col("trigger_type").eq(lit("manual"))]);
+    let rows = scheduler.inspect_tasks(&manual, Some(7));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state.as_ref(), "queued");
+    assert_ne!(rows[0].task_id, automatic_id);
+    let manual_id = rows[0].task_id.clone();
+    let submitted_at = rows[0].submitted_at;
+    assert!(
+        scheduler
+            .inspect_tasks(
+                &MetadataFilter::new(&[col("node_id").eq(lit(8u64))]),
+                Some(7)
+            )
+            .is_empty()
+    );
+    // Finish automatic planning without running fake SSTs, promoting the pending request.
+    finished.result = CompactionPlanningResult::NoPlan(None);
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
+        .await;
+    let rows = scheduler.inspect_tasks(&all, Some(7));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].task_id, manual_id);
+    assert_eq!(rows[0].submitted_at, submitted_at);
+    assert_eq!(rows[0].phase.as_ref(), "planning");
+    assert_eq!(
+        scheduler
+            .region_status
+            .get_mut(&version.region_id())
+            .unwrap()
+            .request_cancel(),
+        crate::schedule::RequestCancelResult::CancelIssued
+    );
+    assert_eq!(
+        scheduler.inspect_tasks(&all, Some(7))[0].state.as_ref(),
+        "cancelling"
+    );
+    let finished = recv_compaction_pick_finished(&mut rx).await;
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas)
+        .await;
+    assert!(scheduler.inspect_tasks(&all, Some(7)).is_empty());
+}
+
+/// Exercises accepted-plan collection and local memory admission through the scheduler.
+#[tokio::test]
+async fn test_compaction_tasks_partial_memory_admission() {
+    let jobs = Arc::new(VecScheduler::default());
+    let env = SchedulerEnv::new().await.scheduler(jobs.clone());
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let memory_limit = 1024 * 1024;
+    scheduler.memory_manager = Arc::new(new_compaction_memory_manager(memory_limit));
+    assert_eq!(scheduler.memory_manager.limit_bytes(), memory_limit);
+    let mut builder = VersionControlBuilder::new();
+    let version = Arc::new(
+        builder
+            .push_l0_file_with_max_row_group_size(0, 1000, memory_limit)
+            .push_l0_file_with_max_row_group_size(100, 1000, memory_limit)
+            .push_l0_file_with_max_row_group_size(200, 1000, memory_limit)
+            .push_l0_file_with_max_row_group_size(10000, 11000, memory_limit / 4)
+            .push_l0_file_with_max_row_group_size(10100, 11000, memory_limit / 4)
+            .build(),
+    );
+    let files_to_add = version.current().version.ssts.levels()[0]
+        .files
+        .values()
+        .map(|file| {
+            let mut meta = file.meta_ref().clone();
+            meta.file_size = match meta.time_range.0.value() {
+                10000 => 100,
+                10100 => 200,
+                _ => 1000,
+            };
+            meta
+        })
+        .collect();
+    version.apply_edit(
+        Some(crate::manifest::action::RegionEdit {
+            files_to_add,
+            files_to_remove: Vec::new(),
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+        }),
+        &[],
+        builder.file_purger(),
+    );
+    let (mut finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let CompactionPlanningResult::Prepared(prepared) = &mut finished.result else {
+        panic!("expected prepared plan");
+    };
+    // Use a deterministic two-unit picker result; acceptance, reservation, memory
+    // admission, local unit construction and inspection all use the production path.
+    let files: Vec<_> = version.current().version.ssts.levels()[0]
+        .files
+        .values()
+        .cloned()
+        .collect();
+    let (rejected, accepted): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|file| file.time_range().0 < Timestamp::new_millisecond(10000));
+    assert_eq!(rejected.len(), 3);
+    assert_eq!(accepted.len(), 2);
+    let output = |inputs, start, end| CompactionOutput {
+        output_level: 1,
+        inputs,
+        filter_deleted: false,
+        output_time_range: Some(TimestampRange::from((
+            std::ops::Bound::Included(Timestamp::new_millisecond(start)),
+            std::ops::Bound::Excluded(Timestamp::new_millisecond(end)),
+        ))),
+    };
+    prepared.picker_output.outputs = vec![
+        output(rejected.clone(), 0, 2000),
+        output(accepted.clone(), 10000, 12000),
+    ];
+    prepared.picker_output.expired_ssts.clear();
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas)
+        .await;
+    assert_eq!(jobs.num_jobs(), 1);
+    let rows = scheduler.inspect_tasks(&MetadataFilter::default(), Some(7));
+    assert_eq!(rows.len(), 1);
+    let entry = &rows[0];
+    assert_eq!(entry.region_id, version.region_id());
+    assert_eq!(entry.total_units, Some(1));
+    assert_eq!(entry.input_files, Some(2));
+    assert_eq!(entry.input_bytes, Some(300));
+    assert_eq!(
+        entry.input_time_start,
+        Some(Timestamp::new_millisecond(10000))
+    );
+    assert_eq!(
+        entry.input_time_end,
+        Some(Timestamp::new_millisecond(11000))
+    );
+    assert_eq!(
+        entry.output_time_start,
+        Some(Timestamp::new_millisecond(10000))
+    );
+    assert_eq!(
+        entry.output_time_end,
+        Some(Timestamp::new_millisecond(12000))
+    );
+    assert!(rejected.iter().all(|file| !file.compacting()));
+    assert!(accepted.iter().all(|file| file.compacting()));
+}
+
+/// Readers retaining a region's shared state must observe replacement and teardown.
+#[tokio::test]
+async fn test_compaction_tasks_shared_state_pending_replacement_and_teardown() {
+    for terminal in ["close", "drop", "truncate", "shutdown"] {
+        let env = SchedulerEnv::new().await;
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let version = compactable_version();
+        let (_, manifest, schemas) =
+            begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+        let region_id = version.region_id();
+        let shared = scheduler.region_status[&region_id].shared_state.clone();
+        let (active, pending) = CompactionState::current(&shared);
+        let automatic_id = active.unwrap().snapshot(Some(7)).task_id;
+        assert!(pending.is_none());
+
+        let mut previous_pending_id = None;
+        for window_seconds in [60, 120] {
+            scheduler
+                .schedule_manual_compaction(
+                    Options::StrictWindow(StrictWindow { window_seconds }),
+                    &version,
+                    &env.access_layer,
+                    OptionOutputTx::none(),
+                    &manifest,
+                    schemas.clone(),
+                    2,
+                    None,
+                )
+                .unwrap();
+            let (active, pending) = CompactionState::current(&shared);
+            assert_eq!(active.unwrap().snapshot(Some(7)).task_id, automatic_id);
+            let pending = pending.unwrap().snapshot(Some(7));
+            assert_ne!(pending.task_id, automatic_id);
+            assert_ne!(Some(&pending.task_id), previous_pending_id.as_ref());
+            assert_eq!((&*pending.state, &*pending.phase), ("queued", "waiting"));
+            let options: serde_json::Value =
+                serde_json::from_str(&pending.request_options).unwrap();
+            assert_eq!(options["window_seconds"], window_seconds);
+            previous_pending_id = Some(pending.task_id);
+        }
+
+        match terminal {
+            "close" => scheduler.on_region_closed(region_id),
+            "drop" => scheduler.on_region_dropped(region_id),
+            "truncate" => scheduler.on_region_truncated(region_id),
+            "shutdown" => drop(scheduler),
+            _ => unreachable!(),
+        }
+        let (active, pending) = CompactionState::current(&shared);
+        assert!(active.is_none(), "active task survived {terminal}");
+        assert!(pending.is_none(), "pending task survived {terminal}");
+    }
+}
+
+/// A many-window cycle publishes progress without rebuilding its live-unit collection.
+#[rstest::rstest]
+#[case::completed(false)]
+#[case::submission_rejected(true)]
+#[tokio::test]
+async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_first: bool) {
+    use std::sync::atomic::Ordering;
+
+    struct SubmissionScheduler {
+        jobs: VecScheduler,
+        reject_after_first: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Scheduler for SubmissionScheduler {
+        fn schedule(&self, job: Job) -> Result<()> {
+            if self.reject_after_first && self.jobs.num_jobs() > 0 {
+                InvalidSchedulerStateSnafu.fail()
+            } else {
+                self.jobs.schedule(job)
+            }
+        }
+
+        async fn stop(&self, await_termination: bool) -> Result<()> {
+            self.jobs.stop(await_termination).await
+        }
+    }
+
+    const UNITS: usize = 64;
+    let jobs = Arc::new(SubmissionScheduler {
+        jobs: VecScheduler::default(),
+        reject_after_first,
+    });
+    let env = SchedulerEnv::new().await.scheduler(jobs.clone());
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler_with_config(
+        tx,
+        MitoConfig {
+            max_background_compactions: UNITS,
+            ..Default::default()
+        },
+    );
+    let mut builder = VersionControlBuilder::new();
+    for window in 0..UNITS as i64 {
+        let start = window * 60_000;
+        builder
+            .push_l0_file(start, start + 1000)
+            .push_l0_file(start + 100, start + 1000);
+    }
+    let version = Arc::new(builder.build());
+    let region_id = version.region_id();
+    let manifest = env
+        .mock_manifest_context(version.current().version.metadata.clone())
+        .await;
+    let (schemas, _kv_backend) = mock_schema_metadata_manager();
+    let (waiter_tx, waiter_rx) = oneshot::channel();
+    scheduler
+        .schedule_manual_compaction(
+            Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            &version,
+            &env.access_layer,
+            OptionOutputTx::from(waiter_tx),
+            &manifest,
+            schemas.clone(),
+            UNITS,
+            None,
+        )
+        .unwrap();
+    let finished = tokio::time::timeout(
+        Duration::from_secs(10),
+        recv_compaction_pick_finished(&mut rx),
+    )
+    .await
+    .expect("strict-window planning did not finish");
+    let CompactionPlanningResult::Prepared(prepared) = &finished.result else {
+        panic!("expected strict-window plan");
+    };
+    assert_eq!(prepared.picker_output.outputs.len(), UNITS);
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
+        .await;
+    let shared = scheduler.region_status[&region_id].shared_state.clone();
+    let CompactionPhase::Units(local) = &scheduler.region_status[&region_id].active.phase else {
+        panic!("expected admitted local units");
+    };
+    let publications = local.publication_count_for_test();
+    let baseline_publications = publications.load(Ordering::Relaxed);
+    let (collection, len, references) = local.inspection_stats_for_test();
+    assert_eq!(len, UNITS);
+    // The worker and published task share one collection, not per-publication copies.
+    assert!(references >= 2);
+    let mut ids = local.unit_ids_for_test();
+    ids.sort_unstable();
+    let rejected = if reject_after_first { UNITS - 1 } else { 0 };
+    assert_eq!(local.released_units_for_test(), rejected);
+    assert_eq!(ids.len(), UNITS - rejected);
+    assert_eq!(jobs.jobs.num_jobs(), UNITS - rejected);
+    let mut previous = CompactionState::current(&shared).0.unwrap();
+    let initial = previous.snapshot(Some(7));
+    assert_eq!(initial.total_units, Some(UNITS as u64));
+    assert_eq!(initial.completed_units, Some(rejected as u64));
+
+    let mut legacy_handle_clones = 0;
+    for (index, id) in ids.iter().copied().enumerate() {
+        // Replay the same terminal-result/task-exit trace without reading synthetic SSTs.
+        // The old current_state collected every remaining handle on both publications.
+        legacy_handle_clones += ids.len() - index;
+        let before_finish = publications.load(Ordering::Relaxed);
+        scheduler.on_unit_finished(region_id, id, Ok(false));
+        assert_eq!(publications.load(Ordering::Relaxed), before_finish + 1);
+        let current = CompactionState::current(&shared).0.unwrap();
+        assert!(!Arc::ptr_eq(&previous, &current));
+        assert_eq!(
+            current.snapshot(Some(7)).completed_units,
+            Some((rejected + index + 1) as u64)
+        );
+        previous = current;
+        let CompactionPhase::Units(local) = &scheduler.region_status[&region_id].active.phase
+        else {
+            panic!("finished unit must remain until release");
+        };
+        let (ptr, len, references) = local.inspection_stats_for_test();
+        assert_eq!((ptr, len), (collection, UNITS));
+        assert!(references >= 2);
+        assert_eq!(local.released_units_for_test(), rejected + index);
+
+        legacy_handle_clones += ids.len() - index - 1;
+        let before_release = publications.load(Ordering::Relaxed);
+        scheduler
+            .on_unit_released(region_id, id, &manifest, schemas.clone())
+            .await;
+        assert_eq!(publications.load(Ordering::Relaxed), before_release + 1);
+        if index + 1 < ids.len() {
+            let current = CompactionState::current(&shared).0.unwrap();
+            assert!(!Arc::ptr_eq(&previous, &current));
+            previous = current;
+            let CompactionPhase::Units(local) = &scheduler.region_status[&region_id].active.phase
+            else {
+                panic!("siblings must remain active");
+            };
+            let (ptr, len, references) = local.inspection_stats_for_test();
+            assert_eq!((ptr, len), (collection, UNITS));
+            assert!(references >= 2);
+            assert_eq!(local.released_units_for_test(), rejected + index + 1);
+        } else {
+            assert!(CompactionState::current(&shared).0.is_none());
+        }
+    }
+    let added_publications = publications.load(Ordering::Relaxed) - baseline_publications;
+    assert_eq!(added_publications, 2 * ids.len());
+    assert_eq!(legacy_handle_clones, ids.len() * ids.len());
+    if !reject_after_first {
+        assert_eq!(added_publications, 128);
+        assert_eq!(legacy_handle_clones, 4096);
+    }
+    let result = tokio::time::timeout(Duration::from_secs(10), waiter_rx)
+        .await
+        .expect("local compaction waiter did not finish")
+        .unwrap();
+    assert_eq!(result.is_err(), reject_after_first);
+    assert!(!scheduler.is_compacting(region_id));
 }

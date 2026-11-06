@@ -435,6 +435,7 @@ impl RegionOpener {
 
         Ok(Arc::new(MitoRegion {
             region_id,
+            compaction_state: Default::default(),
             version_control,
             series_index_version_control: Default::default(),
             series_index_store: self.series_index_store.clone(),
@@ -682,6 +683,7 @@ impl RegionOpener {
 
         let region = MitoRegion {
             region_id: self.region_id,
+            compaction_state: Default::default(),
             version_control: version_control.clone(),
             series_index_version_control,
             series_index_store: self.series_index_store.clone(),

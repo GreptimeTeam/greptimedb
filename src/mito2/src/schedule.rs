@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common_base::cancellation::CancellationHandle;
@@ -24,6 +25,7 @@ pub mod scheduler;
 pub(crate) struct CancellableTaskState {
     cancel_handle: Arc<CancellationHandle>,
     commit_started: Arc<Mutex<bool>>,
+    started: Arc<AtomicBool>,
 }
 
 impl CancellableTaskState {
@@ -31,7 +33,18 @@ impl CancellableTaskState {
         Self {
             cancel_handle: Arc::new(CancellationHandle::default()),
             commit_started: Arc::new(Mutex::new(false)),
+            started: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Records that the executor has started this task.
+    pub(crate) fn mark_started(&self) {
+        self.started.store(true, Ordering::Relaxed);
+    }
+
+    /// Returns whether the executor has started this task.
+    pub(crate) fn started(&self) -> bool {
+        self.started.load(Ordering::Relaxed)
     }
 
     pub(crate) fn cancel_handle(&self) -> Arc<CancellationHandle> {
