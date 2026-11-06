@@ -45,13 +45,15 @@ class StorageTests(unittest.TestCase):
         plan = dict(output_root='/tmp/o11ybench-test', run_id='test',
                     data=dict(generate=True, data_home='/tmp/o11ybench-test/data'),
                     targets=[dict(name='greptimedb', storage=dict(type='file')),
-                             dict(name='greptimedb-s3', storage=dict(type='s3', root='owned/prefix/'))],
+                             dict(name='greptimedb-s3', storage=dict(type='s3', root='owned/prefix/')),
+                             dict(name='prometheus', kind='prometheus')],
                     report=dict(root='old', index_html='old/index.html'),
                     artifacts=dict(run_manifest='old/run-manifest.json'),
                     query=dict(modes=['serial'], serial_tries=5))
         original = copy.deepcopy(plan)
         children = storage.split_metrics(plan)
         self.assertEqual(plan, original)
+        self.assertEqual(set(children), {'greptimedb', 'greptimedb-s3', 'prometheus'})
         for name, child in children.items():
             self.assertEqual(child['query'], plan['query'])
             self.assertEqual(child['data'], dict(plan['data'], generate=False))
@@ -60,6 +62,15 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(child['output_root'], '/tmp/o11ybench-test/o11ybench/o11ybench-' + name)
             self.assertTrue(child['report']['root'].startswith(child['output_root']))
         self.assertNotEqual(children['greptimedb']['run_id'], children['greptimedb-s3']['run_id'])
+
+    def test_prometheus_workflow_wiring(self):
+        text = (ROOT / '.github/workflows/vmbench-long-range.yml').read_text()
+        step = text.split('    - name: Load and benchmark Prometheus\n', 1)[1].split('    - name:', 1)[0]
+        self.assertIn("steps.generate.outcome == 'success' && inputs.run_prometheus", step)
+        self.assertIn('metrics-run --target prometheus', step)
+        self.assertIn('for target in greptimedb victoriametrics prometheus;', text)
+        cleanup = text.split('    - name: Clean up owned containers', 1)[1].split('    - name:', 1)[0]
+        self.assertIn('greptimedb-s3-baseline victoriametrics prometheus; do', cleanup)
 
     def test_missing_s3_arm_is_not_a_success(self):
         with tempfile.TemporaryDirectory() as tmp:

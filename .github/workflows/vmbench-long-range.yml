@@ -56,7 +56,7 @@ on:
         default: v3.2.1@sha256:6927e0919a144aa7616fd0137d4816816d42f6b816de3af269ab065250859a62
         required: true
       runtime_image:
-        description: 'Runtime image: auto = pinned S3 test runtime on ACR; explicit tag/digest overrides'
+        description: 'Runtime image: auto = pinned Prometheus/File/S3 runtime on ACR; explicit tag/digest overrides'
         type: string
         default: auto
         required: true
@@ -116,7 +116,7 @@ env:
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
   PROMETHEUS_TAG: ${{ inputs.prometheus_tag }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:s3-test-b0cf5204d2fc@sha256:c2bf622db6056a2029842f4dc1cc1f37b82773bd45b134a0a83ffe2a8cd62214' }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:345b6f7c-prometheus-s3@sha256:39d207f4a9c479b8614b8283e2d049fc8f430fcbd2b3362ce3035cfbf294edf9' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
