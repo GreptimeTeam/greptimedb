@@ -131,9 +131,9 @@ use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
 use store_api::region_engine::{
-    BatchPutResponse, BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse,
-    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    BatchPutResponse, BatchResponses, CancelCompactionResult, MitoCopyRegionFromRequest,
+    MitoCopyRegionFromResponse, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
+    RegionStatistic, RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
     SettableRegionRoleState, SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_info::RegionInfoEntry;
@@ -1484,6 +1484,27 @@ fn map_batch_responses(responses: Vec<(RegionId, Result<AffectedRows>)>) -> Batc
 impl RegionEngine for MitoEngine {
     fn name(&self) -> &str {
         MITO_ENGINE_NAME
+    }
+
+    async fn cancel_compaction(
+        &self,
+        region_id: RegionId,
+        task_id: &str,
+    ) -> Result<CancelCompactionResult, BoxedError> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                WorkerRequest::CancelCompaction {
+                    region_id,
+                    task_id: task_id.to_string(),
+                    sender,
+                },
+            )
+            .await
+            .map_err(BoxedError::new)?;
+        receiver.await.context(RecvSnafu).map_err(BoxedError::new)
     }
 
     #[tracing::instrument(skip_all)]

@@ -38,7 +38,8 @@ use store_api::ManifestVersion;
 use store_api::codec::{PrimaryKeyEncoding, infer_primary_key_encoding_from_hint};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{
-    MitoCopyRegionFromResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
+    CancelCompactionResult, MitoCopyRegionFromResponse, SetRegionRoleStateResponse,
+    SettableRegionRoleState,
 };
 use store_api::region_request::{
     AffectedRows, ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest,
@@ -791,6 +792,13 @@ pub(crate) enum WorkerRequest {
         region_role_state: SettableRegionRoleState,
         /// The sender of [SetReadonlyResponse].
         sender: Sender<SetRegionRoleStateResponse>,
+    },
+
+    /// Cancels one live compaction on its owning worker.
+    CancelCompaction {
+        region_id: RegionId,
+        task_id: String,
+        sender: Sender<CancelCompactionResult>,
     },
 
     /// Notify a worker to stop.

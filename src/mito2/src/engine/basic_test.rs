@@ -2669,3 +2669,120 @@ async fn test_inspect_compaction_tasks() {
     .unwrap();
     engine.stop().await.unwrap();
 }
+
+/// Cancels a real live cycle through the owning worker while its merge is gated.
+#[tokio::test]
+async fn test_cancel_compaction_task() {
+    struct Release(Arc<CompactionListener>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.wake();
+        }
+    }
+    let listener = Arc::new(CompactionListener::default());
+    let release = Release(listener.clone());
+    let mut env = TestEnv::with_prefix("cancel-compaction-task").await;
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(124, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
+        .build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(0, 2),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+    }
+    let compact = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Compact(RegionCompactRequest {
+                        options: Options::StrictWindow(StrictWindow {
+                            window_seconds: 3600,
+                        }),
+                        ..Default::default()
+                    }),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(20), listener.wait_handle_finished())
+        .await
+        .unwrap();
+    let tasks = engine.inspect_compaction_tasks(&[]).await.unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        engine.cancel_compaction(region_id, "stale").await.unwrap(),
+        CancelCompactionResult::NotFound
+    );
+    for expected in [
+        CancelCompactionResult::CancelIssued,
+        CancelCompactionResult::AlreadyCancelling,
+    ] {
+        let actual = tokio::time::timeout(
+            Duration::from_secs(10),
+            engine.cancel_compaction(region_id, &tasks[0].task_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+    assert_eq!(
+        engine.inspect_compaction_tasks(&[]).await.unwrap()[0]
+            .state
+            .as_ref(),
+        "cancelling"
+    );
+    drop(release);
+    let result = tokio::time::timeout(Duration::from_secs(20), compact)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_err());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !engine
+            .inspect_compaction_tasks(&[])
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        engine
+            .cancel_compaction(region_id, &tasks[0].task_id)
+            .await
+            .unwrap(),
+        CancelCompactionResult::NotFound
+    );
+    engine.stop().await.unwrap();
+}

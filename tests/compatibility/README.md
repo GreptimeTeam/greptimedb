@@ -23,6 +23,14 @@ including exact integer counts, custom bounds, and NaN payloads:
 cargo nextest run -p servers -E 'test(native_histogram_remote_read_wire_fixture)'
 ```
 
+The compaction cancellation fixtures in `wire/compaction_cancel/` freeze the new
+RPC request/response field numbers and result values independently of the encoder.
+They do not modify the existing Region Handle wire format:
+
+```shell
+cargo nextest run -p api -E 'test(test_compaction_cancel_wire_fixtures)'
+```
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of
