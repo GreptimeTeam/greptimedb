@@ -892,12 +892,27 @@ mod tests {
                 let mut empty = query.clone();
                 empty.start_timestamp_ms = 5000;
                 empty.end_timestamp_ms = 6000;
+                let mut hinted = query.clone();
+                hinted.end_timestamp_ms = 3000;
+                hinted.hints = Some(api::prom_store::remote::ReadHints {
+                    start_ms: 2000,
+                    end_ms: 5000,
+                    ..Default::default()
+                });
+                let mut disjoint = query.clone();
+                disjoint.hints = Some(api::prom_store::remote::ReadHints {
+                    start_ms: 5000,
+                    end_ms: 6000,
+                    ..Default::default()
+                });
                 let request = ReadRequest {
                     queries: vec![
                         remote_query("metric1"),
                         query,
                         remote_query("missing_metric"),
                         empty,
+                        hinted,
+                        disjoint,
                     ],
                     accepted_response_types,
                 };
@@ -911,7 +926,7 @@ mod tests {
                 assert_eq!(response.headers()["content-encoding"], "snappy");
                 let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
                 let response = ReadResponse::decode(body.as_slice()).unwrap();
-                assert_eq!(response.results.len(), 4);
+                assert_eq!(response.results.len(), 6);
                 assert!(!response.results[0].timeseries[0].samples.is_empty());
                 assert!(response.results[2].timeseries.is_empty());
                 assert!(response.results[3].timeseries.is_empty());
@@ -947,6 +962,10 @@ mod tests {
                     Some(api::prom_store::remote::histogram::Count::CountFloat(6.0))
                 );
                 assert_eq!(series.histograms[3].sum.to_bits(), 0x7ff0_0000_0000_0002);
+                let hinted_series = &response.results[4].timeseries[0];
+                assert_eq!(hinted_series.labels, series.labels);
+                assert_eq!(hinted_series.histograms, series.histograms[1..3]);
+                assert!(response.results[5].timeseries.is_empty());
             }
         }
         let response = client
