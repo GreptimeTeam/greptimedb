@@ -7460,7 +7460,7 @@ async fn native_promql_rate_and_abs_rate_match_legacy_across_storage_encodings()
                 .expect("fused node reads a prepared series scan");
             let RawLabelSource::PrimaryKey {
                 physical_metadata, ..
-            } = series_scan.label_source()
+            } = series_scan.scan_binding()
             else {
                 panic!("fused scan must materialize labels from the primary key");
             };
@@ -7840,7 +7840,7 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // selector, over the scan bound to that selector's metric.
         fn scan_metric(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> Option<String> {
             if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
-                return match scan.label_source() {
+                return match scan.scan_binding() {
                     store_api::region_engine::RawLabelSource::PrimaryKey {
                         metric_name, ..
                     } => Some(metric_name.to_string()),
@@ -8720,10 +8720,14 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
         metric_name,
         physical_metadata,
         logical_tags,
-    } = series_scan.label_source()
+    } = series_scan.scan_binding()
     else {
-        panic!("the fused scan must materialize labels from the primary key");
+        panic!("the fused scan must bind labels from the primary key");
     };
+    assert!(matches!(
+        series_scan.label_source(),
+        RawLabelSource::Explicit
+    ));
     assert_eq!(metric_name.as_ref(), TABLE);
     assert_eq!(
         logical_tags
@@ -8786,6 +8790,19 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
     assert_eq!(native_rows, legacy_rows, "same rows on both routes");
     assert!(observer.fused().is_none(), "the legacy route must not fuse");
+    // An instant selector preserves identities across scan partitions even when frames carry
+    // explicit labels. The binding, rather than the frame encoding, proves completeness.
+    observer.clear();
+    let instant = format!("TQL EVAL (120, 120, '1m') {TABLE}");
+    native_result_rows(native_tql_output(&instance, &instant, true).await).await;
+    let instant_plan = observer.take();
+    let fused = instant_plan
+        .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
+        .unwrap();
+    assert!(fused.has_partition_disjoint_identities());
+    let matched = format!("TQL EVAL (120, 120, '1m') sum_over_time({TABLE}{{host=\"b\"}}[2m])");
+    let matched_rows = native_result_rows(native_tql_output(&instance, &matched, true).await).await;
+    assert_eq!(matched_rows, vec![(120_000, "b".to_string(), 80.0)]);
 }
 
 /// No published series index: the columnar `Float64` selector must answer from the raw memtable
