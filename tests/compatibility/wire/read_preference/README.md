@@ -43,10 +43,3 @@ Generated with `libprotoc 25.1`. The 48-byte fixture has SHA-256
 `4127ebbee8cdb1375ef8ad52754be56ed206c12513e5f61c4354c04587cba638`.
 The test never rewrites it and does not require protobuf map ordering to remain
 stable.
-
-The session regression also checks that a legacy context without
-`query.allow_partial_inspection_results` retains strict inspection behavior.
-
-The partial-inspection snapshot test checks that this frontend-only option is
-omitted from outbound query contexts, keeping ordinary scans compatible with
-older datanodes that reject unknown `query.*` options.
