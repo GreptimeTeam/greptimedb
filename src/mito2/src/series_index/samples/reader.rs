@@ -215,6 +215,11 @@ impl SamplesFormatReader for SamplesReader {
                 .project(&projection)
                 .map_err(|e| invalid(format!("sample projection: {e}")))?,
         );
+        let field_ids: HashSet<_> = projection
+            .iter()
+            .filter(|&&index| index >= 5)
+            .map(|&index| self.manifest.fields[index - 5].column_id)
+            .collect();
         let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
@@ -273,11 +278,11 @@ impl SamplesFormatReader for SamplesReader {
                             if block_index >= prefetched.end {
                                 // Release the previous window before reserving the next one.
                                 drop(std::mem::take(&mut prefetched));
-                                prefetched = prefetch_blocks(reader, blocks, block_index, &manifest, &request, &projection, trailer.payload_end, &mut metrics).await?;
+                                prefetched = prefetch_blocks(reader, blocks, block_index, &field_ids, &request, &projection, trailer.payload_end, &mut metrics).await?;
                             }
                             *metrics.counts.entry("blocks").or_default() += 1;
                             *metrics.counts.entry("decoded_rows").or_default() += u64::from(block.rows);
-                            read_block(reader, block, &manifest, &request, &projection, projected.clone(), &prefetched.buffers, &mut metrics).await?
+                            read_block(reader, block, &manifest, &request, &projection, &field_ids, projected.clone(), &mut prefetched, &mut metrics).await?
                         } else { None };
                         if let Some((batch, _reservation)) = batch {
                             *metrics.counts.entry("batches").or_default() += 1;
@@ -391,18 +396,14 @@ async fn read_block(
     manifest: &Manifest,
     request: &SamplesReadRequest,
     projection: &[usize],
+    field_ids: &HashSet<u32>,
     schema: SchemaRef,
-    prefetched: &HashMap<u64, bytes::Bytes>,
+    prefetched: &mut PrefetchedBlocks,
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<Option<(RecordBatch, Option<MemoryReservation>)>> {
     let boundary = request.start.is_some_and(|start| start > block.min)
         || request.end.is_some_and(|end| end <= block.max);
     let needs_time = boundary || projection.contains(&2);
-    let field_ids: HashSet<_> = projection
-        .iter()
-        .filter(|&&index| index >= 5)
-        .map(|&index| manifest.fields[index - 5].column_id)
-        .collect();
     let columns: Vec<_> = block
         .columns
         .iter()
@@ -437,13 +438,22 @@ async fn read_block(
         + block.rows as usize * (32 * (projection.len() + 1) + std::mem::size_of::<usize>())
         + columns.len() * 128;
     if let Some(reservation) = &reservation {
-        reservation
-            .try_grow(bytes)
-            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+        let mut result = reservation.try_grow(bytes);
+        if result.is_err() && !prefetched.buffers.is_empty() {
+            // Read-ahead must not prevent a block that fits on its own from being read.
+            // Drop every shared slice and its reservation before retrying, and avoid
+            // attempting the same window again on the next block.
+            *prefetched = PrefetchedBlocks {
+                end: prefetched.end,
+                ..Default::default()
+            };
+            result = reservation.try_grow(bytes);
+        }
+        result.context(crate::error::ScanMemoryExhaustedSnafu)?;
     }
     let mut buffers = HashMap::new();
     for column in &columns {
-        if let Some(bytes) = prefetched.get(&column.payload.offset) {
+        if let Some(bytes) = prefetched.buffers.get(&column.payload.offset) {
             buffers.insert(column.payload.offset, bytes.clone());
         }
     }
@@ -689,7 +699,7 @@ async fn prefetch_blocks(
     reader: &Reader,
     blocks: &[Block],
     start: usize,
-    manifest: &Manifest,
+    field_ids: &HashSet<u32>,
     request: &SamplesReadRequest,
     projection: &[usize],
     payload_end: u64,
@@ -720,9 +730,7 @@ async fn prefetch_blocks(
                     1 => projection.contains(&2),
                     2 => projection.contains(&3),
                     3 => projection.contains(&4),
-                    4 => projection
-                        .iter()
-                        .any(|&i| i >= 5 && manifest.fields[i - 5].column_id == column.id),
+                    4 => field_ids.contains(&column.id),
                     _ => false,
                 }
             })
@@ -758,11 +766,16 @@ async fn prefetch_blocks(
         .memory_pool
         .as_ref()
         .map(|pool| MemoryConsumer::new("ColumnarSamplesPrefetch").register(pool));
-    if let Some(reservation) = &reservation {
-        // Account stored bytes, a possible Buffer-to-Bytes copy, fetch vectors, and map entries.
-        reservation
+    // Account stored bytes, a possible Buffer-to-Bytes copy, fetch vectors, and map entries.
+    if let Some(reservation) = &reservation
+        && reservation
             .try_grow(2 * bytes + columns.len() * 256)
-            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+            .is_err()
+    {
+        return Ok(PrefetchedBlocks {
+            end,
+            ..Default::default()
+        });
     }
     let mut buffers = HashMap::new();
     fetch_columns(reader, &columns, &mut buffers, metrics).await?;
