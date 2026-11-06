@@ -38,4 +38,7 @@ WHERE c.service_name <> p.service_name
 GROUP BY p.service_name, c.service_name
 ORDER BY p.service_name, c.service_name;
 
+SELECT COUNT(*) AS cross_rows
+FROM projection_spans a CROSS JOIN projection_spans b;
+
 DROP TABLE projection_spans;

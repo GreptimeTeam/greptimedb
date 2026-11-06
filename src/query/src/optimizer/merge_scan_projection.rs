@@ -40,10 +40,12 @@ impl OptimizerRule for MergeScanProjection {
         let LogicalPlan::Projection(projection) = &plan else {
             return Ok(Transformed::no(plan));
         };
-        if !projection
-            .expr
-            .iter()
-            .all(|expr| matches!(expr, Expr::Column(_)))
+        // Remote batches do not yet preserve the row count of empty projections.
+        if projection.expr.is_empty()
+            || !projection
+                .expr
+                .iter()
+                .all(|expr| matches!(expr, Expr::Column(_)))
         {
             return Ok(Transformed::no(plan));
         }

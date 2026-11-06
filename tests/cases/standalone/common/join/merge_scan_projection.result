@@ -88,6 +88,15 @@ ORDER BY p.service_name, c.service_name;
 | front          | storage       | 1          |
 +----------------+---------------+------------+
 
+SELECT COUNT(*) AS cross_rows
+FROM projection_spans a CROSS JOIN projection_spans b;
+
++------------+
+| cross_rows |
++------------+
+| 16         |
++------------+
+
 DROP TABLE projection_spans;
 
 Affected Rows: 0
