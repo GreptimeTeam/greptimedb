@@ -70,6 +70,7 @@ use crate::dist_plan::dyn_filter_bridge::{
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
     resolve_scalar_subquery_dyn_filters,
 };
+use crate::dist_plan::grouped_read::{DatanodeReadGroup, build_grouped_read_plan};
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
@@ -506,6 +507,9 @@ pub struct MergeScanExec {
     captured_remote_dyn_filters: Arc<Mutex<[Vec<CapturedDynFilter>; 2]>>,
     target_partition: usize,
     enable_per_region_metrics: bool,
+    /// The frozen datanode groups of a grouped read, one request each. `None` is the ordinary
+    /// one-request-per-region path, which stays byte-for-byte unchanged.
+    datanode_groups: Option<Arc<[DatanodeReadGroup]>>,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -589,7 +593,51 @@ impl MergeScanExec {
             captured_remote_dyn_filters: Arc::default(),
             target_partition,
             enable_per_region_metrics,
+            datanode_groups: None,
         })
+    }
+
+    /// Attaches the frozen datanode groups of a grouped read.
+    ///
+    /// A grouped read is request batching: each group's envelope names exactly that group's regions
+    /// and the datanode executes them in order, so the groups have to cover the selected regions
+    /// exactly once each. A missing, duplicated or foreign region would drop or duplicate rows and
+    /// is rejected here rather than at execution time. The output partition count becomes the
+    /// number of groups, and the grouped path declares no ordering: the frontend only enables it
+    /// for plans whose remote shape has no ordering guarantee to break.
+    pub fn with_datanode_groups(mut self, groups: Vec<DatanodeReadGroup>) -> Result<Self> {
+        if groups.is_empty() {
+            return Err(DataFusionError::Internal(
+                "a grouped read needs at least one datanode group".to_string(),
+            ));
+        }
+        let mut covered = groups
+            .iter()
+            .flat_map(|group| group.regions().iter().copied())
+            .collect::<Vec<_>>();
+        let mut selected = self.regions.clone();
+        covered.sort_unstable();
+        selected.sort_unstable();
+        if covered != selected {
+            return Err(DataFusionError::Internal(format!(
+                "the grouped read groups {:?} do not cover the selected regions {:?} exactly once",
+                covered, self.regions
+            )));
+        }
+        let partition_count = Self::output_partition_count(groups.len(), self.target_partition);
+        self.properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(self.arrow_schema.clone()),
+            Partitioning::UnknownPartitioning(partition_count),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        self.datanode_groups = Some(groups.into());
+        Ok(self)
+    }
+
+    /// The datanode groups of a grouped read, when this scan is grouped.
+    pub fn datanode_groups(&self) -> Option<&[DatanodeReadGroup]> {
+        self.datanode_groups.as_deref()
     }
 
     /// Conservative row-count upper bound for all selected regions.
@@ -910,6 +958,243 @@ impl MergeScanExec {
         )))
     }
 
+    /// One request per datanode group.
+    ///
+    /// The envelope of a group names every region of that group and carries the same plain
+    /// per-region plan the ordinary path would send, so the datanode decodes it once per region
+    /// against that region's own catalog and concatenates the region plans' batches in order.
+    /// Nothing is merged across regions here: the batches of the group are yielded as they arrive,
+    /// exactly as the batches of one region are on the ordinary path.
+    fn to_grouped_stream(
+        &self,
+        context: Arc<TaskContext>,
+        partition: usize,
+        groups: Arc<[DatanodeReadGroup]>,
+    ) -> Result<SendableRecordBatchStream> {
+        // prepare states to move
+        let region_query_handler = self.region_query_handler.clone();
+        let metric = MergeScanMetric::new(&self.metric);
+        let arrow_schema = self.arrow_schema.clone();
+        let query_ctx = self.query_ctx.clone();
+        let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
+        let partition_metrics_moved = self.partition_metrics.clone();
+        let plan = self.plan.clone();
+        let region_count = self.regions.len();
+        let target_partition = Self::output_partition_count(groups.len(), self.target_partition);
+        let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
+        let captured_remote_dyn_filters = if remote_dyn_filter_enabled {
+            self.captured_remote_dyn_filters()
+        } else {
+            Vec::new()
+        };
+        resolve_scalar_subquery_dyn_filters(&captured_remote_dyn_filters);
+        let dbname = context.task_id().unwrap_or_default();
+        let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let current_channel = self.query_ctx.channel();
+        let remote_dyn_filter_registry_lease = acquire_remote_dyn_filter_registry_lease(
+            context.as_ref(),
+            &query_ctx,
+            &captured_remote_dyn_filters,
+        );
+
+        let stream = Box::pin(stream!({
+            let remote_dyn_filter_registry_lease = remote_dyn_filter_registry_lease;
+            // only report metrics once for each MergeScan
+            if partition == 0 {
+                MERGE_SCAN_REGIONS.observe(region_count as f64);
+            }
+
+            let _finish_timer = metric.finish_time().timer();
+            let mut ready_timer = metric.ready_time().timer();
+            let mut first_consume_timer = Some(metric.first_consume_time().timer());
+
+            let partition_start = Instant::now();
+            let mut partition_ready_time: Option<Duration> = None;
+            let mut partition_first_consume_time: Option<Duration> = None;
+
+            for group in groups.iter().skip(partition).step_by(target_partition) {
+                let anchor = group.regions()[0];
+                let group_span = tracing_context.attach(tracing::info_span!(
+                    parent: &Span::current(),
+                    "merge_scan_datanode_group",
+                    anchor_region = %anchor,
+                    regions = group.regions().len(),
+                    partition = partition
+                ));
+                let group_start = Instant::now();
+
+                // The initial registrations travel once in the request header and are shared by
+                // every region of the group; the subscribers are per member region, with the
+                // group's frozen target, so an update reaches the region it was captured for.
+                register_remote_dyn_filters_for_region(
+                    remote_dyn_filter_registry_lease.as_ref(),
+                    &captured_remote_dyn_filters,
+                );
+                let mut subscriber_rollback =
+                    remote_dyn_filter_registry_lease.as_ref().map(|lease| {
+                        let mut added = Vec::new();
+                        for region_id in group.regions() {
+                            added.extend(register_dyn_filter_subscribers_for_region(
+                                lease.registry(),
+                                *region_id,
+                                group.target().clone(),
+                                &captured_remote_dyn_filters,
+                            ));
+                        }
+                        SubscriberRollbackGuard::new(lease.registry(), added)
+                    });
+                let grouped_plan =
+                    build_grouped_read_plan(group.regions(), anchor.table_id(), &plan).map_err(
+                        |error| {
+                            MERGE_SCAN_ERRORS_TOTAL.inc();
+                            error
+                        },
+                    )?;
+                let region_query_ctx = query_context_with_refreshed_initial_dyn_filter_regs(
+                    &query_ctx,
+                    anchor,
+                    &captured_remote_dyn_filters,
+                );
+                let request = QueryRequest {
+                    header: Some(RegionRequestHeader {
+                        tracing_context: tracing_context.to_w3c(),
+                        dbname: dbname.clone(),
+                        query_context: Some((&region_query_ctx).into()),
+                    }),
+                    region_id: anchor,
+                    plan: grouped_plan,
+                };
+
+                let do_get_start = Instant::now();
+                let do_get_result = region_query_handler
+                    .do_get(group.target(), request)
+                    .instrument(group_span.clone())
+                    .await;
+                if do_get_result.is_err() {
+                    drop(subscriber_rollback.take());
+                }
+                let mut stream = do_get_result.map_err(|e| {
+                    MERGE_SCAN_ERRORS_TOTAL.inc();
+                    DataFusionError::External(Box::new(BoxedError::new(e)))
+                })?;
+
+                if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
+                    subscriber_rollback.disarm();
+                }
+                let mut advertised_schema = stream.schema().arrow_schema().clone();
+                validate_remote_schema(
+                    arrow_schema.as_ref(),
+                    advertised_schema.as_ref(),
+                    "advertised grouped remote stream",
+                )
+                .inspect_err(|_| record_merge_scan_schema_error())?;
+                let do_get_cost = do_get_start.elapsed();
+
+                if let Some(remote_dyn_filter_registry_lease) =
+                    remote_dyn_filter_registry_lease.as_ref()
+                {
+                    remote_dyn_filter_registry_lease
+                        .ensure_fanout_task(region_query_handler.clone());
+                }
+
+                ready_timer.stop();
+                if partition_ready_time.is_none() {
+                    partition_ready_time = Some(partition_start.elapsed());
+                }
+
+                let mut poll_duration = Duration::ZERO;
+                let mut poll_timer = Instant::now();
+                loop {
+                    let batch = stream.next().instrument(group_span.clone()).await;
+                    let Some(batch) = batch else {
+                        if let Some(metrics) = stream.metrics() {
+                            let load = region_scan_load(&metrics);
+                            let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
+                            let value = read_meter!(c, s, load, current_channel as u8);
+                            metric.record_greptime_exec_cost(value as usize);
+                            sub_stage_metrics_moved
+                                .lock()
+                                .unwrap()
+                                .insert(anchor, metrics);
+                        }
+                        break;
+                    };
+                    poll_duration += poll_timer.elapsed();
+
+                    let batch = batch
+                        .map_err(|e| DataFusionError::External(Box::new(BoxedError::new(e))))?;
+                    let df_batch = batch.into_df_record_batch();
+                    if !Arc::ptr_eq(&advertised_schema, df_batch.schema_ref()) {
+                        validate_remote_schema(
+                            arrow_schema.as_ref(),
+                            df_batch.schema_ref().as_ref(),
+                            "grouped remote record batch",
+                        )
+                        .inspect_err(|_| record_merge_scan_schema_error())?;
+                        advertised_schema = df_batch.schema_ref().clone();
+                    }
+                    let batch =
+                        patch_batch_timezone(arrow_schema.clone(), df_batch.columns().to_vec())?;
+                    metric.record_output_batch_rows(batch.num_rows());
+                    if let Some(mut first_consume_timer) = first_consume_timer.take() {
+                        first_consume_timer.stop();
+                        partition_first_consume_time = Some(partition_start.elapsed());
+                    }
+                    if let Some(metrics) = stream.metrics() {
+                        let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
+                        sub_stage_metrics.insert(anchor, metrics);
+                    }
+                    yield Ok(batch);
+                    poll_timer = Instant::now();
+                }
+                if let Some(mut first_consume_timer) = first_consume_timer.take() {
+                    first_consume_timer.stop();
+                    partition_first_consume_time = Some(partition_start.elapsed());
+                }
+                let total_cost = group_start.elapsed();
+
+                // Group metrics are recorded under the group's anchor region, the region the
+                // request itself names. The grouped path is disabled for verbose explain, so no
+                // per-region verbose snapshot depends on the other members.
+                {
+                    let mut partition_metrics_guard = partition_metrics_moved.lock().unwrap();
+                    let partition_metrics = partition_metrics_guard
+                        .entry(partition)
+                        .or_insert_with(|| PartitionMetrics::new(partition, false));
+                    partition_metrics.add_region_metrics(RegionMetrics {
+                        region_id: anchor,
+                        poll_duration,
+                        do_get_cost,
+                        total_cost,
+                    });
+                }
+                MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
+            }
+
+            ready_timer.stop();
+            if let Some(mut first_consume_timer) = first_consume_timer.take() {
+                first_consume_timer.stop();
+            }
+            let partition_finish_time = partition_start.elapsed();
+            {
+                let mut partition_metrics_guard = partition_metrics_moved.lock().unwrap();
+                if let Some(partition_metrics) = partition_metrics_guard.get_mut(&partition) {
+                    partition_metrics.set_timings(
+                        partition_ready_time.unwrap_or_default(),
+                        partition_first_consume_time.unwrap_or_default(),
+                        partition_finish_time,
+                    );
+                    partition_metrics.finish();
+                }
+            }
+        }));
+
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.arrow_schema.clone(),
+            stream,
+        )))
+    }
+
     fn captured_remote_dyn_filters(&self) -> Vec<CapturedDynFilter> {
         self.captured_remote_dyn_filters.lock().unwrap().concat()
     }
@@ -1172,7 +1457,10 @@ impl ExecutionPlan for MergeScanExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        self.to_stream(context, partition)
+        match self.datanode_groups.clone() {
+            Some(groups) => self.to_grouped_stream(context, partition, groups),
+            None => self.to_stream(context, partition),
+        }
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -1898,6 +2186,71 @@ mod tests {
 
         assert!(entries[0].subscribers().is_empty());
         assert!(!entries[0].fanout_started_for_test());
+    }
+
+    #[tokio::test]
+    async fn grouped_read_registers_every_member_and_rolls_back_on_cancel() {
+        use datafusion::datasource::{DefaultTableSource, empty::EmptyTable};
+
+        let handler = Arc::new(PendingDoGetHandler::default());
+        let query_ctx = QueryContext::arc();
+        let state = query_engine_state(handler.clone());
+        let lease = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+            "host",
+            TestArrowDataType::Utf8,
+            true,
+        )]));
+        let source = Arc::new(DefaultTableSource::new(Arc::new(EmptyTable::new(
+            schema.clone(),
+        ))));
+        let plan = LogicalPlanBuilder::scan("table", source, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let target = test_target(7);
+        let group = DatanodeReadGroup::try_new(target.clone(), regions.clone()).unwrap();
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            regions.clone(),
+            plan,
+            schema.as_ref(),
+            handler.clone(),
+            query_ctx.clone(),
+            1,
+            Some(RemoteDynFilterProducerId::new(42)),
+            false,
+        )
+        .unwrap()
+        .with_datanode_groups(vec![group])
+        .unwrap();
+        let _filter = install_remote_dyn_filter(&exec);
+        let stream = exec
+            .to_grouped_stream(
+                task_context_with_engine_state(state, query_ctx),
+                0,
+                exec.datanode_groups.clone().unwrap(),
+            )
+            .unwrap();
+        let poll = tokio::spawn(async move {
+            let mut stream = stream;
+            stream.next().await
+        });
+        handler.do_get_entered.notified().await;
+        let entry = lease.registry().entries().pop().unwrap();
+        let subscribers = entry.subscribers();
+        assert_eq!(2, subscribers.len());
+        for region in regions {
+            assert!(subscribers.contains(&Subscriber::new(region, target.clone())));
+        }
+        assert!(!entry.fanout_started_for_test());
+        poll.abort();
+        assert!(poll.await.unwrap_err().is_cancelled());
+        assert!(entry.subscribers().is_empty());
     }
 
     #[tokio::test]
