@@ -996,6 +996,21 @@ pub struct MitoCopyRegionFromResponse {
     pub copied_file_ids: Vec<FileId>,
 }
 
+/// Outcome of cancelling one live compaction task by its exact task identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelCompactionResult {
+    /// Cancellation was requested; completion is asynchronous.
+    CancelIssued,
+    /// The task is already cancelling.
+    AlreadyCancelling,
+    /// The task has crossed its non-cancellable commit boundary.
+    TooLateToCancel,
+    /// The task is no longer present on this region.
+    NotFound,
+    /// This engine or execution mode does not support cancellation.
+    Unsupported,
+}
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
@@ -1107,6 +1122,15 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<RegionResponse, BoxedError>;
+
+    /// Requests cancellation of a live task, without pausing automatic compaction.
+    async fn cancel_compaction(
+        &self,
+        _region_id: RegionId,
+        _task_id: &str,
+    ) -> Result<CancelCompactionResult, BoxedError> {
+        Ok(CancelCompactionResult::Unsupported)
+    }
 
     /// Returns the committed sequence (sequence of latest written data).
     async fn get_committed_sequence(

@@ -115,6 +115,8 @@ pub(super) struct ActiveCompaction {
     /// picking cycle after the current cycle finishes. Recorded in every phase so an external
     /// trigger always resets the continuation scope, even during local/remote execution.
     pub(super) automatic_followup_required: bool,
+    /// Task-specific cancellation preserves unrelated pending manual work.
+    pub(crate) task_cancel_requested: bool,
 }
 
 impl ActiveCompaction {
@@ -126,6 +128,7 @@ impl ActiveCompaction {
             trigger: CompactionTrigger::Automatic,
             waiters: Vec::new(),
             automatic_followup_required: false,
+            task_cancel_requested: false,
         }
     }
 
@@ -144,11 +147,13 @@ impl ActiveCompaction {
             trigger,
             waiters,
             automatic_followup_required: false,
+            task_cancel_requested: false,
         }
     }
 
     pub(super) fn start_picking(&mut self, plan_id: u64, trigger: CompactionTrigger) {
         self.task_state = None;
+        self.task_cancel_requested = false;
         self.phase = CompactionPhase::Picking {
             plan_id,
             cancelled: false,
@@ -566,6 +571,15 @@ impl CompactionStatus {
                 .send(Err(err.clone()).context(CompactRegionSnafu {
                     region_id: self.region_id,
                 }));
+        }
+        self.publish_state();
+    }
+
+    /// Ends only the cancelled active cycle, preserving a different pending task.
+    pub(crate) fn cancel_active_task(&mut self) {
+        let mut active = std::mem::replace(&mut self.active, ActiveCompaction::idle());
+        for waiter in active.waiters.drain(..) {
+            waiter.send(CompactionCancelledSnafu.fail());
         }
         self.publish_state();
     }

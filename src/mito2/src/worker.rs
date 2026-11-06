@@ -1347,6 +1347,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request);
                 }
+                WorkerRequest::CancelCompaction {
+                    region_id,
+                    task_id,
+                    sender,
+                } => {
+                    let result = self.compaction_scheduler.cancel_task(region_id, &task_id);
+                    let _ = sender.send(result);
+                }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }

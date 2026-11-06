@@ -411,9 +411,7 @@ impl CompactionScheduler {
         }
         if let Some(err) = local.error.take() {
             if matches!(err.as_ref(), Error::CompactionCancelled { .. }) {
-                return CompactionTransition::from_pending_ddls(
-                    self.finish_compaction_on_cancel(region_id),
-                );
+                return self.finish_cancelled_compaction(region_id, manifest, schemas);
             }
             self.on_compaction_failed(region_id, err);
             return CompactionTransition::NoAction;

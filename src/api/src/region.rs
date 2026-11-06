@@ -79,3 +79,54 @@ impl RegionResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use greptime_proto::v1::region::{
+        CancelCompactionRequest, CancelCompactionResponse, cancel_compaction_response,
+    };
+    use greptime_proto::v1::{ResponseHeader, Status};
+    use prost::Message;
+
+    use super::*;
+
+    #[test]
+    fn test_compaction_cancel_wire_fixtures() {
+        // Frozen independently from the encoder to protect field numbers and result values.
+        let request_bytes =
+            include_bytes!("../../../tests/compatibility/wire/compaction_cancel/request.bin");
+        let response_bytes =
+            include_bytes!("../../../tests/compatibility/wire/compaction_cancel/response.bin");
+        let request = CancelCompactionRequest {
+            header: Some(RegionRequestHeader::default()),
+            region_id: 42,
+            task_id: "task-1".to_string(),
+        };
+        assert_eq!(
+            CancelCompactionRequest::decode(request_bytes.as_slice()).unwrap(),
+            request
+        );
+        assert_eq!(request.encode_to_vec(), request_bytes);
+        let response = CancelCompactionResponse {
+            header: Some(ResponseHeader {
+                status: Some(Status::default()),
+            }),
+            result: cancel_compaction_response::Result::CancelIssued as i32,
+        };
+        assert_eq!(
+            CancelCompactionResponse::decode(response_bytes.as_slice()).unwrap(),
+            response
+        );
+        assert_eq!(response.encode_to_vec(), response_bytes);
+        for (result, number) in [
+            (cancel_compaction_response::Result::Unspecified, 0),
+            (cancel_compaction_response::Result::CancelIssued, 1),
+            (cancel_compaction_response::Result::AlreadyCancelling, 2),
+            (cancel_compaction_response::Result::TooLateToCancel, 3),
+            (cancel_compaction_response::Result::NotFound, 4),
+            (cancel_compaction_response::Result::Unsupported, 5),
+        ] {
+            assert_eq!(result as i32, number);
+        }
+    }
+}

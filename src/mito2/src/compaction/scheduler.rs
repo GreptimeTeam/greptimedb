@@ -35,9 +35,12 @@ pub use planning::CompactionRequest;
 #[cfg(test)]
 pub(crate) use planning::pick_automatic_for_test;
 pub(crate) use state::{CompactionExecution, CompactionState, CompactionStateRef};
-use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
+use state::{
+    CompactionPhase, CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction,
+};
 #[cfg(test)]
 use store_api::compaction_task::{self, CompactionTaskEntry};
+use store_api::region_engine::CancelCompactionResult;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
@@ -53,7 +56,6 @@ use crate::error::{
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
-#[cfg(test)]
 use crate::schedule::RequestCancelResult;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::worker::WorkerListener;
@@ -202,6 +204,55 @@ impl CompactionScheduler {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
         status.shared_state = shared_state.clone();
         self.region_status.insert(region_id, status);
+    }
+
+    /// Cancels an exact live identity, checking the pending slot before the active cycle.
+    pub(crate) fn cancel_task(
+        &mut self,
+        region_id: RegionId,
+        task_id: &str,
+    ) -> CancelCompactionResult {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return CancelCompactionResult::NotFound;
+        };
+        if status
+            .pending_task_state
+            .as_ref()
+            .is_some_and(|state| state.entry.task_id.as_ref() == task_id)
+        {
+            status.pending_task_state = None;
+            if let Some(pending) = status.pending_request.take() {
+                pending.waiter.send(CompactionCancelledSnafu.fail());
+            }
+            status.publish_state();
+            return CancelCompactionResult::CancelIssued;
+        }
+        if !status
+            .active
+            .task_state
+            .as_ref()
+            .is_some_and(|state| state.entry.task_id.as_ref() == task_id)
+        {
+            return CancelCompactionResult::NotFound;
+        }
+        if matches!(status.active.phase, CompactionPhase::Remote { .. }) {
+            return CancelCompactionResult::Unsupported;
+        }
+        if status.active.task_cancel_requested {
+            return CancelCompactionResult::AlreadyCancelling;
+        }
+        let result = status.request_cancel();
+        match result {
+            RequestCancelResult::CancelIssued | RequestCancelResult::AlreadyCancelling => {
+                status.active.task_cancel_requested = true;
+                if result == RequestCancelResult::CancelIssued {
+                    CancelCompactionResult::CancelIssued
+                } else {
+                    CancelCompactionResult::AlreadyCancelling
+                }
+            }
+            RequestCancelResult::TooLateToCancel => CancelCompactionResult::TooLateToCancel,
+        }
     }
 
     /// Reports active work rather than the existence of a resident region record.
@@ -786,6 +837,24 @@ impl CompactionScheduler {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             status.on_failure(err);
         }
+    }
+
+    /// Completes task-specific cancellation without discarding another pending request.
+    fn finish_cancelled_compaction(
+        &mut self,
+        region_id: RegionId,
+        manifest: &ManifestContextRef,
+        schemas: SchemaMetadataManagerRef,
+    ) -> CompactionTransition {
+        if let Some(status) = self.region_status.get_mut(&region_id)
+            && status.active.task_cancel_requested
+            && status.pending_ddl_requests.is_empty()
+        {
+            status.cancel_active_task();
+            self.handle_pending_compaction_request(region_id, manifest, schemas);
+            return CompactionTransition::NoAction;
+        }
+        CompactionTransition::from_pending_ddls(self.finish_compaction_on_cancel(region_id))
     }
 
     /// Returns the cycle to idle and records any DDL handoff in the same resident entry.

@@ -3405,3 +3405,314 @@ async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_fir
     assert_eq!(result.is_err(), reject_after_first);
     assert!(!scheduler.is_compacting(region_id));
 }
+
+/// Pending task identity survives promotion, but replacement invalidates the old identity.
+#[tokio::test]
+async fn test_cancel_compaction_task_identity_and_pending() {
+    let env = SchedulerEnv::new().await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let region_id = version.region_id();
+    let (mut finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let active_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[0]
+        .task_id
+        .clone();
+    let mut pending_ids = Vec::new();
+    let mut waiters = Vec::new();
+    for _ in 0..3 {
+        let (sender, receiver) = oneshot::channel();
+        scheduler
+            .schedule_manual_compaction(
+                Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+                &version,
+                &env.access_layer,
+                sender.into(),
+                &manifest,
+                schemas.clone(),
+                2,
+                None,
+            )
+            .unwrap();
+        pending_ids.push(
+            scheduler.inspect_tasks(&MetadataFilter::default(), None)[1]
+                .task_id
+                .clone(),
+        );
+        waiters.push(receiver);
+    }
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_ids[0]),
+        CancelCompactionResult::NotFound
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_ids[1]),
+        CancelCompactionResult::NotFound
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_ids[2]),
+        CancelCompactionResult::CancelIssued
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_ids[2]),
+        CancelCompactionResult::NotFound
+    );
+    for receiver in waiters {
+        assert!(receiver.await.unwrap().is_err());
+    }
+    let rows = scheduler.inspect_tasks(&MetadataFilter::default(), None);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].task_id, active_id);
+    assert_eq!(rows[0].state.as_ref(), "running");
+
+    scheduler
+        .schedule_manual_compaction(
+            Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            &version,
+            &env.access_layer,
+            OptionOutputTx::none(),
+            &manifest,
+            schemas.clone(),
+            2,
+            None,
+        )
+        .unwrap();
+    let pending_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[1]
+        .task_id
+        .clone();
+    finished.result = CompactionPlanningResult::NoPlan(None);
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
+        .await;
+    assert_eq!(
+        scheduler.inspect_tasks(&MetadataFilter::default(), None)[0].task_id,
+        pending_id
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_id),
+        CancelCompactionResult::CancelIssued
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_id),
+        CancelCompactionResult::AlreadyCancelling
+    );
+    let finished = recv_compaction_pick_finished(&mut rx).await;
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas)
+        .await;
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_id),
+        CancelCompactionResult::NotFound
+    );
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn test_cancel_active_compaction_preserves_pending(#[case] local_execution: bool) {
+    let jobs = Arc::new(VecScheduler::default());
+    let env = SchedulerEnv::new().await.scheduler(jobs);
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let region_id = version.region_id();
+    let (finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let active_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[0]
+        .task_id
+        .clone();
+    let mut finished = Some(finished);
+    if local_execution {
+        scheduler
+            .handle_compaction_pick_finished(finished.take().unwrap(), &manifest, schemas.clone())
+            .await;
+    }
+    let (sender, mut receiver) = oneshot::channel();
+    scheduler
+        .schedule_manual_compaction(
+            Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            &version,
+            &env.access_layer,
+            sender.into(),
+            &manifest,
+            schemas.clone(),
+            2,
+            None,
+        )
+        .unwrap();
+    let pending_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[1]
+        .task_id
+        .clone();
+    assert_eq!(
+        scheduler.cancel_task(region_id, &active_id),
+        CancelCompactionResult::CancelIssued
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &active_id),
+        CancelCompactionResult::AlreadyCancelling
+    );
+    if local_execution {
+        let CompactionPhase::Units(local) = &scheduler.region_status[&region_id].active.phase
+        else {
+            panic!("expected local units")
+        };
+        let ids = local.unit_ids_for_test();
+        for id in ids {
+            scheduler.on_unit_finished(
+                region_id,
+                id,
+                Err(Arc::new(CompactionCancelledSnafu.build())),
+            );
+            scheduler
+                .on_unit_released(region_id, id, &manifest, schemas.clone())
+                .await;
+        }
+    } else {
+        scheduler
+            .handle_compaction_pick_finished(finished.take().unwrap(), &manifest, schemas.clone())
+            .await;
+    }
+    let rows = scheduler.inspect_tasks(&MetadataFilter::default(), None);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].task_id, pending_id);
+    assert_eq!(rows[0].phase.as_ref(), "planning");
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        scheduler.cancel_task(region_id, &active_id),
+        CancelCompactionResult::NotFound
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &pending_id),
+        CancelCompactionResult::CancelIssued
+    );
+    let finished = recv_compaction_pick_finished(&mut rx).await;
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
+        .await;
+    assert!(receiver.await.unwrap().is_err());
+    assert!(
+        scheduler
+            .schedule_automatic_compaction(
+                Options::Regular(Default::default()),
+                &version,
+                &env.access_layer,
+                &manifest,
+                schemas,
+            )
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_compaction_remote_and_commit_boundary() {
+    let env = SchedulerEnv::new().await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let region_id = version.region_id();
+    let (_finished, _manifest, _schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[0]
+        .task_id
+        .clone();
+    scheduler
+        .region_status
+        .get_mut(&region_id)
+        .unwrap()
+        .start_remote_task();
+    assert_eq!(
+        scheduler.cancel_task(region_id, &id),
+        CancelCompactionResult::Unsupported
+    );
+    let state = scheduler
+        .region_status
+        .get_mut(&region_id)
+        .unwrap()
+        .start_local_task();
+    assert!(state.mark_commit_started());
+    assert_eq!(
+        scheduler.cancel_task(region_id, &id),
+        CancelCompactionResult::TooLateToCancel
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, "stale"),
+        CancelCompactionResult::NotFound
+    );
+    assert_eq!(
+        scheduler.cancel_task(RegionId::new(999, 1), &id),
+        CancelCompactionResult::NotFound
+    );
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn test_cancel_compaction_task_keeps_ddl_priority(#[case] task_first: bool) {
+    let env = SchedulerEnv::new().await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let region_id = version.region_id();
+    let (finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let active_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[0]
+        .task_id
+        .clone();
+    let (manual_tx, manual_rx) = oneshot::channel();
+    scheduler
+        .schedule_manual_compaction(
+            Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            &version,
+            &env.access_layer,
+            manual_tx.into(),
+            &manifest,
+            schemas.clone(),
+            2,
+            None,
+        )
+        .unwrap();
+    if task_first {
+        assert_eq!(
+            scheduler.cancel_task(region_id, &active_id),
+            CancelCompactionResult::CancelIssued
+        );
+    }
+    let (ddl_tx, _ddl_rx) = oneshot::channel();
+    assert!(
+        scheduler
+            .try_cancel_and_add_ddl(
+                region_id,
+                ddl_tx.into(),
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+                DdlRequest::EnterStaging,
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        scheduler.cancel_task(region_id, &active_id),
+        CancelCompactionResult::AlreadyCancelling
+    );
+    let transition = scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas)
+        .await;
+    let CompactionTransition::DdlReady(ddls) = transition else {
+        panic!("DDL must take precedence over the pending compaction");
+    };
+    assert_eq!(ddls.len(), 1);
+    assert!(manual_rx.await.unwrap().is_err());
+    assert!(
+        scheduler
+            .inspect_tasks(&MetadataFilter::default(), None)
+            .is_empty()
+    );
+    assert!(scheduler.region_status[&region_id].executing_ddl.is_some());
+}

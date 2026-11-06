@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use api::v1::region::region_server::{Region, RegionServer};
 use api::v1::region::{
-    AlignedSchemaVersion, BulkInsertRequest, DeleteRequest, DeleteRequests, InsertRequest,
-    InsertRequests, RegionRequestHeader, RegionResponse as PbRegionResponse, bulk_insert_request,
+    AlignedSchemaVersion, BulkInsertRequest, CancelCompactionRequest, CancelCompactionResponse,
+    DeleteRequest, DeleteRequests, InsertRequest, InsertRequests, RegionRequestHeader,
+    RegionResponse as PbRegionResponse, bulk_insert_request,
 };
 use api::v1::value::ValueData;
 use api::v1::{
@@ -88,6 +89,15 @@ struct RecordingRegionService {
 
 #[async_trait::async_trait]
 impl Region for RecordingRegionService {
+    async fn cancel_compaction(
+        &self,
+        _request: Request<CancelCompactionRequest>,
+    ) -> std::result::Result<Response<CancelCompactionResponse>, Status> {
+        Err(Status::unimplemented(
+            "write dispatcher does not cancel compaction",
+        ))
+    }
+
     async fn handle(
         &self,
         request: Request<RegionRequest>,

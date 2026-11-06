@@ -21,9 +21,11 @@ use std::time::Duration;
 use api::region::{BatchRegionResponse, RegionResponse};
 use api::v1::ResponseHeader;
 use api::v1::region::RegionResponse as PbRegionResponse;
+use api::v1::region::cancel_compaction_response::Result as CancelCompactionResult;
 use api::v1::region::{
-    RegionRequest, RegionRequestHeader, RemoteDynFilterRequest, RemoteDynFilterUnregister,
-    RemoteDynFilterUpdate, region_request, remote_dyn_filter_request,
+    CancelCompactionRequest, CancelCompactionResponse, RegionRequest, RegionRequestHeader,
+    RemoteDynFilterRequest, RemoteDynFilterUnregister, RemoteDynFilterUpdate, region_request,
+    remote_dyn_filter_request,
 };
 use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
@@ -149,6 +151,60 @@ impl RegionRequester {
         R: Borrow<RegionRequest> + Send + Sync + 'static,
     {
         self.handle_inner(request).await
+    }
+
+    /// Requests cancellation of a specific live compaction cycle without retrying.
+    ///
+    /// A successful RPC reports whether cancellation was accepted, already pending,
+    /// too late, unavailable, or unsupported; acceptance does not mean the task has exited.
+    pub async fn cancel_compaction(
+        &self,
+        region_id: u64,
+        task_id: impl Into<String>,
+    ) -> Result<CancelCompactionResult> {
+        let request = CancelCompactionRequest {
+            header: Some(RegionRequestHeader {
+                tracing_context: TracingContext::from_current_span().to_w3c(),
+                ..Default::default()
+            }),
+            region_id,
+            task_id: task_id.into(),
+        };
+        let _timer = metrics::METRIC_REGION_REQUEST_GRPC
+            .with_label_values(&["CancelCompaction"])
+            .start_timer();
+        let (addr, mut client) = self.client.raw_region_client()?;
+        let response: CancelCompactionResponse = async {
+            client
+                .ready()
+                .await
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {e}")))?;
+            let mut request = tonic::Request::new(request);
+            request.extensions_mut().insert(tonic::GrpcMethod::new(
+                "greptime.v1.region.Region",
+                "CancelCompaction",
+            ));
+            client
+                .unary(
+                    request,
+                    tonic::codegen::http::uri::PathAndQuery::from_static(
+                        "/greptime.v1.region.Region/CancelCompaction",
+                    ),
+                    tonic_prost::ProstCodec::default(),
+                )
+                .await
+        }
+        .await
+        .map_err(|status| map_region_error(status, addr))?
+        .into_inner();
+        check_response_header(&response.header)?;
+        match CancelCompactionResult::try_from(response.result) {
+            Ok(CancelCompactionResult::Unspecified) | Err(_) => IllegalDatabaseResponseSnafu {
+                err_msg: "Missing or unknown compaction cancellation result",
+            }
+            .fail(),
+            Ok(result) => Ok(result),
+        }
     }
 
     /// Sends a remote dynamic filter update to the region service.
@@ -532,11 +588,30 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingRegionService {
         requests: Arc<Mutex<Vec<(RegionRequest, bool, bool)>>>,
+        cancel_requests: Arc<Mutex<Vec<CancelCompactionRequest>>>,
+        cancel_responses:
+            Arc<Mutex<VecDeque<std::result::Result<CancelCompactionResponse, Status>>>>,
         responses: Arc<Mutex<VecDeque<std::result::Result<PbRegionResponse, Status>>>>,
     }
 
     #[tonic::async_trait]
     impl Region for RecordingRegionService {
+        async fn cancel_compaction(
+            &self,
+            request: Request<CancelCompactionRequest>,
+        ) -> std::result::Result<Response<CancelCompactionResponse>, Status> {
+            self.cancel_requests
+                .lock()
+                .unwrap()
+                .push(request.into_inner());
+            self.cancel_responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("test must configure a cancellation response")
+                .map(Response::new)
+        }
+
         async fn handle(
             &self,
             request: Request<RegionRequest>,
@@ -623,6 +698,104 @@ mod tests {
             }),
             affected_rows: 1,
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_compaction_rpc() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        for outcome in [
+            CancelCompactionResult::CancelIssued,
+            CancelCompactionResult::AlreadyCancelling,
+            CancelCompactionResult::TooLateToCancel,
+            CancelCompactionResult::NotFound,
+            CancelCompactionResult::Unsupported,
+        ] {
+            server
+                .service
+                .cancel_responses
+                .lock()
+                .unwrap()
+                .push_back(Ok(CancelCompactionResponse {
+                    header: build_response(StatusCode::Success).header,
+                    result: outcome as i32,
+                }));
+            assert_eq!(
+                requester.cancel_compaction(42, "cycle-id").await.unwrap(),
+                outcome
+            );
+        }
+        let requests = server.service.cancel_requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        for request in requests.iter() {
+            assert_eq!(request.region_id, 42);
+            assert_eq!(request.task_id, "cycle-id");
+            assert!(request.header.is_some());
+        }
+        assert!(server.service.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_compaction_invalid_and_error_responses() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        for (header, result) in [
+            (None, CancelCompactionResult::CancelIssued as i32),
+            (
+                Some(ResponseHeader { status: None }),
+                CancelCompactionResult::CancelIssued as i32,
+            ),
+            (
+                build_response(StatusCode::Success).header,
+                CancelCompactionResult::Unspecified as i32,
+            ),
+            (build_response(StatusCode::Success).header, i32::MAX),
+        ] {
+            server
+                .service
+                .cancel_responses
+                .lock()
+                .unwrap()
+                .push_back(Ok(CancelCompactionResponse { header, result }));
+            assert!(matches!(
+                requester.cancel_compaction(42, "cycle-id").await,
+                Err(Error::IllegalDatabaseResponse { .. })
+            ));
+        }
+        server
+            .service
+            .cancel_responses
+            .lock()
+            .unwrap()
+            .push_back(Ok(CancelCompactionResponse {
+                header: build_response(StatusCode::InvalidArguments).header,
+                result: CancelCompactionResult::CancelIssued as i32,
+            }));
+        let error = requester
+            .cancel_compaction(42, "cycle-id")
+            .await
+            .unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        for (status, expected) in [
+            (Status::unavailable("offline"), tonic::Code::Unavailable),
+            // Older datanodes do not implement this independent RPC.
+            (
+                Status::unimplemented("unknown method"),
+                tonic::Code::Unimplemented,
+            ),
+        ] {
+            server
+                .service
+                .cancel_responses
+                .lock()
+                .unwrap()
+                .push_back(Err(status));
+            let error = requester
+                .cancel_compaction(42, "cycle-id")
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::RegionServer { code, .. } if code == expected));
         }
     }
 

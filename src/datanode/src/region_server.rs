@@ -29,8 +29,9 @@ use api::region::{BatchRegionResponse, RegionResponse};
 use api::v1::meta::TopicStat;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    ListMetadataRequest, RegionRequest as RegionRequestV1, RegionRequestFailure,
-    RegionResponse as RegionResponseV1, SyncRequest, region_request,
+    CancelCompactionRequest, CancelCompactionResponse, ListMetadataRequest,
+    RegionRequest as RegionRequestV1, RegionRequestFailure, RegionResponse as RegionResponseV1,
+    SyncRequest, cancel_compaction_response, region_request,
 };
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
@@ -80,9 +81,9 @@ use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, RELATIONAL_ENGINE_NAME,
 };
 use store_api::region_engine::{
-    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, RemapManifestsRequest,
-    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
-    SyncRegionFromRequest,
+    CancelCompactionResult, RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SyncRegionFromRequest,
 };
 use store_api::region_request::{
     self as store_region_request, AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest,
@@ -1061,6 +1062,52 @@ impl Stream for RegionWatermarkStream {
 
 #[async_trait]
 impl RegionServerHandler for RegionServer {
+    async fn cancel_compaction(
+        &self,
+        request: CancelCompactionRequest,
+    ) -> ServerResult<CancelCompactionResponse> {
+        ensure!(
+            !request.task_id.trim().is_empty(),
+            servers_error::InvalidQuerySnafu {
+                reason: "Compaction task ID must not be empty.",
+            }
+        );
+        let region_id = RegionId::from_u64(request.region_id);
+        let engine = self
+            .find_engine(region_id)
+            .map_err(BoxedError::new)
+            .context(ExecuteGrpcRequestSnafu)?;
+        let result = match engine {
+            Some(engine) => engine
+                .cancel_compaction(region_id, &request.task_id)
+                .await
+                .context(ExecuteGrpcRequestSnafu)?,
+            None => CancelCompactionResult::NotFound,
+        };
+        let result = match result {
+            CancelCompactionResult::CancelIssued => {
+                cancel_compaction_response::Result::CancelIssued
+            }
+            CancelCompactionResult::AlreadyCancelling => {
+                cancel_compaction_response::Result::AlreadyCancelling
+            }
+            CancelCompactionResult::TooLateToCancel => {
+                cancel_compaction_response::Result::TooLateToCancel
+            }
+            CancelCompactionResult::NotFound => cancel_compaction_response::Result::NotFound,
+            CancelCompactionResult::Unsupported => cancel_compaction_response::Result::Unsupported,
+        };
+        Ok(CancelCompactionResponse {
+            header: Some(ResponseHeader {
+                status: Some(Status {
+                    status_code: StatusCode::Success as _,
+                    ..Default::default()
+                }),
+            }),
+            result: result as i32,
+        })
+    }
+
     async fn handle_region_request(
         &self,
         request: RegionRequestV1,

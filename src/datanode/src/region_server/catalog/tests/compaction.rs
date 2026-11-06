@@ -16,6 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::Rows;
+use api::v1::region::cancel_compaction_response::Result as CancelCompactionResult;
+use api::v1::region::{CancelCompactionRequest, RegionRequestHeader};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use datafusion::arrow::compute::concat_batches;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::MemTable;
@@ -25,6 +29,7 @@ use mito2::engine::listener::EventListener;
 use mito2::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, flush_region, put_rows, rows_schema,
 };
+use servers::grpc::region_server::RegionServerHandler;
 use store_api::compaction_task::CompactionTaskEntry;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
@@ -32,6 +37,7 @@ use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
 
 use crate::region_server::catalog::inspect::{CompactionTasksSource, InspectTable};
+use crate::tests::{MockRegionEngine, mock_region_server};
 
 struct MergeGate {
     entered: Semaphore,
@@ -203,4 +209,174 @@ async fn test_compaction_tasks_live_scan_and_pushdown() {
         query(&lazy, "SELECT task_id FROM tasks").await.num_rows(),
         0
     );
+}
+
+/// Cancels the exact observed cycle through the datanode handler and engine routing.
+#[tokio::test]
+async fn test_cancel_compaction_live_task() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let gate = Arc::new(MergeGate {
+            entered: Semaphore::new(0),
+            resume: Semaphore::new(0),
+        });
+        let release = ReleaseGate(gate.clone());
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine_with(
+                MitoConfig {
+                    min_compaction_interval: Duration::from_secs(3600),
+                    ..Default::default()
+                },
+                None,
+                Some(gate.clone()),
+                None,
+            )
+            .await;
+        let mut server = mock_region_server();
+        server.register_engine(Arc::new(engine.clone()));
+        let region_id = RegionId::new(13, 1);
+        let create = CreateRequestBuilder::new()
+            .insert_option("compaction.type", "twcs")
+            .insert_option("compaction.twcs.trigger_file_num", "100")
+            .build();
+        let schema = rows_schema(&create);
+        server
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows: build_rows_for_key("a", 0, 10, 0),
+                },
+            )
+            .await;
+            flush_region(&engine, region_id, None).await;
+        }
+        let compact = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                engine
+                    .handle_request(
+                        region_id,
+                        RegionRequest::Compact(RegionCompactRequest {
+                            options: api::v1::region::compact_request::Options::StrictWindow(
+                                api::v1::region::StrictWindow {
+                                    window_seconds: 3600,
+                                },
+                            ),
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+            })
+        };
+        gate.entered.acquire().await.unwrap().forget();
+        let tasks = engine.inspect_compaction_tasks(&[]).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        let task_id = tasks[0].task_id.to_string();
+        for (id, expected) in [
+            ("stale-task-id", CancelCompactionResult::NotFound),
+            (task_id.as_str(), CancelCompactionResult::CancelIssued),
+            (task_id.as_str(), CancelCompactionResult::AlreadyCancelling),
+        ] {
+            let response = RegionServerHandler::cancel_compaction(
+                &server,
+                CancelCompactionRequest {
+                    header: Some(RegionRequestHeader::default()),
+                    region_id: region_id.as_u64(),
+                    task_id: id.into(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.result, expected as i32);
+            assert_eq!(
+                response.header.unwrap().status.unwrap().status_code,
+                StatusCode::Success as u32
+            );
+            let tasks = engine.inspect_compaction_tasks(&[]).await.unwrap();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].task_id.as_ref(), task_id);
+            assert_eq!(
+                tasks[0].state.as_ref(),
+                if id == "stale-task-id" {
+                    "running"
+                } else {
+                    "cancelling"
+                }
+            );
+        }
+        drop(release);
+        assert!(compact.await.unwrap().is_err());
+        while !engine
+            .inspect_compaction_tasks(&[])
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+        let response = RegionServerHandler::cancel_compaction(
+            &server,
+            CancelCompactionRequest {
+                header: Some(RegionRequestHeader::default()),
+                region_id: region_id.as_u64(),
+                task_id,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.result, CancelCompactionResult::NotFound as i32);
+        engine.stop().await.unwrap();
+    })
+    .await
+    .expect("datanode cancellation lifecycle did not complete");
+}
+
+#[tokio::test]
+async fn test_cancel_compaction_routing_errors() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server = mock_region_server();
+        let region_id = RegionId::new(14, 1);
+        let request = CancelCompactionRequest {
+            header: Some(RegionRequestHeader::default()),
+            region_id: region_id.as_u64(),
+            task_id: "cycle-id".into(),
+        };
+        let response = RegionServerHandler::cancel_compaction(&server, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(response.result, CancelCompactionResult::NotFound as i32);
+        assert_eq!(
+            response.header.unwrap().status.unwrap().status_code,
+            StatusCode::Success as u32
+        );
+        let error = RegionServerHandler::cancel_compaction(
+            &server,
+            CancelCompactionRequest {
+                task_id: " \t".into(),
+                ..request.clone()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+
+        let (engine, _requests) = MockRegionEngine::new("unsupported-compaction");
+        server.register_test_region(region_id, engine);
+        let response = RegionServerHandler::cancel_compaction(&server, request)
+            .await
+            .unwrap();
+        assert_eq!(response.result, CancelCompactionResult::Unsupported as i32);
+        assert_eq!(
+            response.header.unwrap().status.unwrap().status_code,
+            StatusCode::Success as u32
+        );
+    })
+    .await
+    .expect("datanode cancellation routing did not complete");
 }

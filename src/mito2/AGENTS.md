@@ -65,6 +65,9 @@ build rows outside the lock. Execution handles provide live background phases.
 There is no second task registry or completed-task history. See
 `compaction/scheduler/state.rs`. The datanode provider reuses the lazy inspection scan
 path and retains residual SQL filters.
+Task cancellation uses `RegionEngine::cancel_compaction` and the owning worker
+to match the live task ID. Task-specific cancellation preserves other pending
+manual work; DDL cancellation retains its existing scheduling fence and priority.
 
 ## Public surface
 
