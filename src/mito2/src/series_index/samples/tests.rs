@@ -1604,6 +1604,7 @@ async fn aligned_payload_cache_assembles_columns_across_blocks() {
 #[rstest::rstest]
 #[case(1024 * 1024)]
 #[case(128 * 1024)]
+#[case(16 * 1024)]
 #[tokio::test]
 async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
     use crate::cache::{CacheManager, CacheStrategy};
@@ -1633,7 +1634,7 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
     )
     .await;
     let strategy = CacheStrategy::EnableAll(Arc::new(
-        CacheManager::builder().page_cache_size(1024 * 1024).build(),
+        CacheManager::builder().page_cache_size(16 * 1024 * 1024).build(),
     ));
     for cached in [false, true] {
         let mut reader = reader::SamplesReader::open(store.clone(), handle.clone())
@@ -1651,20 +1652,32 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
                 .map(|tsid| MetricSeriesId { table_id: 1, tsid })
                 .collect(),
         );
-        let rows = reader
-            .read(request)
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        assert_eq!(
-            collect_rows(&rows),
-            input
-                .iter()
-                .copied()
-                .filter(|r| r.1 % 2 == 0)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(pool.reserved(), 0);
+        for warm in [false, true] {
+            if warm && cached {
+                let mut prime = request.clone();
+                prime.memory_pool = None;
+                reader
+                    .read(prime)
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+            }
+            let rows = reader
+                .read(request.clone())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(
+                collect_rows(&rows),
+                input
+                    .iter()
+                    .copied()
+                    .filter(|r| r.1 % 2 == 0)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(pool.reserved(), 0);
+        }
     }
 }

@@ -446,14 +446,15 @@ async fn read_block(
         .map(|r| r.end - r.start)
         .sum::<u64>()
         - ranges.iter().map(|r| r.end - r.start).sum::<u64>();
-    let bytes = reader.reservation_bytes(&ranges)
-        + 2 * gap_bytes as usize
+    let base_bytes = 2 * gap_bytes as usize
         + columns
             .iter()
             .map(|column| column.payload.stored as usize + column.payload.decoded as usize)
             .sum::<usize>()
         + block.rows as usize * (32 * (projection.len() + 1) + std::mem::size_of::<usize>())
         + columns.len() * 128;
+    let bytes = base_bytes + reader.reservation_bytes(&ranges);
+    let mut bypass_cache = false;
     if let Some(reservation) = &reservation {
         let mut result = reservation.try_grow(bytes);
         if result.is_err() && !prefetched.buffers.is_empty() {
@@ -466,8 +467,20 @@ async fn read_block(
             };
             result = reservation.try_grow(bytes);
         }
+        if result.is_err() && reader.cache.is_some() {
+            // Alignment is optional. A block that fits without it must remain readable,
+            // including on cache hits, whose shared backing buffers still need accounting.
+            result = reservation.try_grow(base_bytes);
+            bypass_cache = result.is_ok();
+        }
         result.context(crate::error::ScanMemoryExhaustedSnafu)?;
     }
+    let uncached = PayloadReader {
+        reader: reader.reader,
+        cache: None,
+        end: reader.end,
+    };
+    let reader = if bypass_cache { &uncached } else { reader };
     let mut buffers = HashMap::new();
     for column in &columns {
         if let Some(bytes) = prefetched.buffers.get(&column.payload.offset) {
