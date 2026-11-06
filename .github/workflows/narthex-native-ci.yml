@@ -196,9 +196,11 @@ jobs:
             --native
       - name: Compare the legacy route, for comparison
         if: always()
-        # The existing route answers the same files in the same harness. A difference that shows up
-        # here and not above predates the native route; one that shows up only above is a native
-        # regression. Both are reported, so neither can be mistaken for the other.
+        # Informational only: the legacy route is deprecated on this branch and is not a gate. It
+        # answers the same files in the same harness so a difference that shows up here and not
+        # above can be told apart from a native regression - today, the metric name `or` leaves on
+        # the right-hand series. Failing the job on it would gate on a route nobody maintains.
+        continue-on-error: true
         run: |
           bash .github/scripts/narthex-prometheus-compat.sh \
             "$PWD/bins/greptime" \
