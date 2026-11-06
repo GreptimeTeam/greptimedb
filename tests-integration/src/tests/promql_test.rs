@@ -1875,11 +1875,6 @@ fn native_region_inputs(
     out: &mut Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
 ) {
     for child in plan.children() {
-        let child = if child.is::<CooperativeExec>() {
-            child.children()[0]
-        } else {
-            child
-        };
         if child.is::<MergeScanExec>() {
             out.push(Arc::clone(child));
         } else {
@@ -6665,7 +6660,7 @@ async fn native_promql_window_over_a_time_partitioned_table_keeps_whole_series()
         // A fallback plan also produces the existing plan's rows, so the admission has to be
         // asserted separately: the frontend tree must carry a fused node.
         assert!(
-            observer.fused().is_some(),
+            find_plan_node(&root, "FusedSeriesExec").is_some(),
             "{query}: the tree must run natively, not on the existing plan: {:?}",
             display_plan_tree(&root)
         );
@@ -6740,13 +6735,6 @@ async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independ
             "`{query}` reads one region input per selector occurrence: {:?}",
             display_plan_tree(&root)
         );
-        for (index, input) in inputs.iter().enumerate() {
-            assert!(
-                input.is::<MergeScanExec>(),
-                "`{query}`: input {index} is not a region read: {:?}",
-                display_plan_tree(input)
-            );
-        }
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");

@@ -1242,12 +1242,6 @@ impl PromPlanner {
         if multi_input && depends_on_input_order(root) {
             return Ok(None);
         }
-        // Two sources that report groups by metric name need a column for that name: without one,
-        // groups that differ only by metric would be reported as the same label set. A discovered
-        // selector carries that column itself; several explicit selectors do not.
-        if multi_input && groups_by_metric_name(root) {
-            return Ok(None);
-        }
         // The native output schema can name only compiled value fields, the time index and the tag
         // columns a source declares. A discovered source declares `__name__` because the name is
         // what tells two metrics with equal labels apart, so a nameless selector's names survive a
@@ -1274,8 +1268,7 @@ impl PromPlanner {
         // series frames, and a canonical router collects the pieces of one label set from every
         // partition. Declining here would hand the statement back to a path that answers it per
         // partition.
-        if !multi_input
-            && selectors.len() == 1
+        if selectors.len() == 1
             && matches!(&tree.root().expr, NativeExpr::Merge { input } if pointwise_operand(input) && canonical_local_prefix(input) && !contains_global_consumer(input))
             && let Some(plan) = canonical_boundary_plan(
                 prom_expr,
@@ -1300,7 +1293,7 @@ impl PromPlanner {
             // without this route. Its producer reads whatever input the statement prepared: over
             // the wire that is the raw series source, and the partial/final halves stay on the
             // frontend above the regions, so per-series work keeps the scan width.
-            let split = if !multi_input && selectors.len() == 1 {
+            let split = if selectors.len() == 1 {
                 FusedSeries::split_aggregate(&tree, &time).context(DataFusionPlanningSnafu)?
             } else {
                 None

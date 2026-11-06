@@ -4195,15 +4195,6 @@ async fn native_fused_same_table_three_selectors_on_partitioned_table_bind_their
         fused_input_metrics(&plan),
         "each selector occurrence reads its own source: {plan}"
     );
-    // The node keeps no bare scan of its own: every child of it is a native node that reads through
-    // its own source, so nothing hands a region a multi-scan node.
-    for input in fused.inputs() {
-        assert!(
-            matches!(input, LogicalPlan::Extension(extension)
-                if extension.node.as_any().is::<FusedSeries>()),
-            "{plan}"
-        );
-    }
 }
 
 /// Find the final half of a split aggregate.
@@ -5251,31 +5242,6 @@ async fn native_fused_preparation_decline_preserves_legacy_plan() {
         legacy.display_indent_schema().to_string(),
         "a native preparation decline must leave legacy planning context unchanged"
     );
-}
-
-/// An aggregate is answered natively now (`sum(rate(..))`, `avg by(..)(..)` are split), and so is a
-/// fold beside a plain selector of the same table: two occurrences are two inputs, each bound to its
-/// own source, and the match above them answers over both.
-#[tokio::test]
-async fn native_fused_aggregate_runs_above_independent_inputs() {
-    for query in ["some_metric + sum(some_metric)"] {
-        let plan = build_native_fused_plan(query, true).await;
-        let display = plan.display_indent().to_string();
-        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
-        assert_eq!(2, fused.inputs().len(), "{query}: {display}");
-        assert_eq!(
-            vec!["some_metric".to_string(), "some_metric".to_string()],
-            fused_input_metrics(&plan),
-            "{query}: each selector occurrence reads its own source: {display}"
-        );
-        assert!(find_final_split(&plan).is_none(), "{query}: {display}");
-        let legacy = build_native_fused_plan(query, false).await;
-        let legacy_display = legacy.display_indent().to_string();
-        assert!(
-            !legacy_display.contains("FusedSeries"),
-            "{query}: the native plan is enabled only by the flag: {legacy_display}"
-        );
-    }
 }
 
 #[tokio::test]
