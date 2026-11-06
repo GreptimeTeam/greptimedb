@@ -83,7 +83,7 @@ use store_api::storage::RegionId;
 mod frame_output;
 
 use super::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
+    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
     series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
@@ -1345,6 +1345,93 @@ impl Drop for StagedStream {
     }
 }
 
+fn canonical_producer_node() -> FusedSeries {
+    let grid = grid();
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let evaluated = NativeType::Samples(Arc::clone(&schema));
+    let raw = NativeType::Samples(raw_schema());
+    let input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: raw.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: raw,
+    };
+    let window = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(input),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 1,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let map = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(window),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Label(Arc::new(
+                    LabelRewrite::replace("host", "web-1", "host", "web-.*").unwrap(),
+                ))]),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(map),
+        },
+        output: evaluated,
+    })
+    .unwrap();
+    FusedSeries::try_new_canonical_producer(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+    )
+    .unwrap()
+}
+
+#[test]
+fn fused_series_encoding_preserves_state_and_canonical_producer() {
+    // A state-exporting producer encodes like any other node: serialization is the node's own
+    // capability, not a decision about where it may run.
+    let tree = partial_tree(rate_tree(), AggregateKind::Sum, &[HOST, JOB]);
+    let producer = FusedSeries::try_new_state_export(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+    )
+    .unwrap();
+    let decoded = FusedSeries::deserialize(&producer.serialize().unwrap()).unwrap();
+    assert_eq!(decoded.tree(), producer.tree());
+    assert_eq!(decoded.binding(), producer.binding());
+    assert_eq!(decoded.schema(), producer.schema());
+    assert!(decoded.reads_aggregate_state() == producer.reads_aggregate_state());
+
+    // A canonical producer's flag is part of the node, so it survives the round trip; the
+    // decoder does not get to decide whether its prefix is partition-local.
+    let canonical = canonical_producer_node();
+    let decoded = FusedSeries::deserialize(&canonical.serialize().unwrap()).unwrap();
+    assert!(decoded.is_canonical_producer());
+    assert_eq!(decoded.tree(), canonical.tree());
+    assert_eq!(decoded.schema(), canonical.schema());
+}
+
 #[test]
 fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() {
     let tree = rate_tree();
@@ -1412,17 +1499,12 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     let projected_decoded = FusedSeries::deserialize(&projected_bytes).unwrap();
     assert_eq!(projected_decoded.schema(), projected.schema());
 
-    // A state-exporting producer never crosses the wire: the frame's state content has no wire
-    // form, so the producer stays on the machine that reads the samples.
+    // A state-exporting producer encodes like any other node; where it may run is decided by the
+    // planner, not by the codec.
     let partial = partial_node(AggregateKind::Sum);
-    assert!(
-        partial
-            .serialize()
-            .unwrap_err()
-            .to_string()
-            .contains("exporting aggregate state"),
-        "a state-exporting producer must be refused by the serializer"
-    );
+    let partial_decoded = FusedSeries::deserialize(&partial.serialize().unwrap()).unwrap();
+    assert_eq!(partial_decoded.tree(), partial.tree());
+    assert_eq!(partial_decoded.schema(), partial.schema());
     let mut bad_version = bytes.clone();
     bad_version[..4].copy_from_slice(&99u32.to_le_bytes());
     assert!(
@@ -2672,6 +2754,189 @@ fn repeated_source_bindings_validate_fields_and_second_ordering() {
     assert!(error.to_string().contains("ordering"), "{error}");
 }
 
+#[test]
+fn fragmented_raw_input_is_reconciled_even_at_width_one() {
+    use crate::extension_plan::{IdentityCompletion, SeriesRepartitionExec, SeriesRouting};
+    use common_query::series_frame::frame_schema_with;
+
+    let make_input = |ordering| {
+        let declaration = SeriesFrameDeclaration::parse(frame_schema().as_ref()).unwrap();
+        let schema = frame_schema_with(
+            declaration.series(),
+            declaration.labels(),
+            declaration.label_decode(),
+            ordering,
+        )
+        .unwrap();
+        memory_exec_with(schema, Vec::new())
+    };
+    for ordering in [SeriesOrdering::Contiguous, SeriesOrdering::Interleaved] {
+        let plan = fused(rate_tree())
+            .to_execution_plan(vec![(
+                make_input(ordering),
+                RawLabelSource::Explicit,
+                ordering,
+            )])
+            .unwrap();
+        let child = plan.children()[0];
+        if ordering == SeriesOrdering::Interleaved {
+            let router = child
+                .downcast_ref::<SeriesRepartitionExec>()
+                .expect("fragmented input needs an owner even for one partition");
+            assert_eq!(router.routing_policy(), &SeriesRouting::RawPrimaryKey);
+            assert_eq!(
+                router.identity_completion(),
+                IdentityCompletion::MergeInputs
+            );
+            assert_eq!(router.outputs(), 1);
+            assert_eq!(
+                series_frame_ordering(child.schema().as_ref()).unwrap(),
+                SeriesOrdering::Contiguous
+            );
+        } else {
+            assert!(
+                child.downcast_ref::<SeriesRepartitionExec>().is_none(),
+                "disjoint input needs no router"
+            );
+        }
+    }
+}
+
+/// Disjoint regional streams keep their contiguous guarantee and need no raw owner.
+#[tokio::test]
+async fn contiguous_raw_input_runs_rate_directly_at_any_width() {
+    use crate::extension_plan::SeriesRepartitionExec;
+
+    let samples = series_samples(1.0);
+    let region_batch = |key, samples: &[(i64, f64)]| {
+        let batch = frame(&series_chunk(key, samples, true));
+        RecordBatch::try_new(frame_schema(), batch.columns().to_vec()).unwrap()
+    };
+    let first = region_batch("web-1", &samples);
+    let second = region_batch("web-2", &samples);
+    for partitions in [
+        vec![vec![first.clone(), second.clone()]],
+        vec![vec![first.clone()], vec![second.clone()]],
+    ] {
+        let input = memory_exec_partitioned_with(frame_schema(), partitions);
+        let exec = fused(rate_tree())
+            .to_execution_plan(vec![(
+                input,
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            )])
+            .unwrap();
+        assert!(
+            exec.children()[0]
+                .downcast_ref::<SeriesRepartitionExec>()
+                .is_none(),
+            "disjoint contiguous input needs no reconciliation"
+        );
+        let batches = collect(exec, SessionContext::default().task_ctx())
+            .await
+            .unwrap();
+        assert_series_rates(&rows(&batches), &[(1.0, "web-1"), (1.0, "web-2")]);
+    }
+}
+
+/// Two region-local chains of one key produce one rate series at either transport width.
+#[tokio::test]
+async fn fragmented_raw_input_merges_region_chains_before_rate() {
+    use common_query::series_frame::frame_schema_with;
+
+    let declaration = SeriesFrameDeclaration::parse(frame_schema().as_ref()).unwrap();
+    let schema = frame_schema_with(
+        declaration.series(),
+        declaration.labels(),
+        declaration.label_decode(),
+        SeriesOrdering::Interleaved,
+    )
+    .unwrap();
+    let samples = series_samples(1.0);
+    let region_batch = |samples: &[(i64, f64)]| {
+        let batch = frame(&series_chunk("web-1", samples, true));
+        RecordBatch::try_new(schema.clone(), batch.columns().to_vec()).unwrap()
+    };
+    let early = region_batch(&samples[..5]);
+    let late = region_batch(&samples[5..]);
+    for partitions in [
+        vec![vec![early.clone(), late.clone()]],
+        vec![vec![early.clone()], vec![late.clone()]],
+    ] {
+        let input = memory_exec_partitioned_with(schema.clone(), partitions);
+        let exec = fused(rate_tree())
+            .to_execution_plan(vec![(
+                input,
+                RawLabelSource::Explicit,
+                SeriesOrdering::Interleaved,
+            )])
+            .unwrap();
+        let batches = collect(exec, SessionContext::default().task_ctx())
+            .await
+            .unwrap();
+        assert_series_rates(&rows(&batches), &[(1.0, "web-1")]);
+    }
+}
+
+#[test]
+fn fragmented_raw_multi_input_is_reconciled_before_matching_router() {
+    use crate::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+    use common_query::series_frame::frame_schema_with;
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let declaration = SeriesFrameDeclaration::parse(frame_schema().as_ref()).unwrap();
+    let schema = frame_schema_with(
+        declaration.series(),
+        declaration.labels(),
+        declaration.label_decode(),
+        SeriesOrdering::Interleaved,
+    )
+    .unwrap();
+    let input = || memory_exec_partitioned_with(schema.clone(), vec![vec![], vec![]]);
+    let exec = node
+        .to_execution_plan_with_parallelism(
+            vec![
+                (
+                    input(),
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Interleaved,
+                ),
+                (
+                    input(),
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Interleaved,
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+    for child in exec.children() {
+        let matching = child
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("matching router");
+        assert!(matches!(
+            matching.routing_policy(),
+            SeriesRouting::Matching(_)
+        ));
+        let matching_children = child.children();
+        let owner = matching_children[0]
+            .downcast_ref::<SeriesRepartitionExec>()
+            .expect("raw owner below matching router");
+        assert_eq!(owner.routing_policy(), &SeriesRouting::RawPrimaryKey);
+        assert_eq!(
+            series_frame_ordering(child.schema().as_ref()).unwrap(),
+            SeriesOrdering::Contiguous
+        );
+    }
+}
+
 /// Logical trees with distinct dense sources are accepted by the physical adapter.
 #[tokio::test]
 async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
@@ -3826,7 +4091,10 @@ fn a_chunk_of_several_runs_converts_its_own_rows_only() {
     // The columns of `output_schema`, in its order: the field, the two tags, then the time.
     let batch = series_to_record_batch(
         &[
-            OutputColumn::Field(0),
+            OutputColumn::Field {
+                index: 0,
+                kind: FieldKind::Float,
+            },
             OutputColumn::Tag(0),
             OutputColumn::Tag(1),
             OutputColumn::Time,

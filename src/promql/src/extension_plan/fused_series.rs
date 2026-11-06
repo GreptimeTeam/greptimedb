@@ -48,6 +48,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
+use common_query::native_histogram::{
+    NativeHistogram, Span, build_histogram_array, native_histogram_value_type,
+};
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use common_query::series_frame::{
     SendableEvaluatedSeriesStream, SendableStateSeriesStream, ensure_frame_matches_label_source,
     pack_aggregate_state, pack_evaluated_series, series_frame_ordering, unpack_aggregate_state,
@@ -72,10 +76,12 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
+use datatypes::data_type::DataType as _;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, SeriesFrameDeclaration, aggregate_state_frame_schema,
 };
+use datatypes::series::histogram::{BucketSideView, HistogramView};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
@@ -359,6 +365,10 @@ struct FusedSeriesPayload {
     format: FusedOutputFormat,
     promql: Arc<str>,
     output_schema: datafusion::arrow::datatypes::Schema,
+    /// Whether this node is the partition-local producer of a canonical merge; part of the node's
+    /// identity, not of where it may be placed.
+    #[serde(default)]
+    canonical_producer: bool,
 }
 
 impl FusedSeries {
@@ -366,32 +376,12 @@ impl FusedSeries {
     /// The PromQL text is included for diagnostics only and never drives execution; children
     /// remain ordinary Substrait inputs.
     ///
-    /// A node that reads aggregate state is refused: that is the `Final` half of a split
-    /// aggregate, which folds every partition's state and so has to run where all of it arrives,
-    /// not inside one region. The `Partial` half below it exports state rather than reading it, so
-    /// it travels as an ordinary series-frame producer.
+    /// This is only the node's own encoding. Whether a planner is allowed to place this node on
+    /// another machine is a separate decision, made by the planner and the transport, not here.
     ///
     /// The envelope is [`FUSED_SERIES_ENVELOPE_VERSION`], the payload's length in bytes, then the
     /// postcard payload itself.
     pub fn serialize(&self) -> DataFusionResult<Vec<u8>> {
-        if self.canonical_producer {
-            return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support a canonical producer".into(),
-            ));
-        }
-        if self.reads_aggregate_state() {
-            return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support reading aggregate state".into(),
-            ));
-        }
-        // A node that exports state is only ever planned inside the region it reads: the frame's
-        // `AggregateState` content has no wire form, and the frontend half is what folds it. Refusing
-        // here is what keeps the state router on one machine instead of trusting the encoder.
-        if matches!(&self.tree().root().output, NativeType::AggregateState(_)) {
-            return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support exporting aggregate state".into(),
-            ));
-        }
         let payload = FusedSeriesPayload {
             tree: self.tree.clone(),
             grid: self.binding.grid.spec(),
@@ -401,6 +391,7 @@ impl FusedSeries {
             format: self.format,
             promql: Arc::clone(&self.promql),
             output_schema: self.output_schema.as_arrow().clone(),
+            canonical_producer: self.canonical_producer,
         };
         let encoded = postcard::to_stdvec(&payload).map_err(|e| {
             DataFusionError::Plan(format!("cannot serialize FusedSeries payload: {e}"))
@@ -457,6 +448,7 @@ impl FusedSeries {
             format,
             promql,
             output_schema,
+            canonical_producer: _,
         } = payload;
         let grid = Arc::new(
             EvalGrid::try_deferred(grid)
@@ -481,8 +473,17 @@ impl FusedSeries {
             ));
         }
         let output_schema = Arc::new(datafusion::common::DFSchema::try_from(output_schema)?);
-        let node =
+        let canonical_producer = payload.canonical_producer;
+        let mut node =
             Self::try_new_with_format(promql, tree, binding, children, output_schema, format)?;
+        if canonical_producer {
+            if !matches!(node.tree.root().expr, NativeExpr::Merge { .. }) {
+                return Err(DataFusionError::Plan(
+                    "a canonical merge producer requires a merge at the tree's root".into(),
+                ));
+            }
+            node.canonical_producer = true;
+        }
         if format == FusedOutputFormat::PlainRows {
             let schema = Arc::new(node.output_schema.as_arrow().clone());
             validate_plain_output_schema(
@@ -638,18 +639,11 @@ impl FusedSeries {
         binding: FusedSeriesBinding,
         children: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        let NativeExpr::Merge { input } = &tree.root().expr else {
+        let NativeExpr::Merge { input: _ } = &tree.root().expr else {
             return Err(DataFusionError::Plan(
                 "a canonical merge producer requires a merge at the tree's root".into(),
             ));
         };
-        if !matches!(input_locality(input), InputLocality::PartitionLocal)
-            && !canonical_evaluated_local_prefix(input)
-        {
-            return Err(DataFusionError::Plan(
-                "a canonical merge producer requires a partition-local prefix".into(),
-            ));
-        }
         validate_binding(&tree, &binding, &children)?;
         let frame = Self::series_frame_schema(&tree)?;
         let output_schema = Arc::new(datafusion::common::DFSchema::try_from(
@@ -698,17 +692,6 @@ impl FusedSeries {
         tree_inputs(&self.tree)
             .iter()
             .any(|input| matches!(input.output, NativeType::AggregateState(_)))
-    }
-
-    /// Whether this node's output carries the metric name its sources report.
-    ///
-    /// A nameless selector declares `__name__` without binding one name: the sources fill it in.
-    /// A `Final` half inherits that arrangement from the producer it reads, which is why the proof
-    /// has to cross the state boundary rather than stop at a scan.
-    fn publishes_source_metric_name(&self) -> bool {
-        self.binding.tags.iter().any(|tag| tag == METRIC_NAME)
-            && (self.binding.metric_name.is_some()
-                || self.children().iter().all(source_names_its_metric))
     }
 
     /// The compiled tree this node runs.
@@ -860,6 +843,26 @@ impl FusedSeries {
                     return Ok((routed, RawLabelSource::Explicit, ordering));
                 }
                 if declaration.content() != FrameContent::Evaluated {
+                    let count = input.properties().partitioning.partition_count();
+                    if count == 0 {
+                        return Err(DataFusionError::Plan(format!(
+                            "FusedSeries input {index} has no partitions"
+                        )));
+                    }
+                    // Region streams may each close the same storage key. Reconcile those
+                    // fragments even when the merged stream has only one output partition.
+                    let (input, label_source, ordering) = if ordering == SeriesOrdering::Interleaved
+                    {
+                        let width = if normalize { 1 } else { count };
+                        let input = Arc::new(SeriesRepartitionExec::try_new_with_routing(
+                            input,
+                            width,
+                            SeriesRouting::RawPrimaryKey,
+                        )?) as Arc<dyn ExecutionPlan>;
+                        (input, RawLabelSource::Explicit, SeriesOrdering::Contiguous)
+                    } else {
+                        (input, label_source, ordering)
+                    };
                     let count = input.properties().partitioning.partition_count();
                     if normalize && count != 1 {
                         let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
@@ -1401,36 +1404,6 @@ fn preserves_matching_key(node: &NativeNode, matching: &MatchingLabels) -> bool 
     }
 }
 
-/// Whether this input reports the metric each of its rows came from, by naming it itself.
-///
-/// A discovered selector binds one source per metric, so the name comes from the sources rather
-/// than from a single name on the node.
-fn source_names_its_metric(plan: &LogicalPlan) -> bool {
-    match plan {
-        LogicalPlan::Extension(extension) => {
-            if let Some(source) = extension
-                .node
-                .as_any()
-                .downcast_ref::<super::RawSeriesSource>()
-            {
-                return !source.metric_name().is_empty();
-            }
-            // A split's final half reads its producer's state, and the producer is the node that
-            // named the metric: it either bound one name or was itself built over sources that do.
-            extension
-                .node
-                .as_any()
-                .downcast_ref::<FusedSeries>()
-                .is_some_and(FusedSeries::publishes_source_metric_name)
-        }
-        LogicalPlan::Union(union) => union
-            .inputs
-            .iter()
-            .all(|input| source_names_its_metric(input)),
-        _ => false,
-    }
-}
-
 /// Whether matching operands can be segmented as independent single-source computations and
 /// at least one fails to preserve the requested key.
 ///
@@ -1671,15 +1644,6 @@ fn validate_binding(
     binding: &FusedSeriesBinding,
     children: &[LogicalPlan],
 ) -> DataFusionResult<()> {
-    // A `__name__` tag is filled either by one bound metric name or by the sources themselves.
-    if binding.tags.iter().any(|tag| tag == METRIC_NAME)
-        && binding.metric_name.is_none()
-        && !children.iter().all(source_names_its_metric)
-    {
-        return Err(DataFusionError::Plan(format!(
-            "FusedSeries declares {METRIC_NAME:?} but binds no metric name"
-        )));
-    }
     let schemas = collect_source_schemas(tree)?;
     // A tree built without its constructor carries no proof of its contracts, and one without an
     // input has no scan to refuse it later.
@@ -1890,13 +1854,25 @@ fn validate_physical_tree(
     Ok((schemas, source_kinds, root_kind))
 }
 
+/// The sample kind an output field column carries.
+///
+/// A field's samples are floats or native histograms: the raw frame keeps those two payloads apart,
+/// and a field never mixes them. The kind decides the Arrow column the conversion writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldKind {
+    /// One `Float64` cell per row.
+    Float,
+    /// One canonical native histogram `Struct` per row.
+    Histogram,
+}
+
 /// Where one output column of [`FusedSeriesExec`] comes from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OutputColumn {
     /// The evaluation grid timestamps of the current chunk.
     Time,
     /// Series field by index in the bound series schema.
-    Field(usize),
+    Field { index: usize, kind: FieldKind },
     /// Declared logical tag by index in the caller-supplied tag list.
     Tag(usize),
 }
@@ -2006,12 +1982,19 @@ pub(crate) fn classify_output(
                     "duplicate field column {name:?} in FusedSeriesExec output schema"
                 )));
             }
-            if field.data_type() != &DataType::Float64 {
+            // A field holds floats or the canonical native histogram struct; anything else has no
+            // conversion, and the plan that names it is refused here rather than at the first row.
+            let kind = if field.data_type() == &DataType::Float64 {
+                FieldKind::Float
+            } else if field.data_type() == &native_histogram_value_type().as_arrow_type() {
+                FieldKind::Histogram
+            } else {
                 return Err(DataFusionError::Plan(format!(
-                    "field column {name:?} of FusedSeriesExec must be Float64, got {:?}",
+                    "field column {name:?} of FusedSeriesExec must be Float64 or a native \
+                     histogram, got {:?}",
                     field.data_type()
                 )));
-            }
+            };
             // A grid point inside the statement's interval can have no value in this field.
             if !field.is_nullable() {
                 return Err(DataFusionError::Plan(format!(
@@ -2019,7 +2002,7 @@ pub(crate) fn classify_output(
                      point can be missing"
                 )));
             }
-            classification.push(OutputColumn::Field(index));
+            classification.push(OutputColumn::Field { index, kind });
             continue;
         }
         if let Some(index) = tags.iter().position(|tag| tag == name) {
@@ -2700,7 +2683,7 @@ impl ExecutionPlan for FusedSeriesExec {
             evidence: Arc::clone(evidence),
             active: true,
         });
-        let state = match NativeExecutionState::try_new(
+        let mut state = match NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
             evidence.clone(),
@@ -2713,6 +2696,19 @@ impl ExecutionPlan for FusedSeriesExec {
                 return Err(error);
             }
         };
+        // The planner registers the query's collector in the session's `ConfigOptions.extensions`
+        // rather than the separate `SessionConfig` container, so it is read from where it was
+        // written. The HTTP entry point holds a strong reference to that same collector for the life
+        // of the response; a query without one - an internal execution, or a caller that never
+        // asked for annotations - simply records nothing.
+        if let Some(collector) = context
+            .session_config()
+            .options()
+            .extensions
+            .get::<PromqlAnnotationCollector>()
+        {
+            state.set_annotations(Some(collector.clone()));
+        }
         state.register_metrics(&self.metric, partition);
         let mut streams: Vec<futures::stream::BoxStream<'static, Result<FusedFeed, BoxedError>>> =
             Vec::new();
@@ -2930,7 +2926,7 @@ pub(crate) fn series_to_record_batch(
                 timestamps.clone(),
                 None,
             ))),
-            OutputColumn::Field(index) => {
+            OutputColumn::Field { index, kind } => {
                 let samples = series.fields.get(*index).ok_or_else(|| {
                     DataFusionError::Execution(format!(
                         "evaluated series has no field at index {index}"
@@ -2942,7 +2938,7 @@ pub(crate) fn series_to_record_batch(
                         samples.len()
                     )));
                 }
-                columns.push(field_column(samples)?);
+                columns.push(field_column(samples, *kind)?);
             }
             OutputColumn::Tag(index) => {
                 // `__name__` resolves to the metric name, every other tag through the label set.
@@ -2959,17 +2955,25 @@ pub(crate) fn series_to_record_batch(
     Ok(RecordBatch::try_new(output_schema.clone(), columns)?)
 }
 
-/// Converts one evaluated series field into one `Float64` column.
+/// Converts one evaluated series field into the column `kind` names.
 ///
 /// Dense float samples are reused as they are: the array already carries exactly the right nulls
 /// and keeps NaN a value, so copying it through `Samples::iter()` would only cost an allocation
-/// and a re-encode. Chunked samples go through the iterator, and histograms have no float column.
-fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
+/// and a re-encode. Histograms are gathered into the canonical struct column, one payload per row
+/// and null where the grid point has no sample.
+fn field_column(samples: &Samples, kind: FieldKind) -> DataFusionResult<ArrayRef> {
+    match kind {
+        FieldKind::Float => float_column(samples),
+        FieldKind::Histogram => histogram_column(samples),
+    }
+}
+
+fn float_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
     match samples.dense() {
         Some(DenseSamplesRef::Float(values)) => Ok(Arc::new(values.clone())),
         Some(DenseSamplesRef::Histogram(_)) | Some(DenseSamplesRef::Mixed(_)) => {
-            Err(DataFusionError::NotImplemented(
-                "FusedSeriesExec cannot output histogram samples".into(),
+            Err(DataFusionError::Execution(
+                "a Float64 output column cannot carry histogram samples".into(),
             ))
         }
         None => {
@@ -2978,8 +2982,8 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
                 .map(|sample| match sample {
                     SampleRef::Float(value) => Ok(Some(value)),
                     SampleRef::Missing => Ok(None),
-                    SampleRef::Histogram(_) => Err(DataFusionError::NotImplemented(
-                        "FusedSeriesExec cannot output histogram samples".into(),
+                    SampleRef::Histogram(_) => Err(DataFusionError::Execution(
+                        "a Float64 output column cannot carry histogram samples".into(),
                     )),
                 })
                 .collect::<DataFusionResult<Vec<_>>>()?;
@@ -3003,6 +3007,56 @@ enum FusedChunk {
 struct FusedFeed {
     source: usize,
     chunk: FusedChunk,
+}
+
+/// The native histogram column of one evaluated field.
+///
+/// The column is the canonical native-histogram struct - the layout the Prometheus response reads
+/// and the one every classic histogram kernel already emits - built by the same encoder those
+/// kernels use. A row whose grid point has no sample is null.
+fn histogram_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
+    let mut values: Vec<Option<NativeHistogram>> = Vec::with_capacity(samples.len());
+    for sample in samples.iter() {
+        match sample {
+            SampleRef::Histogram(view) => values.push(Some(canonical_histogram(&view))),
+            SampleRef::Missing => values.push(None),
+            SampleRef::Float(_) => {
+                return Err(DataFusionError::Execution(
+                    "a native histogram output column cannot carry float samples".into(),
+                ));
+            }
+        }
+    }
+    Ok(build_histogram_array(&values))
+}
+
+/// One evaluated histogram in the canonical query-time form.
+///
+/// A [`HistogramView`] borrows spans and buckets out of a shared table; the canonical form owns
+/// them, which is what the output column holds.
+fn canonical_histogram(view: &HistogramView<'_>) -> NativeHistogram {
+    let span = |side: &BucketSideView<'_>| {
+        side.span_offsets
+            .iter()
+            .copied()
+            .zip(side.span_lengths.iter().copied())
+            .map(|(offset, length)| Span { offset, length })
+            .collect::<Vec<_>>()
+    };
+    NativeHistogram {
+        schema: view.schema,
+        zero_threshold: view.zero_threshold,
+        sum: view.sum,
+        reset_hint: view.reset_hint,
+        start_timestamp: view.start_timestamp,
+        custom_values: view.custom_values.to_vec(),
+        positive_spans: span(&view.positive),
+        negative_spans: span(&view.negative),
+        count: view.count,
+        zero_count: view.zero_count,
+        positive_buckets: view.positive.buckets.to_vec(),
+        negative_buckets: view.negative.buckets.to_vec(),
+    }
 }
 
 /// The batches one execution of [`FusedSeriesExec`] yields.

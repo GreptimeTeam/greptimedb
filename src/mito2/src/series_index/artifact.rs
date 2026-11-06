@@ -57,11 +57,67 @@ pub(crate) struct ArtifactMetadata {
     pub(crate) file_size: u64,
 }
 
-/// One samples artifact derived from an immutable Parquet SST.
+/// One samples artifact derived from immutable Parquet SSTs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SamplesEntry {
     pub(crate) file_id: FileId,
     pub(crate) artifact: ArtifactMetadata,
+    /// Empty for legacy per-SST artifacts. Otherwise the complete source set for a UTC day.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_file_ids: Vec<FileId>,
+    /// UTC day number since the Unix epoch; absent for legacy per-SST artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) window: Option<i64>,
+    /// Complete nonempty UTC-day coverage, stored on one anchor entry per source group.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) source_windows: std::collections::HashMap<FileId, Vec<i64>>,
+}
+
+impl SamplesEntry {
+    pub(crate) fn covers(&self, id: FileId) -> bool {
+        if self.window.is_some() {
+            self.source_file_ids.contains(&id)
+        } else {
+            self.file_id == id
+        }
+    }
+
+    pub(crate) fn sources_visible(&self, visible: &std::collections::HashSet<FileId>) -> bool {
+        if self.window.is_some() {
+            !self.source_file_ids.is_empty()
+                && self.source_file_ids.iter().all(|id| visible.contains(id))
+        } else {
+            visible.contains(&self.file_id)
+        }
+    }
+}
+
+/// Requires either a legacy whole-SST artifact or complete daily coverage.
+pub(crate) fn samples_cover_file(
+    samples: &std::collections::HashMap<FileId, SamplesFileHandle>,
+    file: &crate::sst::file::FileHandle,
+) -> bool {
+    let id = file.file_id().file_id();
+    if samples
+        .values()
+        .any(|h| h.entry().window.is_none() && h.entry().covers(id))
+    {
+        return true;
+    }
+    samples.values().any(|handle| {
+        let Some(days) = handle.entry().source_windows.get(&id) else {
+            // Earlier daily catalogs require rebuilding to establish actual row coverage.
+            return false;
+        };
+        !days.is_empty()
+            && days.iter().all(|day| {
+                samples.values().any(|h| {
+                    h.entry().window == Some(*day)
+                        && h.entry().covers(id)
+                        && h.entry().source_file_ids == handle.entry().source_file_ids
+                })
+            })
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -111,5 +167,50 @@ impl Drop for SamplesFileInner {
                     .collect(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn frozen_sample_catalog_coverage() {
+        let legacy: SamplesEntry = serde_json::from_str(include_str!(
+            "../../../../tests/compatibility/wire/mito_columnar_samples/legacy-catalog-entry.json"
+        ))
+        .unwrap();
+        assert!(legacy.window.is_none());
+        assert!(legacy.source_file_ids.is_empty());
+        assert!(legacy.covers(legacy.file_id));
+        let daily: SamplesEntry = serde_json::from_str(include_str!(
+            "../../../../tests/compatibility/wire/mito_columnar_samples/daily-catalog-entry.json"
+        ))
+        .unwrap();
+        assert!(daily.source_windows.is_empty());
+        let sparse: SamplesEntry = serde_json::from_str(include_str!(
+            "../../../../tests/compatibility/wire/mito_columnar_samples/sparse-daily-catalog-entry.json"
+        )).unwrap();
+        assert_eq!(sparse.source_windows[&legacy.file_id], vec![0, 3]);
+        assert_eq!(
+            sparse,
+            serde_json::from_str(&serde_json::to_string(&sparse).unwrap()).unwrap()
+        );
+        let mut visible: HashSet<_> = daily.source_file_ids.iter().copied().collect();
+        assert!(daily.sources_visible(&visible));
+        assert!(daily.covers(legacy.file_id));
+        assert!(!daily.covers(daily.file_id));
+        visible.remove(&legacy.file_id);
+        assert!(!daily.sources_visible(&visible));
+        assert_eq!(
+            daily,
+            serde_json::from_str(&serde_json::to_string(&daily).unwrap()).unwrap()
+        );
+        assert!(
+            !serde_json::to_string(&legacy)
+                .unwrap()
+                .contains("source_file_ids")
+        );
     }
 }

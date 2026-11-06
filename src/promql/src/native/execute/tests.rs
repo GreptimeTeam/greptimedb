@@ -43,7 +43,8 @@ fn is_resources_exhausted(error: &DataFusionError) -> bool {
 use super::{
     BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
     NodeState, PairKernel, RuntimeNode, RuntimeOp, absorb_rebuilds, evaluated_bytes, grid_end_ms,
-    map_chunk, map_workspace_bytes, operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
+    grid_position, map_chunk, map_workspace_bytes, operand_chunk_bytes, raw_bytes,
+    vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -11866,4 +11867,50 @@ fn exporting_a_partial_charges_the_fold_and_the_groups_it_builds() {
         "the admitted figure covers the fold ({fold_bytes}) and the exported groups ({chunk_bytes}): {}",
         charges[0]
     );
+}
+
+#[test]
+fn grid_position_reads_the_lattice_and_reports_what_is_off_it() {
+    let grid = EvalGrid::try_new(GridSpec::try_new(1_000, 30_000, 3).unwrap()).unwrap();
+    // Points of the lattice answer their own index, whether the position is the first, the last,
+    // or between them.
+    assert_eq!(0, grid_position(&grid, 1_000).unwrap());
+    assert_eq!(1, grid_position(&grid, 31_000).unwrap());
+    assert_eq!(2, grid_position(&grid, 61_000).unwrap());
+    // A timestamp off the lattice, one before the grid, and one past its end are disagreements
+    // between the selection and its binding, so each is reported rather than rounded into a point.
+    for off in [1_001, 8_999, 0, 91_000, 91_001] {
+        assert!(
+            grid_position(&grid, off).is_err(),
+            "{off} is not a point of the grid"
+        );
+    }
+}
+
+#[test]
+fn grid_position_still_answers_a_lattice_whose_offset_does_not_fit_in_an_i64() {
+    // The points are `i64::MIN`, `-1` and `i64::MAX - 1`: the last one is in range, but it sits
+    // `2 * i64::MAX` past the start, so only the `i128` path can place it. Answering an error here
+    // would make the fast path narrower than the code it replaces.
+    let grid = EvalGrid::try_new(GridSpec::try_new(i64::MIN, i64::MAX, 3).unwrap()).unwrap();
+    assert_eq!(0, grid_position(&grid, i64::MIN).unwrap());
+    // The offset is `i64::MAX`, the widest the fast path accepts.
+    assert_eq!(1, grid_position(&grid, -1).unwrap());
+    assert_eq!(2, grid_position(&grid, i64::MAX - 1).unwrap());
+
+    // The third point of this grid is `0`, and its offset is `i64::MAX + 1`, one past what the
+    // fast path accepts.
+    let grid = EvalGrid::try_new(GridSpec::try_new(i64::MIN, 1_i64 << 62, 3).unwrap()).unwrap();
+    assert_eq!(2, grid_position(&grid, 0).unwrap());
+}
+
+#[test]
+fn grid_position_reports_a_timestamp_whose_offset_overflows_and_misses_the_lattice() {
+    // The difference does not fit in an `i64`, so the `i128` path answers. Wrapped, it would be
+    // negative, which is not a position either: the answer is the lattice's own rejection, not a
+    // panic and not some row read through a wrapped offset.
+    let grid = EvalGrid::try_new(GridSpec::try_new(i64::MIN + 5, 1, 10).unwrap()).unwrap();
+    assert_eq!(0, grid_position(&grid, i64::MIN + 5).unwrap());
+    let error = grid_position(&grid, i64::MAX).unwrap_err().to_string();
+    assert!(error.contains("is not a point of"), "{error}");
 }

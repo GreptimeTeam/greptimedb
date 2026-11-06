@@ -33,8 +33,9 @@
 //! Packing accumulates bounded multi-row batches: [`SeriesFrameCursor`] walks one validated chunk
 //! and [`SeriesFrameBuilder`] emits rows directly as Arrow arrays once a row or estimated byte bound
 //! is reached. Decoding reuses one prepared
-//! schema per stream through [`SeriesFrameDecoder`]. Column layout, metadata, and wire strings stay
-//! on the frozen `v2` contract; a key-encoded frame additionally declares a versioned
+//! schema per stream through [`SeriesFrameDecoder`]. The column layout and existing metadata stay
+//! on the `v2` contract. Raw frames may also declare `greptime.series.ordering=interleaved`; older
+//! readers that do not recognize this ordering reject it. A key-encoded frame declares a versioned
 //! [`LabelDecodeSpec`] so its labels can be decoded from the received schema alone, and an evaluated
 //! frame declares its [`GridSpec`] once instead of repeating timestamps.
 //!
@@ -650,10 +651,11 @@ pub struct SeriesFrameDeclaration {
 fn validate_ordering(schema: &Schema, content: FrameContent) -> Result<()> {
     match schema.metadata().get(ORDERING).map(String::as_str) {
         Some("contiguous") => Ok(()),
-        Some("read_key_then_time") if content == FrameContent::Raw => Ok(()),
+        Some("read_key_then_time" | "interleaved") if content == FrameContent::Raw => Ok(()),
         Some("read_key_then_time") => Err(err(
             "an evaluated frame cannot claim key-then-time ordering",
         )),
+        Some("interleaved") => Err(err("an evaluated frame cannot claim interleaved ordering")),
         None => Err(err(format!("frame declares no {ORDERING} value"))),
         Some(_) => Err(err("unknown series ordering")),
     }

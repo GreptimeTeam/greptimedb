@@ -26,7 +26,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `compaction` | `src/mito2/src/compaction/` | Compaction scheduler (`scheduler.rs` + `scheduler/`), TWCS picker, strict-window manual picker, compactor, memory control |
 | `access_layer` | `src/mito2/src/access_layer.rs` | SST read/write over the object store |
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
-| `series_index` | `src/mito2/src/series_index/` | Format interfaces (`format.rs`), index writer/searcher, per-SST samples artifacts (`artifact.rs`), bucket planning, catalogs, reconciliation (`maintenance.rs`), and deferred purge |
+| `series_index` | `src/mito2/src/series_index/` | Format interfaces (`format.rs`), index writer/searcher, sample artifacts and source coverage (`artifact.rs`), bucket planning, catalogs, reconciliation (`maintenance.rs`), and deferred purge |
 | `read` | `src/mito2/src/read/` | `ScanRegion`, merge, dedup, projection, streaming |
 | `manifest` | `src/mito2/src/manifest/` | `RegionManifestManager`, manifest actions/edits |
 | `cache` | `src/mito2/src/cache.rs` | Write/file/page caches |
@@ -70,11 +70,11 @@ filtered `RecordBatch` stream.
 - **Series-index coverage** (`series_index/catalog.rs`): `SeriesIndexEntry` stores
   compaction-window width and SST summaries keyed by aligned start in both catalogs and Parquet footers.
 - **Local index cache**: startup checks a root layout version before workers start; missing or incompatible versions reset the whole rebuildable cache, including catalogs and range indexes. Samples use one generation directory; source SST identity stays in metadata.
-- **Columnar samples**: `series_index/samples.rs` implements opt-in per-SST sidecars,
+- **Columnar samples**: `series_index/samples.rs` implements opt-in sample artifacts,
   including nullable Float64 fields and preserved sequence/delete rows. Its wire
   contract is `docs/formats/mito-samples.md`; time/ID bounds may overlap across
   leaves and parts. Both columnar backends share cancellation-safe output ownership
-  in `series_index/artifact_writer.rs`. Format readers do not apply query visibility; the prepared-source adapter applies visibility and the existing merge/dedup pipeline. Eligible sample merges use identity-only keys and omit tag columns; the raw adapter restores label-bearing keys from candidates. Non-separable tag/sample residuals retain the full flat schema. Manual reconciliation covers all snapshot SSTs regardless of maintenance eligibility, but retains the soft disk limit. Manual builds validate columnar sample and tag schemas before reuse.
+  in `series_index/artifact_writer.rs`. Format readers do not apply query visibility; the prepared-source adapter applies visibility and the existing merge/dedup pipeline. Eligible sample merges use identity-only keys and omit tag columns; the raw adapter restores label-bearing keys from candidates. Non-separable tag/sample residuals retain the full flat schema. Manual reconciliation covers all snapshot SSTs regardless of maintenance eligibility, but retains the soft disk limit. Manual builds validate columnar sample and tag schemas before reuse. Columnar reconciliation consolidates snapshot SSTs into UTC-day sample generations; catalogs record all source IDs. Grouped reads require complete daily coverage and all sources still visible, open each artifact once, and fall back for source-sequence-pruned scans. SST replacement invalidates a whole affected generation; catalog publication and reader handles govern retirement.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.
 - **WAL/memtable encoding** (`wal/`, `memtable/`): breaks replay if changed incompatibly.
 
