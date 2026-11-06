@@ -1958,6 +1958,8 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
         }
         assert_eq!(results[0], results[1]);
     }
+    engine.stop().await.unwrap();
+}
 
 /// The ordinal slice a partition reads is total: zero series, fewer series than partitions, an
 /// uneven split, and an out-of-range index all produce an in-bounds slice.
