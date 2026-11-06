@@ -19,7 +19,6 @@ use store_api::storage::{FileId, RegionId};
 
 use crate::error::{InvalidRequestSnafu, MissingManifestSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::table_compaction::TableCompactionAction;
 use crate::region::{
     FileDescriptor, MitoRegionRef, RegionFileCopier, RegionLeaderState, RegionMetadataLoader,
 };
@@ -87,7 +86,7 @@ impl<S> RegionWorkerLoop<S> {
             };
 
             match region_edit {
-                Some(region_edit) if region_edit.table_compaction.is_some() => {
+                Some(region_edit) if !region_edit.extensions.is_empty() => {
                     // Shared references and their target admission sequence must enter
                     // the serialized edit lane, not the asynchronous physical-copy path.
                     // The response lists installed references, including shared SSTs
@@ -196,8 +195,8 @@ impl<S> RegionWorkerLoop<S> {
             })?;
         let mut new_file_metas = vec![];
         let target_region_manifest = region.manifest_ctx.manifest().await;
-        let mut receipt_state = target_region_manifest.table_compaction.clone();
-        receipt_state.merge_from(&source_region_manifest.table_compaction, target_region_id)?;
+        let mut extensions = target_region_manifest.extensions.clone();
+        extensions.merge_from(&source_region_manifest.extensions, target_region_id)?;
         let source_file_ids = source_region_manifest
             .files
             .keys()
@@ -216,7 +215,7 @@ impl<S> RegionWorkerLoop<S> {
                 });
             }
         }
-        if new_file_metas.is_empty() && receipt_state == target_region_manifest.table_compaction {
+        if new_file_metas.is_empty() && extensions == target_region_manifest.extensions {
             return Ok((None, source_file_ids));
         }
 
@@ -237,11 +236,7 @@ impl<S> RegionWorkerLoop<S> {
             )
             .await?;
         let edit = RegionEdit {
-            table_compaction: (!receipt_state.is_empty()).then(|| {
-                Box::new(TableCompactionAction::Remap {
-                    state: Box::new(receipt_state),
-                })
-            }),
+            extensions: extensions.into_edit(),
             files_to_add: new_file_metas,
             files_to_remove: vec![],
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
@@ -250,7 +245,7 @@ impl<S> RegionWorkerLoop<S> {
             flushed_sequence: None,
             committed_sequence: None,
         };
-        if edit.table_compaction.is_some() {
+        if !edit.extensions.is_empty() {
             return Ok((Some(edit), source_file_ids));
         }
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));

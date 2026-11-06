@@ -117,7 +117,7 @@ async fn test_edit_region_schedule_compaction_with_format(
     assert_eq!(initial_time, initial_schedule_time);
 
     let new_edit = |file_starts: &[i64]| RegionEdit {
-        table_compaction: None,
+        extensions: Default::default(),
         files_to_add: file_starts
             .iter()
             .map(|start| FileMeta {
@@ -231,7 +231,7 @@ async fn test_edit_region_fill_cache_with_format(flat_format: bool) {
         .unwrap();
 
     let edit = RegionEdit {
-        table_compaction: None,
+        extensions: Default::default(),
         files_to_add: vec![FileMeta {
             region_id: region.region_id,
             file_id,
@@ -726,7 +726,7 @@ async fn wait_worker_recv_event(rx: &mut mpsc::UnboundedReceiver<usize>) {
 
 fn test_region_edit(region_id: RegionId, file_id: FileId) -> RegionEdit {
     RegionEdit {
-        table_compaction: None,
+        extensions: Default::default(),
         files_to_add: vec![FileMeta {
             region_id,
             file_id,
@@ -821,7 +821,7 @@ async fn test_edit_region_concurrently_with_format(flat_format: bool) {
         async fn edit_region(self, engine: MitoEngine) {
             for sst in self.ssts {
                 let edit = RegionEdit {
-                    table_compaction: None,
+                    extensions: Default::default(),
                     files_to_add: vec![sst],
                     files_to_remove: vec![],
                     timestamp_ms: None,

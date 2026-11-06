@@ -419,7 +419,7 @@ async fn test_flushed_parquet_bytes() {
             .edit_region(
                 region_id,
                 crate::manifest::action::RegionEdit {
-                    table_compaction: None,
+                    extensions: Default::default(),
                     files_to_add: vec![file],
                     files_to_remove: vec![],
                     timestamp_ms: None,

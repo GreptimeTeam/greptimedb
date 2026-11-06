@@ -82,7 +82,7 @@ async fn reopen_manager(
 
 fn nop_action() -> RegionMetaActionList {
     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
-        table_compaction: None,
+        extensions: Default::default(),
         files_to_add: vec![],
         files_to_remove: vec![],
         timestamp_ms: None,
@@ -305,7 +305,7 @@ async fn checkpoint_with_different_compression_types() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            table_compaction: None,
+            extensions: Default::default(),
         })]);
         actions.push(action);
     }
@@ -372,7 +372,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            table_compaction: None,
+            extensions: Default::default(),
         })]);
         actions.push(action);
     }

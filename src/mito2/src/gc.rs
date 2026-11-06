@@ -588,9 +588,9 @@ impl LocalGcWorker {
             if let (Some(guard), Some(snapshot)) = (&manifest_guard, &manifest)
                 && (guard.is_stopped()
                     || guard.manifest().manifest_version != snapshot.manifest_version
-                    || region
-                        .as_ref()
-                        .is_some_and(|region| !matches!(region.state(), RegionRoleState::Leader(_))))
+                    || region.as_ref().is_some_and(|region| {
+                        !matches!(region.state(), RegionRoleState::Leader(_))
+                    }))
             {
                 break;
             }

@@ -201,7 +201,7 @@ impl SstReplaceCommand {
             })?;
 
         let edit = RegionEdit {
-            table_compaction: None,
+            extensions: Default::default(),
             files_to_add: vec![new_file],
             files_to_remove: vec![],
             timestamp_ms: None,

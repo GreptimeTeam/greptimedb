@@ -307,7 +307,7 @@ async fn test_gc_reclaims_obsolete_index_after_readers_and_linger_release(
             .update_manifest(
                 RegionLeaderState::Writable,
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-                    table_compaction: None,
+                    extensions: Default::default(),
                     files_to_add: vec![meta],
                     files_to_remove: vec![],
                     timestamp_ms: Some(removed_at),
@@ -1311,7 +1311,14 @@ async fn test_gc_batches_yield_to_publication_and_recheck(#[case] publish: bool)
     assert_eq!(!publish, report.processed_regions.contains(&region_id));
     let mut existing = 0;
     for path in &paths {
-        existing += usize::from(region.access_layer.object_store().exists(path).await.unwrap());
+        existing += usize::from(
+            region
+                .access_layer
+                .object_store()
+                .exists(path)
+                .await
+                .unwrap(),
+        );
     }
     assert_eq!(usize::from(publish), existing);
     if publish {
@@ -1330,7 +1337,14 @@ async fn test_gc_batches_yield_to_publication_and_recheck(#[case] publish: bool)
         assert!(report.processed_regions.contains(&region_id));
         assert!(report.need_retry_regions.is_empty());
         for path in &paths {
-            assert!(!region.access_layer.object_store().exists(path).await.unwrap());
+            assert!(
+                !region
+                    .access_layer
+                    .object_store()
+                    .exists(path)
+                    .await
+                    .unwrap()
+            );
         }
     }
 }

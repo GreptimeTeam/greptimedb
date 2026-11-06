@@ -77,7 +77,7 @@ async fn test_bump_committed_sequence_with_format(flat_format: bool) {
         .edit_region(
             region_id,
             RegionEdit {
-                table_compaction: None,
+                extensions: Default::default(),
                 files_to_add: vec![FileMeta::default()],
                 files_to_remove: vec![],
                 timestamp_ms: None,

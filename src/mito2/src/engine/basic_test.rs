@@ -2186,6 +2186,7 @@ async fn add_manifest_scan_region(
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
     let edit = RegionEdit {
+        extensions: Default::default(),
         files_to_add: (0..files_per_region)
             .map(|index| FileMeta {
                 region_id,

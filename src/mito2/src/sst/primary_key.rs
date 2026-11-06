@@ -734,7 +734,7 @@ mod tests {
         let changed = VersionBuilder::from_version(Arc::new(changed))
             .apply_edit(
                 RegionEdit {
-                    table_compaction: None,
+                    extensions: Default::default(),
                     files_to_add: vec![added_meta],
                     files_to_remove: vec![],
                     timestamp_ms: None,

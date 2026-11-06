@@ -41,6 +41,8 @@ excludes = [
     "src/sql/src/parsers/create_parser/trigger.rs",
     "src/sql/src/parsers/show_parser/trigger.rs",
     "src/mito2/src/extension.rs",
+    "src/mito2/src/manifest/table_compaction.rs",
+    "src/mito2/src/worker/table_compaction.rs",
     "src/mito2/src/compaction/multi_region.rs",
     "src/mito2/src/compaction/multi_region/source.rs",
     "src/mito2/src/compaction/multi_region/memory.rs",

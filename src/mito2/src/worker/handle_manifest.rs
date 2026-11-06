@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use common_telemetry::{debug, info, warn};
 use parquet::file::metadata::PageIndexPolicy;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
@@ -105,7 +105,7 @@ impl RegionEditQueue {
                 && edit.flushed_entry_id.is_none()
                 && edit.flushed_sequence.is_none()
                 && edit.committed_sequence.is_none()
-                && edit.table_compaction.is_none()
+                && edit.extensions.is_empty()
         }
 
         let mut merged = self.requests.pop_front()?;
@@ -316,77 +316,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters,
             preload_sst_cache,
         } = request;
-        if let Err(error) = validate_edit_lane(&region, &edit) {
+        if let Err(error) = prepare_region_edit(&region, &mut edit) {
             let error = Arc::new(error);
             waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
             return;
-        }
-        {
-            let current = region.version_control.current();
-            let is_remap = edit.table_compaction.is_some();
-            let existing_sequence = |file: &crate::sst::file::FileMeta| {
-                (is_remap && file.level == crate::sst::file::LEVEL_SHARED)
-                    .then(|| {
-                        current
-                            .version
-                            .table_compaction
-                            .registrations
-                            .get(&file.file_id().to_string())
-                    })
-                    .flatten()
-                    .and_then(|receipt| receipt.file.sequence)
-            };
-            // In-place repartition must not re-admit a source already known to this
-            // target, including a retired receipt that the copy explicitly restores.
-            let needs_admission = !is_remap
-                || edit
-                    .files_to_add
-                    .iter()
-                    .any(|file| existing_sequence(file).is_none());
-            let file_sequence = if needs_admission {
-                let Some(sequence) = current.last_sequence.checked_add(1) else {
-                    waiters.reply_with(|| {
-                        crate::error::InvalidRequestSnafu {
-                            region_id,
-                            reason: "Region sequence exhausted",
-                        }
-                        .fail()
-                    });
-                    return;
-                };
-                edit.committed_sequence = Some(sequence);
-                NonZeroU64::new(sequence)
-            } else {
-                None
-            };
-            // Direct/import/staging edits cannot prove physical row sequences in
-            // the destination domain, so exact sequence-range scans stay fail-closed.
-            for file in &mut edit.files_to_add {
-                file.sequence = existing_sequence(file).or(file_sequence);
-                file.preserve_row_sequence = false;
-            }
-            if let Some(action) = edit.table_compaction.as_deref_mut()
-                && let crate::manifest::table_compaction::TableCompactionAction::Remap { state } =
-                    action
-            {
-                if let Err(error) = state.merge_from(&region.version().table_compaction, region_id)
-                {
-                    let error = Arc::new(error);
-                    waiters
-                        .reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
-                    return;
-                }
-                let mut files = region
-                    .version()
-                    .ssts
-                    .levels()
-                    .iter()
-                    .flat_map(|level| level.files())
-                    .map(|file| file.meta_ref().clone())
-                    .collect::<Vec<_>>();
-                files.extend(edit.files_to_add.iter().cloned());
-                state.reconcile_files(&files);
-            }
         }
 
         // Allow retrieving `is_staging` before spawn the edit region task.
@@ -654,7 +587,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // WAL after a restart skips everything the memtables held. The WAL must be
             // durable through that entry before the manifest names it.
             let edit = RegionEdit {
-                table_compaction: None,
+                extensions: Default::default(),
                 files_to_add: Vec::new(),
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
@@ -772,38 +705,43 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
-fn validate_edit_lane(region: &MitoRegionRef, edit: &RegionEdit) -> Result<()> {
-    use crate::manifest::table_compaction::TableCompactionAction;
-    use crate::sst::file::{LEVEL_SHARED, MAX_LEVEL};
-    let region_id = region.region_id;
-    if let Some(TableCompactionAction::Remap { state }) = edit.table_compaction.as_deref() {
-        snafu::ensure!(
-            state.min_request_epoch >= region.version().table_compaction.min_request_epoch
-                && edit.files_to_add.iter().all(|file| file.level < MAX_LEVEL
-                    && (file.level != LEVEL_SHARED
-                        || state
-                            .registrations
-                            .contains_key(&file.file_id().to_string()))),
-            crate::error::InvalidRequestSnafu {
-                region_id,
-                reason: "Invalid receipt staging promotion"
-            }
-        );
+fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
+    #[cfg(feature = "enterprise")]
+    if crate::worker::table_compaction::prepare_remap(region, edit)? {
         return Ok(());
     }
-    let version = region.version();
-    let shared = &version.ssts.levels()[LEVEL_SHARED as usize].files;
+    let region_id = region.region_id;
+    let current = region.version_control.current();
+    let shared = &current.version.ssts.levels()[crate::sst::file::LEVEL_SHARED as usize].files;
     snafu::ensure!(
-        edit.table_compaction.is_none()
-            && edit.files_to_add
+        edit.extensions.is_empty()
+            && edit
+                .files_to_add
                 .iter()
                 .chain(&edit.files_to_remove)
-                .all(|file| file.level < LEVEL_SHARED && !shared.contains_key(&file.file_id)),
+                .all(|file| {
+                    file.level < crate::sst::file::LEVEL_SHARED
+                        && !shared.contains_key(&file.file_id)
+                }),
         crate::error::InvalidRequestSnafu {
             region_id,
-            reason: "Shared SSTs require the table protocol"
+            reason: "Shared SSTs require a supported extension edit"
         }
     );
+    let sequence =
+        current
+            .last_sequence
+            .checked_add(1)
+            .context(crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: "Region sequence exhausted",
+            })?;
+    edit.committed_sequence = Some(sequence);
+    for file in &mut edit.files_to_add {
+        file.sequence = NonZeroU64::new(sequence);
+        // Imported physical row sequences are not trusted in the destination domain.
+        file.preserve_row_sequence = false;
+    }
     Ok(())
 }
 
@@ -895,18 +833,18 @@ async fn edit_region(
         region_id, is_staging
     );
 
-    let carries_receipts = edit.table_compaction.is_some();
+    let carries_extensions = !edit.extensions.is_empty();
     let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
     let result = region
         .manifest_ctx
         .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
         .await;
-    if carries_receipts
+    if carries_extensions
         && let Err(error) = &result
         && error.may_have_persisted_manifest_update()
     {
-        // Internal Remap imports the same durable fences as coordinator operations.
-        // Recover them before accepting another edit after an uncertain write.
+        // Recover extension state with the file list before accepting another edit
+        // after an uncertain write.
         region
             .manifest_ctx
             .manifest_manager

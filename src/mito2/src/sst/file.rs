@@ -120,9 +120,13 @@ pub const LEVEL_SHARED: Level = 2;
 /// Exclusive upper bound of supported SST levels (also the level-array length).
 pub const MAX_LEVEL: Level = LEVEL_SHARED + 1;
 
+pub(crate) const fn is_supported_level(level: Level) -> bool {
+    level < LEVEL_SHARED || (cfg!(feature = "enterprise") && level == LEVEL_SHARED)
+}
+
 fn deserialize_level<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Level, D::Error> {
     let level = Level::deserialize(deserializer)?;
-    if level >= MAX_LEVEL {
+    if !is_supported_level(level) {
         return Err(serde::de::Error::custom(format!(
             "Unsupported SST level {level}"
         )));

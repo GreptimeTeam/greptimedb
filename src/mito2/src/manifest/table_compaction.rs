@@ -1,16 +1,13 @@
-// Copyright 2023 Greptime Team
+// Copyright 2023-2026 GrepTime Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This file is part of the GreptimeDB Enterprise Edition and is licensed under
+// the GreptimeDB Enterprise License. You may not use this file except in
+// compliance with that license. A copy of the license is available at the root
+// of this repository in the file LICENSE-ENTERPRISE.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing, this software is
+// distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+// either express or implied.
 
 //! Durable, target-local evidence of shared input admission and replacement.
 
@@ -293,58 +290,5 @@ impl TableCompactionState {
                 true
             }
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
-
-    #[test]
-    fn test_table_compaction_manifest_compatibility() {
-        let legacy_edit = include_str!(
-            "../../../../tests/compatibility/manifest/table_compaction/legacy-edit.json"
-        );
-        let actions = RegionMetaActionList::decode(legacy_edit.as_bytes()).unwrap();
-        let RegionMetaAction::Edit(edit) = &actions.actions[0] else {
-            panic!("expected edit")
-        };
-        assert_eq!(
-            vec![0, 1],
-            edit.files_to_add
-                .iter()
-                .map(|file| file.level)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(Some(8), edit.committed_sequence);
-        assert_eq!(
-            vec![7, 8],
-            edit.files_to_add
-                .iter()
-                .map(|file| file.sequence.unwrap().get())
-                .collect::<Vec<_>>()
-        );
-        let encoded = String::from_utf8(actions.encode().unwrap()).unwrap();
-        assert!(!encoded.contains("table_compaction"));
-        let manifest: RegionManifest = serde_json::from_str(include_str!(
-            "../../../../tests/compatibility/manifest/table_compaction/legacy-manifest.json"
-        ))
-        .unwrap();
-        assert!(manifest.table_compaction.is_empty());
-        assert_eq!(12, manifest.manifest_version);
-        assert_eq!(5, manifest.flushed_entry_id);
-        assert_eq!(8, manifest.flushed_sequence);
-        assert!(
-            !serde_json::to_string(&manifest)
-                .unwrap()
-                .contains("table_compaction")
-        );
-        for level in [0, 1, 2, 3, 255] {
-            let mut file = serde_json::to_value(&edit.files_to_add[0]).unwrap();
-            file["level"] = level.into();
-            let decoded = serde_json::from_value::<FileMeta>(file);
-            assert_eq!(level <= 2, decoded.is_ok(), "level {level}");
-        }
     }
 }

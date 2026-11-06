@@ -67,9 +67,11 @@ memory tracker. Direct scanner callers default to an unbounded operator pool.
 ## When you change X, also touch Y
 
 - **Manifest format** (`manifest/action.rs`): affects crash recovery and
-  follower replay. Keep it backward compatible. Table-compaction receipts live in
-  `manifest/table_compaction.rs`; `LEVEL_SHARED=2` requires protocol capability
-  gating before use. Fixtures: `tests/compatibility/manifest/table_compaction/`.
+  follower replay. Keep it backward compatible. Shared-path code uses the atomic
+  envelopes in `manifest/extension.rs`; table receipts and remap policy live in
+  Enterprise-gated `manifest/table_compaction.rs` and `worker/table_compaction.rs`.
+  Unsupported extensions/shared SSTs fail closed when decoding. Fixtures and
+  capability checks: `tests/compatibility/manifest/table_compaction/`.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete

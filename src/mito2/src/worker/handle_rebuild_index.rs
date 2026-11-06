@@ -390,7 +390,7 @@ impl<S> RegionWorkerLoop<S> {
         if is_current {
             region.version_control.apply_edit(
                 Some(RegionEdit {
-                    table_compaction: None,
+                    extensions: Default::default(),
                     files_to_add: vec![file_meta.clone()],
                     files_to_remove: Vec::new(),
                     timestamp_ms: None,

@@ -287,7 +287,7 @@ async fn test_reconcile_range_index_disabled(
     // Obsolete entries are still pruned and persisted while range builds are disabled.
     region.version_control.apply_edit(
         Some(crate::manifest::action::RegionEdit {
-            table_compaction: None,
+            extensions: Default::default(),
             files_to_remove: files,
             files_to_add: Vec::new(),
             timestamp_ms: None,
@@ -397,7 +397,7 @@ async fn test_reconcile_range_only_build_and_removal() {
         .collect();
     region.version_control.apply_edit(
         Some(crate::manifest::action::RegionEdit {
-            table_compaction: None,
+            extensions: Default::default(),
             files_to_remove: files,
             files_to_add: Vec::new(),
             timestamp_ms: None,
@@ -450,7 +450,7 @@ async fn test_reconcile_replaces_whole_bucket_after_failure(#[case] failure: &st
         .meta_ref()
         .clone();
     let edit = |add| crate::manifest::action::RegionEdit {
-        table_compaction: None,
+        extensions: Default::default(),
         files_to_add: if add { vec![newest.clone()] } else { vec![] },
         files_to_remove: if add { vec![] } else { vec![newest.clone()] },
         timestamp_ms: None,

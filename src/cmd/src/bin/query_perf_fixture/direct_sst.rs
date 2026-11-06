@@ -501,7 +501,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         .max()
         .unwrap_or(0);
     let manifest = RegionManifest {
-        table_compaction: Default::default(),
+        extensions: Default::default(),
         metadata,
         files,
         removed_files: RemovedFilesRecord::default(),

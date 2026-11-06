@@ -118,21 +118,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
 
-            let mut state = staging_manifest.table_compaction.clone();
+            let mut extensions = staging_manifest.extensions.clone();
             let target = region.manifest_ctx.manifest().await;
-            if let Err(error) = state.merge_from(&target.table_compaction, region_id) {
+            if let Err(error) = extensions.merge_from(&target.extensions, region_id) {
                 sender.send(Err(error));
                 return;
             }
             let files_to_add = staging_manifest.files.values().cloned().collect::<Vec<_>>();
             let edit = RegionEdit {
-                table_compaction: (!state.is_empty()).then(|| {
-                    Box::new(
-                        crate::manifest::table_compaction::TableCompactionAction::Remap {
-                            state: Box::new(state),
-                        },
-                    )
-                }),
+                extensions: extensions.into_edit(),
                 files_to_add,
                 files_to_remove: vec![],
                 timestamp_ms: Some(Utc::now().timestamp_millis()),

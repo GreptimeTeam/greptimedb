@@ -214,7 +214,7 @@ impl RegionManifestManager {
         })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
-                table_compaction: None,
+                extensions: Default::default(),
                 files_to_add: vec![],
                 files_to_remove: vec![],
                 timestamp_ms: None,
@@ -597,7 +597,7 @@ impl RegionManifestManager {
             if let RegionMetaAction::Edit(edit) = action {
                 for file in edit.files_to_add.iter().chain(&edit.files_to_remove) {
                     ensure!(
-                        file.level < crate::sst::file::MAX_LEVEL,
+                        crate::sst::file::is_supported_level(file.level),
                         crate::error::InvalidRequestSnafu {
                             region_id: self.manifest.metadata.region_id,
                             reason: format!("Unsupported SST level {}", file.level),
@@ -1036,7 +1036,7 @@ mod test {
             manager
                 .update(
                     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
-                        table_compaction: None,
+                        extensions: Default::default(),
                         files_to_add: vec![],
                         files_to_remove: vec![],
                         timestamp_ms: None,

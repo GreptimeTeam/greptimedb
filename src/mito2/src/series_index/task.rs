@@ -806,7 +806,7 @@ mod tests {
             .clone();
         region.version_control.apply_edit(
             Some(crate::manifest::action::RegionEdit {
-                table_compaction: None,
+                extensions: Default::default(),
                 files_to_remove: vec![newest.clone()],
                 files_to_add: Vec::new(),
                 timestamp_ms: None,

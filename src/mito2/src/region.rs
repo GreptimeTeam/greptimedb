@@ -1457,7 +1457,7 @@ impl ManifestContext {
         committed.index_version = updated.index_version;
 
         let edit = crate::manifest::action::RegionEdit {
-            table_compaction: None,
+            extensions: Default::default(),
             files_to_add: vec![committed.clone()],
             files_to_remove: Vec::new(),
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
@@ -1568,7 +1568,7 @@ impl ManifestContext {
             // A plan can be accepted before Adopt installs its Version, even after
             // the manifest reclassification. Fence stale ordinary edits under the
             // same lock as publication, including overwrites using the old file ID.
-            if edit.table_compaction.is_none() {
+            if edit.extensions.is_empty() {
                 ensure!(
                     edit.files_to_add
                         .iter()
@@ -2441,7 +2441,7 @@ mod tests {
 
     fn empty_edit() -> RegionEdit {
         RegionEdit {
-            table_compaction: None,
+            extensions: Default::default(),
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),
             timestamp_ms: None,
@@ -2478,7 +2478,7 @@ mod tests {
 
         let file_id = FileId::random();
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-            table_compaction: None,
+            extensions: Default::default(),
             files_to_add: vec![crate::sst::file::FileMeta {
                 region_id: region.region_id,
                 file_id,

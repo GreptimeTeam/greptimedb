@@ -31,6 +31,8 @@ mod handle_rebuild_index;
 mod handle_remap;
 mod handle_truncate;
 mod handle_write;
+#[cfg(feature = "enterprise")]
+mod table_compaction;
 
 use std::collections::HashMap;
 use std::path::Path;

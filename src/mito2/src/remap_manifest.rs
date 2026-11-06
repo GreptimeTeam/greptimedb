@@ -105,7 +105,7 @@ impl RemapManifest {
             new_metadata.set_partition_expr(Some(new_partition_expr));
 
             let manifest = RegionManifest {
-                table_compaction: Default::default(),
+                extensions: Default::default(),
                 metadata: Arc::new(new_metadata),
                 files: HashMap::new(),
                 removed_files: RemovedFilesRecord::default(),
@@ -158,8 +158,8 @@ impl RemapManifest {
         source_manifest: &RegionManifest,
         target_manifest: &mut RegionManifest,
     ) -> Result<()> {
-        target_manifest.table_compaction.merge_from(
-            &source_manifest.table_compaction,
+        target_manifest.extensions.merge_from(
+            &source_manifest.extensions,
             target_manifest.metadata.region_id,
         )?;
         for (file_id, file_meta) in &source_manifest.files {
@@ -267,11 +267,11 @@ impl RemapManifest {
 
             if let Some(previous) = self.old_manifests.get(region_id) {
                 manifest
-                    .table_compaction
-                    .merge_from(&previous.table_compaction, *region_id)?;
+                    .extensions
+                    .merge_from(&previous.extensions, *region_id)?;
             }
             manifest
-                .table_compaction
+                .extensions
                 .reconcile_files(&manifest.files.values().cloned().collect::<Vec<_>>());
             // removed_files are tracked by old manifests, don't copy
             manifest.removed_files = RemovedFilesRecord::default();
@@ -469,7 +469,7 @@ mod tests {
         }
 
         RegionManifest {
-            table_compaction: Default::default(),
+            extensions: Default::default(),
             metadata: create_region_metadata(region_id),
             files,
             removed_files: RemovedFilesRecord::default(),

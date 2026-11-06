@@ -32,7 +32,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::manifest::action::{RegionEdit, TruncateKind};
-use crate::manifest::table_compaction::TableCompactionState;
+use crate::manifest::extension::ManifestExtensions;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
@@ -400,7 +400,7 @@ pub(crate) struct Version {
     pub(crate) compaction_time_window: Option<Duration>,
     /// Options of the region.
     pub(crate) options: RegionOptions,
-    pub(crate) table_compaction: Arc<TableCompactionState>,
+    pub(crate) extensions: Arc<ManifestExtensions>,
 }
 
 pub(crate) type VersionRef = Arc<Version>;
@@ -415,7 +415,7 @@ pub(crate) struct VersionBuilder {
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
     options: RegionOptions,
-    table_compaction: Arc<TableCompactionState>,
+    extensions: Arc<ManifestExtensions>,
 }
 
 impl VersionBuilder {
@@ -430,7 +430,7 @@ impl VersionBuilder {
             truncated_entry_id: None,
             compaction_time_window: None,
             options: RegionOptions::default(),
-            table_compaction: Arc::default(),
+            extensions: Arc::default(),
         }
     }
 
@@ -445,7 +445,7 @@ impl VersionBuilder {
             truncated_entry_id: version.truncated_entry_id,
             compaction_time_window: version.compaction_time_window,
             options: version.options.clone(),
-            table_compaction: version.table_compaction.clone(),
+            extensions: version.extensions.clone(),
         }
     }
 
@@ -494,20 +494,18 @@ impl VersionBuilder {
         self
     }
 
-    /// Restores the same receipt state as the file-list checkpoint.
-    pub(crate) fn table_compaction(mut self, state: TableCompactionState) -> Self {
-        self.table_compaction = Arc::new(state);
+    /// Restores extension state from the same checkpoint as the file list.
+    pub(crate) fn extensions(mut self, state: ManifestExtensions) -> Self {
+        self.extensions = Arc::new(state);
         self
     }
 
     /// Apply edit to the builder.
     pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
-        if !edit.files_to_remove.is_empty() || edit.table_compaction.is_some() {
-            let state = Arc::make_mut(&mut self.table_compaction);
+        if !edit.files_to_remove.is_empty() || !edit.extensions.is_empty() {
+            let state = Arc::make_mut(&mut self.extensions);
             state.retire_files(&edit.files_to_remove);
-            if let Some(action) = edit.table_compaction {
-                state.apply(*action);
-            }
+            state.apply(edit.extensions);
         }
         if let Some(entry_id) = edit.flushed_entry_id {
             self.flushed_entry_id = self.flushed_entry_id.max(entry_id);
@@ -553,7 +551,7 @@ impl VersionBuilder {
 
     pub(crate) fn remove_files(mut self, files: impl Iterator<Item = FileMeta>) -> Self {
         let files: Vec<_> = files.collect();
-        Arc::make_mut(&mut self.table_compaction).retire_files(&files);
+        Arc::make_mut(&mut self.extensions).retire_files(&files);
         let mut ssts = (*self.ssts).clone();
         ssts.remove_files(files.into_iter());
         self.ssts = Arc::new(ssts);
@@ -563,7 +561,7 @@ impl VersionBuilder {
 
     /// Clear all files in the builder.
     pub(crate) fn clear_files(mut self) -> Self {
-        Arc::make_mut(&mut self.table_compaction).retire_files(
+        Arc::make_mut(&mut self.extensions).retire_files(
             self.ssts
                 .levels()
                 .iter()
@@ -600,7 +598,7 @@ impl VersionBuilder {
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window,
             options: self.options,
-            table_compaction: self.table_compaction,
+            extensions: self.extensions,
         }
     }
 }
@@ -642,7 +640,7 @@ mod tests {
         for sequence in [25, 11] {
             vc.apply_edit(
                 Some(RegionEdit {
-                    table_compaction: None,
+                    extensions: Default::default(),
                     files_to_add: vec![],
                     files_to_remove: vec![],
                     timestamp_ms: None,
