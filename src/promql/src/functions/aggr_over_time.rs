@@ -30,6 +30,7 @@ use crate::range_array::{RangeArray, unpack};
 #[derive(Clone, Copy)]
 enum PresenceEvaluator {
     Count,
+    First,
     Last,
     Absent,
     Present,
@@ -40,6 +41,13 @@ fn count_over_time_evaluator(
     name: &str,
 ) -> Result<ColumnarValue, DataFusionError> {
     evaluate_presence(input, name, PresenceEvaluator::Count)
+}
+
+fn first_over_time_evaluator(
+    input: &[ColumnarValue],
+    name: &str,
+) -> Result<ColumnarValue, DataFusionError> {
+    evaluate_presence(input, name, PresenceEvaluator::First)
 }
 
 fn last_over_time_evaluator(
@@ -102,6 +110,9 @@ fn evaluate_presence(
     let evaluator: fn(&Float64Array, usize, usize) -> Option<f64> = if values.null_count() == 0 {
         match operation {
             PresenceEvaluator::Count => |_, _, length| (length != 0).then_some(length as f64),
+            PresenceEvaluator::First => {
+                |values, offset, length| (length != 0).then(|| values.value(offset))
+            }
             PresenceEvaluator::Last => {
                 |values, offset, length| (length != 0).then(|| values.value(offset + length - 1))
             }
@@ -115,6 +126,11 @@ fn evaluate_presence(
                     .filter(|&index| values.is_valid(index))
                     .count();
                 (count != 0).then_some(count as f64)
+            },
+            PresenceEvaluator::First => |values, offset, length| {
+                (offset..offset + length)
+                    .find(|&index| values.is_valid(index))
+                    .map(|index| values.value(index))
             },
             PresenceEvaluator::Last => |values, offset, length| {
                 (offset..offset + length)
@@ -506,6 +522,17 @@ pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
 pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     let count = values.iter().flatten().count();
     (count != 0).then_some(count as f64)
+}
+
+/// The oldest point value in the specified interval.
+#[range_fn(
+    name = FirstOverTime,
+    ret = Float64Array,
+    display_name = prom_first_over_time,
+    evaluator = first_over_time_evaluator
+)]
+pub fn first_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
+    values.iter().flatten().next()
 }
 
 /// The most recent point value in specified interval.
@@ -1223,9 +1250,32 @@ mod test {
     #[test]
     fn specialized_presence_range_udfs_match_slice_oracles() {
         assert_specialized_matches_oracle(CountOverTime::scalar_udf(), count_over_time);
+        assert_specialized_matches_oracle(FirstOverTime::scalar_udf(), first_over_time);
         assert_specialized_matches_oracle(LastOverTime::scalar_udf(), last_over_time);
         assert_specialized_matches_oracle(AbsentOverTime::scalar_udf(), absent_over_time);
         assert_specialized_matches_oracle(PresentOverTime::scalar_udf(), present_over_time);
+    }
+
+    #[test]
+    fn first_over_time_preserves_non_null_samples() {
+        let values = Float64Array::from(vec![9.0, -1.0, 3.0, -0.0, 0.0, f64::NAN]);
+        let ranges = [(1, 3), (2, 2), (3, 1), (4, 1), (5, 1), (6, 0)];
+        let output = crate::functions::test_util::invoke_range_udf(
+            FirstOverTime::scalar_udf(),
+            RangeArray::from_ranges(
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..6)),
+                ranges,
+            )
+            .unwrap(),
+            RangeArray::from_ranges(Arc::new(values), ranges).unwrap(),
+        )
+        .unwrap();
+        let output = extract_array(&output).unwrap();
+        let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+        for (index, expected) in [-1.0f64, 3.0, -0.0, 0.0, f64::NAN].into_iter().enumerate() {
+            assert_eq!(output.value(index).to_bits(), expected.to_bits());
+        }
+        assert!(output.is_null(5));
     }
 
     #[test]
@@ -1242,7 +1292,7 @@ mod test {
                 ])),
             ))
             .slice(1, 7);
-            let ranges = [(0, 4), (0, 3), (1, 2), (4, 1), (5, 2), (7, 0)];
+            let ranges = [(0, 4), (0, 3), (1, 2), (4, 1), (5, 2), (7, 0), (1, 3)];
 
             (
                 RangeArray::from_ranges(Arc::new(timestamps), ranges).unwrap(),
@@ -1254,19 +1304,55 @@ mod test {
         let cases = [
             (
                 CountOverTime::scalar_udf(),
-                [Some(2.0), Some(1.0), None, Some(1.0), Some(2.0), None],
+                [
+                    Some(2.0),
+                    Some(1.0),
+                    None,
+                    Some(1.0),
+                    Some(2.0),
+                    None,
+                    Some(1.0),
+                ],
+            ),
+            (
+                FirstOverTime::scalar_udf(),
+                [
+                    Some(1.0),
+                    Some(1.0),
+                    None,
+                    Some(f64::NAN),
+                    Some(0.0),
+                    None,
+                    Some(4.0),
+                ],
             ),
             (
                 LastOverTime::scalar_udf(),
-                [Some(4.0), Some(1.0), None, Some(f64::NAN), Some(-0.0), None],
+                [
+                    Some(4.0),
+                    Some(1.0),
+                    None,
+                    Some(f64::NAN),
+                    Some(-0.0),
+                    None,
+                    Some(4.0),
+                ],
             ),
             (
                 AbsentOverTime::scalar_udf(),
-                [None, None, Some(1.0), None, None, Some(1.0)],
+                [None, None, Some(1.0), None, None, Some(1.0), None],
             ),
             (
                 PresentOverTime::scalar_udf(),
-                [Some(1.0), Some(1.0), None, Some(1.0), Some(1.0), None],
+                [
+                    Some(1.0),
+                    Some(1.0),
+                    None,
+                    Some(1.0),
+                    Some(1.0),
+                    None,
+                    Some(1.0),
+                ],
             ),
         ];
 
@@ -1300,6 +1386,7 @@ mod test {
 
         for (udf, name) in [
             (CountOverTime::scalar_udf(), "prom_count_over_time"),
+            (FirstOverTime::scalar_udf(), "prom_first_over_time"),
             (LastOverTime::scalar_udf(), "prom_last_over_time"),
             (AbsentOverTime::scalar_udf(), "prom_absent_over_time"),
             (PresentOverTime::scalar_udf(), "prom_present_over_time"),

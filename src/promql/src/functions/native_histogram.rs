@@ -35,9 +35,9 @@ use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{ScalarFunctionArgs, ScalarUDFImpl, Signature, create_udaf, create_udf};
 
 use crate::functions::{
-    AvgOverTime, Deriv, DoubleExponentialSmoothing, IDelta, Increase, LastOverTime, MaxOverTime,
-    MinOverTime, PredictLinear, QuantileOverTime, Rate, StddevOverTime, StdvarOverTime,
-    SumOverTime, extract_array, extract_range_dict,
+    AvgOverTime, Deriv, DoubleExponentialSmoothing, FirstOverTime, IDelta, Increase, LastOverTime,
+    MaxOverTime, MinOverTime, PredictLinear, QuantileOverTime, Rate, StddevOverTime,
+    StdvarOverTime, SumOverTime, extract_array, extract_range_dict,
 };
 use crate::range_array::{RangeArray, unpack};
 
@@ -1083,6 +1083,7 @@ fn range_fold_histograms(
 enum NativeHistogramRangeHistogramKind {
     Sum,
     Avg,
+    First,
     Last,
 }
 
@@ -1154,6 +1155,14 @@ fn native_histogram_range_histogram(
             result.push(None);
             continue;
         }
+        if matches!(kind, NativeHistogramRangeHistogramKind::First) {
+            let histogram = match (offset..offset + length).find(|&row| histograms.is_valid(row)) {
+                Some(row) => read_histogram(histograms, row)?,
+                None => None,
+            };
+            result.push(histogram);
+            continue;
+        }
         if matches!(kind, NativeHistogramRangeHistogramKind::Last) {
             let histogram = if (offset..offset + length).any(|row| histograms.is_null(row)) {
                 None
@@ -1180,6 +1189,7 @@ fn native_histogram_range_histogram(
                 func_name,
                 &collector,
             ),
+            NativeHistogramRangeHistogramKind::First => samples.first().cloned(),
             NativeHistogramRangeHistogramKind::Last => samples.last().cloned(),
         };
         result.push(histogram);
@@ -1328,6 +1338,8 @@ pub struct NativeHistogramSumOverTime;
 pub struct NativeHistogramAvgOverTime;
 pub struct NativeHistogramAbsentOverTime;
 pub struct NativeHistogramCountOverTime;
+/// Selects the oldest non-null native histogram in each window.
+pub struct NativeHistogramFirstOverTime;
 pub struct NativeHistogramLastOverTime;
 pub struct NativeHistogramPresentOverTime;
 pub struct NativeHistogramChanges;
@@ -1386,6 +1398,20 @@ impl NativeHistogramCountOverTime {
 
     pub fn scalar_udf() -> ScalarUDF {
         create_native_range_float_udf(Self::name(), NativeHistogramRangeFloatKind::Count)
+    }
+}
+
+impl NativeHistogramFirstOverTime {
+    pub const fn name() -> &'static str {
+        "prom_native_histogram_first_over_time"
+    }
+
+    pub fn scalar_udf() -> ScalarUDF {
+        create_native_range_histogram_udf(
+            Self::name(),
+            NativeHistogramRangeHistogramKind::First,
+            None,
+        )
     }
 }
 
@@ -1552,6 +1578,7 @@ enum MixedRangeFunction {
     MaxOverTime,
     SumOverTime,
     CountOverTime,
+    FirstOverTime,
     LastOverTime,
     AbsentOverTime,
     PresentOverTime,
@@ -1593,6 +1620,7 @@ impl MixedRangeFunction {
             "max_over_time" => Ok(Self::MaxOverTime),
             "sum_over_time" => Ok(Self::SumOverTime),
             "count_over_time" => Ok(Self::CountOverTime),
+            "first_over_time" => Ok(Self::FirstOverTime),
             "last_over_time" => Ok(Self::LastOverTime),
             "absent_over_time" => Ok(Self::AbsentOverTime),
             "present_over_time" => Ok(Self::PresentOverTime),
@@ -1625,6 +1653,7 @@ impl MixedRangeFunction {
             Self::MaxOverTime => "max_over_time",
             Self::SumOverTime => "sum_over_time",
             Self::CountOverTime => "count_over_time",
+            Self::FirstOverTime => "first_over_time",
             Self::LastOverTime => "last_over_time",
             Self::AbsentOverTime => "absent_over_time",
             Self::PresentOverTime => "present_over_time",
@@ -1648,6 +1677,7 @@ impl MixedRangeFunction {
             | Self::AvgOverTime
             | Self::SumOverTime => MixedRangePolicy::DropMixed,
             Self::IDelta | Self::IRate => MixedRangePolicy::LastTwo,
+            Self::FirstOverTime => MixedRangePolicy::First,
             Self::LastOverTime => MixedRangePolicy::Last,
             Self::Changes
             | Self::Resets
@@ -1678,6 +1708,7 @@ impl MixedRangeFunction {
             Self::MinOverTime => Some(MinOverTime::scalar_udf()),
             Self::MaxOverTime => Some(MaxOverTime::scalar_udf()),
             Self::SumOverTime => Some(SumOverTime::scalar_udf()),
+            Self::FirstOverTime => Some(FirstOverTime::scalar_udf()),
             Self::LastOverTime => Some(LastOverTime::scalar_udf()),
             Self::StddevOverTime => Some(StddevOverTime::scalar_udf()),
             Self::StdvarOverTime => Some(StdvarOverTime::scalar_udf()),
@@ -1710,6 +1741,7 @@ impl MixedRangeFunction {
             Self::SumOverTime => Some(NativeHistogramSumOverTime::scalar_udf_with_collector(
                 collector,
             )),
+            Self::FirstOverTime => Some(NativeHistogramFirstOverTime::scalar_udf()),
             Self::LastOverTime => Some(NativeHistogramLastOverTime::scalar_udf()),
             Self::RawDeltaRate | Self::RawDeltaIncrease => None,
             _ => None,
@@ -1721,6 +1753,7 @@ impl MixedRangeFunction {
 enum MixedRangePolicy {
     DropMixed,
     LastTwo,
+    First,
     Last,
     Combined,
     FloatOnly,
@@ -1977,6 +2010,15 @@ fn select_mixed_range_lanes(
                     }
                     (float_count > 0).then_some(SampleLane::Float)
                 }
+                MixedRangePolicy::First => (*offset..*end).find_map(|row| {
+                    if histogram_valid[row] {
+                        Some(SampleLane::Histogram)
+                    } else if float_valid[row] {
+                        Some(SampleLane::Float)
+                    } else {
+                        None
+                    }
+                }),
                 MixedRangePolicy::Last => (*offset..*end).rev().find_map(|row| {
                     if histogram_valid[row] {
                         Some(SampleLane::Histogram)
@@ -3166,6 +3208,104 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    #[test]
+    fn first_and_last_over_time_preserve_histograms_and_select_mixed_samples() {
+        let mut first = sample_histogram(3.0, 7.0, vec![1.0, 2.0]);
+        first.reset_hint = COUNTER_RESET_HINT;
+        first.start_timestamp = Some(123);
+        first.zero_threshold = 0.001;
+        first.negative_spans = first.positive_spans.clone();
+        first.negative_buckets = vec![2.0, 1.0];
+        let mut later = sample_histogram(8.0, 20.0, vec![8.0]);
+        later.schema = 2;
+        assert_eq!(
+            run_histogram_range_udf(
+                NativeHistogramLastOverTime::scalar_udf(),
+                vec![later.clone(), first.clone()],
+            ),
+            first
+        );
+        for values in [
+            vec![Some(first.clone()), Some(later.clone())],
+            vec![None, Some(first.clone()), None, Some(later.clone()), None],
+            vec![None, None],
+            vec![],
+        ] {
+            let expected = values.iter().flatten().next().cloned();
+            let result = run_udf(
+                NativeHistogramFirstOverTime::scalar_udf(),
+                histogram_range_input(values),
+                native_histogram_arrow_type(),
+            );
+            let result = extract_array(&result).unwrap();
+            assert_eq!(
+                read_histogram(result.as_any().downcast_ref::<StructArray>().unwrap(), 0).unwrap(),
+                expected
+            );
+        }
+
+        for (function, floats, histograms, expected_float, expected_histogram) in [
+            (
+                "first_over_time",
+                vec![Some(9.0), None],
+                vec![None, Some(first.clone())],
+                Some(9.0),
+                None,
+            ),
+            (
+                "first_over_time",
+                vec![None, Some(9.0)],
+                vec![Some(first.clone()), None],
+                None,
+                Some(first.clone()),
+            ),
+            (
+                "first_over_time",
+                vec![Some(9.0), None],
+                vec![Some(first.clone()), None],
+                None,
+                Some(first.clone()),
+            ),
+            (
+                "last_over_time",
+                vec![Some(9.0), None],
+                vec![Some(first.clone()), None],
+                None,
+                Some(first.clone()),
+            ),
+            (
+                "first_over_time",
+                vec![None, Some(9.0), None],
+                vec![None, None, Some(first.clone())],
+                Some(9.0),
+                None,
+            ),
+            (
+                "first_over_time",
+                vec![None, None],
+                vec![None, None],
+                None,
+                None,
+            ),
+        ] {
+            let collector = PromqlAnnotationCollector::default();
+            let input = mixed_range_input(function, floats, histograms);
+            assert_eq!(
+                mixed_float_result(
+                    MixedRange::float_udf(Some(collector.clone())),
+                    input.clone()
+                ),
+                expected_float
+            );
+            assert_eq!(
+                mixed_histogram_result(MixedRange::histogram_udf(Some(collector.clone())), input),
+                expected_histogram
+            );
+            assert!(collected_warnings(&collector).is_empty());
+            assert!(collected_infos(&collector).is_empty());
+        }
     }
 
     #[test]
