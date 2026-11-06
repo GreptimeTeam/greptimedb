@@ -567,38 +567,38 @@ async fn native_hybrid_binary_05_06_08() {
             .map(|row| row.value.unwrap())
             .collect::<Vec<_>>()
     );
+    // The native route matches the whole right operand and checks the one-side groups itself, so
+    // it reports the duplicated `other` group that Prometheus reports. The legacy value above is
+    // the one that differs: copying the left matcher into the right scan drops every group without
+    // a partner, and a dropped group cannot be reported as duplicated. A partition column on the
+    // right table does not change that - the pair reads independent raw sources either way.
     let mark = observer.mark();
-    let (hybrid, capture) = run_query(&instance, &propagated, true, &observer).await;
-    assert_eq!(
-        vec![5.0],
-        hybrid
-            .rows
-            .iter()
-            .map(|row| row.value.unwrap())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        2,
-        capture.fused.len(),
-        "both binary operands use native execution"
-    );
-    let plans = observer.since(mark);
-    let frontend = plans
-        .iter()
-        .find(|plan| find_binary_join(plan).is_some())
-        .expect("frontend Join plan");
-    let join = find_binary_join(frontend).unwrap();
-    let uniqueness = join
-        .children()
-        .iter()
-        .map(|branch| uniqueness_operators_above_merge(branch))
-        .fold((false, false), |(window, filter), found| {
-            (window || found.0, filter || found.1)
-        });
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, SCAN_PARTITIONS.to_string());
+    query_ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+    let output = instance
+        .do_query(&tql_eval(&propagated), Arc::new(query_ctx))
+        .await
+        .remove(0)
+        .expect("the query plans");
+    let error = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream)
+            .await
+            .expect_err("a duplicate match group fails"),
+        other => panic!("`{propagated}` was expected to stream: {other:?}"),
+    };
     assert!(
-        uniqueness.0 && uniqueness.1,
-        "on(job) FE uniqueness operators: {}",
-        displayable(frontend.as_ref()).indent(false)
+        error.to_string().contains(
+            "found duplicate series for the match group {job=\"other\"} on the right hand-side"
+        ),
+        "{propagated}: {error}"
+    );
+    // The statement is admitted natively: a fallback to the legacy plan would have answered the
+    // value instead of reporting the duplicate.
+    let capture = NativeCapture::from_plans(&observer.since(mark));
+    assert!(
+        capture.fused.iter().any(|node| node.children().len() == 2),
+        "the partitioned pair runs as one native binary"
     );
 
     // The left selector is a nonempty single `api` series, while the unpartitioned RHS also
