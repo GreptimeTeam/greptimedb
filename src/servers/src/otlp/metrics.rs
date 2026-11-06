@@ -336,6 +336,7 @@ pub(crate) fn service_identity(attrs: &[KeyValue]) -> ServiceIdentity {
 fn string_key_value(key: &str, value: String) -> KeyValue {
     KeyValue {
         key: key.to_string(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(any_value::Value::StringValue(value)),
         }),
@@ -374,18 +375,21 @@ fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Opti
         let mut attrs = s.attributes.clone();
         attrs.push(KeyValue {
             key: OTEL_SCOPE_NAME.to_string(),
+            key_strindex: 0,
             value: Some(AnyValue {
                 value: Some(any_value::Value::StringValue(s.name.clone())),
             }),
         });
         attrs.push(KeyValue {
             key: OTEL_SCOPE_VERSION.to_string(),
+            key_strindex: 0,
             value: Some(AnyValue {
                 value: Some(any_value::Value::StringValue(s.version.clone())),
             }),
         });
         attrs.push(KeyValue {
             key: OTEL_SCOPE_SCHEMA_URL.to_string(),
+            key_strindex: 0,
             value: Some(AnyValue {
                 value: Some(any_value::Value::StringValue(scope.schema_url.clone())),
             }),
@@ -1497,6 +1501,7 @@ mod tests {
     fn keyvalue(key: &str, value: &str) -> KeyValue {
         KeyValue {
             key: key.into(),
+            key_strindex: 0,
             value: Some(AnyValue {
                 value: Some(Val::StringValue(value.into())),
             }),
@@ -1506,6 +1511,7 @@ mod tests {
     fn bool_keyvalue(key: &str, value: bool) -> KeyValue {
         KeyValue {
             key: key.into(),
+            key_strindex: 0,
             value: Some(AnyValue {
                 value: Some(Val::BoolValue(value)),
             }),
