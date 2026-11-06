@@ -25,6 +25,7 @@ use std::time::Instant;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_expr::utils::split_conjunction;
 use datatypes::arrow::array::{
@@ -190,6 +191,27 @@ fn collect_inputs(
                 .insert(row_group.row_group_index);
         }
     }
+    // Grouped artifacts may also contain sources excluded solely by time pruning.
+    // Sequence-pruned, unassigned, and retired sources remain ineligible.
+    let assigned: HashSet<_> = files
+        .keys()
+        .map(|i| input.files[*i].file_id().file_id())
+        .collect();
+    let allowed = assigned
+        .iter()
+        .chain(&input.time_pruned_files)
+        .copied()
+        .collect();
+    let eligible_samples = index
+        .version
+        .samples
+        .iter()
+        .filter(|(_, handle)| {
+            handle.entry().sources_visible(&allowed)
+                && assigned.iter().any(|id| handle.entry().covers(*id))
+        })
+        .map(|(id, handle)| (*id, handle.clone()))
+        .collect();
     let mut indexes = HashSet::new();
     let file_indices = files.keys().copied().collect();
     for (file_idx, groups) in files {
@@ -223,11 +245,11 @@ fn collect_inputs(
         if !covered {
             ready = false;
         }
-        if index
-            .version
-            .samples
-            .get(&file.file_id().file_id())
-            .is_none_or(|handle| handle.entry().artifact.format != ArtifactFormat::ColumnarSamples)
+        if !crate::series_index::artifact::samples_cover_file(&eligible_samples, file)
+            || index.version.samples.values().any(|h| {
+                h.entry().covers(file.file_id().file_id())
+                    && h.entry().artifact.format != ArtifactFormat::ColumnarSamples
+            })
         {
             ready = false;
         }
@@ -332,9 +354,36 @@ impl ColumnarPreparedSource {
             .cache_strategy
             .columnar_metadata(index.cache_namespace);
         let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
-        for file_idx in files {
-            let file = &input.files[file_idx];
-            let handle = &index.version.samples[&file.file_id().file_id()];
+        let assigned: HashSet<_> = files
+            .iter()
+            .map(|i| input.files[*i].file_id().file_id())
+            .collect();
+        let allowed = assigned
+            .iter()
+            .chain(&input.time_pruned_files)
+            .copied()
+            .collect();
+        for handle in index.version.samples.values().filter(|h| {
+            if !h.entry().sources_visible(&allowed)
+                || !assigned.iter().any(|id| h.entry().covers(*id))
+            {
+                return false;
+            }
+            // Coverage validation above still needs every day of each source. Only
+            // opening readers can omit daily artifacts outside the query range.
+            if let (Some(day), Some(range)) = (h.entry().window, input.time_range.as_ref()) {
+                let bounds = day
+                    .checked_mul(86_400)
+                    .zip(day.checked_add(1).and_then(|next| next.checked_mul(86_400)));
+                if let Some((start, end)) = bounds {
+                    return range.intersects(
+                        &(Timestamp::new_second(start)..Timestamp::new_second(end)).into(),
+                    );
+                }
+                // Retain extreme days whose bounds cannot be represented in seconds.
+            }
+            true
+        }) {
             let reader = crate::series_index::samples::reader::SamplesReader::open_cached(
                 index.store.clone(),
                 handle.clone(),

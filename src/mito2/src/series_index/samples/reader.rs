@@ -215,6 +215,11 @@ impl SamplesFormatReader for SamplesReader {
                 .project(&projection)
                 .map_err(|e| invalid(format!("sample projection: {e}")))?,
         );
+        let field_ids: HashSet<_> = projection
+            .iter()
+            .filter(|&&index| index >= 5)
+            .map(|&index| self.manifest.fields[index - 5].column_id)
+            .collect();
         let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
@@ -259,7 +264,8 @@ impl SamplesFormatReader for SamplesReader {
                         page
                     };
                     let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in sample depth-two tree"))? };
-                    for block in blocks {
+                    let mut prefetched = PrefetchedBlocks::default();
+                    for (block_index, block) in blocks.iter().enumerate() {
                         row_count = row_count.checked_add(u64::from(block.rows)).ok_or_else(|| invalid("samples row count overflow"))?;
                         block_count += 1;
                         if let Some(prior) = &previous { block.follows(prior, adjacent)?; }
@@ -269,9 +275,14 @@ impl SamplesFormatReader for SamplesReader {
                             payload_position = column.payload.end()?;
                         }
                         let batch = if matches(block.bounds(), &request) {
+                            if block_index >= prefetched.end {
+                                // Release the previous window before reserving the next one.
+                                drop(std::mem::take(&mut prefetched));
+                                prefetched = prefetch_blocks(reader, blocks, block_index, &field_ids, &request, &projection, trailer.payload_end, &mut metrics).await?;
+                            }
                             *metrics.counts.entry("blocks").or_default() += 1;
                             *metrics.counts.entry("decoded_rows").or_default() += u64::from(block.rows);
-                            read_block(reader, block, &manifest, &request, &projection, projected.clone(), &mut metrics).await?
+                            read_block(reader, block, &manifest, &request, &projection, &field_ids, projected.clone(), &mut prefetched, &mut metrics).await?
                         } else { None };
                         if let Some((batch, _reservation)) = batch {
                             *metrics.counts.entry("batches").or_default() += 1;
@@ -378,23 +389,21 @@ fn timestamp_array(values: impl Iterator<Item = i64>, unit: TimestampUnit) -> Ar
         TimestampUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from_iter_values(values)),
     }
 }
+#[allow(clippy::too_many_arguments)]
 async fn read_block(
     reader: &Reader,
     block: &Block,
     manifest: &Manifest,
     request: &SamplesReadRequest,
     projection: &[usize],
+    field_ids: &HashSet<u32>,
     schema: SchemaRef,
+    prefetched: &mut PrefetchedBlocks,
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<Option<(RecordBatch, Option<MemoryReservation>)>> {
     let boundary = request.start.is_some_and(|start| start > block.min)
         || request.end.is_some_and(|end| end <= block.max);
     let needs_time = boundary || projection.contains(&2);
-    let field_ids: HashSet<_> = projection
-        .iter()
-        .filter(|&&index| index >= 5)
-        .map(|&index| manifest.fields[index - 5].column_id)
-        .collect();
     let columns: Vec<_> = block
         .columns
         .iter()
@@ -412,18 +421,42 @@ async fn read_block(
         .map(|pool| MemoryConsumer::new("ColumnarSamplesBuffers").register(pool));
     // Stored buffers, decompression, typed values, selection, and Arrow output coexist.
     // Reserve before any payload I/O/allocation. The reservation survives the yield.
-    let bytes = columns
+    let ranges = columns
         .iter()
-        .map(|column| column.payload.stored as usize + column.payload.decoded as usize)
-        .sum::<usize>()
+        .map(|c| Ok(c.payload.offset..c.payload.end()?))
+        .collect::<Result<Vec<_>>>()?;
+    let gap_bytes = merge_read_ranges(&ranges)
+        .iter()
+        .map(|r| r.end - r.start)
+        .sum::<u64>()
+        - ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+    let bytes = 2 * gap_bytes as usize
+        + columns
+            .iter()
+            .map(|column| column.payload.stored as usize + column.payload.decoded as usize)
+            .sum::<usize>()
         + block.rows as usize * (32 * (projection.len() + 1) + std::mem::size_of::<usize>())
         + columns.len() * 128;
     if let Some(reservation) = &reservation {
-        reservation
-            .try_grow(bytes)
-            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+        let mut result = reservation.try_grow(bytes);
+        if result.is_err() && !prefetched.buffers.is_empty() {
+            // Read-ahead must not prevent a block that fits on its own from being read.
+            // Drop every shared slice and its reservation before retrying, and avoid
+            // attempting the same window again on the next block.
+            *prefetched = PrefetchedBlocks {
+                end: prefetched.end,
+                ..Default::default()
+            };
+            result = reservation.try_grow(bytes);
+        }
+        result.context(crate::error::ScanMemoryExhaustedSnafu)?;
     }
     let mut buffers = HashMap::new();
+    for column in &columns {
+        if let Some(bytes) = prefetched.buffers.get(&column.payload.offset) {
+            buffers.insert(column.payload.offset, bytes.clone());
+        }
+    }
     if boundary {
         fetch_columns(reader, &[&block.columns[0]], &mut buffers, metrics).await?;
     } else {
@@ -561,8 +594,8 @@ async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes:
     Ok(bytes)
 }
 
-/// Fetch selected ranges with zero-gap coalescing, without reading unselected
-/// fields or blocks. The block size and scan reservation bound retained buffers;
+/// Fetch selected ranges with bounded gap coalescing and shared-buffer slices.
+/// The read window and scan reservation bound retained buffers;
 /// OpenDAL bounds concurrency to 8.
 async fn fetch_columns(
     reader: &Reader,
@@ -570,6 +603,11 @@ async fn fetch_columns(
     buffers: &mut HashMap<u64, bytes::Bytes>,
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<()> {
+    let columns: Vec<_> = columns
+        .iter()
+        .copied()
+        .filter(|c| !buffers.contains_key(&c.payload.offset))
+        .collect();
     if columns.is_empty() {
         return Ok(());
     }
@@ -577,25 +615,193 @@ async fn fetch_columns(
         .iter()
         .map(|column| Ok(column.payload.offset..column.payload.end()?))
         .collect::<Result<Vec<_>>>()?;
+    let merged = merge_read_ranges(&ranges);
     *metrics.counts.entry("column_ranges").or_default() += ranges.len() as u64;
+    *metrics.counts.entry("payload_reads").or_default() += merged.len() as u64;
     *metrics.bytes.entry("requested").or_default() +=
         ranges.iter().map(|r| r.end - r.start).sum::<u64>();
     let started = Instant::now();
-    let fetched = reader.fetch(ranges).await.context(OpenDalSnafu)?;
+    let fetched = reader.fetch(merged.clone()).await.context(OpenDalSnafu)?;
     metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
-    *metrics.bytes.entry("fetched").or_default() +=
-        fetched.iter().map(|b| b.len() as u64).sum::<u64>();
     require(
-        fetched.len() == columns.len(),
+        fetched.len() == merged.len(),
         "sample fetch response count mismatch",
     )?;
-    for (column, buffer) in columns.iter().zip(fetched) {
+    let mut column_index = 0;
+    for (range, buffer) in merged.iter().zip(fetched) {
         let bytes = buffer.to_bytes();
         require(
-            bytes.len() == column.payload.stored as usize,
+            bytes.len() as u64 == range.end - range.start,
             "sample range length mismatch",
         )?;
-        buffers.insert(column.payload.offset, bytes);
+        *metrics.bytes.entry("fetched").or_default() += bytes.len() as u64;
+        while let Some(column) = columns.get(column_index) {
+            if column.payload.offset >= range.end {
+                break;
+            }
+            require(
+                column.payload.offset >= range.start && column.payload.end()? <= range.end,
+                "sample column outside fetched range",
+            )?;
+            let start = (column.payload.offset - range.start) as usize;
+            let end = (column.payload.end()? - range.start) as usize;
+            require(end <= bytes.len(), "sample column outside fetched range")?;
+            buffers.insert(column.payload.offset, bytes.slice(start..end));
+            column_index += 1;
+        }
     }
+    require(
+        column_index == columns.len(),
+        "missing sample column response",
+    )?;
     Ok(())
+}
+
+const MAX_READ_GAP: u64 = 4 * 1024;
+const MAX_READ_BYTES: u64 = 256 * 1024;
+
+/// Allows bounded over-read to amortize filesystem and scheduling costs.
+fn can_merge_ranges(previous: &std::ops::Range<u64>, next: &std::ops::Range<u64>) -> bool {
+    next.start
+        .checked_sub(previous.end)
+        .is_some_and(|gap| gap <= MAX_READ_GAP)
+        && next
+            .end
+            .checked_sub(previous.start)
+            .is_some_and(|bytes| bytes <= MAX_READ_BYTES)
+}
+
+fn merge_read_ranges(ranges: &[std::ops::Range<u64>]) -> Vec<std::ops::Range<u64>> {
+    let mut merged: Vec<std::ops::Range<u64>> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && can_merge_ranges(previous, range)
+        {
+            previous.end = range.end;
+        } else {
+            merged.push(range.clone());
+        }
+    }
+    merged
+}
+
+/// A bounded read-ahead window. Byte slices retain the shared fetched allocation;
+/// the reservation therefore lives until the whole window is replaced or cancelled.
+#[derive(Default)]
+struct PrefetchedBlocks {
+    end: usize,
+    buffers: HashMap<u64, bytes::Bytes>,
+    _reservation: Option<MemoryReservation>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prefetch_blocks(
+    reader: &Reader,
+    blocks: &[Block],
+    start: usize,
+    field_ids: &HashSet<u32>,
+    request: &SamplesReadRequest,
+    projection: &[usize],
+    payload_end: u64,
+    metrics: &mut ColumnarReadMetrics,
+) -> Result<PrefetchedBlocks> {
+    const MAX_BLOCKS: usize = 128;
+    let mut columns = Vec::new();
+    let mut bytes = 0usize;
+    let mut last_range: Option<std::ops::Range<u64>> = None;
+    let mut end = start;
+    for block in blocks.iter().skip(start).take(MAX_BLOCKS) {
+        if !matches(block.bounds(), request) {
+            end += 1;
+            continue;
+        }
+        let boundary = request.start.is_some_and(|t| t > block.min)
+            || request.end.is_some_and(|t| t <= block.max);
+        // Boundary blocks request timestamps first. Coalescing may include value
+        // bytes in gaps, but values are only decoded after timestamp pruning.
+        let selected: Vec<_> = block
+            .columns
+            .iter()
+            .filter(|column| {
+                if boundary {
+                    return column.role == 1;
+                }
+                match column.role {
+                    1 => projection.contains(&2),
+                    2 => projection.contains(&3),
+                    3 => projection.contains(&4),
+                    4 => field_ids.contains(&column.id),
+                    _ => false,
+                }
+            })
+            .collect();
+        let mut next_bytes = bytes;
+        let mut next_range = last_range.clone();
+        for column in &selected {
+            column
+                .payload
+                .validate(metadata::HEADER_SIZE, payload_end, false)?;
+            let range = column.payload.offset..column.payload.end()?;
+            if let Some(previous) = next_range.as_mut()
+                && can_merge_ranges(previous, &range)
+            {
+                next_bytes += (range.end - previous.end) as usize;
+                previous.end = range.end;
+            } else {
+                next_bytes += column.payload.stored as usize;
+                next_range = Some(range);
+            }
+        }
+        if next_bytes > MAX_READ_BYTES as usize {
+            break;
+        }
+        bytes = next_bytes;
+        last_range = next_range;
+        columns.extend(selected);
+        end += 1;
+    }
+    // A single oversized block uses the existing per-block reservation and read path.
+    let end = end.max(start + 1);
+    let reservation = request
+        .memory_pool
+        .as_ref()
+        .map(|pool| MemoryConsumer::new("ColumnarSamplesPrefetch").register(pool));
+    // Account stored bytes, a possible Buffer-to-Bytes copy, fetch vectors, and map entries.
+    if let Some(reservation) = &reservation
+        && reservation
+            .try_grow(2 * bytes + columns.len() * 256)
+            .is_err()
+    {
+        return Ok(PrefetchedBlocks {
+            end,
+            ..Default::default()
+        });
+    }
+    let mut buffers = HashMap::new();
+    fetch_columns(reader, &columns, &mut buffers, metrics).await?;
+    Ok(PrefetchedBlocks {
+        end,
+        buffers,
+        _reservation: reservation,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coalesces_bounded_gaps_and_caps_reads() {
+        assert_eq!(vec![0..24], merge_read_ranges(&[0..4, 4..8, 8..12, 20..24]));
+        assert!(merge_read_ranges(&[]).is_empty());
+        assert_eq!(vec![0..8], merge_read_ranges(&[0..4, 5..8]));
+        assert_eq!(
+            vec![0..4, 8192..8200],
+            merge_read_ranges(&[0..4, 8192..8200])
+        );
+        assert_eq!(
+            vec![0..MAX_READ_BYTES, MAX_READ_BYTES..MAX_READ_BYTES + 1],
+            merge_read_ranges(&[0..MAX_READ_BYTES, MAX_READ_BYTES..MAX_READ_BYTES + 1])
+        );
+    }
 }

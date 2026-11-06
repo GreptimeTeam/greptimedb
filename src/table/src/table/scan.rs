@@ -614,6 +614,14 @@ impl RegionScanExec {
         let ordering = scanner
             .raw_series_ordering()
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        // A scan's planned ordering is a guarantee its own partitions keep. Interleaved is a
+        // transport annotation for fragments several producers contribute; it is not something a
+        // single scanner can promise, so a scan that planned it is refused here.
+        if ordering == SeriesOrdering::Interleaved {
+            return Err(DataFusionError::Plan(
+                "a scan cannot plan interleaved raw series ordering".into(),
+            ));
+        }
         let frame_labels = if scanner
             .raw_series_has_explicit_labels(&label_source)
             .map_err(|e| DataFusionError::External(Box::new(e)))?

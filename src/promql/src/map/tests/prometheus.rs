@@ -146,6 +146,7 @@ fn evaluate(case: &Case) -> Vec<Series> {
         "cmp_series" => each(&|s| {
             map_compare_series(schema, s, comparison(&h[1], &h[2]), scalar_series())
                 .unwrap()
+                .0
                 .into_iter()
                 .collect()
         }),

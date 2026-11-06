@@ -35,8 +35,9 @@ pub use crate::schema::column_schema::{
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
     COMPRESSION_KEY, ColumnExtType, ColumnSchema, CompressionOptions, CompressionType,
-    FULLTEXT_KEY, FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
-    SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType, TIME_INDEX_KEY,
+    FULLTEXT_KEY, FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY,
+    METRIC_NAME_KEY, Metadata, SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType,
+    TIME_INDEX_KEY, is_metric_name_field, metric_name_field_metadata,
 };
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 

@@ -42,6 +42,13 @@ impl QueryEngineContext {
         self.query_ctx.clone()
     }
 
+    /// The session configuration the execution task context is built from, so that a plan may
+    /// extend it before execution.
+    #[inline]
+    pub fn config_mut(&mut self) -> &mut datafusion::execution::config::SessionConfig {
+        self.state.config_mut()
+    }
+
     pub fn build_task_ctx(&self) -> Arc<TaskContext> {
         let dbname = self.query_ctx.get_db_string();
         let state = &self.state;

@@ -305,7 +305,36 @@ impl ScanRegion {
         mut self,
         series_index: Option<SeriesIndexReadContext>,
     ) -> Self {
-        self.series_index = series_index;
+        self.series_index = series_index.map(|mut context| {
+            // A daily artifact cannot be partially selected by source SST identity. Pin only
+            // generations whose complete source set is still visible in this data snapshot.
+            let visible = self
+                .version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|l| l.files())
+                .map(|f| f.file_id().file_id())
+                .collect();
+            let previous = &context.version;
+            context.version = Arc::new(crate::series_index::SeriesIndexVersion {
+                samples: previous
+                    .samples
+                    .iter()
+                    .filter(|(_, h)| {
+                        h.entry().sources_visible(&visible)
+                            && (h.entry().window.is_none()
+                                || (self.request.sst_min_sequence.is_none()
+                                    && !self.request.exact_sequence_range))
+                    })
+                    .map(|(id, h)| (*id, h.clone()))
+                    .collect(),
+                range_indexes: previous.range_indexes.clone(),
+                series_indexes: previous.series_indexes.clone(),
+                index_buckets: previous.index_buckets.clone(),
+            });
+            context
+        });
         self
     }
 
@@ -494,6 +523,24 @@ impl ScanRegion {
             mapper
         };
 
+        // Only time-pruned sources from this pinned version may accompany an assigned SST
+        // in a grouped sample artifact. Explicit selections and sequence pruning stay strict.
+        let time_pruned_files = if self.exact_selection.is_none()
+            && !self.request.skip_sst_files
+            && self.request.sst_min_sequence.is_none()
+            && !self.request.exact_sequence_range
+        {
+            self.version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files.values())
+                .filter(|file| !file_in_range(file, &time_range))
+                .map(|file| file.file_id().file_id())
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let (files, sequence_range) =
             if let Some((files, sequence_range)) = self.exact_selection.take() {
                 (files, sequence_range)
@@ -577,6 +624,7 @@ impl ScanRegion {
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
             .with_files(files)
+            .with_time_pruned_files(time_pruned_files)
             .with_primary_key_mapper(self.version.ssts.primary_key_mapper())
             .with_cache(self.cache_strategy)
             .with_inverted_index_appliers(inverted_index_appliers)
@@ -936,6 +984,8 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
+    /// Visible sources excluded solely by the query time range.
+    pub(crate) time_pruned_files: HashSet<store_api::storage::FileId>,
     /// Shares the pinned schema's encoded defaults across parallel range readers.
     primary_key_mapper: OnceLock<Arc<PrimaryKeyRangeMapper>>,
     /// Scan-wide hint for rows in an execution batch.
@@ -1021,6 +1071,7 @@ impl ScanInput {
                 region_partition_expr: None,
                 memtables: Vec::new(),
                 files: Vec::new(),
+                time_pruned_files: HashSet::new(),
                 primary_key_mapper: OnceLock::new(),
                 batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
                 cache_strategy: CacheStrategy::Disabled,
@@ -1234,6 +1285,16 @@ impl ScanInputBuilder {
     #[must_use]
     pub(crate) fn with_memtables(mut self, memtables: Vec<MemRangeBuilder>) -> Self {
         self.input.memtables = memtables;
+        self
+    }
+
+    /// Sets visible sources excluded solely by time pruning.
+    #[must_use]
+    pub(crate) fn with_time_pruned_files(
+        mut self,
+        files: HashSet<store_api::storage::FileId>,
+    ) -> Self {
+        self.input.time_pruned_files = files;
         self
     }
 

@@ -37,3 +37,13 @@ bytes for future reader compatibility; introduce a separate versioned fixture
 when the approved format changes. This is a frozen-byte compatibility check,
 not a cross-binary upgrade/downgrade test. Older binaries are not promised to
 understand the new opt-in `columnar-samples` catalog identifier.
+
+`legacy-catalog-entry.json` and `daily-catalog-entry.json` freeze the optional
+source-coverage extension, exercised by `frozen_sample_catalog_coverage`. Empty
+object lists isolate catalog decoding; the existing part fixture tests actual
+payload reads. Legacy entries cover one SST. Daily entries cover the entire
+listed source set and become ineligible if any source disappears.
+
+`sparse-daily-catalog-entry.json` freezes explicit populated-day coverage per source.
+Older daily catalogs decode with empty coverage and are rebuilt before reuse.
+The source Parquet files and sample payload encoding are unchanged.

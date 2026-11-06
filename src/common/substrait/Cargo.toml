@@ -20,3 +20,6 @@ datafusion-substrait.workspace = true
 promql.workspace = true
 prost.workspace = true
 snafu.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
