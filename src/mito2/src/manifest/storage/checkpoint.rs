@@ -200,6 +200,37 @@ impl<T: Tracker> CheckpointStorage<T> {
         self.load_checkpoint(metadata).await
     }
 
+    /// Loads the checkpoint that LIST found at `version` with `compress_type`.
+    ///
+    /// The checkpoint pointer only provides the checksum, when it points at the same version: the
+    /// checkpoint task of a stale writer can leave it at an older one.
+    pub(crate) async fn load_listed_checkpoint(
+        &self,
+        version: ManifestVersion,
+        compress_type: CompressionType,
+    ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+        let checksum = self
+            .read_last_checkpoint_metadata()
+            .await?
+            .filter(|metadata| metadata.version == version)
+            .and_then(|metadata| metadata.checksum);
+        let mut storage = Self::new(
+            self.path.clone(),
+            self.object_store.clone(),
+            compress_type,
+            self.manifest_cache.clone(),
+            self.size_tracker.clone(),
+        );
+        storage
+            .load_checkpoint(CheckpointMetadata {
+                size: 0,
+                version,
+                checksum,
+                extend_metadata: HashMap::new(),
+            })
+            .await
+    }
+
     /// Reads the small checkpoint pointer without loading its payload.
     pub(crate) async fn read_last_checkpoint_metadata(&self) -> Result<Option<CheckpointMetadata>> {
         let last_checkpoint_path = self.last_checkpoint_path();

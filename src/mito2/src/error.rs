@@ -147,6 +147,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Manifest version {version} conflicts in {manifest_dir}: {reason}"))]
+    ManifestVersionConflict {
+        version: ManifestVersion,
+        manifest_dir: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize manifest, region_id: {}", region_id))]
     SerializeManifest {
         region_id: RegionId,
@@ -1561,9 +1570,10 @@ impl ErrorExt for Error {
             MultiRegionCompactionResource { .. } => StatusCode::RuntimeResourcesExhausted,
             SstWriteMemoryExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            OpenDal { .. }
+            | ManifestDeltaNotFound { .. }
+            | ManifestVersionConflict { .. }
+            | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. }
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
@@ -1784,7 +1794,8 @@ impl ErrorExt for Error {
             | RegionBusy { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
-            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
+            | ManifestDeltaNotFound { .. }
+            | ManifestVersionConflict { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }
@@ -2002,5 +2013,14 @@ mod tests {
         // This can be raised while applying an edit after its manifest file was saved.
         let error = RegionMetadataNotFoundSnafu {}.build();
         assert!(error.may_have_persisted_manifest_update());
+
+        let error = ManifestVersionConflictSnafu {
+            version: 1u64,
+            manifest_dir: "manifest/",
+            reason: "test",
+        }
+        .build();
+        assert!(error.may_have_persisted_manifest_update());
+        assert!(error.retry_hint().is_retryable());
     }
 }

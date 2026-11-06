@@ -60,7 +60,7 @@ use crate::error::{
     FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
     RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
-use crate::lease::Deadline;
+use crate::lease::{Deadline, NodeLease};
 use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
@@ -1264,6 +1264,8 @@ pub(crate) struct ManifestContext {
     /// long the Leader role stays valid. The engine extends it from those leases, and writes check
     /// it.
     pub(crate) leader_deadline: Deadline,
+    /// The clock of [`Self::leader_deadline`].
+    node_lease: Arc<NodeLease>,
     /// Partition info of the region in staging mode.
     ///
     /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
@@ -1278,12 +1280,14 @@ impl ManifestContext {
         manager: RegionManifestManager,
         state: RegionRoleState,
         hook: Option<RegionHookRef>,
+        node_lease: Arc<NodeLease>,
     ) -> Self {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
             downgrade_started_at: Mutex::new(Instant::now()),
             leader_deadline: Deadline::default(),
+            node_lease,
             staging_partition_info: Mutex::new(None),
             hook,
         }
@@ -1524,14 +1528,16 @@ impl ManifestContext {
         // Clone before `action_list` is moved into `update` so the hook still
         // sees what was written.
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
-        let version = if !is_staging
-            && self.state.load() == RegionRoleState::Leader(RegionLeaderState::Downgrading)
-        {
-            manager.update_normal_without_checkpoint(action_list).await
-        } else {
-            manager.update(action_list, is_staging).await
-        }
-        .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
+        // The final flush of a downgrading leader must not start cleanup after the downgrade
+        // checkpoint barrier.
+        let allow_checkpoint = !is_staging
+            && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading);
+        let version = manager
+            .update(action_list, is_staging, allow_checkpoint, || {
+                self.leader_lease_expired()
+            })
+            .await
+            .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
 
         Ok(PendingManifestHook::new(
             region_id,
@@ -1540,6 +1546,11 @@ impl ManifestContext {
             self.hook.clone(),
             is_staging,
         ))
+    }
+
+    /// Returns whether the region's Leader deadline has passed. No deadline counts as passed.
+    fn leader_lease_expired(&self) -> bool {
+        self.node_lease.now() >= self.leader_deadline.get()
     }
 
     /// Updates the manifest using a caller-held write lock, releases the lock,
@@ -2342,6 +2353,7 @@ mod tests {
                 checkpoint_distance: 10,
                 remove_file_options: Default::default(),
                 manifest_cache: None,
+                conditional_publication: false,
             },
             FormatType::PrimaryKey,
             false,
@@ -2354,6 +2366,7 @@ mod tests {
             manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
+            Default::default(),
         ));
 
         MitoRegion {
@@ -2417,6 +2430,8 @@ mod tests {
                 .update(
                     RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone())),
                     false,
+                    true,
+                    || false,
                 )
                 .await
                 .unwrap();
@@ -2701,6 +2716,8 @@ mod tests {
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
                 true,
+                false,
+                || false,
             )
             .await
             .unwrap();
@@ -2740,6 +2757,8 @@ mod tests {
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
                 true,
+                false,
+                || false,
             )
             .await
             .unwrap();
@@ -2779,6 +2798,8 @@ mod tests {
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
                 true,
+                false,
+                || false,
             )
             .await
             .unwrap();
@@ -2812,6 +2833,8 @@ mod tests {
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
                 true,
+                false,
+                || false,
             )
             .await
             .unwrap();
@@ -2897,6 +2920,7 @@ mod tests {
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
                     manifest_cache: None,
+                    conditional_publication: false,
                 },
                 FormatType::PrimaryKey,
                 false,
@@ -2908,6 +2932,7 @@ mod tests {
                 manager,
                 RegionRoleState::Leader(RegionLeaderState::Staging),
                 None,
+                Default::default(),
             ))
         };
 
@@ -2966,6 +2991,7 @@ mod tests {
                 checkpoint_distance: 10,
                 remove_file_options: Default::default(),
                 manifest_cache: None,
+                conditional_publication: false,
             },
             FormatType::PrimaryKey,
             false,
@@ -2978,6 +3004,7 @@ mod tests {
             manager,
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
+            Default::default(),
         ));
 
         let region = MitoRegion {

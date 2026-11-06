@@ -63,6 +63,7 @@ use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rstest_reuse::template;
+use store_api::ManifestVersion;
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::{RegionEngine, RegionRole};
@@ -80,7 +81,9 @@ use crate::engine::{MITO_ENGINE_NAME, MitoEngine};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::manifest::storage::{is_checkpoint_file, is_delta_file};
+use crate::manifest::storage::{
+    LAST_CHECKPOINT_FILE, delta_file, is_checkpoint_file, is_delta_file,
+};
 use crate::read::{Batch, BatchBuilder};
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::sst::FormatType;
@@ -123,6 +126,15 @@ impl CheckpointTaskBlocker {
 
     /// Blocks publication of `_last_checkpoint` at writer close.
     pub(crate) fn block_last_checkpoint_write() -> (Self, MockLayer) {
+        Self::block_write(LAST_CHECKPOINT_FILE.to_string(), true)
+    }
+
+    /// Blocks the first write of the delta of `version`, before any of its bytes reach storage.
+    pub(crate) fn block_delta_write(version: ManifestVersion) -> (Self, MockLayer) {
+        Self::block_write(delta_file(version), false)
+    }
+
+    fn block_write(file_name: String, at_close: bool) -> (Self, MockLayer) {
         let blocker = Self {
             entered: Arc::new(Notify::new()),
             release: Arc::new(Notify::new()),
@@ -131,11 +143,15 @@ impl CheckpointTaskBlocker {
         let factory_blocker = blocker.clone();
         let layer = MockLayerBuilder::default()
             .writer_factory(Arc::new(move |path, _args, inner| {
-                Box::new(BlockingCheckpointWriter {
-                    path: path.to_string(),
-                    inner,
-                    blocker: factory_blocker.clone(),
-                })
+                if path.contains(&file_name) {
+                    Box::new(BlockingManifestWriter {
+                        inner,
+                        blocker: factory_blocker.clone(),
+                        at_close,
+                    })
+                } else {
+                    inner
+                }
             }))
             .build()
             .unwrap();
@@ -195,19 +211,22 @@ fn is_manifest_checkpoint_file(path: &str) -> bool {
     is_delta_file(file_name) || is_checkpoint_file(file_name)
 }
 
-struct BlockingCheckpointWriter {
-    path: String,
+struct BlockingManifestWriter {
     inner: Writer,
     blocker: CheckpointTaskBlocker,
+    at_close: bool,
 }
 
-impl object_store::layers::mock::Write for BlockingCheckpointWriter {
+impl object_store::layers::mock::Write for BlockingManifestWriter {
     async fn write(&mut self, bs: Buffer) -> MockResult<()> {
+        if !self.at_close {
+            self.blocker.block_once().await;
+        }
         self.inner.write(bs).await
     }
 
     async fn close(&mut self) -> MockResult<Metadata> {
-        if self.path.ends_with("_last_checkpoint") {
+        if self.at_close {
             self.blocker.block_once().await;
         }
         self.inner.close().await
@@ -839,6 +858,7 @@ impl TestEnv {
             checkpoint_distance,
             remove_file_options: Default::default(),
             manifest_cache: None,
+            conditional_publication: false,
         };
 
         if let Some(metadata) = initial_metadata {

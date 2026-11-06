@@ -330,6 +330,8 @@ async fn test_engine_recover_json2_region(
                 append_mode: Some(true),
             })]),
             false,
+            true,
+            || false,
         )
         .await?;
     let manifest = region.manifest_ctx.manifest().await;

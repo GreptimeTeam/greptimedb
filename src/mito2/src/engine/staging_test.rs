@@ -941,6 +941,8 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                         committed_sequence: None,
                     })]),
                     true,
+                    false,
+                    || false,
                 )
                 .await
                 .unwrap();
@@ -1182,6 +1184,8 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
                 }),
             ]),
             true,
+            false,
+            || false,
         )
         .await
         .unwrap();
