@@ -19,7 +19,7 @@ use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::series::Label;
 use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
-use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -106,6 +106,39 @@ fn input(
         schema,
         metric,
         TimeAxis::Grid(GridRange::try_new(schema.eval_grid.clone().unwrap(), start, len).unwrap()),
+        SeriesFields::try_from_vec(fields).unwrap(),
+    )
+    .unwrap()
+}
+
+/// A series whose axis carries only `positions`, in one field per row of `fields`.
+///
+/// The rows are the positions the runs hold, so a gap between them is a hole in the axis rather
+/// than a null sample: the fold must reach them by absolute position.
+fn sparse_input(
+    schema: &SeriesSchema,
+    metric: SeriesLabels,
+    positions: &[usize],
+    fields: &[Vec<Option<f64>>],
+) -> Series {
+    let mut spans: Vec<GridSpan> = Vec::new();
+    for &position in positions {
+        match spans.last_mut() {
+            Some(span) if span.start() + span.len() == position => {
+                *span = GridSpan::new(span.start(), span.len() + 1);
+            }
+            _ => spans.push(GridSpan::new(position, 1)),
+        }
+    }
+    let time = TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap();
+    let fields = fields
+        .iter()
+        .map(|values| Samples::from_float(Float64Array::from(values.clone())))
+        .collect();
+    Series::try_new(
+        schema,
+        metric,
+        time,
         SeriesFields::try_from_vec(fields).unwrap(),
     )
     .unwrap()
@@ -632,33 +665,49 @@ fn adjacent_blocks_are_admitted_and_accounted_separately() {
         .unwrap();
     assert_eq!(aggregator.groups(), 1);
     assert_eq!(aggregator.groups[0].blocks.len(), 2);
-    assert_eq!(
-        admissions.last().copied(),
-        Some(
-            aggregator
-                .state_bytes()
-                .saturating_add(std::mem::size_of::<(usize, f64)>() * BLOCK_POINTS,)
-        )
+    // A new block is admitted on the retained state alone, so the last admission settles at
+    // exactly what the fold keeps and no staging buffer is charged for the samples in it.
+    let block = BLOCK_POINTS
+        .saturating_mul(schema.fields.len())
+        .saturating_mul(std::mem::size_of::<FloatState>());
+    let (first, second) = (
+        admissions[admissions.len() - 2],
+        admissions[admissions.len() - 1],
     );
+    assert_eq!(
+        first,
+        admissions[admissions.len() - 3]
+            .saturating_add(btree_backing_bytes(1))
+            .saturating_add(block),
+        "the first block adds its states and its tree node to the retained state"
+    );
+    assert_eq!(
+        second,
+        first
+            .saturating_add(btree_backing_bytes(2).saturating_sub(btree_backing_bytes(1)))
+            .saturating_add(block),
+        "the second block is admitted after the first"
+    );
+    assert_eq!(admissions.last().copied(), Some(aggregator.state_bytes()));
 }
 
 #[test]
 fn a_rejected_block_allocation_does_not_insert_a_block() {
     let schema = schema(&["value"]);
     let series = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0)]]);
-    // The figure a new block's admission adds: the block's states and its pending buffer, on
-    // top of whatever the fold already holds. Located by the value, not by which call reaches it,
-    // so reordering the earlier admissions cannot make this test pass without testing anything.
+    // The figure a new block's admission adds: the block's states and its tree node, on top of
+    // whatever the fold already holds. Located by the value, not by which call reaches it, so
+    // reordering the earlier admissions cannot make this test pass without testing anything.
     let block_states = BLOCK_POINTS
         .saturating_mul(schema.fields.len())
         .saturating_mul(std::mem::size_of::<FloatState>());
-    let pending = BLOCK_POINTS * std::mem::size_of::<(usize, f64)>();
+    let block = block_states.saturating_add(btree_backing_bytes(1));
     let mut aggregator =
         FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
     let mut refused = None;
     let result = aggregator.update_budgeted(&series, |bytes| {
         // Everything up to the block's own admission is admitted; only the block is refused.
-        if bytes >= block_states.saturating_add(pending) {
+        if bytes >= block {
             refused = Some(bytes);
             return Err(DataFusionError::Execution("block allocation budget".into()));
         }
@@ -670,7 +719,7 @@ fn a_rejected_block_allocation_does_not_insert_a_block() {
     );
     let refused = refused.expect("the refusal did not come from a block admission");
     assert!(
-        refused >= block_states.saturating_add(pending),
+        refused >= block,
         "the refusal came from an admission smaller than a block"
     );
     assert_eq!(aggregator.groups(), 1);
@@ -678,6 +727,178 @@ fn a_rejected_block_allocation_does_not_insert_a_block() {
         aggregator.groups[0].blocks.is_empty(),
         "a refused block was inserted anyway"
     );
+}
+
+/// A block the group already holds keeps its states when the next block is refused: the refusal is
+/// an admission taken before the insertion, not a half-inserted block.
+#[test]
+fn a_rejected_later_block_keeps_the_blocks_the_group_already_holds() {
+    let schema = schema(&["value"]);
+    let first = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0)]]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    aggregator.update(&first).unwrap();
+    let retained = aggregator.state_bytes();
+    assert_eq!(aggregator.groups[0].blocks.len(), 1);
+
+    // The group and the tree node are already there, so the block's own states are the whole
+    // charge of the second block.
+    let later = input(&schema, metric("m", &[]), 64, &[vec![Some(2.0)]]);
+    let block_states = BLOCK_POINTS
+        .saturating_mul(schema.fields.len())
+        .saturating_mul(std::mem::size_of::<FloatState>());
+    let threshold = retained
+        .saturating_add(btree_backing_bytes(2).saturating_sub(btree_backing_bytes(1)))
+        .saturating_add(block_states);
+    let mut refused = false;
+    let result = aggregator.update_budgeted(&later, |bytes| {
+        if bytes >= threshold {
+            refused = true;
+            return Err(DataFusionError::Execution("later block budget".into()));
+        }
+        Ok(())
+    });
+    assert!(result.is_err(), "the second block was admitted");
+    assert!(refused, "the refusal did not come from the second block");
+    assert_eq!(aggregator.groups[0].blocks.len(), 1);
+    assert!(
+        !aggregator.groups[0].blocks.contains_key(&1),
+        "a refused block was inserted anyway"
+    );
+    assert_eq!(
+        aggregator.state_bytes(),
+        retained,
+        "a refused block was charged"
+    );
+}
+
+/// The fold admits exactly the figures it reports: a bound equal to the peak it asked for admits
+/// the whole series, and one byte less refuses it. The staging pass that used to buffer a block's
+/// samples is gone, so the block no longer costs a buffer beside its states.
+#[test]
+fn a_bound_equal_to_the_fold_peak_admits_the_whole_series() {
+    let schema = schema(&["value", "other"]);
+    let series = input(
+        &schema,
+        metric("m", &[("zone", "a")]),
+        60,
+        &[
+            vec![Some(1.0); 8],
+            vec![
+                None,
+                Some(2.0),
+                None,
+                Some(3.0),
+                None,
+                Some(4.0),
+                None,
+                None,
+            ],
+        ],
+    );
+    let mut recorder =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["zone"])).unwrap();
+    let mut peak = 0;
+    recorder
+        .update_budgeted(&series, |bytes| {
+            peak = peak.max(bytes);
+            Ok(())
+        })
+        .unwrap();
+
+    let mut just_fitting =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["zone"])).unwrap();
+    just_fitting
+        .update_budgeted(&series, |bytes| match bytes <= peak {
+            true => Ok(()),
+            false => Err(DataFusionError::Execution(format!(
+                "the fold asked for {bytes}, more than its own peak {peak}"
+            ))),
+        })
+        .expect("a bound equal to the fold's own peak admits it");
+    assert_eq!(
+        values(&just_fitting.finish().unwrap()[0], 0),
+        (60, vec![Some(1.0); 8])
+    );
+
+    let mut one_short =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["zone"])).unwrap();
+    assert!(
+        one_short
+            .update_budgeted(&series, |bytes| match bytes < peak {
+                true => Ok(()),
+                false => Err(DataFusionError::Execution("one byte short".into())),
+            })
+            .is_err(),
+        "the peak admission is needed, not spare"
+    );
+}
+
+/// The fold releases the series' grouping workspace at its entry, so a block is charged on the
+/// retained state alone and the retained figure is the recount afterwards.
+#[test]
+fn the_fold_releases_the_series_workspace_before_it_admits_a_block() {
+    let schema = schema(&["value"]);
+    let series = input(&schema, metric("m", &[("i", "0")]), 0, &[vec![Some(1.0)]]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["i"])).unwrap();
+    let mut admissions = Vec::new();
+    aggregator
+        .update_budgeted(&series, |bytes| {
+            admissions.push(bytes);
+            Ok(())
+        })
+        .unwrap();
+    let state = aggregator.state_bytes();
+    assert_eq!(aggregator.recounted_state_bytes(), state);
+
+    let block = BLOCK_POINTS
+        .saturating_mul(schema.fields.len())
+        .saturating_mul(std::mem::size_of::<FloatState>());
+    let entry = state
+        .saturating_sub(block)
+        .saturating_sub(btree_backing_bytes(1));
+    assert_eq!(admissions[admissions.len() - 2], entry);
+    assert_eq!(admissions[admissions.len() - 1], state);
+    // Opening the group admitted the grouping workspace on top of the same retained state. The
+    // entry asked for less than that, so the workspace is not charged while the block is.
+    let grouping = admissions[..admissions.len() - 2]
+        .iter()
+        .copied()
+        .max()
+        .expect("the group was opened with an admission");
+    assert!(
+        grouping > entry,
+        "the series workspace was still charged at the fold entry: {grouping} <= {entry}"
+    );
+}
+
+/// A block a field holds no value in is not allocated: two fields whose samples fall in different
+/// blocks leave the group with the blocks they write, not the blocks between them.
+#[test]
+fn blocks_are_allocated_only_where_a_field_holds_a_value() {
+    let schema = schema_with_grid_len(&["a", "b"], 256);
+    let mut fields = [vec![None; 130], vec![None; 130]];
+    for (value, sample) in fields[0].iter_mut().take(64).enumerate() {
+        *sample = Some(value as f64);
+    }
+    fields[1][128] = Some(1.0);
+    fields[1][129] = Some(2.0);
+    let series = input(&schema, metric("m", &[]), 0, &fields);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    aggregator.update(&series).unwrap();
+    assert_eq!(aggregator.groups(), 1);
+    assert_eq!(
+        aggregator.groups[0]
+            .blocks
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![0, 2],
+        "the block between the two fields holds no sample and is not allocated"
+    );
+    assert_eq!(aggregator.state_bytes(), aggregator.recounted_state_bytes());
 }
 
 #[test]
@@ -854,6 +1075,121 @@ fn state_blocks_keep_absolute_indices_across_boundaries_and_gaps() {
     }
     assert_eq!(values_of(&output, 0, 512), (60, a));
     assert_eq!(values_of(&output, 1, 512), (60, b));
+}
+
+/// Every float aggregate, over inputs that cross block boundaries with holes, nulls and
+/// non-finite values in two fields, folded as one series each and as the runs those series are
+/// made of.
+///
+/// The oracle is the same kernel over the same samples in another shape: a run carries only its
+/// own rows, so a fold that read a block's states by row number instead of by absolute position,
+/// or that handed a field's samples over in bulk instead of in their order, would part from the
+/// whole-series fold here.
+#[test]
+fn every_aggregate_folds_a_series_whole_and_as_its_runs() {
+    let schema = schema_with_grid_len(&["a", "b"], 256);
+    // Every row holds a value in at least one field. The positions straddle the 64-point block
+    // edges, leave whole blocks empty, and repeat non-finite and signed-zero values.
+    let inputs: [(&str, &[(usize, Option<f64>, Option<f64>)]); 2] = [
+        (
+            "h1",
+            &[
+                (0, Some(1.0), None),
+                (1, Some(f64::NAN), Some(2.0)),
+                (62, None, Some(3.0)),
+                (63, Some(4.0), Some(4.0)),
+                (64, Some(5.0), None),
+                (65, Some(f64::INFINITY), Some(5.0)),
+                (127, Some(6.0), Some(f64::NEG_INFINITY)),
+                (128, None, Some(7.0)),
+                (255, Some(8.0), None),
+            ],
+        ),
+        (
+            "h2",
+            &[
+                (1, Some(9.0), Some(9.0)),
+                (63, Some(10.0), None),
+                (64, None, Some(11.0)),
+                (128, Some(12.0), Some(-0.0)),
+                (129, Some(13.0), Some(0.0)),
+            ],
+        ),
+    ];
+    let mut whole = Vec::new();
+    let mut runs = Vec::new();
+    for (host, samples) in inputs {
+        assert!(
+            samples.iter().all(|(_, a, b)| a.is_some() || b.is_some()),
+            "a row with no value would not be a carried position"
+        );
+        let positions: Vec<usize> = samples.iter().map(|(position, _, _)| *position).collect();
+        let fields = [
+            samples.iter().map(|(_, a, _)| *a).collect::<Vec<_>>(),
+            samples.iter().map(|(_, _, b)| *b).collect::<Vec<_>>(),
+        ];
+        let labels = || metric("m", &[("host", host)]);
+        whole.push(sparse_input(&schema, labels(), &positions, &fields));
+        // Each run of consecutive positions, handed over as its own series of the same label set.
+        let mut start = 0;
+        while start < positions.len() {
+            let mut end = start + 1;
+            while end < positions.len() && positions[end - 1] + 1 == positions[end] {
+                end += 1;
+            }
+            runs.push(input(
+                &schema,
+                labels(),
+                positions[start],
+                &[
+                    fields[0][start..end].to_vec(),
+                    fields[1][start..end].to_vec(),
+                ],
+            ));
+            start = end;
+        }
+    }
+    for op in OPS
+        .iter()
+        .chain(&[AggregateOp::Stddev, AggregateOp::Stdvar])
+        .copied()
+    {
+        for grouping in [
+            Grouping::By(&[]),
+            Grouping::By(&["host"]),
+            Grouping::Without(&["host"]),
+        ] {
+            let folded = aggregate_float(&schema, &whole, op, grouping).unwrap();
+            let mut chunked = FloatAggregator::try_new(&schema, op, grouping).unwrap();
+            for run in &runs {
+                chunked.update(run).unwrap();
+            }
+            let chunked = chunked.finish().unwrap();
+            let (folded, chunked) = (flatten(&folded), flatten(&chunked));
+            assert_eq!(
+                folded.keys().collect::<Vec<_>>(),
+                chunked.keys().collect::<Vec<_>>(),
+                "{op:?} {grouping:?}"
+            );
+            for (labels, chunks) in &chunked {
+                let singles = &folded[labels];
+                assert_eq!(
+                    singles.keys().collect::<Vec<_>>(),
+                    chunks.keys().collect::<Vec<_>>(),
+                    "{op:?} {grouping:?} {labels}"
+                );
+                for (key, &skipped) in chunks {
+                    // The same samples in the same per-field order, so the bits must agree; a NaN
+                    // is the same NaN, which `==` would not say.
+                    assert_eq!(
+                        singles[key].to_bits(),
+                        skipped.to_bits(),
+                        "{op:?} {grouping:?} {labels} {key:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
