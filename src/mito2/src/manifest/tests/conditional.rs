@@ -25,7 +25,7 @@ use common_wal::options::{ObjectStoreWalOptions, WalOptions};
 use object_store::ObjectStore;
 use object_store::layers::CapabilityOverrideLayer;
 use object_store::layers::mock::{
-    Error as MockError, ErrorKind, MockLayerBuilder, Result as MockResult, oio,
+    Error as MockError, ErrorKind, MockLayer, MockLayerBuilder, Result as MockResult, oio,
 };
 use object_store::services::Fs;
 use rstest::rstest;
@@ -116,6 +116,21 @@ fn counting_store() -> (TempDir, ObjectStore, Arc<AtomicUsize>, Arc<AtomicUsize>
     (dir, store.layer(layer), writes, lists)
 }
 
+struct FailingLister(ErrorKind);
+
+impl oio::List for FailingLister {
+    async fn next(&mut self) -> MockResult<Option<oio::Entry>> {
+        Err(MockError::new(self.0, "mock list failure"))
+    }
+}
+
+fn failing_list_layer(kind: ErrorKind) -> MockLayer {
+    MockLayerBuilder::default()
+        .lister_factory(Arc::new(move |_, _, _| Box::new(FailingLister(kind))))
+        .build()
+        .unwrap()
+}
+
 fn assert_conflict(error: &Error) {
     assert!(
         matches!(error, Error::ManifestVersionConflict { .. }),
@@ -156,22 +171,13 @@ async fn test_ordinary_commit_does_one_write_and_no_list(#[case] conditional: bo
     assert_eq!(0, lists.load(Ordering::Relaxed));
 }
 
+#[rstest]
 #[tokio::test]
-async fn test_list_error_during_verification_conflicts() {
-    struct FailingLister;
-
-    impl oio::List for FailingLister {
-        async fn next(&mut self) -> MockResult<Option<oio::Entry>> {
-            Err(MockError::new(ErrorKind::Unexpected, "mock list failure"))
-        }
-    }
-
+async fn test_list_error_during_verification_conflicts(
+    #[values(ErrorKind::Unexpected, ErrorKind::NotFound)] kind: ErrorKind,
+) {
     let (_dir, store) = temp_store();
-    let layer = MockLayerBuilder::default()
-        .lister_factory(Arc::new(|_, _, _| Box::new(FailingLister)))
-        .build()
-        .unwrap();
-    let store = store.layer(layer);
+    let store = store.layer(failing_list_layer(kind));
     let mut manager = create_manager(options(&store, CompressionType::Gzip, 1, true)).await;
 
     let result = manager.update(nop_action(), false, true, || true).await;
@@ -180,6 +186,18 @@ async fn test_list_error_during_verification_conflicts() {
     assert_eq!(0, manager.last_version());
     assert_eq!(0, manager.manifest().manifest_version);
     assert!(store.exists(&delta_key(1)).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_recovery_treats_missing_directory_as_no_checkpoint() {
+    let (_dir, store) = temp_store();
+    let store = store.layer(failing_list_layer(ErrorKind::NotFound));
+
+    let checkpoint = conditional_store(&store, CompressionType::Gzip)
+        .load_last_checkpoint()
+        .await;
+
+    assert!(checkpoint.unwrap().is_none());
 }
 
 #[tokio::test]

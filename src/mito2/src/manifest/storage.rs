@@ -26,21 +26,19 @@ use std::sync::atomic::AtomicU64;
 use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, warn};
 use crc32fast::Hasher;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use object_store::util::join_dir;
 use object_store::{Lister, ObjectStore, util};
 use regex::Regex;
-#[cfg(test)]
-use snafu::ResultExt;
-use snafu::ensure;
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use store_api::{MIN_VERSION, ManifestVersion};
 
 use crate::cache::manifest_cache::ManifestCache;
-#[cfg(test)]
-use crate::error::OpenDalSnafu;
 use crate::error::{
-    ChecksumMismatchSnafu, ManifestVersionConflictSnafu, Result, UnsupportedOperationSnafu,
+    ChecksumMismatchSnafu, ManifestVersionConflictSnafu, OpenDalSnafu, Result,
+    UnsupportedOperationSnafu,
 };
 use crate::manifest::storage::checkpoint::CheckpointStorage;
 use crate::manifest::storage::delta::DeltaStorage;
@@ -455,19 +453,23 @@ impl ManifestObjectStore {
         &self,
         min_version: ManifestVersion,
     ) -> Result<Option<(ManifestVersion, CompressionType)>> {
-        let start_after = list_start_after(&self.path, min_version);
-        let checkpoints = self
-            .delta_storage
-            .get_paths(Some(&start_after), |entry| {
-                let file_name = entry.name();
-                is_checkpoint_file(file_name)
-                    .then(|| (file_version(file_name), file_compress_type(file_name)))
-            })
-            .await?;
-        Ok(checkpoints
-            .into_iter()
-            .filter(|(version, _)| *version >= min_version)
-            .max_by_key(|(version, _)| *version))
+        let mut lister = self
+            .object_store
+            .lister_with(&self.path)
+            .start_after(&list_start_after(&self.path, min_version))
+            .await
+            .context(OpenDalSnafu)?;
+        let mut highest = None;
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            let file_name = entry.name();
+            if is_checkpoint_file(file_name) {
+                let version = file_version(file_name);
+                if version >= min_version && highest.is_none_or(|(v, _)| v < version) {
+                    highest = Some((version, file_compress_type(file_name)));
+                }
+            }
+        }
+        Ok(highest)
     }
 
     /// Save the checkpoint manifest file.
@@ -486,13 +488,16 @@ impl ManifestObjectStore {
     /// Also applies the checkpoint retention rule to the tracked size.
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let checkpoint = if self.conditional_publication {
-            match self.highest_checkpoint(MIN_VERSION).await? {
-                Some((version, compress_type)) => {
+            match self.highest_checkpoint(MIN_VERSION).await {
+                Ok(Some((version, compress_type))) => {
                     self.checkpoint_storage
                         .load_listed_checkpoint(version, compress_type)
                         .await?
                 }
-                None => None,
+                Ok(None) => None,
+                // A region that does not exist yet can have no manifest directory.
+                Err(e) if e.is_object_not_found() => None,
+                Err(e) => return Err(e),
             }
         } else {
             self.checkpoint_storage.load_last_checkpoint().await?
