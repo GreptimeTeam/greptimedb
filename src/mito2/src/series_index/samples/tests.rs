@@ -1122,8 +1122,8 @@ async fn batches_column_io_reuses_readers_and_releases_reservations() {
     assert_eq!(1, creations.load(Ordering::Relaxed));
     {
         let reads = reads.lock().unwrap();
-        // Each stream reads framing/root plus one coalesced request per four-column block.
-        assert_eq!(10, reads.len());
+        // Each stream reads framing/root plus one payload read across both blocks.
+        assert_eq!(8, reads.len());
         assert_eq!(
             2 * part_size,
             reads
@@ -1251,4 +1251,141 @@ async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
     // Both boundary blocks read timestamps before fetching remaining columns.
     assert_eq!(10, reads.len());
     assert_eq!(timestamp_read, reads[3]);
+}
+
+#[tokio::test]
+async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let input = (0..260)
+        .map(|id| (1, id, 0, 1, 1, Some(id)))
+        .collect::<Vec<_>>();
+    let handle = build(&format, &store, m.clone(), &[batch(&m, &input, false)]).await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let reader = format
+        .reader(
+            store.layer(
+                MockLayerBuilder::default()
+                    .reader_factory(Arc::new(move |path, _, inner| {
+                        Box::new(RecordingRead {
+                            inner,
+                            path: path.into(),
+                            reads: observed.clone(),
+                        })
+                    }))
+                    .build()
+                    .unwrap(),
+            ),
+            handle,
+        )
+        .await
+        .unwrap();
+    reads.lock().unwrap().clear();
+    let all = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(input, collect_rows(&all));
+    let (full_bytes, first_window_bytes) = {
+        let reads = reads.lock().unwrap();
+        // Header, trailer, one leaf, then three windows of at most 128 blocks.
+        assert_eq!(6, reads.len());
+        (
+            reads.iter().map(|(_, r)| r.size().unwrap()).sum::<u64>(),
+            reads[3].1.size().unwrap() as usize,
+        )
+    };
+    reads.lock().unwrap().clear();
+    let mut request = full_request();
+    request.ids = Some(
+        [
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 0,
+            },
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 259,
+            },
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let selected = reader
+        .read(request)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(vec![input[0], input[259]], collect_rows(&selected));
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, r)| r.size().unwrap())
+            .sum::<u64>()
+            < full_bytes
+    );
+
+    reads.lock().unwrap().clear();
+    let mut request = full_request();
+    request.ids = Some(
+        [
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 0,
+            },
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 2,
+            },
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let selected = reader
+        .read(request)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(vec![input[0], input[2]], collect_rows(&selected));
+    // The intervening series is read as a gap, but never decoded or returned.
+    assert_eq!(4, reads.lock().unwrap().len());
+
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    // The first pool rejects read-ahead outright. The second admits the first
+    // 128-block, four-column window but leaves no room for block decoding.
+    for capacity in [64 * 1024, 2 * first_window_bytes + 128 * 4 * 256] {
+        reads.lock().unwrap().clear();
+        let pool = Arc::new(GreedyMemoryPool::new(capacity));
+        let mut request = full_request();
+        request.memory_pool = Some(pool.clone());
+        let all = reader
+            .read(request.clone())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(input, collect_rows(&all));
+        assert_eq!(0, pool.reserved());
+        {
+            let reads = reads.lock().unwrap();
+            assert!(reads.len() > 6);
+            assert_eq!(
+                capacity != 64 * 1024,
+                reads[3].1.size().unwrap() as usize == first_window_bytes,
+                "only the larger pool should admit the initial prefetch"
+            );
+        }
+        let mut stream = reader.read(request).unwrap();
+        assert!(stream.try_next().await.unwrap().is_some());
+        drop(stream);
+        assert_eq!(0, pool.reserved());
+    }
 }
