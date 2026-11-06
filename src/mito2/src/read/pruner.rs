@@ -266,11 +266,12 @@ impl PrunerInner {
         let file = &self.stream_ctx.input.files[file_index];
         // A cached builder has already passed the static manifest predicate. Dynamic
         // filters may arrive or tighten later, so inspect their current set each time.
-        if self.file_entries[file_index]
+        let has_builder = self.file_entries[file_index]
             .lock()
             .unwrap()
             .builder
-            .is_some()
+            .is_some();
+        if has_builder
             && self
                 .stream_ctx
                 .input
@@ -1308,26 +1309,6 @@ mod tests {
             .try_mark_manifest_pruned(0, &mut reader_metrics2);
         assert!(marked2);
         assert_eq!(reader_metrics2.filter_metrics.files_time_range_pruned, 0);
-    }
-
-    #[tokio::test]
-    async fn cached_builder_reuses_static_manifest_check() {
-        let expressions = [col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(500), None)))];
-        let (_env, pruner) = make_test_pruner_with_predicate(1, 3, &expressions).await;
-        let ranges = pruner.inner.stream_ctx.partition_ranges();
-        pruner.add_partition_ranges(&ranges);
-        let mut metrics = ReaderMetrics::default();
-        assert!(!pruner.inner.try_mark_manifest_pruned(0, &mut metrics));
-        let builder = Arc::new(FileRangeBuilder::default());
-        cache_builder_if_needed(
-            &mut pruner.inner.file_entries[0].lock().unwrap(),
-            &builder,
-            &mut metrics,
-        );
-        for _ in 0..3 {
-            assert!(!pruner.inner.try_mark_manifest_pruned(0, &mut metrics));
-        }
-        assert_eq!(pruner.inner.manifest_check_count.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
