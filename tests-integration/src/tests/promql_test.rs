@@ -10907,9 +10907,15 @@ async fn native_promql_scalar_parameter_reads_its_own_selector() {
         Some("FusedSeriesExec"),
         "the fused node must answer a scalar() parameter that reads a selector: {sql}"
     );
-    assert!(
-        !topk_native.1.is_empty(),
+    assert_eq!(
+        topk_native.1.len(),
+        2,
         "one row per evaluation point: {sql}"
+    );
+    assert_eq!(
+        topk_native.1.iter().map(|row| row.0).collect::<Vec<_>>(),
+        vec![0, 60_000],
+        "the expected evaluation timestamps: {sql}"
     );
     // The existing planner rejects `scalar()` over a selector, so each evaluation point is compared
     // against the same statement with the scalar's value at that point written as a literal `k`.

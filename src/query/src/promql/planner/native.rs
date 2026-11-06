@@ -3414,6 +3414,7 @@ fn calls_rate_or_increase(expr: &PromExpr) -> bool {
                 || call.args.args.iter().any(|arg| calls_rate_or_increase(arg))
         }
         PromExpr::Paren(ParenExpr { expr }) => calls_rate_or_increase(expr),
+        PromExpr::Subquery(subquery) => calls_rate_or_increase(&subquery.expr),
         PromExpr::Binary(binary) => {
             calls_rate_or_increase(&binary.lhs) || calls_rate_or_increase(&binary.rhs)
         }
@@ -3446,11 +3447,27 @@ mod tests {
 
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
-        NativeType, aggregate_reads_histogram, collect_selectors, cut_segments, fused_output_schema,
-        fused_output_tags, hybrid_binary_admitted, independent_scan_pair, native_output_tags,
-        native_promql_requested, native_raw_plan_bounds_region_reads, node_children,
-        scan_time_filter,
+        NativeType, aggregate_reads_histogram, calls_rate_or_increase, collect_selectors,
+        cut_segments, fused_output_schema, fused_output_tags, hybrid_binary_admitted,
+        independent_scan_pair, native_output_tags, native_promql_requested,
+        native_raw_plan_bounds_region_reads, node_children, scan_time_filter,
     };
+
+    #[test]
+    fn delta_temporality_guard_finds_rate_and_increase_inside_subqueries() {
+        for query in [
+            "rate(x[5m])",
+            "increase(x[5m])",
+            "avg_over_time(rate(x[5m])[10m:1m])",
+            "avg_over_time(increase(x[5m])[10m:1m])",
+        ] {
+            let expr = promql_parser::parser::parse(query).unwrap();
+            assert!(calls_rate_or_increase(&expr), "{query}");
+        }
+        let query = "avg_over_time(abs(x)[10m:1m])";
+        let expr = promql_parser::parser::parse(query).unwrap();
+        assert!(!calls_rate_or_increase(&expr), "{query}");
+    }
 
     #[test]
     fn native_raw_region_read_budget_needs_the_native_topology() {
@@ -3890,6 +3907,12 @@ mod tests {
             Some(vec!["host".to_string(), "sample".to_string()]),
             native_output_tags(count_values.root(), &sources)
         );
+        // A destination already present in the grouping is reported once, not duplicated.
+        let count_values = compiled_test_tree("count_values by (host) (\"host\", x)");
+        assert_eq!(
+            Some(vec!["host".to_string()]),
+            native_output_tags(count_values.root(), &sources)
+        );
         // Selecting some series keeps each one's own labels, whatever the grouping was.
         let topk = compiled_test_tree("topk(1, x)");
         assert_eq!(
@@ -3969,6 +3992,13 @@ mod tests {
         let count_values = compiled_test_tree("count_values without (instance) (\"sample\", x)");
         assert_eq!(
             Some(vec!["job".to_string(), "sample".to_string()]),
+            native_output_tags(count_values.root(), &sources)
+        );
+
+        let count_values =
+            compiled_test_tree("count_values without (sample, instance) (\"sample\", x)");
+        assert_eq!(
+            Some(vec!["job".to_string()]),
             native_output_tags(count_values.root(), &sources)
         );
     }

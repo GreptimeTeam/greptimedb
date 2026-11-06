@@ -839,6 +839,154 @@ fn math_map_matching_key_preservation_controls_locality() {
     ));
 }
 
+/// The inner ranking's per-point parameter children finish before the outer ranking settles.
+/// Dropping those children must not prevent the outer `topk` from returning its suffix rows.
+#[tokio::test]
+async fn constant_topk_over_parameterized_topk_keeps_suffix_rows() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 60_000, 3).unwrap()).unwrap());
+    let raw = NativeType::Samples(raw_schema());
+    let output = evaluated_of(&raw_schema(), &grid);
+    let window = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
+                    output: raw.clone(),
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: raw,
+            }),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 60_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: output.clone(),
+    };
+    let ceil = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(window),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Math(crate::map::MathOp::Ceil)]),
+            },
+        },
+        output: output.clone(),
+    };
+    let sum = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(ceil),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::from([Arc::from(HOST)])),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: output.clone(),
+    };
+    let scalar = |value| NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value }),
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let binary = |left, right, op| NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let time = NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let parameter = binary(
+        binary(time, scalar(1.0 / 60.0), BinaryOp::Mul),
+        scalar(1.0),
+        BinaryOp::Add,
+    );
+    let rank = |k| BoundVectorOp::TopK {
+        k,
+        top: true,
+        group: Grouping::By(Arc::from([])),
+    };
+    let inner = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(sum),
+            op: rank(0.0),
+            parameter: Box::new(parameter),
+        },
+        output: output.clone(),
+    };
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op: rank(1.0),
+        },
+        output,
+    })
+    .unwrap();
+
+    // `h0` through `h7` sum to 0 through 7. Splitting `h7` across the two physical
+    // partitions also proves that the gathered execution reads both contributions: partition 0
+    // alone would rank `h6=6` over its `h7=3` fragment.
+    let mut partitions = vec![Vec::new(), Vec::new()];
+    for host in 0..8 {
+        let host_name = format!("h{host}");
+        let parts: Vec<(usize, &str, f64)> = if host == 7 {
+            vec![(0, "a", 3.0), (1, "b", 4.0)]
+        } else {
+            vec![(host % 2, "a", host as f64)]
+        };
+        for (partition, job, value) in parts {
+            let key = format!("{host_name}-{job}");
+            let samples = [
+                (-60_000, value),
+                (0, value),
+                (60_000, value),
+                (120_000, value),
+            ];
+            partitions[partition].push(frame(&labelled_chunk(
+                &key,
+                &[(HOST, &host_name), (JOB, job)],
+                &samples,
+                true,
+            )));
+        }
+    }
+    assert!(matches!(
+        super::input_locality(tree.root()),
+        super::InputLocality::SinglePartition
+    ));
+    let exec = plan(tree, memory_exec_partitioned(partitions)).unwrap();
+    let mut actual = rows(
+        &collect(exec, SessionContext::default().task_ctx())
+            .await
+            .unwrap(),
+    );
+    actual.sort_by_key(|row| row.0);
+    assert_eq!(
+        actual,
+        vec![
+            (0, Some(7.0), Some("h7".to_string()), None),
+            (60_000, Some(7.0), Some("h7".to_string()), None),
+            (120_000, Some(7.0), Some("h7".to_string()), None),
+        ]
+    );
+}
+
 /// A node that reads the whole vector at a point answers one value (or a whole ranking) rather than
 /// one output series per input series, so it cannot keep a source's matching key: it needs every
 /// series of that source in one place.
