@@ -6259,14 +6259,11 @@ fn broadcast_runtime(
 
 /// Whether the [`Emitted`] table `broadcast` would keep only repeats the one its vector side keeps.
 ///
-/// Arithmetic against a constant maps one position to one position: a value stays a value whatever
-/// it becomes -- `pow` may answer a `NaN`, which occupies its position like any other -- and a
-/// missing sample stays missing, so no occupancy changes. Nor does identity, when the vector side is
-/// a [`NativeExpr::Window`] that drops the metric name: that window already dropped the name, and
-/// the second drop removes only what [`label_set`] ignores, the empty-valued labels, so the
-/// canonical identity this node hands out is the one it read. The window checks exactly those
-/// identities and their occupied positions in a table of its own, so a second series could not
-/// collide here without having been refused there first.
+/// Literal arithmetic leaves missing samples missing and floats at their positions; a histogram is
+/// either retained at its position or dropped. Its output occupancy is therefore a subset of the
+/// window's. A name-dropping [`NativeExpr::Window`] already removed the metadata labels, and the
+/// second drop removes only empty-valued labels that [`label_set`] ignores. The canonical identity
+/// is unchanged, so arithmetic cannot create a collision the window did not already refuse.
 fn elides_emitted_table(broadcast: &BroadcastRuntime, vector: &NativeNode) -> bool {
     matches!(broadcast.scalar, BroadcastScalar::Literal(_))
         && matches!(broadcast.op, BroadcastOp::Arithmetic(_))

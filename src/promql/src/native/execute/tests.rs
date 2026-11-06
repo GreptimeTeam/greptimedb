@@ -27,7 +27,8 @@ use datatypes::series::histogram::{
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
-    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields,
+    SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
@@ -10366,58 +10367,119 @@ fn a_name_preserving_window_leaves_the_collision_to_the_broadcast() {
     );
 }
 
-/// A native histogram its window hands over is still refused by the arithmetic kernel.
-///
-/// The broadcast keeps no table for this shape, and a table is not a filter: the histogram reaches
-/// the kernel and is reported uncomputed, rather than being dropped from the answer.
+/// Literal arithmetic over a name-dropping window keeps only the positions it was handed:
+/// multiplication scales histograms, while unsupported arithmetic drops their samples without
+/// dropping floats or the series close. The window already checks the identities and positions.
 #[test]
-fn a_histogram_window_under_a_literal_arithmetic_is_refused() {
-    let grid = grid(0, 60_000, 2);
+fn a_histogram_window_under_literal_arithmetic_never_expands_occupancy() {
+    let grid = grid(0, 60_000, 4);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(broadcast_right(
+    let window = || {
         window_with(
             evaluated_input(Arc::clone(&grid)),
-            RangeFunction::Increase,
-            240_000,
+            RangeFunction::SumOverTime,
+            1,
             Some(Arc::clone(&grid)),
             Arc::clone(&grid),
-        ),
-        2.0,
-        BinaryOp::Mul,
-        false,
-    ))
-    .unwrap();
-    let pool = pool();
-    let mut execution = executor(&tree, Arc::clone(&pool));
-    execution
-        .push_evaluated(
-            InputId::new(0),
-            evaluated_histograms(&schema, metric(), 0, 4, 2, true),
         )
-        .unwrap();
-    let error = match execution.next_chunk() {
-        Ok(None) => panic!("the window answered nothing for the histograms it read"),
-        Ok(Some(chunk)) => panic!(
-            "a histogram reached the arithmetic kernel: {:?}",
-            histogram_counts(&chunk)
-        ),
-        Err(error) => error,
     };
-    let message = error.to_string();
-    assert!(
-        message.contains("histogram/mixed samples are not supported"),
-        "expected the kernel's refusal of an unsupported sample, got: {message:?}"
-    );
-    assert_eq!(
-        execution.state().reserved_bytes(),
+    let mut metric = named_metric("requests", "x");
+    metric.set("__type__", "histogram".into()).unwrap();
+    metric.set("__unit__", "seconds".into()).unwrap();
+    let mut expected_metric = named_metric("requests", "x");
+    expected_metric.remove("__name__");
+    let mixed = Samples::try_from_mixed(
+        Float64Array::from(vec![Some(3.0), None, None, Some(5.0)]),
+        HistogramSamples::try_new(
+            UInt32Array::from(vec![None, Some(0), None, None]),
+            histogram_table(1, 4),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mixed = EvaluatedChunk::try_new(
+        Series {
+            metric: metric.clone(),
+            time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 4).unwrap()),
+            fields: SeriesFields::one(mixed),
+        },
+        true,
+    )
+    .unwrap();
+    let histograms = evaluated_histogram_chunk_of(
+        &schema,
+        metric,
         0,
-        "error retained execution bytes: {message}"
+        vec![Some(0), None, Some(0), None],
+        &histogram_table(1, 4),
+        true,
     );
-    assert_eq!(
-        pool.reserved(),
-        0,
-        "error retained a pool reservation: {message}"
-    );
+
+    for (op, literal_left, input, expected, dropped) in [
+        (
+            BinaryOp::Mul,
+            false,
+            mixed.clone(),
+            vec![(0, Some(6.0)), (1, None), (3, Some(10.0))],
+            false,
+        ),
+        (
+            BinaryOp::Mul,
+            true,
+            mixed.clone(),
+            vec![(0, Some(6.0)), (1, None), (3, Some(10.0))],
+            false,
+        ),
+        (
+            BinaryOp::Add,
+            false,
+            mixed,
+            vec![(0, Some(5.0)), (1, None), (3, Some(7.0))],
+            true,
+        ),
+        (
+            BinaryOp::Add,
+            false,
+            histograms,
+            vec![(0, None), (2, None)],
+            true,
+        ),
+    ] {
+        let root = if literal_left {
+            broadcast_left(2.0, window(), op, false)
+        } else {
+            broadcast_right(window(), 2.0, op, false)
+        };
+        assert_eq!(emitted_tables(root.clone()), (false, true));
+        let tree = NativeTree::try_new(root).unwrap();
+        let pool = pool();
+        let collector = common_query::promql_annotations::PromqlAnnotationCollector::default();
+        let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        execution.push_evaluated(InputId::new(0), input).unwrap();
+        let out = run(&mut execution);
+
+        assert_eq!(decided(&out), expected);
+        assert_eq!(out.iter().filter(|chunk| chunk.is_last).count(), 1);
+        for chunk in &out {
+            assert_eq!(chunk.series.metric, expected_metric);
+        }
+        let counts = out.iter().flat_map(histogram_counts).collect::<Vec<_>>();
+        assert_eq!(counts, if dropped { vec![] } else { vec![8.0] });
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        assert_eq!(
+            infos
+                .iter()
+                .any(|info| info.contains("dropped native histogram samples")),
+            dropped,
+            "unexpected histogram drop annotation: {infos:?}"
+        );
+        assert_eq!(execution.state().reserved_bytes(), 0);
+        assert_eq!(pool.reserved(), 0);
+    }
 }
 
 /// A series that ended is one member of a group, not the group: nothing is answered until the input
