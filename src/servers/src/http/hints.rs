@@ -37,7 +37,20 @@ pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
     {
         return error.into_response();
     }
-    next.run(request).await
+    let query_ctx = request.extensions().get::<QueryContext>().cloned();
+    let mut response = next.run(request).await;
+    if let Some(warning) = query_ctx.and_then(|ctx| ctx.warning()) {
+        // Encode as JSON so quotes and control characters cannot corrupt headers.
+        if let Ok(json) = serde_json::to_string(&vec![warning])
+            && let Ok(value) = axum::http::HeaderValue::from_str(&json)
+        {
+            response.headers_mut().insert(
+                crate::http::header::constants::GREPTIME_DB_HEADER_WARNINGS,
+                value,
+            );
+        }
+    }
+    response
 }
 
 fn apply_hints(
@@ -81,6 +94,68 @@ mod tests {
     };
 
     use super::apply_hints;
+
+    #[tokio::test]
+    async fn partial_inspection_http_hint_and_warning() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use axum::{Extension, Router, middleware, routing};
+        use session::context::QueryContext;
+        use tower::ServiceExt;
+
+        for (value, status, allowed) in [
+            ("true", StatusCode::OK, true),
+            ("false", StatusCode::OK, false),
+            ("TRUE", StatusCode::OK, true),
+            ("yes", StatusCode::BAD_REQUEST, false),
+        ] {
+            let app = Router::new()
+                .route(
+                    "/v1/sql",
+                    routing::get(|Extension(ctx): Extension<QueryContext>| async move {
+                        let ctx = ctx.query_option_snapshot().unwrap();
+                        if ctx.allow_partial_inspection_results() {
+                            ctx.set_warning(
+                                "Incomplete inspection results: failed-node".to_string(),
+                            );
+                        }
+                        ctx.allow_partial_inspection_results().to_string()
+                    }),
+                )
+                .layer(middleware::from_fn(super::extract_hints))
+                .layer(Extension(QueryContextBuilder::default().build()));
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/sql")
+                        .header(
+                            "x-greptime-hints",
+                            format!("query.allow_partial_inspection_results={value}"),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            if status == StatusCode::OK {
+                assert_eq!(
+                    response.headers().contains_key("x-greptime-warnings"),
+                    allowed
+                );
+                if allowed {
+                    assert_eq!(
+                        response.headers()["x-greptime-warnings"],
+                        "[\"Incomplete inspection results: failed-node\"]"
+                    );
+                }
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert_eq!(&body[..], allowed.to_string().as_bytes());
+            }
+        }
+    }
 
     #[test]
     fn test_apply_hints_ignores_reserved_extension_keys_only() {

@@ -14,10 +14,14 @@
 
 use crate::session_config::{Error, InvalidConfigValueSnafu};
 
+/// Allows incomplete results from distributed datanode inspection tables only.
+pub const ALLOW_PARTIAL_INSPECTION_RESULTS: &str = "query.allow_partial_inspection_results";
+
 /// Returns a canonical query option alias or a DataFusion optimizer option name.
 pub fn canonical_query_option_name(key: &str) -> Option<String> {
     let key = key.to_ascii_lowercase();
     match key.as_str() {
+        ALLOW_PARTIAL_INSPECTION_RESULTS => Some(key.clone()),
         "query_parallelism" | "query.parallelism" => Some("query.parallelism".to_string()),
         "query_fallback" | "allow_query_fallback" | "query.allow_query_fallback" => {
             Some("query.allow_query_fallback".to_string())

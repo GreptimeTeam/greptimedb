@@ -63,8 +63,9 @@ pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
     session: SessionRef,
     outputs: Vec<Result<Output>>,
 ) -> Result<()> {
-    if let Some(warning) = query_context.warning() {
-        session.add_warning(warning);
+    let initial_warning = query_context.warning();
+    if let Some(warning) = &initial_warning {
+        session.add_warning(warning.clone());
     }
 
     enum Response {
@@ -147,6 +148,11 @@ pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
         }
     }
 
+    if let Some(warning) = query_context.warning()
+        && Some(&warning) != initial_warning.as_ref()
+    {
+        session.add_warning(warning);
+    }
     writer.no_more_results().await?;
     Ok(())
 }

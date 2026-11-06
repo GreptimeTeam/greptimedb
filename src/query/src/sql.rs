@@ -871,6 +871,10 @@ pub fn show_query_option(
     };
     let context = engine.engine_context(query_ctx.clone())?;
     let value = match canonical.as_str() {
+        session::query_options::ALLOW_PARTIAL_INSPECTION_RESULTS => context
+            .query_ctx()
+            .allow_partial_inspection_results()
+            .to_string(),
         "query.allow_query_fallback" => context
             .state()
             .config_options()

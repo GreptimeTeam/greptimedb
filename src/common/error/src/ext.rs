@@ -160,6 +160,12 @@ pub trait ErrorExt: StackError {
         self.retry_hint().is_retryable()
     }
 
+    /// Whether this error represents an unavailable transport connection.
+    /// This is narrower than retryability and must not include application errors.
+    fn is_transport_unavailable(&self) -> bool {
+        false
+    }
+
     /// Returns the error as [Any](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
@@ -323,6 +329,10 @@ impl std::error::Error for BoxedError {
 }
 
 impl crate::ext::ErrorExt for BoxedError {
+    fn is_transport_unavailable(&self) -> bool {
+        self.inner.is_transport_unavailable()
+    }
+
     fn status_code(&self) -> crate::status_code::StatusCode {
         self.inner.status_code()
     }
