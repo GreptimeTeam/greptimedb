@@ -85,6 +85,16 @@ pub(crate) async fn prepare_region_with_metadata(
     config: MitoConfig,
     metadata: store_api::metadata::RegionMetadataRef,
 ) -> (MitoEngine, MitoRegionRef) {
+    prepare_region_with_metadata_and_flush(env, timestamps, config, metadata, true).await
+}
+
+pub(crate) async fn prepare_region_with_metadata_and_flush(
+    env: &mut TestEnv,
+    timestamps: &[i64],
+    config: MitoConfig,
+    metadata: store_api::metadata::RegionMetadataRef,
+    flush_each: bool,
+) -> (MitoEngine, MitoRegionRef) {
     let engine = env.create_engine(config).await;
     let region_id = RegionId::new(1, 1);
     let mut request = CreateRequestBuilder::new().build();
@@ -104,7 +114,7 @@ pub(crate) async fn prepare_region_with_metadata(
         .insert("compaction.type".to_string(), "twcs".to_string());
     request.options.insert(
         "compaction.twcs.time_window".to_string(),
-        "100s".to_string(),
+        if flush_each { "100s" } else { "172800s" }.to_string(),
     );
     // Keep the source SSTs stable while tests reconcile multiple buckets.
     for window in ["active_window", "inactive_window"] {
@@ -165,6 +175,11 @@ pub(crate) async fn prepare_region_with_metadata(
             )
             .await
             .unwrap();
+        if flush_each {
+            flush_region(&engine, region_id, None).await;
+        }
+    }
+    if !flush_each {
         flush_region(&engine, region_id, None).await;
     }
     (engine, region)

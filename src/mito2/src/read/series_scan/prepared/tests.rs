@@ -621,6 +621,29 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     );
 
     build(&engine, &region).await;
+    // A partial-day query still uses grouped samples when other sources were time-pruned.
+    let mut bounded_request = request.clone();
+    bounded_request.filters.push(col("ts").gt_eq(lit(
+        datafusion_common::ScalarValue::TimestampMillisecond(Some(1500), None),
+    )));
+    let bounded = engine
+        .handle_query(region.region_id, bounded_request)
+        .await
+        .unwrap();
+    let bounded_labels = labels(bounded.metadata());
+    let prepared = bounded
+        .prepare_series(&ctx, &metrics, &bounded_labels)
+        .await
+        .unwrap()
+        .expect("time-pruned daily sources remain prepared");
+    let chunks = prepared
+        .read_series(0..prepared.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(samples(&chunks), vec![(2000, 1.0)]);
+
     let mut raw_scanner = engine
         .handle_query(region.region_id, request.clone())
         .await
@@ -915,8 +938,15 @@ async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType
 
     build(&engine, &region).await;
     let rebuilt = region.series_index_version();
-    for (id, old) in &original.samples {
-        let new = &rebuilt.samples[id];
+    for old in original.samples.values() {
+        let new = rebuilt
+            .samples
+            .values()
+            .find(|new| {
+                new.entry().window == old.entry().window
+                    && new.entry().source_file_ids == old.entry().source_file_ids
+            })
+            .unwrap();
         assert_eq!(
             semantic_type == SemanticType::Tag,
             old.entry().artifact.generation == new.entry().artifact.generation
@@ -1320,6 +1350,43 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
             .to_string()
             .contains("foreign SST")
     );
+
+    // A daily artifact cannot supply just one source from its grouped coverage.
+    let mut partial = make_context();
+    partial.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
+        index: 0,
+        row_group_index: -1,
+    }]
+    .into();
+    assert!(!validate_inputs(&partial, &ranges[..1]).unwrap());
+
+    // A catalog can outlive a source generation until reconciliation runs.
+    let mut stale = make_context();
+    let index = stale.input.series_index.as_mut().unwrap();
+    let (purger, _purges) = crate::series_index::series_index_channel(store.clone());
+    let samples = index
+        .version
+        .samples
+        .iter()
+        .map(|(id, handle)| {
+            let mut entry = handle.entry().clone();
+            entry.source_file_ids.push(FileId::random());
+            (
+                *id,
+                crate::series_index::artifact::SamplesFileHandle::new(
+                    handle.file_id(),
+                    entry,
+                    purger.clone(),
+                ),
+            )
+        })
+        .collect();
+    index.version = Arc::new(SeriesIndexVersion {
+        samples,
+        series_indexes: index.version.series_indexes.clone(),
+        ..Default::default()
+    });
+    assert!(!validate_inputs(&stale, &ranges).unwrap());
 
     // Missing columnar samples are a not-ready answer, not an error.
     let mut context = make_context();
@@ -1837,6 +1904,110 @@ async fn series_pushdown_skips_unrelated_table_payloads() {
         .unwrap();
     assert!(selected.is_empty());
     assert!(reads.lock().unwrap().len() < full_reads);
+    engine.stop().await.unwrap();
+}
+
+/// Sparse timestamps must not create empty-day artifacts, and new SSTs must leave existing
+/// source groups intact. Reopening exercises the persisted explicit coverage used by preflight.
+#[tokio::test]
+async fn daily_samples_preserve_sparse_coverage_and_existing_groups() {
+    let (_env, engine, region) = fixture().await;
+    const LATER: i64 = 20_000 * 86_400_000;
+    write(&engine, &region, 0, 0, Some(1.0)).await;
+    write(&engine, &region, 0, LATER, Some(2.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let original = region.series_index_version();
+    assert_eq!(original.samples.len(), 2);
+    assert_eq!(
+        original
+            .samples
+            .values()
+            .map(|h| h.entry().window.unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        [0, 20_000].into()
+    );
+    let store = region.series_index_store.clone().unwrap();
+    let (purger, _receiver) = crate::series_index::series_index_channel(store.clone());
+    let reopened =
+        crate::series_index::load_version_control(&store, region.region_id, &purger).await;
+    for file in region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+    {
+        assert!(crate::series_index::artifact::samples_cover_file(
+            &reopened.current().samples,
+            file
+        ));
+    }
+    // Complete source coverage spans both days, but preparation must open only
+    // intersecting artifacts. Compare rows with the ordinary scanner as well.
+    for (start, end, expected_readers) in [
+        (0, 86_400_000, 1),
+        (86_400_000, LATER, 0),
+        (LATER, LATER + 1, 1),
+        (0, LATER + 1, 2),
+    ] {
+        let mut results = Vec::new();
+        for format in [SelectedFormat::Legacy, SelectedFormat::Columnar] {
+            let mut input = scan_input(
+                &region,
+                store.clone(),
+                format,
+                (0..region.version().metadata.column_metadatas.len()).collect(),
+            );
+            input.time_range = common_time::range::TimestampRange::new(
+                common_time::Timestamp::new_millisecond(start),
+                common_time::Timestamp::new_millisecond(end),
+            );
+            input.predicate = PredicateGroup::new(
+                &region.version().metadata,
+                &[
+                    col("tag_0").eq(lit("a")),
+                    col("field_0").gt(lit(0.0)),
+                    col("ts").gt_eq(lit(datafusion_common::ScalarValue::TimestampMillisecond(
+                        Some(start),
+                        None,
+                    ))),
+                    col("ts").lt(lit(datafusion_common::ScalarValue::TimestampMillisecond(
+                        Some(end),
+                        None,
+                    ))),
+                ],
+            )
+            .unwrap();
+            let scan = SeriesScan::new(input, false);
+            let chunks = scan
+                .scan_series_partition(
+                    &QueryScanContext::default(),
+                    &ExecutionPlanMetricsSet::new(),
+                    0,
+                    &labels(scan.metadata()),
+                )
+                .unwrap()
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            if format == SelectedFormat::Columnar {
+                let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
+                assert_eq!(prepared.samples.len(), expected_readers);
+            }
+            results.push(rows(&chunks));
+        }
+        assert_eq!(results[0], results[1]);
+    }
+    write(&engine, &region, 0, 3000, Some(3.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let updated = region.series_index_version();
+    assert_eq!(updated.samples.len(), original.samples.len() + 1);
+    for (id, old) in &original.samples {
+        assert_eq!(updated.samples[id].entry(), old.entry());
+    }
     engine.stop().await.unwrap();
 }
 
