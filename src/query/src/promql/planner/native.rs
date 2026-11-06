@@ -2716,10 +2716,7 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
             !matches!(input.output_field_kind(input_kind), Some(FieldKind::Float))
                 || aggregate_reads_histogram(input, input_kind)
         }
-        NativeExpr::Input(_)
-        | NativeExpr::Scalar(_)
-        | NativeExpr::EvalTime { .. }
-        | NativeExpr::VectorOf { .. } => false,
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Merge { input }
         | NativeExpr::Window { input, .. }
@@ -2734,10 +2731,13 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
                     .iter()
                     .any(|node| aggregate_reads_histogram(node, input_kind))
         }
-        // `scalar()` reads a whole vector and answers one value, and the two dynamic nodes read
-        // their parameters beside their input: an aggregate under any of them is still an
-        // aggregate this tree would run, so the walk descends into every child it has.
-        NativeExpr::ScalarOf { input } => aggregate_reads_histogram(input, input_kind),
+        // `vector()` answers one float series, but the walk asks about aggregates anywhere in
+        // the tree: `vector(scalar(sum(h)))` still folds histogram input. `scalar()` also reads
+        // its input, and both wrappers can hide an aggregate that must be refused.
+        NativeExpr::VectorOf { input } | NativeExpr::ScalarOf { input } => {
+            aggregate_reads_histogram(input, input_kind)
+        }
+        // The dynamic nodes read their parameters beside their input, so every child matters.
         NativeExpr::ParameterizedTopK {
             input, parameter, ..
         } => {
@@ -3446,9 +3446,10 @@ mod tests {
 
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
-        NativeType, collect_selectors, cut_segments, fused_output_schema, fused_output_tags,
-        hybrid_binary_admitted, independent_scan_pair, native_output_tags, native_promql_requested,
-        native_raw_plan_bounds_region_reads, scan_time_filter,
+        NativeType, aggregate_reads_histogram, collect_selectors, cut_segments, fused_output_schema,
+        fused_output_tags, hybrid_binary_admitted, independent_scan_pair, native_output_tags,
+        native_promql_requested, native_raw_plan_bounds_region_reads, node_children,
+        scan_time_filter,
     };
 
     #[test]
@@ -3505,46 +3506,23 @@ mod tests {
         .tree
     }
 
+    #[test]
+    fn aggregate_histogram_walk_descends_through_scalar_vector_wrappers() {
+        let tree = compiled_test_tree("scalar(vector(scalar(sum(some_metric))))");
+        assert_eq!(input_sources(tree.root()), vec![0]);
+        assert!(aggregate_reads_histogram(tree.root(), FieldKind::Histogram));
+        assert!(!aggregate_reads_histogram(tree.root(), FieldKind::Float));
+    }
+
     fn input_sources(root: &NativeNode) -> Vec<usize> {
         fn collect(node: &NativeNode, sources: &mut Vec<usize>) {
             match &node.expr {
                 NativeExpr::Input(input) => sources.push(input.source_index),
-                NativeExpr::Instant { input, .. }
-                | NativeExpr::Window { input, .. }
-                | NativeExpr::Merge { input }
-                | NativeExpr::Map { input, .. }
-                | NativeExpr::Timestamp { input }
-                | NativeExpr::ScalarOf { input } => collect(input, sources),
-                NativeExpr::ParameterizedTopK {
-                    input, parameter, ..
-                } => {
-                    collect(input, sources);
-                    collect(parameter, sources);
-                }
-                NativeExpr::ParameterizedHistogram {
-                    input, parameters, ..
-                } => {
-                    collect(input, sources);
-                    for parameter in parameters {
-                        collect(parameter, sources);
+                expr => {
+                    for child in node_children(expr) {
+                        collect(child, sources);
                     }
                 }
-                NativeExpr::Binary { left, right, .. }
-                | NativeExpr::Set { left, right, .. }
-                | NativeExpr::Info {
-                    base: left,
-                    info: right,
-                    ..
-                } => {
-                    collect(left, sources);
-                    collect(right, sources);
-                }
-                NativeExpr::Scalar(_)
-                | NativeExpr::EvalTime { .. }
-                | NativeExpr::VectorOf { .. }
-                | NativeExpr::ParameterizedMap { .. }
-                | NativeExpr::Aggregate { .. }
-                | NativeExpr::Vector { .. } => {}
             }
         }
 
