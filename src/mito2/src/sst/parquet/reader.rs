@@ -62,8 +62,13 @@ use crate::error::{
     UnexpectedSnafu,
 };
 use crate::metrics::{
-    PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
-    READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
+    PRECISE_FILTER_ROWS_PARQUET_TOTAL, READ_ROW_GROUPS_BEFORE_FILTERING_TOTAL,
+    READ_ROW_GROUPS_BLOOM_FILTER_INDEX_FILTERED_TOTAL,
+    READ_ROW_GROUPS_FULLTEXT_INDEX_FILTERED_TOTAL, READ_ROW_GROUPS_INVERTED_INDEX_FILTERED_TOTAL,
+    READ_ROW_GROUPS_MINMAX_INDEX_FILTERED_TOTAL, READ_ROWS_IN_ROW_GROUP_BEFORE_FILTERING_TOTAL,
+    READ_ROWS_IN_ROW_GROUP_BLOOM_FILTER_INDEX_FILTERED_TOTAL,
+    READ_ROWS_IN_ROW_GROUP_FULLTEXT_INDEX_FILTERED_TOTAL,
+    READ_ROWS_IN_ROW_GROUP_INVERTED_INDEX_FILTERED_TOTAL, READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
 };
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
@@ -1632,36 +1637,19 @@ impl ReaderFilterMetrics {
 
     /// Reports metrics.
     pub(crate) fn observe(&self) {
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["before_filtering"])
-            .inc_by(self.rg_total as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["fulltext_index_filtered"])
-            .inc_by(self.rg_fulltext_filtered as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["inverted_index_filtered"])
-            .inc_by(self.rg_inverted_filtered as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["minmax_index_filtered"])
-            .inc_by(self.rg_minmax_filtered as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["bloom_filter_index_filtered"])
-            .inc_by(self.rg_bloom_filtered as u64);
+        READ_ROW_GROUPS_BEFORE_FILTERING_TOTAL.inc_by(self.rg_total as u64);
+        READ_ROW_GROUPS_FULLTEXT_INDEX_FILTERED_TOTAL.inc_by(self.rg_fulltext_filtered as u64);
+        READ_ROW_GROUPS_INVERTED_INDEX_FILTERED_TOTAL.inc_by(self.rg_inverted_filtered as u64);
+        READ_ROW_GROUPS_MINMAX_INDEX_FILTERED_TOTAL.inc_by(self.rg_minmax_filtered as u64);
+        READ_ROW_GROUPS_BLOOM_FILTER_INDEX_FILTERED_TOTAL.inc_by(self.rg_bloom_filtered as u64);
 
-        PRECISE_FILTER_ROWS_TOTAL
-            .with_label_values(&["parquet"])
-            .inc_by(self.rows_precise_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["before_filtering"])
-            .inc_by(self.rows_total as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["fulltext_index_filtered"])
+        PRECISE_FILTER_ROWS_PARQUET_TOTAL.inc_by(self.rows_precise_filtered as u64);
+        READ_ROWS_IN_ROW_GROUP_BEFORE_FILTERING_TOTAL.inc_by(self.rows_total as u64);
+        READ_ROWS_IN_ROW_GROUP_FULLTEXT_INDEX_FILTERED_TOTAL
             .inc_by(self.rows_fulltext_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["inverted_index_filtered"])
+        READ_ROWS_IN_ROW_GROUP_INVERTED_INDEX_FILTERED_TOTAL
             .inc_by(self.rows_inverted_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["bloom_filter_index_filtered"])
+        READ_ROWS_IN_ROW_GROUP_BLOOM_FILTER_INDEX_FILTERED_TOTAL
             .inc_by(self.rows_bloom_filtered as u64);
     }
 

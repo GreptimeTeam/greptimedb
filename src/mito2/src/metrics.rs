@@ -251,6 +251,17 @@ lazy_static! {
         register_int_counter_vec!("greptime_mito_precise_filter_rows_total", "mito precise filter rows total", &[TYPE_LABEL]).unwrap();
     pub static ref READ_ROWS_IN_ROW_GROUP_TOTAL: IntCounterVec =
         register_int_counter_vec!("greptime_mito_read_rows_in_row_group_total", "mito read rows in row group total", &[TYPE_LABEL]).unwrap();
+    // Resolve fixed labels once to avoid MetricVec hashing and locking on every range.
+    pub(crate) static ref READ_ROW_GROUPS_BEFORE_FILTERING_TOTAL: IntCounter = READ_ROW_GROUPS_TOTAL.with_label_values(&["before_filtering"]);
+    pub(crate) static ref READ_ROW_GROUPS_FULLTEXT_INDEX_FILTERED_TOTAL: IntCounter = READ_ROW_GROUPS_TOTAL.with_label_values(&["fulltext_index_filtered"]);
+    pub(crate) static ref READ_ROW_GROUPS_INVERTED_INDEX_FILTERED_TOTAL: IntCounter = READ_ROW_GROUPS_TOTAL.with_label_values(&["inverted_index_filtered"]);
+    pub(crate) static ref READ_ROW_GROUPS_MINMAX_INDEX_FILTERED_TOTAL: IntCounter = READ_ROW_GROUPS_TOTAL.with_label_values(&["minmax_index_filtered"]);
+    pub(crate) static ref READ_ROW_GROUPS_BLOOM_FILTER_INDEX_FILTERED_TOTAL: IntCounter = READ_ROW_GROUPS_TOTAL.with_label_values(&["bloom_filter_index_filtered"]);
+    pub(crate) static ref PRECISE_FILTER_ROWS_PARQUET_TOTAL: IntCounter = PRECISE_FILTER_ROWS_TOTAL.with_label_values(&["parquet"]);
+    pub(crate) static ref READ_ROWS_IN_ROW_GROUP_BEFORE_FILTERING_TOTAL: IntCounter = READ_ROWS_IN_ROW_GROUP_TOTAL.with_label_values(&["before_filtering"]);
+    pub(crate) static ref READ_ROWS_IN_ROW_GROUP_FULLTEXT_INDEX_FILTERED_TOTAL: IntCounter = READ_ROWS_IN_ROW_GROUP_TOTAL.with_label_values(&["fulltext_index_filtered"]);
+    pub(crate) static ref READ_ROWS_IN_ROW_GROUP_INVERTED_INDEX_FILTERED_TOTAL: IntCounter = READ_ROWS_IN_ROW_GROUP_TOTAL.with_label_values(&["inverted_index_filtered"]);
+    pub(crate) static ref READ_ROWS_IN_ROW_GROUP_BLOOM_FILTER_INDEX_FILTERED_TOTAL: IntCounter = READ_ROWS_IN_ROW_GROUP_TOTAL.with_label_values(&["bloom_filter_index_filtered"]);
     /// Histogram for the number of SSTs to scan per query.
     pub static ref READ_SST_COUNT: Histogram = register_histogram!(
         "greptime_mito_read_sst_count",
