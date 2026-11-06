@@ -3019,7 +3019,10 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     let plan = build_native_fused_plan("rate(some_metric[5m])", true).await;
 
     let display = plan.display_indent().to_string();
-    assert!(display.contains("  Window: rate [300000ms]"), "{display}");
+    assert!(
+        display.contains("native_tree=[\nWindow: rate [300000ms]"),
+        "{display}"
+    );
     // The node reads the selector's own scan; nothing between them packs the frame it reads.
     assert!(display.contains("TableScan: some_metric"), "{display}");
     // The node keeps the compiled tree, not the query text.
@@ -5561,18 +5564,21 @@ async fn native_split_explain_renders_each_tree_including_remote_input() {
     });
     let text = logical.display_indent().to_string();
     let verbose = logical.display_indent_schema().to_string();
-    println!("=== logical_plan ===\n{text}\n=== logical_plan VERBOSE ===\n{verbose}");
     let (final_text, remote_text) = text
         .split_once("MergeScan [is_placeholder=false, remote_input=[")
         .expect("the partial is inside a merge scan");
-    assert!(final_text.starts_with("FusedSeries\n  Binary:"), "{text}");
+    assert!(
+        final_text.starts_with("FusedSeries\nnative_tree=[\nBinary:"),
+        "{text}"
+    );
     assert!(
         final_text.contains("Aggregate: avg by [tag_0] final"),
         "{text}"
     );
     assert!(
-        remote_text
-            .contains("FusedSeries: (output: series_frame)\n  Aggregate: avg by [tag_0] partial"),
+        remote_text.contains(
+            "FusedSeries: (output: series_frame)\nnative_tree=[\nAggregate: avg by [tag_0] partial"
+        ),
         "{text}"
     );
     assert!(remote_text.contains("Window: irate [60000ms]"), "{text}");
@@ -5641,13 +5647,13 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
         // above the Final aggregate rather than the literal `Histogram` op the constant form binds.
         match query {
             "histogram_quantile(time() / 150, sum by (le) (rate(some_metric[5m])))" => assert!(
-                final_display.contains("ParameterizedHistogram histogram_quantile"),
+                final_display.contains("ParameterizedHistogram: histogram_quantile"),
                 "`{query}`: the split must carry the per-point parameter: {final_display}"
             ),
             "histogram_fraction(time() / 150, time() / 75 + 0.5, sum by (le) (rate(some_metric[5m])))" =>
             {
                 assert!(
-                    final_display.contains("ParameterizedHistogram histogram_fraction"),
+                    final_display.contains("ParameterizedHistogram: histogram_fraction"),
                     "`{query}`: the split must carry the per-point parameters: {final_display}"
                 )
             }

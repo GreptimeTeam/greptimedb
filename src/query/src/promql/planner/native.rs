@@ -1650,7 +1650,6 @@ impl PromPlanner {
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = segment_tree(
-                prom_expr,
                 &tree,
                 &children,
                 &source_tags,
@@ -2666,7 +2665,6 @@ fn build_inner_segment(
 /// root publishes rows.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn segment_tree(
-    prom_expr: &PromExpr,
     tree: &NativeTree,
     children: &[LogicalPlan],
     source_tags: &[Vec<String>],
@@ -2752,7 +2750,6 @@ fn segment_tree(
                     return Ok(None);
                 };
                 let plan = segment_tree(
-                    prom_expr,
                     &cut_tree,
                     &current_children,
                     &current_tags,

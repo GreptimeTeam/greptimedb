@@ -663,8 +663,7 @@ mod tests {
         let tree = NativeTree::try_new(merge).unwrap();
         LogicalPlan::Extension(Extension {
             node: Arc::new(
-                FusedSeries::try_new_canonical_producer(tree, binding, vec![input])
-                .unwrap(),
+                FusedSeries::try_new_canonical_producer(tree, binding, vec![input]).unwrap(),
             ),
         })
     }
