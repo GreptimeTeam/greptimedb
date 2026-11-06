@@ -16,7 +16,7 @@
 
 use crate::error::Result;
 pub(super) use crate::series_index::columnar::codec::{
-    Cursor, checksum, decompress, put_u32, put_u64, put_varint,
+    Cursor, PayloadDecoder, checksum, decompress, put_u32, put_u64, put_varint,
 };
 use crate::series_index::samples::{MAX_ROWS, require, unsupported};
 
