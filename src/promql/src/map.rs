@@ -35,11 +35,11 @@ use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::arrow::array::Float64Array;
-use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{
     DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{GridRange, TimeAxis};
+use datatypes::series::{Label, SeriesLabels};
 
 use crate::functions::Round;
 use crate::grid_series::GridSeriesBuilder;
@@ -233,9 +233,24 @@ fn map_float_fields(
 /// name. Empty values are dropped too: Prometheus has no empty labels, and keeping them would
 /// hide a same-labelset collision from the caller.
 pub(crate) fn drop_metric_name(metric: &SeriesLabels) -> Result<SeriesLabels> {
-    rebuild_labels(metric, None, |name| {
-        !matches!(name, "__type__" | "__unit__")
-    })
+    let tags = metric.tags();
+    let reject = |label: &Label| {
+        label.value.is_empty() || matches!(label.name.as_ref(), "__type__" | "__unit__")
+    };
+    let Some(first) = tags.iter().position(reject) else {
+        let mut result = metric.clone();
+        result.remove("__name__");
+        return Ok(result);
+    };
+
+    let mut kept = tags[..first].to_vec();
+    kept.extend(
+        tags[first + 1..]
+            .iter()
+            .filter(|label| !reject(label))
+            .cloned(),
+    );
+    SeriesLabels::try_new(None, kept).map_err(series_error)
 }
 
 /// Drops labels with empty values, which Prometheus treats as absent.

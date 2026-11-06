@@ -553,6 +553,123 @@ fn math_matches_main_udfs_across_float_boundaries() {
     }
 }
 
+fn labels(name: Option<&str>, tags: &[(&str, &str)]) -> SeriesLabels {
+    SeriesLabels::try_new(
+        name.map(Arc::from),
+        tags.iter()
+            .map(|(name, value)| Label {
+                name: Arc::from(*name),
+                value: Arc::from(*value),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn drop_metric_name_shares_clean_tags_and_mutation_is_isolated() {
+    let expected = labels(None, &[("__other__", "kept"), ("host", "a"), ("job", "db")]);
+    for name in [None, Some(""), Some("cpu")] {
+        let input = labels(name, &[("job", "db"), ("__other__", "kept"), ("host", "a")]);
+        let before = input.clone();
+        let mut output = drop_metric_name(&input).unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(output.name(), None);
+        assert_eq!(
+            output
+                .tags()
+                .iter()
+                .map(|tag| (tag.name.as_ref(), tag.value.as_ref()))
+                .collect::<Vec<_>>(),
+            [("__other__", "kept"), ("host", "a"), ("job", "db")]
+        );
+        assert_eq!(input.name(), name);
+        assert_eq!(input.tags(), expected.tags());
+        assert_eq!(input, before);
+        assert!(std::ptr::eq(input.tags().as_ptr(), output.tags().as_ptr()));
+
+        output.set("host", "b".into()).unwrap();
+        assert_eq!(output.get("host"), Some("b"));
+        assert_eq!(input.get("host"), Some("a"));
+        assert_eq!(input, before);
+        assert!(!std::ptr::eq(input.tags().as_ptr(), output.tags().as_ptr()));
+    }
+
+    for name in [None, Some(""), Some("cpu")] {
+        let input = labels(name, &[]);
+        let output = drop_metric_name(&input).unwrap();
+        assert_eq!(output, labels(None, &[]));
+        assert_eq!(input.name(), name);
+        assert!(input.tags().is_empty());
+    }
+}
+
+#[test]
+fn drop_metric_name_filters_rejected_tags_like_rebuild_labels() {
+    let cases: &[(&[(&str, &str)], &[(&str, &str)])] = &[
+        (
+            &[("a", ""), ("b", "2"), ("c", "3")],
+            &[("b", "2"), ("c", "3")],
+        ),
+        (
+            &[("a", "1"), ("b", ""), ("c", "3")],
+            &[("a", "1"), ("c", "3")],
+        ),
+        (
+            &[("a", "1"), ("b", "2"), ("c", "")],
+            &[("a", "1"), ("b", "2")],
+        ),
+        (
+            &[
+                ("__other__", "kept"),
+                ("__type__", "gauge"),
+                ("__unit__", "seconds"),
+                ("a", ""),
+                ("b", "2"),
+                ("c", ""),
+            ],
+            &[("__other__", "kept"), ("b", "2")],
+        ),
+        (
+            &[("__type__", "gauge"), ("__unit__", "seconds"), ("a", "")],
+            &[],
+        ),
+    ];
+    for &(tags, expected_tags) in cases {
+        let input = labels(Some("cpu"), tags);
+        let before = input.clone();
+        let output = drop_metric_name(&input).unwrap();
+        let reference = rebuild_labels(&input, None, |name| {
+            !matches!(name, "__type__" | "__unit__")
+        })
+        .unwrap();
+        assert_eq!(output, reference, "{tags:?}");
+        assert_eq!(output, labels(None, expected_tags), "{tags:?}");
+        assert_eq!(input, before, "{tags:?}");
+    }
+}
+
+#[test]
+fn drop_metric_name_converges_names_and_metadata() {
+    let a = labels(
+        Some("cpu"),
+        &[
+            ("host", "a"),
+            ("__type__", "counter"),
+            ("__unit__", "seconds"),
+            ("zone", ""),
+        ],
+    );
+    let b = labels(
+        Some("memory"),
+        &[("host", "a"), ("__type__", "gauge"), ("__unit__", "bytes")],
+    );
+    let clean = labels(None, &[("host", "a")]);
+    assert_eq!(drop_metric_name(&a).unwrap(), clean);
+    assert_eq!(drop_metric_name(&b).unwrap(), clean);
+    assert_eq!(drop_metric_name(&clean).unwrap(), clean);
+}
+
 #[test]
 fn math_drops_reserved_metadata_and_empty_labels_with_the_name() {
     let schema = schema(&["value"]);
