@@ -38,6 +38,7 @@ use futures::StreamExt;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher};
 use servers::error::{self, Result};
 use servers::exemplar::query::{ExactTimestamp, Observation, Query, Selector, Series};
+use servers::interceptor::{PromQueryInterceptor, PromQueryInterceptorRef};
 use servers::prometheus_handler::PrometheusHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -59,8 +60,9 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Vec<Series>> {
         self.check_prom_query_privilege(&ctx)?;
-        let mut groups = BTreeMap::<String, Vec<Selector>>::new();
-        for selector in query.selectors {
+        let interceptor = self.plugins.get::<PromQueryInterceptorRef<error::Error>>();
+        let mut groups = BTreeMap::<String, Vec<&Selector>>::new();
+        for selector in &query.selectors {
             groups
                 .entry(selector.schema.clone())
                 .or_default()
@@ -98,9 +100,6 @@ impl Instance {
             self.check_query_target_permission(PermissionTableTargets::resolved(targets), &local)
                 .await?;
         }
-        let Some(bounds) = query.bounds else {
-            return Ok(Vec::new());
-        };
         let ticket = self.process_manager.register_query(
             ctx.current_catalog().to_string(),
             groups.keys().cloned().collect(),
@@ -144,7 +143,7 @@ impl Instance {
                 operator::insert::validate_exemplar_table(&info)
                     .map_err(BoxedError::new)
                     .context(error::ExecuteQuerySnafu)?;
-                let filter = filter(&info, &selectors, bounds)?;
+                let filter = filter(&info, &selectors, query.bounds)?;
                 let frame = self
                     .query_engine
                     .read_table(table)
@@ -154,6 +153,7 @@ impl Instance {
                     .filter(filter)
                     .context(error::DataFusionSnafu)?
                     .into_unoptimized_plan();
+                interceptor.pre_execute_exemplars(&query, info.table_ref(), local.clone())?;
                 let output = self
                     .statement_executor
                     .exec_plan(plan, local)
@@ -213,7 +213,7 @@ fn column(name: &str) -> Expr {
     Expr::Column(Column::from_name(name))
 }
 
-fn filter(info: &TableInfo, selectors: &[Selector], bounds: (i64, i64)) -> Result<Expr> {
+fn filter(info: &TableInfo, selectors: &[&Selector], bounds: (i64, i64)) -> Result<Expr> {
     let schema = &info.meta.schema;
     let tags = info
         .meta

@@ -50,6 +50,13 @@ a `warnings` entry with the skipped count. Valid observations retain their
 timestamps, values, labels, and deduplication behavior. Schema, decoding,
 storage, memory-limit, and cancellation errors still fail the query.
 
+Query `start` and `end` accept numeric Unix seconds or RFC3339 timestamps. Both
+are floored to nanoseconds, ignoring finer precision, before validating that
+`start` does not exceed `end`. Bounds are inclusive: values within the same
+nanosecond select that instant, even if their discarded fractions were reversed.
+Negative numeric timestamps also floor toward the past; `-0.0000000001` becomes
+`-0.000000001`.
+
 Selectors use `__name__` for the metric name and inherited series labels such
 as `job`. Storage columns such as `__table_id`, `__tsid`, `greptime_metric`,
 and `greptime_value` are not exposed as series labels; matchers on them follow

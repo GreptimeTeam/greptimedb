@@ -669,11 +669,44 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_exemplar_authorizes_every_resolved_branch_before_missing_table() {
+    async fn test_exemplar_authorization_and_interception() {
         use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
         use servers::exemplar::query::Query;
+        use servers::interceptor::{PromQueryInterceptor, PromQueryInterceptorRef};
         use servers::prometheus_handler::PrometheusHandler;
         use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use table::table_reference::TableReference;
+
+        #[derive(Default)]
+        struct Hook {
+            tables: Mutex<Vec<String>>,
+            reject: AtomicBool,
+        }
+        impl PromQueryInterceptor for Hook {
+            type Error = servers::error::Error;
+
+            fn pre_execute_exemplars(
+                &self,
+                query: &Query,
+                table: TableReference<'_>,
+                ctx: QueryContextRef,
+            ) -> servers::error::Result<()> {
+                assert_eq!(query.bounds, (0, 1_000_000_000));
+                assert!(query.expression.starts_with("metric"));
+                assert_eq!(table.catalog, ctx.current_catalog());
+                assert_eq!(table.schema, ctx.current_schema());
+                assert_eq!(table.table, METRICS_EXEMPLARS_TABLE);
+                self.tables.lock().unwrap().push(table.to_string());
+                if self.reject.load(Ordering::Relaxed) {
+                    return servers::error::NotSupportedSnafu {
+                        feat: "intercepted exemplar query",
+                    }
+                    .fail();
+                }
+                Ok(())
+            }
+        }
 
         struct Checker(Mutex<Vec<auth::PermissionTableTargets>>);
         impl auth::PermissionChecker for Checker {
@@ -709,13 +742,19 @@ mod tests {
             }
         }
         let checker = Arc::new(Checker(Mutex::new(Vec::new())));
+        let hook = Arc::new(Hook::default());
         let plugins = Plugins::new();
         plugins.insert::<auth::PermissionCheckerRef>(checker.clone());
+        plugins.insert::<PromQueryInterceptorRef<servers::error::Error>>(hook.clone());
         let standalone = GreptimeDbStandaloneBuilder::new("exemplar_query_auth")
             .with_plugin(plugins)
             .build()
             .await;
         let instance = standalone.fe_instance();
+        query(instance, "CREATE DATABASE other").await;
+        for schema in ["public", "other"] {
+            create_table(instance, &format!("CREATE TABLE {schema}.{METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')")).await;
+        }
         for expression in [
             "rate(metric{__schema__=\"public\"}[5m]) + metric{__database__=\"secret\"}",
             "metric{__schema__=\"public\" or __schema__=\"secret\"}",
@@ -734,6 +773,7 @@ mod tests {
                 "{expression}: {error:?}"
             );
             assert!(!checker.0.lock().unwrap().is_empty());
+            assert!(hook.tables.lock().unwrap().is_empty());
         }
         let query = Query::parse(
             "metric{__schema__=\"public\" or __database__=\"other\"}".into(),
@@ -750,12 +790,48 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let checks = checker.0.lock().unwrap();
+        let checks = checker.0.lock().unwrap().clone();
         for schema in ["public", "other"] {
             for table in ["metric", METRICS_EXEMPLARS_TABLE] {
                 assert!(checks.iter().any(|c| matches!(c, auth::PermissionTableTargets::Resolved(t) if t.iter().any(|t| t.schema == schema && t.table == table))));
             }
         }
+        assert_eq!(
+            *hook.tables.lock().unwrap(),
+            [
+                format!("greptime.other.{METRICS_EXEMPLARS_TABLE}"),
+                format!("greptime.public.{METRICS_EXEMPLARS_TABLE}"),
+            ],
+        );
+        hook.tables.lock().unwrap().clear();
+        hook.reject.store(true, Ordering::Relaxed);
+        let error = instance
+            .query_exemplars(
+                Query::parse("metric".into(), "0", "1", "public").unwrap(),
+                QueryContext::arc(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            servers::error::Error::NotSupported { feat, .. }
+                if feat == "intercepted exemplar query"
+        ));
+        assert_eq!(hook.tables.lock().unwrap().len(), 1);
+
+        hook.tables.lock().unwrap().clear();
+        assert!(
+            instance
+                .query_exemplars(
+                    Query::parse("metric{__schema__=\"missing\"}".into(), "0", "1", "public")
+                        .unwrap(),
+                    QueryContext::arc(),
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(hook.tables.lock().unwrap().is_empty());
     }
 
     /// The entity-graph derivation must run as the caller: a source table the
