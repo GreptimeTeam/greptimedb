@@ -231,8 +231,8 @@ impl FormatReader for ColumnarReader {
             let mut metrics = ColumnarReadMetrics::default();
             for part in &manifest.files {
                 if !matches_range(part.first, part.last, &request) { continue; }
-                let started = Instant::now();
                 *metrics.counts.entry("series_parts").or_default() += 1;
+                let timer = metrics.timer("columnar_series_metadata_wall");
                 let path = manifest.part_path(part.part_id);
                 let size = part.file_size;
                 let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
@@ -249,7 +249,7 @@ impl FormatReader for ColumnarReader {
                 }).await?;
                 require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
                 let root = load_metadata_page(cache.as_ref(), &store, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
-                metrics.add_elapsed("columnar_series_metadata_wall", started.elapsed());
+                drop(timer);
                 let (mut active, children) = match root.as_ref() {
                     Page::Leaf(_) => (Some(root.clone()), Vec::new()),
                     Page::Internal(children) => (None, children.clone()),
@@ -261,9 +261,9 @@ impl FormatReader for ColumnarReader {
                     let page = if let Some(page) = active.take() { page } else {
                         let Some(child) = child_iter.next() else { break; };
                         if !matches_range(child.first, child.last, &request) { continue; }
-                        let started = Instant::now();
+                        let timer = metrics.timer("columnar_series_metadata_wall");
                         let page = load_metadata_page(cache.as_ref(), &store, (&path, size), &child, 1, trailer.payload_end, &names).await?;
-                        metrics.add_elapsed("columnar_series_metadata_wall", started.elapsed());
+                        drop(timer);
                         page
                     };
                     let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in depth-two series index"))? };
@@ -466,9 +466,9 @@ async fn load_column_chunk(
             column.payload.encoding, column.name
         )));
     }
-    let started = Instant::now();
+    let timer = metrics.timer("columnar_series_fetch_wall");
     let bytes = read_range(store, path, column.payload.offset, column.payload.end()?).await?;
-    metrics.add_elapsed("columnar_series_fetch_wall", started.elapsed());
+    drop(timer);
     *metrics.counts.entry("series_column_reads").or_default() += 1;
     *metrics.bytes.entry("series_payload_fetched").or_default() += bytes.len() as u64;
     let started = Instant::now();
