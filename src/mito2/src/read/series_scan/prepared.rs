@@ -784,12 +784,8 @@ fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<Reco
             timestamp.name
         )));
     }
-    // Preserve schema validation above even for empty batches. Bounds are computed
-    // from the actual arrays: sample metadata does not expose sequence bounds here,
-    // and timestamps from a format reader are not assumed to be sorted.
-    if batch.num_rows() == 0 {
-        return Ok(batch);
-    }
+    // Bounds are computed from the actual arrays: sample metadata does not expose
+    // sequence bounds here, and format-reader timestamps need not be sorted.
     if sequence.null_count() == 0 && time.null_count() == 0 {
         let needs_sequence_max = context.input.snapshot_sequence.is_some()
             || matches!(

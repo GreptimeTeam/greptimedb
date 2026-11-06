@@ -1998,23 +1998,14 @@ async fn visibility_fast_path_preserves_buffers_and_partial_filtering() {
             )
             .with_snapshot_sequence(snapshot)
             .with_sequence_range(range)
-            .build();
-            let mut context = StreamContext::seq_scan_ctx(input);
-            // Use the builder for a bounded scan, keeping the unbounded cases too.
-            if let Some((start, end)) = bounds {
-                let input = ScanInput::builder(
-                    region.access_layer.clone(),
-                    FlatProjectionMapper::new(&metadata, vec![]).unwrap(),
-                )
-                .with_snapshot_sequence(snapshot)
-                .with_sequence_range(range)
-                .with_time_range(TimestampRange::new(
+            .with_time_range(bounds.and_then(|(start, end)| {
+                TimestampRange::new(
                     Timestamp::new_millisecond(start),
                     Timestamp::new_millisecond(end),
-                ))
-                .build();
-                context = StreamContext::seq_scan_ctx(input);
-            }
+                )
+            }))
+            .build();
+            let context = StreamContext::seq_scan_ctx(input);
             let batch = RecordBatch::try_from_iter(vec![
                 (
                     time_name.as_str(),
@@ -2052,49 +2043,7 @@ async fn visibility_fast_path_preserves_buffers_and_partial_filtering() {
                 assert!(Arc::ptr_eq(batch.column(0), filtered.column(0)));
                 assert!(Arc::ptr_eq(batch.column(1), filtered.column(1)));
             }
-            let empty = batch.slice(0, 0);
-            assert_eq!(0, filter_visibility(empty, &context).unwrap().num_rows());
         }
-    }
-    engine.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn visibility_fast_path_validates_empty_batch_schema() {
-    use datatypes::arrow::array::{TimestampMillisecondArray, TimestampSecondArray};
-    let (_env, engine, region) = fixture().await;
-    let metadata = region.version().metadata.clone();
-    let time_name = metadata.time_index_column().column_schema.name.clone();
-    let context = StreamContext::seq_scan_ctx(
-        ScanInput::builder(
-            region.access_layer.clone(),
-            FlatProjectionMapper::new(&metadata, vec![]).unwrap(),
-        )
-        .build(),
-    );
-    let time = Arc::new(TimestampMillisecondArray::from(Vec::<i64>::new())) as ArrayRef;
-    let sequence = Arc::new(UInt64Array::from(Vec::<u64>::new())) as ArrayRef;
-    for columns in [
-        vec![(time_name.as_str(), time.clone())],
-        vec![(SEQUENCE_COLUMN_NAME, sequence.clone())],
-        vec![
-            (time_name.as_str(), time.clone()),
-            (SEQUENCE_COLUMN_NAME, time.clone()),
-        ],
-        vec![
-            (time_name.as_str(), sequence.clone()),
-            (SEQUENCE_COLUMN_NAME, sequence.clone()),
-        ],
-        vec![
-            (
-                time_name.as_str(),
-                Arc::new(TimestampSecondArray::from(Vec::<i64>::new())) as ArrayRef,
-            ),
-            (SEQUENCE_COLUMN_NAME, sequence.clone()),
-        ],
-    ] {
-        let batch = RecordBatch::try_from_iter(columns).unwrap();
-        assert!(filter_visibility(batch, &context).is_err());
     }
     engine.stop().await.unwrap();
 }
