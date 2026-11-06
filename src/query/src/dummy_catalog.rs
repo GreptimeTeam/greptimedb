@@ -42,7 +42,7 @@ use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeri
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictionary_encoding};
-use table::table::scan::RegionScanExec;
+use table::table::scan::statistics_scan_plan;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
 use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
@@ -195,11 +195,14 @@ impl TableProvider for DummyTableProvider {
         }
 
         let query_memory_tracker = self.engine.query_memory_tracker();
-        let mut scan_exec = RegionScanExec::new(scanner, request, query_memory_tracker)?;
-        if let Some(query_ctx) = &self.query_ctx {
-            scan_exec.set_explain_verbose(query_ctx.explain_verbose());
-        }
-        Ok(Arc::new(scan_exec))
+        statistics_scan_plan(
+            scanner,
+            request,
+            query_memory_tracker,
+            self.query_ctx
+                .as_ref()
+                .is_some_and(|ctx| ctx.explain_verbose()),
+        )
     }
 
     fn supports_filters_pushdown(
@@ -292,6 +295,19 @@ impl DummyTableProvider {
 
     pub(crate) fn with_json_type_hint(&self, hint: HashMap<String, JsonNativeType>) {
         self.scan_request.lock().unwrap().json_type_hint = hint;
+    }
+
+    /// Whether this Mito scan still needs a count hint. Optimizer passes may
+    /// revisit the same aggregate; an already hinted provider is left alone.
+    pub(crate) fn needs_metadata_count_hint(&self) -> bool {
+        self.engine.name() == "mito" && !self.scan_request.lock().unwrap().metadata_count_hint
+    }
+
+    /// Requests exact-count preparation from Mito.
+    pub(crate) fn with_metadata_count_hint(&self) {
+        if self.engine.name() == "mito" {
+            self.scan_request.lock().unwrap().metadata_count_hint = true;
+        }
     }
 
     /// Gets the scan request of the provider.
