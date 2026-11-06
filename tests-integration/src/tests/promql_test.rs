@@ -6607,6 +6607,64 @@ async fn native_promql_info_enriches_from_the_info_table() {
     }
 }
 
+/// A window over a table partitioned on a column that is not a tag sees the whole series.
+///
+/// Such a table splits one series across regions, so a per-region prefix evaluates `rate` over a
+/// fragment and loses every window that straddles the boundary. The cut therefore has to keep each
+/// occurrence's raw source and run the prefix above the reconciliation, exactly as the remote route
+/// does. The fixture puts the two samples of one series on either side of the boundary and compares
+/// the native answer with the existing plan's.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_window_over_a_time_partitioned_table_keeps_whole_series() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_time_partitioned_window",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_time_partitioned (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:02:30', \
+         ts >= '1970-01-01 00:02:30')",
+        QueryContext::arc(),
+    )
+    .await;
+    // One series, one sample in each region: the second is 240s after the first, and the boundary
+    // sits between them, so neither region holds a complete window on its own.
+    execute_all(
+        &instance,
+        "INSERT INTO native_time_partitioned VALUES ('h0', 60000, 60), ('h0', 240000, 240)",
+        QueryContext::arc(),
+    )
+    .await;
+    for query in [
+        "rate(native_time_partitioned[5m]) + rate(native_time_partitioned[5m])",
+        "(rate(native_time_partitioned[5m]) + rate(native_time_partitioned[5m])) \
+         + rate(native_time_partitioned[5m])",
+    ] {
+        let sql = format!("TQL EVAL (300, 300, '1m') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !native.is_empty(),
+            "{query}: the native plan answered nothing"
+        );
+        assert_eq!(
+            native, legacy,
+            "{query}: the native plan must match the existing one"
+        );
+        let root = observer.root_plan();
+        let mut inputs = Vec::new();
+        native_region_inputs(&root, &mut inputs);
+        assert!(
+            !inputs.is_empty(),
+            "{query}: the window runs above the region reads: {:?}",
+            display_plan_tree(&root)
+        );
+    }
+}
+
 /// A query over two selectors of one partitioned table matches above the regions.
 ///
 /// A fused node over the bare scans of such a table has no placement in a region — the dist

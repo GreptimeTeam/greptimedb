@@ -1360,9 +1360,13 @@ impl PromPlanner {
                 FusedOutputFormat::PlainRows,
                 contains_canonical_merge(root),
                 root_kind,
-                // A split-series table must keep the raw source under the cut: a bare-scan segment
-                // would evaluate a window over one region's fragment on the frontend.
-                self_contained || any_split_series,
+                // A cut must keep the source whenever the table behind it can split a series
+                // across regions: a per-region prefix would evaluate a window over one region's
+                // fragment, so `rate` never sees the samples the other region holds. That is a
+                // partitioned table whose occurrences are source-backed, and always a partition on
+                // a column that is not a tag. An unpartitioned table's scans are whole in one
+                // region, so its cuts keep the bare-scan form.
+                self_contained || any_split_series || (per_source_inputs && any_partitioned),
             ))
             .await?;
             if let Some(plan) = plan {
