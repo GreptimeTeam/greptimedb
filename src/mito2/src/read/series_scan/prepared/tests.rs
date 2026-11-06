@@ -2268,3 +2268,91 @@ async fn overlapping_buckets_reject_conflicting_physical_tags(#[case] mixed: boo
     assert!(error.output_msg().contains("conflicting labels"), "{error}");
     engine.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn visibility_fast_path_preserves_buffers_and_partial_filtering() {
+    use common_time::{Timestamp, range::TimestampRange};
+    use datatypes::arrow::array::TimestampMillisecondArray;
+    use store_api::storage::SequenceRange;
+
+    let (_env, engine, region) = fixture().await;
+    let metadata = region.version().metadata.clone();
+    let time_name = metadata.time_index_column().column_schema.name.clone();
+    // Deliberately unordered: first/last values alone cannot prove visibility.
+    let sequences = vec![Some(3), Some(5), Some(2), Some(4)];
+    let times = vec![Some(0), Some(2), Some(-1), Some(1)];
+    let cases = [
+        (None, None, None),
+        (Some(5), SequenceRange::new(Some(1), Some(5)), Some((-1, 3))),
+        (Some(5), SequenceRange::new(Some(1), None), None),
+        (None, SequenceRange::new(None, Some(5)), None),
+        (Some(4), None, None),
+        (None, SequenceRange::new(Some(2), None), None),
+        (None, SequenceRange::new(None, Some(4)), None),
+        (None, SequenceRange::new(Some(5), Some(5)), None),
+        (None, None, Some((-1, 2))),
+        (None, None, Some((0, 3))),
+    ];
+    for nulls in [false, true] {
+        for (snapshot, range, bounds) in cases {
+            let mut sequences = sequences.clone();
+            let mut times = times.clone();
+            if nulls {
+                sequences[0] = None;
+                times[1] = None;
+            }
+            let input = ScanInput::builder(
+                region.access_layer.clone(),
+                FlatProjectionMapper::new(&metadata, vec![]).unwrap(),
+            )
+            .with_snapshot_sequence(snapshot)
+            .with_sequence_range(range)
+            .with_time_range(bounds.and_then(|(start, end)| {
+                TimestampRange::new(
+                    Timestamp::new_millisecond(start),
+                    Timestamp::new_millisecond(end),
+                )
+            }))
+            .build();
+            let context = StreamContext::seq_scan_ctx(input);
+            let batch = RecordBatch::try_from_iter(vec![
+                (
+                    time_name.as_str(),
+                    Arc::new(TimestampMillisecondArray::from(times.clone())) as ArrayRef,
+                ),
+                (
+                    SEQUENCE_COLUMN_NAME,
+                    Arc::new(UInt64Array::from(sequences.clone())) as ArrayRef,
+                ),
+            ])
+            .unwrap();
+            let expected = sequences
+                .iter()
+                .zip(&times)
+                .filter_map(|(seq, time)| {
+                    let (seq, time) = ((*seq)?, (*time)?);
+                    let visible = snapshot.is_none_or(|max| seq <= max)
+                        && range.is_none_or(|range| match range {
+                            SequenceRange::Gt { min } => seq > min,
+                            SequenceRange::LtEq { max } => seq <= max,
+                            SequenceRange::GtLtEq { min, max } => seq > min && seq <= max,
+                        })
+                        && bounds.is_none_or(|(start, end)| time >= start && time < end);
+                    visible.then_some(seq)
+                })
+                .collect::<Vec<_>>();
+            let filtered = filter_visibility(batch.clone(), &context).unwrap();
+            let actual = filtered
+                .column(1)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            assert_eq!(expected.as_slice(), actual.values().as_ref());
+            if expected.len() == batch.num_rows() {
+                assert!(Arc::ptr_eq(batch.column(0), filtered.column(0)));
+                assert!(Arc::ptr_eq(batch.column(1), filtered.column(1)));
+            }
+        }
+    }
+    engine.stop().await.unwrap();
+}

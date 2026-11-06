@@ -33,7 +33,7 @@ use datatypes::arrow::array::{
     UInt64Array,
 };
 use datatypes::arrow::buffer::{Buffer, OffsetBuffer};
-use datatypes::arrow::compute::{cast, filter_record_batch, take_record_batch};
+use datatypes::arrow::compute::{cast, filter_record_batch, max, min, take_record_batch};
 use datatypes::arrow::datatypes::{Schema, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::{SeriesLabelBatch, SeriesLabels, SeriesOrdering};
@@ -47,8 +47,8 @@ use store_api::metric_engine_consts::{
 use store_api::region_engine::{
     PartitionRange, PreparedSeriesSource, RawLabelSource, SendableRawSeriesStream, SeriesInfo,
 };
-use store_api::storage::FileId;
 use store_api::storage::consts::{ReservedColumnId, SEQUENCE_COLUMN_NAME};
+use store_api::storage::{FileId, SequenceRange};
 use table::predicate::Predicate;
 use tokio::sync::OnceCell;
 
@@ -1039,6 +1039,47 @@ fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<Reco
             "time index column {} has unit {actual_unit:?}, expected {unit:?}",
             timestamp.name
         )));
+    }
+    // Bounds are computed from the actual arrays: sample metadata does not expose
+    // sequence bounds here, and format-reader timestamps need not be sorted.
+    if sequence.null_count() == 0 && time.null_count() == 0 {
+        let needs_sequence_max = context.input.snapshot_sequence.is_some()
+            || matches!(
+                context.input.sequence_range,
+                Some(SequenceRange::LtEq { .. } | SequenceRange::GtLtEq { .. })
+            );
+        let sequence_max = needs_sequence_max.then(|| max(sequence)).flatten();
+        let snapshot_visible = context
+            .input
+            .snapshot_sequence
+            .is_none_or(|bound| sequence_max.is_some_and(|value| value <= bound));
+        let range_visible = context
+            .input
+            .sequence_range
+            .is_none_or(|range| match range {
+                SequenceRange::Gt { min: bound } => {
+                    min(sequence).is_some_and(|value| value > bound)
+                }
+                SequenceRange::LtEq { max: bound } => {
+                    sequence_max.is_some_and(|value| value <= bound)
+                }
+                SequenceRange::GtLtEq {
+                    min: lower,
+                    max: upper,
+                } => {
+                    sequence_max.is_some_and(|value| value <= upper)
+                        && min(sequence).is_some_and(|value| value > lower)
+                }
+            });
+        let time_visible = context.input.time_range.as_ref().is_none_or(|range| {
+            min(&time).zip(max(&time)).is_some_and(|(lower, upper)| {
+                range.contains(&common_time::Timestamp::new(lower, unit))
+                    && range.contains(&common_time::Timestamp::new(upper, unit))
+            })
+        });
+        if snapshot_visible && range_visible && time_visible {
+            return Ok(batch);
+        }
     }
     let sequence_filter = context
         .input
