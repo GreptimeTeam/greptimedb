@@ -5780,9 +5780,8 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         );
     }
 
-    // A `__name__` destination is not covered here on purpose: the existing planner refuses that
-    // destination outright ("Invalid destination label name in label_replace()"), so no route can
-    // answer it and admitting the shape natively would only turn a refusal into a different one.
+    // A `__name__` destination is native-only - the existing planner refuses it - and is covered by
+    // `native_promql_rewrites_the_metric_name` below.
 
     // Two stored series rewritten to one label set, holding values at different evaluation points,
     // are one series carrying both points rather than two rows.
@@ -5797,6 +5796,269 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
         native_result_rows(complementary).await,
         vec![(0, "same".into(), 10.0), (600_000, "same".into(), 20.0)],
         "complementary points of one rewritten label set are one series"
+    );
+}
+
+/// A `__name__` destination is native-only: the existing planner refuses that destination, so this
+/// test reads the native route's own answer and the plan that produced it, and never compares
+/// against a legacy run.
+///
+/// Three logical metrics share one physical table. `name_left` and `name_right` hold the same two
+/// ordinary label sets ten minutes apart, so rewriting both names to one value puts their samples
+/// under one canonical identity; `name_clash` holds a sample where `name_left` already has one under
+/// `host="h"`, so the same rewrite has a genuine same-point conflict to report.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_rewrites_the_metric_name() {
+    common_telemetry::init_default_ut_logging();
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_metric_name_rewrite")
+            .with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE name_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true'); \
+         CREATE TABLE name_left (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='name_phy'); \
+         CREATE TABLE name_right (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='name_phy'); \
+         CREATE TABLE name_clash (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='name_phy'); \
+         INSERT INTO name_left (host, ts, val) VALUES ('h', 0, 1), ('i', 0, 2); \
+         INSERT INTO name_right (host, ts, val) VALUES ('h', 600000, 10), ('i', 600000, 20); \
+         INSERT INTO name_clash (host, ts, val) VALUES ('h', 0, 100)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let run = |expr: &str, range: &str| {
+        let sql = format!("TQL EVAL {range} {expr}");
+        let instance = instance.clone();
+        async move {
+            instance
+                .do_query(&sql, native_query_context(true, 4))
+                .await
+                .remove(0)
+        }
+    };
+    // A nameless selector is answered by enumerating the schema's metric tables, which the
+    // frontend's PromQL entry point bounds by the caller's grants before it plans. A SQL
+    // `TQL EVAL` statement prepares no such scope, so the test states the unrestricted one a
+    // caller with every grant would get.
+    let discovery_ctx = Arc::new({
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, 4.to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true");
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
+        ctx
+    });
+    let run_discovery = |expr: &str, range: &str| {
+        let sql = format!("TQL EVAL {range} {expr}");
+        let instance = instance.clone();
+        let ctx = Arc::clone(&discovery_ctx);
+        async move { instance.do_query(&sql, ctx).await.remove(0) }
+    };
+    let labels = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // The boundary is a partition-local producer that merges what its own scan partition held and
+    // the canonical router that collects every partition's pieces of one label set. The router is
+    // only built over a canonical producer, so finding it by name is what proves the plan answered
+    // through that boundary rather than some other way.
+    let expect_canonical_boundary = |context: &str| {
+        assert!(
+            observer.fused().is_some(),
+            "{context}: a native fused node answered"
+        );
+        assert!(
+            canonical_router(&observer).is_some(),
+            "{context}: the canonical router collects each label set: {:?}",
+            observer
+                .all_plans()
+                .iter()
+                .map(display_plan_tree)
+                .collect::<Vec<_>>()
+        );
+    };
+
+    // Renaming the name keeps series whose other labels differ distinct, and publishes the new name.
+    observer.clear();
+    let renamed = run(
+        r#"label_replace(name_left, "__name__", "renamed", "__name__", "(.*)")"#,
+        "(0, 0, '1s')",
+    )
+    .await
+    .unwrap();
+    let (columns, rows) = native_labelled_rows(renamed).await;
+    assert!(
+        columns.iter().any(|column| column == "__name__"),
+        "the rewritten name is a column: {columns:?}"
+    );
+    assert_eq!(
+        rows,
+        vec![
+            (0, labels(&[("__name__", "renamed"), ("host", "h")]), 1.0),
+            (0, labels(&[("__name__", "renamed"), ("host", "i")]), 2.0),
+        ],
+        "a name rewrite reports the new name and keeps distinct series distinct"
+    );
+    expect_canonical_boundary("a name rewrite of a named scan");
+
+    // Deleting the name reports no name, and a delete-only rewrite of a scan that publishes no name
+    // column publishes none: whether a series keeps its value depends on the regex, and a deleted
+    // value is the only one this rewrite can write.
+    observer.clear();
+    let deleted = run(
+        r#"label_replace(name_left, "__name__", "", "__name__", "(.*)")"#,
+        "(0, 0, '1s')",
+    )
+    .await
+    .unwrap();
+    let (columns, rows) = native_labelled_rows(deleted).await;
+    assert!(
+        !columns.iter().any(|column| column == "__name__"),
+        "a deleted name publishes no column: {columns:?}"
+    );
+    assert_eq!(
+        rows,
+        vec![
+            (0, labels(&[("host", "h")]), 1.0),
+            (0, labels(&[("host", "i")]), 2.0),
+        ],
+        "a deleted name is absent from the answer"
+    );
+    expect_canonical_boundary("a name deletion");
+
+    // `label_join` writes the name as well, and an empty source list deletes it.
+    for (expr, expected) in [
+        (
+            r#"label_join(name_left, "__name__", "-", "host")"#,
+            vec![
+                (0, labels(&[("__name__", "h"), ("host", "h")]), 1.0),
+                (0, labels(&[("__name__", "i"), ("host", "i")]), 2.0),
+            ],
+        ),
+        (
+            r#"label_join(name_left, "__name__", "-")"#,
+            vec![
+                (0, labels(&[("host", "h")]), 1.0),
+                (0, labels(&[("host", "i")]), 2.0),
+            ],
+        ),
+    ] {
+        observer.clear();
+        let joined = run(expr, "(0, 0, '1s')").await.unwrap();
+        let (_, rows) = native_labelled_rows(joined).await;
+        assert_eq!(rows, expected, "{expr}");
+        expect_canonical_boundary(expr);
+    }
+
+    // Two metrics told apart only by name: rewriting both names to one value merges the points each
+    // of them holds, because the canonical identity is the complete label set with the new name.
+    observer.clear();
+    let complementary = run_discovery(
+        r#"label_replace({__name__=~"name_left|name_right", host=~"h|i"}, "__name__", "same", "__name__", "(.*)")"#,
+        "(0, 600, '10m')",
+    )
+    .await
+    .unwrap();
+    let (_, rows) = native_labelled_rows(complementary).await;
+    assert_eq!(
+        rows,
+        vec![
+            (0, labels(&[("__name__", "same"), ("host", "h")]), 1.0),
+            (
+                600_000,
+                labels(&[("__name__", "same"), ("host", "h")]),
+                10.0
+            ),
+            (0, labels(&[("__name__", "same"), ("host", "i")]), 2.0),
+            (
+                600_000,
+                labels(&[("__name__", "same"), ("host", "i")]),
+                20.0
+            ),
+        ],
+        "one identity carries both metrics' points"
+    );
+    expect_canonical_boundary("two metrics renamed to one name");
+
+    // A name written above `abs` is collected even though `abs` dropped the name: the two metrics are
+    // still told apart by name alone below it, so writing one name folds their samples into one
+    // identity. Without the collection each metric would answer as its own series under one label set.
+    observer.clear();
+    let rewritten_above_abs = run_discovery(
+        r#"label_replace(abs({__name__=~"name_left|name_right", host=~"h|i"}), "__name__", "same", "", ".*")"#,
+        "(0, 600, '10m')",
+    )
+    .await
+    .unwrap();
+    let (_, rows) = native_labelled_rows(rewritten_above_abs).await;
+    assert_eq!(
+        rows,
+        vec![
+            (0, labels(&[("__name__", "same"), ("host", "h")]), 1.0),
+            (
+                600_000,
+                labels(&[("__name__", "same"), ("host", "h")]),
+                10.0
+            ),
+            (0, labels(&[("__name__", "same"), ("host", "i")]), 2.0),
+            (
+                600_000,
+                labels(&[("__name__", "same"), ("host", "i")]),
+                20.0
+            ),
+        ],
+        "one identity carries both metrics' points after `abs` dropped their names"
+    );
+    expect_canonical_boundary("a name rewrite above a dropped name");
+
+    // The same shape at one point is that identity's duplicate-label-set error, and it is reported
+    // even though the two series came from different metrics and a math kernel erased their names.
+    observer.clear();
+    let renamed_above_abs_clash = run_discovery(
+        r#"label_replace(abs({__name__=~"name_left|name_clash", host="h"}), "__name__", "same", "", ".*")"#,
+        "(0, 0, '1s')",
+    )
+    .await;
+    let error = match renamed_above_abs_clash {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("cannot contain metrics with the same labelset"),
+        "a name written above `abs` reports the duplicate label set: {error}"
+    );
+    assert!(
+        observer.fused().is_some(),
+        "the collision after a dropped name is reported by a native plan"
+    );
+
+    // A point where the other metric already holds a sample is the duplicate-label-set error, and it
+    // is reported even though the two series came from different metrics.
+    observer.clear();
+    let clash = run_discovery(
+        r#"label_replace({__name__=~"name_left|name_clash", host="h"}, "__name__", "same", "__name__", "(.*)")"#,
+        "(0, 0, '1s')",
+    )
+    .await;
+    let error = match clash {
+        Ok(output) => collect_error(output).await,
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("cannot contain metrics with the same labelset"),
+        "two metrics renamed to one identity report the duplicate label set: {error}"
+    );
+    assert!(
+        observer.fused().is_some(),
+        "the collision is reported by a native plan"
     );
 }
 

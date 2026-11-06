@@ -63,8 +63,8 @@ use promql::extension_plan::{
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
     AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeTree, NativeType, binary_output_field_kind, fused_output_tags,
-    reads_across_series, uniform_field_kind,
+    NativeExpr, NativeNode, NativeTree, NativeType, binary_output_field_kind, reads_across_series,
+    uniform_field_kind,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
@@ -1321,6 +1321,23 @@ impl PromPlanner {
             .iter()
             .map(|(_, _, _, _, tags, _, _)| tags.clone())
             .collect::<Vec<_>>();
+        // The complete runtime label set of each input: a scan bound to one metric names every
+        // series it hands over, so `__name__` is one of its labels even though it is not a tag
+        // column. The canonical pass judges a rewrite by the labels it writes and the ones its input
+        // carries, so rewriting the name of a named scan is a rewrite of an existing label - and a
+        // discovered source declares the name among its tags itself. The output-column walks keep
+        // `source_tags`: the name becomes a column only when a rewrite writes one, or when the
+        // source declares it.
+        let runtime_source_tags = prepared
+            .iter()
+            .map(|(_, _, metric, _, tags, _, _)| {
+                let mut tags = tags.clone();
+                if metric.is_some() && !tags.iter().any(|tag| tag == METRIC_NAME) {
+                    tags.push(METRIC_NAME.to_string());
+                }
+                tags
+            })
+            .collect::<Vec<_>>();
         // Whether any input's table is split into regions along a partition column. The canonical
         // boundary is the only part of this route that claims a whole-query label-set answer, and a
         // region-local producer cannot see the pieces another region holds, so this fact decides
@@ -1334,7 +1351,7 @@ impl PromPlanner {
         // matters and nowhere else, so a tree with no collapsing rewrite keeps every partition.
         let tree = match promql::native::canonicalize::merge_label_rewrites(
             &compiled.tree,
-            &source_tags,
+            &runtime_source_tags,
         ) {
             Ok(tree) => tree,
             Err(_) => return Ok(None),
@@ -2375,7 +2392,7 @@ fn canonical_boundary_stages(
         .iter()
         .map(|field| field.name.to_string())
         .collect::<Vec<_>>();
-    let output_tags = fused_output_tags(tree.root(), source_tags)?;
+    let output_tags = native_output_tags(tree.root(), source_tags)?;
     let output_schema = fused_output_schema(&fields, &output_tags, time_index, root_kind).ok()?;
 
     // The producer: the statement's own tree, run per partition, exporting a frame.
@@ -2764,7 +2781,7 @@ fn segment_tree(
                 )?;
                 match plan {
                     Some(plan) => {
-                        let Some(cut_tags) = fused_output_tags(cut, &current_tags) else {
+                        let Some(cut_tags) = native_output_tags(cut, &current_tags) else {
                             return Ok(None);
                         };
                         Some((plan, cut_tags))
@@ -3386,11 +3403,18 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                 for operation in op.ops.iter() {
                     if let MapOp::Label(rewrite) = operation {
                         let destination = rewrite.destination();
-                        if destination == "__name__" {
-                            return None;
+                        if tags.iter().any(|tag| tag == destination) {
+                            // The input carries the label - a discovered source declares `__name__`
+                            // among its tags - so the rewrite changes its value, and an empty
+                            // replacement may remove it, which the nullable column still represents.
+                            tags.retain(|tag| tag != destination);
+                            tags.push(destination.to_string());
+                        } else if rewrite.writes_value() {
+                            // A fresh destination is a column only when the rewrite can write a
+                            // value: that is how a `__name__` destination publishes a name column,
+                            // and how a delete-only rewrite publishes none.
+                            tags.push(destination.to_string());
                         }
-                        tags.retain(|tag| tag != destination);
-                        tags.push(destination.to_string());
                     }
                 }
                 return Some(tags);
@@ -3486,6 +3510,8 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
             matching,
         } => {
             let keeps_name = keeps_metric_name(matching);
+            let scalar_side = matches!(&left.output, NativeType::Scalar(_))
+                || matches!(&right.output, NativeType::Scalar(_));
             let tags = match (&left.output, &right.output) {
                 (NativeType::Scalar(_), _) => native_output_tags(right, source_tags)?,
                 (_, NativeType::Scalar(_)) => native_output_tags(left, source_tags)?,
@@ -3518,6 +3544,13 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                         Cardinality::ManyToOne(_) => left_tags.clone(),
                         Cardinality::OneToMany(_) => right_tags.clone(),
                     };
+                    // `result_metric` drops the metadata labels before it matches or copies an
+                    // included label, so an arithmetic result starts without the name. An include can
+                    // still put it back from the one side, which is why the final rule below does not
+                    // run on this branch.
+                    if !keeps_name {
+                        tags.retain(|tag| tag != METRIC_NAME);
+                    }
                     let (includes, include_tags) = match &matching.cardinality {
                         Cardinality::OneToOne => (&[][..], &[][..]),
                         Cardinality::ManyToOne(labels) => {
@@ -3561,10 +3594,7 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                             }
                         };
                         tags.retain(|tag| {
-                            // The name is not an ordinary label here: `keeps_name` above decides
-                            // whether the walk reports it.
-                            tag == METRIC_NAME
-                                || !includes.iter().any(|label| label.as_ref() == tag.as_str())
+                            !includes.iter().any(|label| label.as_ref() == tag.as_str())
                                 || include_tags.contains(tag)
                                 || (many_rows_filled && in_match_key(tag))
                         });
@@ -3585,8 +3615,17 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                             (right_tags.as_slice(), matching.fill.lhs)
                         }
                     };
+                    // A filled row keeps only the one side's matching labels, so the name can reach
+                    // it only through an `on` key that names the metric name, and only while the
+                    // operation reports its samples' names.
+                    let fill_carries_name = keeps_name
+                        && matches!(&matching.labels, MatchingLabels::On(names)
+                            if names.iter().any(|name| name.as_ref() == METRIC_NAME));
                     if fills_many_side.is_some() {
                         for tag in kept(one_tags.to_vec()) {
+                            if tag == METRIC_NAME && !fill_carries_name {
+                                continue;
+                            }
                             if !tags.contains(&tag) {
                                 tags.push(tag);
                             }
@@ -3595,10 +3634,10 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                     tags
                 }
             };
-            Some(if keeps_name {
-                tags
-            } else {
+            Some(if scalar_side && !keeps_name {
                 without_metric_name(tags)
+            } else {
+                tags
             })
         }
         NativeExpr::Set { left, right, op } => {
@@ -4108,15 +4147,15 @@ mod tests {
     use datafusion::physical_plan::ExecutionPlan;
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::native::plan::{NativeExpr, NativeNode, NativeTree};
+    use promql::native::plan::{NativeExpr, NativeNode, NativeTree, fused_output_tags};
     use session::context::QueryContextBuilder;
 
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
         NativeType, aggregate_reads_histogram, collect_selectors_with_set_operations, cut_segments,
-        fused_output_schema, fused_output_tags, independent_scan_pair, native_output_tags,
-        native_promql_requested, native_raw_plan_bounds_region_reads, node_children,
-        plans_over_remote_regions, scan_time_filter,
+        fused_output_schema, independent_scan_pair, native_output_tags, native_promql_requested,
+        native_raw_plan_bounds_region_reads, node_children, plans_over_remote_regions,
+        scan_time_filter,
     };
 
     #[test]
@@ -4696,6 +4735,99 @@ mod tests {
         );
     }
 
+    /// A `__name__` rewrite publishes a name column, canonicalizes the complete runtime label set,
+    /// and leaves the name dropped wherever a kernel computes a value of its own.
+    #[test]
+    fn name_rewrite_publishes_a_column_and_is_canonicalized() {
+        let columns = [vec!["host".to_string(), "kind".to_string()]];
+        let runtime = [vec![
+            "host".to_string(),
+            "kind".to_string(),
+            METRIC_NAME.to_string(),
+        ]];
+        let tree =
+            compiled_test_tree(r#"label_replace(x, "__name__", "same", "__name__", "(.*)")"#);
+        assert_eq!(
+            Some(vec!["host".into(), "kind".into(), METRIC_NAME.into()]),
+            native_output_tags(tree.root(), &columns),
+            "a written name is a column the output publishes"
+        );
+        let collected = promql::native::canonicalize::merge_label_rewrites(&tree, &runtime)
+            .expect("the pass produces a legal tree");
+        assert!(
+            matches!(collected.root().expr, NativeExpr::Merge { .. }),
+            "a name rewrite writes an existing runtime label: {collected}"
+        );
+        assert_eq!(
+            native_output_tags(tree.root(), &columns),
+            native_output_tags(collected.root(), &columns),
+            "collecting the pieces does not change the columns"
+        );
+
+        // A delete-only rewrite over a scan whose columns carry no name publishes none.
+        let deleted = compiled_test_tree(r#"label_replace(x, "__name__", "", "__name__", "(.*)")"#);
+        assert_eq!(
+            Some(vec!["host".into(), "kind".into()]),
+            native_output_tags(deleted.root(), &columns)
+        );
+
+        // A kernel that computes a value of its own drops the name a rewrite below it wrote.
+        for query in [
+            r#"abs(label_replace(x, "__name__", "same", "__name__", "(.*)"))"#,
+            r#"histogram_count(label_replace(x, "__name__", "same", "__name__", "(.*)"))"#,
+            r#"timestamp(label_replace(x, "__name__", "same", "__name__", "(.*)"))"#,
+            r#"sum(label_replace(x, "__name__", "same", "__name__", "(.*)"))"#,
+        ] {
+            let tree = compiled_test_tree(query);
+            let tags = native_output_tags(tree.root(), &columns)
+                .unwrap_or_else(|| panic!("{query} derives its columns"));
+            assert!(
+                !tags.iter().any(|tag| tag == METRIC_NAME),
+                "{query}: {tags:?}"
+            );
+        }
+    }
+
+    /// A name write is collected even above a kernel that dropped the name: the scan below it can
+    /// still hold several metrics whose ordinary labels are equal, so writing one name can fold them
+    /// into one identity. The output still publishes the written name.
+    #[test]
+    fn a_name_rewrite_above_a_dropped_name_is_collected() {
+        let runtime = [vec![
+            "host".to_string(),
+            "kind".to_string(),
+            METRIC_NAME.to_string(),
+        ]];
+        let tree =
+            compiled_test_tree(r#"label_replace(abs(x), "__name__", "same", "missing", "(.*)")"#);
+        let collected = promql::native::canonicalize::merge_label_rewrites(&tree, &runtime)
+            .expect("the pass produces a legal tree");
+        assert!(
+            matches!(collected.root().expr, NativeExpr::Merge { .. }),
+            "the merge sits above the name rewrite: {collected}"
+        );
+        assert_eq!(
+            1,
+            collected.to_string().matches("Merge").count(),
+            "exactly one merge: {collected}"
+        );
+        // The rewrite writes a name over a dropped one, so the output publishes a name column.
+        assert_eq!(
+            Some(vec!["host".into(), "kind".into(), METRIC_NAME.into()]),
+            native_output_tags(collected.root(), &[vec!["host".into(), "kind".into()]])
+        );
+
+        // A fresh ordinary destination above the same kernel is still uncollected: no scan can carry
+        // an ordinary label it does not declare.
+        let fresh = compiled_test_tree(r#"label_replace(abs(x), "dst", "$1", "host", "(.*)")"#);
+        let collected = promql::native::canonicalize::merge_label_rewrites(&fresh, &runtime)
+            .expect("the pass produces a legal tree");
+        assert!(
+            !collected.to_string().contains("Merge"),
+            "a fresh ordinary destination does not alias: {collected}"
+        );
+    }
+
     #[test]
     fn group_right_copies_included_labels_into_output_tags() {
         let sources = [
@@ -4706,6 +4838,32 @@ mod tests {
         assert_eq!(
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
             native_output_tags(tree.root(), &sources)
+        );
+    }
+
+    /// `group_left(__name__)` copies the one side's name onto an arithmetic result: the operation
+    /// drops the name before it copies an included label, so the copied name is a column. A one side
+    /// without a name cannot provide one, so the column leaves the set.
+    #[test]
+    fn an_included_metric_name_is_an_output_column() {
+        let sources = [
+            vec!["host".to_string()],
+            vec!["host".to_string(), METRIC_NAME.to_string()],
+        ];
+        let included = compiled_test_tree(
+            r#"x * on(host) group_left(__name__) label_replace(y, "__name__", "renamed", "__name__", "(.*)")"#,
+        );
+        assert_eq!(
+            Some(vec!["host".to_string(), METRIC_NAME.to_string()]),
+            native_output_tags(included.root(), &sources)
+        );
+        let unnamed = compiled_test_tree(r#"x * on(host) group_left(__name__) y"#);
+        assert_eq!(
+            Some(vec!["host".to_string()]),
+            native_output_tags(
+                unnamed.root(),
+                &[vec!["host".to_string()], vec!["host".to_string()]]
+            )
         );
     }
 
