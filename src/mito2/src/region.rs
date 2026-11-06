@@ -1765,7 +1765,18 @@ impl ManifestContext {
                         region_id, state
                     ),
                     Err(state) => {
-                        if state != RegionRoleState::Leader(RegionLeaderState::Writable) {
+                        // These states already have the leader role; keep their ongoing operation.
+                        if !matches!(
+                            state,
+                            RegionRoleState::Leader(
+                                RegionLeaderState::Writable
+                                    | RegionLeaderState::Altering
+                                    | RegionLeaderState::Dropping
+                                    | RegionLeaderState::Truncating
+                                    | RegionLeaderState::Editing
+                                    | RegionLeaderState::EnteringStaging
+                            )
+                        ) {
                             warn!(
                                 "Failed to convert region {} to leader, current role state: {:?}",
                                 region_id, state
