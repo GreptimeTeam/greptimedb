@@ -41,6 +41,18 @@ pub mod txn;
 pub mod util;
 pub type KvBackendRef<E = Error> = Arc<dyn KvBackend<Error = E> + Send + Sync>;
 
+/// A [KvBackend] holding resources that must be released explicitly on shutdown, because
+/// components sharing it may keep it alive until the process exits.
+///
+/// Wrappers of a closable backend must forward [ClosableKvBackend::close] to it.
+#[async_trait]
+pub trait ClosableKvBackend: KvBackend<Error = Error> {
+    /// Releases the backend's resources; any later use fails.
+    async fn close(&self) -> Result<(), Error>;
+}
+
+pub type ClosableKvBackendRef = Arc<dyn ClosableKvBackend + Send + Sync>;
+
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 // The default meta table name, default is "greptime_metakv".
 pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
