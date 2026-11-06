@@ -23,14 +23,14 @@ use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::column_def::{options_from_column_schema, try_as_column_schema};
 use api::v1::{
     AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType,
-    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
-    DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
+    ColumnDataTypeExtension, ColumnOptions, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropColumn, DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
     JsonSettings as PbJsonSettings, JsonTypeHint as PbJsonTypeHint, ModifyColumnType,
-    ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetDefaults, SetFulltext,
-    SetIndex, SetIndexes, SetInverted, SetJsonSettings, SetSkipping, SetTableOptions,
-    SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext,
-    UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions, set_index,
-    unset_index,
+    ModifyColumnTypes, RenameTable, SemanticType, SetColumnCompression, SetDatabaseOptions,
+    SetDefaults, SetFulltext, SetIndex, SetIndexes, SetInverted, SetJsonSettings, SetSkipping,
+    SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions,
+    UnsetFulltext, UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions,
+    set_index, unset_index,
 };
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
@@ -911,6 +911,19 @@ pub(crate) fn to_alter_table_expr(
             AlterTableKind::SetJsonSettings(SetJsonSettings {
                 column_name: column_name.value,
                 settings: Some(json_settings_to_proto(settings)?),
+            })
+        }
+        AlterTableOperation::SetColumnCompression {
+            column_name,
+            options,
+        } => {
+            let reset = options.is_none();
+            AlterTableKind::SetColumnCompression(SetColumnCompression {
+                column_name: column_name.value,
+                options: options.map(|options| ColumnOptions {
+                    options: options.into_map(),
+                }),
+                reset,
             })
         }
         AlterTableOperation::DropColumn { name } => AlterTableKind::DropColumns(DropColumns {

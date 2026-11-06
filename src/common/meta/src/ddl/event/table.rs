@@ -202,6 +202,7 @@ pub(crate) fn alter_table_kind_name(kind: &AlterTableKind) -> Option<&'static st
         AlterTableKind::SetIndexes(_) => Some("set_indexes"),
         AlterTableKind::UnsetIndexes(_) => Some("unset_indexes"),
         AlterTableKind::SetDefaults(_) => Some("set_defaults"),
+        AlterTableKind::SetColumnCompression(_) => Some("set_column_compression"),
         // Repartition is handled by RepartitionProcedure.
         AlterTableKind::Repartition(_) => None,
     }

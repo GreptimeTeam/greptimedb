@@ -464,6 +464,30 @@ impl ColumnSchema {
         Ok(self)
     }
 
+    /// Merges a merge-on-set delta over the column's current compression options.
+    ///
+    /// Only the keys present in `delta` override; the rest are retained from the
+    /// column's current options. The merged values are parsed and validated by
+    /// the CREATE-time conversion, so ALTER and CREATE reject the same values.
+    pub fn merge_compression_options(
+        &self,
+        delta: &HashMap<String, String>,
+    ) -> Result<CompressionOptions> {
+        let mut merged = self
+            .compression_options()?
+            .map(|options| options.to_options_map())
+            .unwrap_or_default();
+        merged.extend(delta.iter().map(|(k, v)| (k.clone(), v.clone())));
+        CompressionOptions::try_from(merged)
+    }
+
+    /// Removes the SST compression options entirely, so the column falls back to
+    /// the SST defaults.
+    pub fn without_compression_options(mut self) -> Self {
+        self.metadata.remove(COMPRESSION_KEY);
+        self
+    }
+
     fn validate_compression_options(&self, options: &CompressionOptions) -> Result<()> {
         options.validate()?;
         ensure!(

@@ -22,6 +22,14 @@ use crate::error::{Result, UnexpectedRequestSnafu, UnsupportedAlterKindSnafu};
 /// Validate the alter region requests.
 pub fn validate_alter_region_requests(requests: &[(RegionId, RegionAlterRequest)]) -> Result<()> {
     for (_, request) in requests {
+        // Compression is a physical-table concern; a logical table has no SSTs of
+        // its own, so report the dedicated wording instead of "unsupported kind".
+        ensure!(
+            !matches!(request.kind, AlterKind::SetColumnCompression { .. }),
+            UnexpectedRequestSnafu {
+                reason: "COMPRESSION is not supported on logical tables; configure it on the physical table".to_string(),
+            }
+        );
         ensure!(
             matches!(request.kind, AlterKind::AddColumns { .. }),
             UnsupportedAlterKindSnafu {

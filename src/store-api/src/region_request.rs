@@ -812,6 +812,13 @@ pub enum AlterKind {
         /// Target JSON2 settings.
         settings: JsonSettings,
     },
+    /// Set or clear the SST compression options of a region column.
+    SetColumnCompression {
+        /// Column name.
+        column_name: String,
+        /// Merge-on-set delta; `None` clears every override.
+        options: Option<HashMap<String, String>>,
+    },
     /// Set region options.
     SetRegionOptions { options: Vec<SetRegionOption> },
     /// Unset region options.
@@ -995,6 +1002,10 @@ impl AlterKind {
             AlterKind::SetJsonSettings { column_name, .. } => {
                 Self::validate_set_json_settings(column_name, metadata)?
             }
+            AlterKind::SetColumnCompression {
+                column_name,
+                options,
+            } => Self::validate_set_column_compression(column_name, options, metadata)?,
             AlterKind::SetRegionOptions { .. } => {}
             AlterKind::UnsetRegionOptions { .. } => {}
             AlterKind::SetIndexes { options } => {
@@ -1116,6 +1127,19 @@ impl AlterKind {
                         !extension.metadata().json_settings().equivalent(settings)
                     })
             }),
+            AlterKind::SetColumnCompression {
+                column_name,
+                options,
+            } => metadata.column_by_name(column_name).is_some_and(|col| {
+                let current = col.column_schema.compression_options().ok().flatten();
+                match options {
+                    None => current.is_some(),
+                    Some(delta) => col
+                        .column_schema
+                        .merge_compression_options(delta)
+                        .is_ok_and(|merged| current != Some(merged)),
+                }
+            }),
             AlterKind::SetRegionOptions { .. } => true,
             AlterKind::UnsetRegionOptions { .. } => true,
             AlterKind::SetIndexes { options, .. } => options
@@ -1220,6 +1244,47 @@ impl AlterKind {
 
         Ok(())
     }
+
+    /// Returns an error if the column compression alter is invalid.
+    ///
+    /// A merge-on-set delta is merged over the column's current options and the
+    /// merged result must pass the CREATE-time validation; `None` (UNSET) only
+    /// needs the column to exist.
+    fn validate_set_column_compression(
+        column_name: &str,
+        options: &Option<HashMap<String, String>>,
+        metadata: &RegionMetadata,
+    ) -> Result<()> {
+        let region_id = metadata.region_id;
+
+        let col =
+            metadata
+                .column_by_name(column_name)
+                .with_context(|| InvalidRegionRequestSnafu {
+                    region_id,
+                    err: format!("column {column_name} not found"),
+                })?;
+
+        if let Some(delta) = options {
+            let invalid = |err: datatypes::error::Error| {
+                InvalidRegionRequestSnafu {
+                    region_id,
+                    err: err.to_string(),
+                }
+                .build()
+            };
+            let merged = col
+                .column_schema
+                .merge_compression_options(delta)
+                .map_err(invalid)?;
+            col.column_schema
+                .clone()
+                .with_compression_options(merged)
+                .map_err(invalid)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl TryFrom<alter_request::Kind> for AlterKind {
@@ -1256,6 +1321,14 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
+            alter_request::Kind::SetColumnCompression(x) => AlterKind::SetColumnCompression {
+                column_name: x.column_name,
+                options: if x.reset {
+                    None
+                } else {
+                    x.options.map(|options| options.options)
+                },
+            },
             alter_request::Kind::SetTableOptions(options) => AlterKind::SetRegionOptions {
                 options: options
                     .table_options
@@ -2682,6 +2755,114 @@ mod tests {
         assert_eq!(
             SetRegionOption::WriteBufferSize(None),
             SetRegionOption::from(&UnsetRegionOption::WriteBufferSize)
+        );
+    }
+
+    #[test]
+    fn test_set_column_compression_validate_and_need_alter() {
+        let metadata = new_metadata();
+
+        // Unknown column is rejected.
+        let unknown = AlterKind::SetColumnCompression {
+            column_name: "nope".to_string(),
+            options: Some(HashMap::from([("level".to_string(), "3".to_string())])),
+        };
+        let err = unknown.validate(&metadata).unwrap_err();
+        assert!(err.to_string().contains("column nope not found"), "{err}");
+
+        // The merged result is validated with the CREATE-time rules.
+        let invalid = AlterKind::SetColumnCompression {
+            column_name: "field_0".to_string(),
+            options: Some(HashMap::from([("level".to_string(), "99".to_string())])),
+        };
+        let err = invalid.validate(&metadata).unwrap_err();
+        assert!(err.to_string().contains("invalid level"), "{err}");
+
+        // No override on the column yet: UNSET is a no-op.
+        let unset = AlterKind::SetColumnCompression {
+            column_name: "field_0".to_string(),
+            options: None,
+        };
+        unset.validate(&metadata).unwrap();
+        assert!(!unset.need_alter(&metadata));
+
+        // Setting a delta on a column without overrides is a change.
+        let set = AlterKind::SetColumnCompression {
+            column_name: "field_0".to_string(),
+            options: Some(HashMap::from([
+                ("level".to_string(), "3".to_string()),
+                ("page_size".to_string(), "8MiB".to_string()),
+            ])),
+        };
+        set.validate(&metadata).unwrap();
+        assert!(set.need_alter(&metadata));
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder.alter(set.clone()).unwrap();
+        let altered = builder.build().unwrap();
+        let column = altered.column_by_name("field_0").unwrap();
+        let options = column.column_schema.compression_options().unwrap().unwrap();
+        assert_eq!(Some(3), options.level);
+
+        // Re-issuing the same delta is a no-op. The delta does not restate
+        // `page_size`, so this also covers the merge retaining it.
+        set.validate(&altered).unwrap();
+        assert!(!set.need_alter(&altered));
+
+        // A delta that changes a value is a change.
+        let bump = AlterKind::SetColumnCompression {
+            column_name: "field_0".to_string(),
+            options: Some(HashMap::from([("level".to_string(), "22".to_string())])),
+        };
+        bump.validate(&altered).unwrap();
+        assert!(bump.need_alter(&altered));
+
+        // UNSET now clears the override, and stops being a no-op.
+        unset.validate(&altered).unwrap();
+        assert!(unset.need_alter(&altered));
+        let mut builder = RegionMetadataBuilder::from_existing(altered);
+        builder.alter(unset.clone()).unwrap();
+        let cleared = builder.build().unwrap();
+        assert_eq!(
+            None,
+            cleared
+                .column_by_name("field_0")
+                .unwrap()
+                .column_schema
+                .compression_options()
+                .unwrap()
+        );
+        assert!(!unset.need_alter(&cleared));
+    }
+
+    #[test]
+    fn test_set_column_compression_proto_round_trip() {
+        let kind = alter_request::Kind::SetColumnCompression(v1::SetColumnCompression {
+            column_name: "field_0".to_string(),
+            options: Some(v1::ColumnOptions {
+                options: HashMap::from([("level".to_string(), "22".to_string())]),
+            }),
+            reset: false,
+        });
+        assert_eq!(
+            AlterKind::SetColumnCompression {
+                column_name: "field_0".to_string(),
+                options: Some(HashMap::from([("level".to_string(), "22".to_string())])),
+            },
+            AlterKind::try_from(kind).unwrap()
+        );
+
+        let reset = alter_request::Kind::SetColumnCompression(v1::SetColumnCompression {
+            column_name: "field_0".to_string(),
+            options: None,
+            reset: true,
+        });
+        assert_eq!(
+            AlterKind::SetColumnCompression {
+                column_name: "field_0".to_string(),
+                options: None,
+            },
+            AlterKind::try_from(reset).unwrap()
         );
     }
 

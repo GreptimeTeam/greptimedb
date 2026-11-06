@@ -228,6 +228,7 @@ impl DataRegion {
             | AlterKind::SetIndexes { options: _ }
             | AlterKind::UnsetIndexes { options: _ }
             | AlterKind::SetJsonSettings { .. }
+            | AlterKind::SetColumnCompression { .. }
             | AlterKind::SyncColumns {
                 column_metadatas: _,
             } => {

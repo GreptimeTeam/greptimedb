@@ -395,6 +395,16 @@ pub struct SetJsonSettingsRequest {
     pub settings: JsonSettings,
 }
 
+/// Set or clear the SST compression options of one column.
+///
+/// `options` is a merge-on-set delta: only the named keys override the column's
+/// current options. `None` clears every override.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetColumnCompressionRequest {
+    pub column_name: String,
+    pub options: Option<HashMap<String, String>>,
+}
+
 /// A family of annotation table options: pure metadata markers that no region
 /// consumes. Setting or unsetting them only rewrites the table's
 /// `extra_options`, so the alter skips region dispatch entirely.
@@ -687,6 +697,9 @@ pub enum AlterKind {
     },
     SetJsonSettings {
         request: SetJsonSettingsRequest,
+    },
+    SetColumnCompression {
+        request: SetColumnCompressionRequest,
     },
     RenameTable {
         new_table_name: String,

@@ -43,9 +43,9 @@ use crate::error::{self, Result};
 use crate::requests::{
     AddColumnRequest, AlterKind, AnnotationContext, AnnotationFamily, AnnotationValidationError,
     ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY, REPARTITION_PARTITION_NUM_HINT_KEY,
-    SetDefaultRequest, SetIndexOption, SetJsonSettingsRequest, TableOptions, UnsetIndexOption,
-    has_stable_string_form, parse_entity_columns, parse_entity_option_key,
-    validate_and_normalize_annotation, validate_annotation_keys,
+    SetColumnCompressionRequest, SetDefaultRequest, SetIndexOption, SetJsonSettingsRequest,
+    TableOptions, UnsetIndexOption, has_stable_string_form, parse_entity_columns,
+    parse_entity_option_key, validate_and_normalize_annotation, validate_annotation_keys,
 };
 use crate::table_reference::TableReference;
 
@@ -335,6 +335,9 @@ impl TableMeta {
                 self.modify_column_types(table_name, columns)
             }
             AlterKind::SetJsonSettings { request } => self.set_json_settings(table_name, request),
+            AlterKind::SetColumnCompression { request } => {
+                self.set_column_compression(table_name, request)
+            }
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::SetTableOptions { options } => self.set_table_options(options),
@@ -1283,6 +1286,71 @@ impl TableMeta {
         Ok(meta_builder)
     }
 
+    /// Creates a [TableMetaBuilder] with updated per-column compression options.
+    ///
+    /// `req.options` is a merge-on-set delta over the column's current options;
+    /// `None` removes the entry so the column falls back to SST defaults.
+    fn set_column_compression(
+        &self,
+        table_name: &str,
+        req: &SetColumnCompressionRequest,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let idx = table_schema
+            .column_index_by_name(&req.column_name)
+            .with_context(|| error::ColumnNotExistsSnafu {
+                column_name: &req.column_name,
+                table_name,
+            })?;
+        let column = &table_schema.column_schemas()[idx];
+
+        let invalid = |err: ConvertError| {
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: err.to_string(),
+            }
+            .build()
+        };
+
+        let new_column = match &req.options {
+            Some(delta) => {
+                let options = column.merge_compression_options(delta).map_err(invalid)?;
+                column
+                    .clone()
+                    .with_compression_options(options)
+                    .map_err(invalid)?
+            }
+            None => column.clone().without_compression_options(),
+        };
+
+        let mut cols = table_schema.column_schemas().to_vec();
+        cols[idx] = new_column;
+
+        let mut builder = SchemaBuilder::try_from_columns(cols)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {table_name} cannot change compression options for column {}",
+                req.column_name
+            ),
+        })?;
+
+        let mut meta_builder = self.new_meta_builder();
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
+
     /// Split requests into different groups using column location info.
     fn split_requests_by_column_location<'a>(
         &self,
@@ -1797,6 +1865,135 @@ mod tests {
             .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap();
         builder.build().unwrap()
+    }
+
+    /// A column whose current options carry both a level and a page size.
+    fn meta_with_compression(version: u32) -> TableMeta {
+        let options = datatypes::schema::CompressionOptions::try_from(HashMap::from([
+            ("type".to_string(), "zstd".to_string()),
+            ("level".to_string(), "3".to_string()),
+            ("page_size".to_string(), "8MiB".to_string()),
+        ]))
+        .unwrap();
+        let schema = Arc::new(
+            SchemaBuilder::try_from_columns(vec![
+                ColumnSchema::new("host", ConcreteDataType::string_datatype(), true)
+                    .with_compression_options(options)
+                    .unwrap(),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            ])
+            .unwrap()
+            .version(version)
+            .build()
+            .unwrap(),
+        );
+        TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .engine("engine")
+            .next_column_id(2)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_set_column_compression_merges_over_current_options() {
+        let meta = meta_with_compression(123);
+        let alter_kind = AlterKind::SetColumnCompression {
+            request: SetColumnCompressionRequest {
+                column_name: "host".to_string(),
+                options: Some(HashMap::from([("level".to_string(), "22".to_string())])),
+            },
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let options = new_meta
+            .schema
+            .column_schema_by_name("host")
+            .unwrap()
+            .compression_options()
+            .unwrap()
+            .unwrap();
+        // The named key overrides.
+        assert_eq!(Some(22), options.level);
+        // The unspecified key is retained from the column current options.
+        assert_eq!(
+            Some(&"8MiB".to_string()),
+            options.to_options_map().get("page_size")
+        );
+        assert_eq!(124, new_meta.schema.version());
+        // Entity and time index metadata survive the alter.
+        assert_eq!(Some(1), new_meta.schema.timestamp_index());
+    }
+
+    #[test]
+    fn test_unset_column_compression_removes_the_entry() {
+        let meta = meta_with_compression(123);
+        let alter_kind = AlterKind::SetColumnCompression {
+            request: SetColumnCompressionRequest {
+                column_name: "host".to_string(),
+                options: None,
+            },
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let column = new_meta.schema.column_schema_by_name("host").unwrap();
+        assert_eq!(None, column.compression_options().unwrap());
+        assert!(!column.metadata().contains_key("greptime:compression"));
+        assert_eq!(124, new_meta.schema.version());
+    }
+
+    #[test]
+    fn test_set_column_compression_reuses_create_validation() {
+        let meta = meta_with_compression(123);
+        // Same rules as CREATE: only zstd, level in 1..=22, positive page_size.
+        for (key, value, expected) in [
+            ("level", "99", "invalid level"),
+            ("type", "snappy", "invalid type"),
+            ("page_size", "0", "invalid page_size"),
+            ("encoding", "rle", "invalid encoding"),
+        ] {
+            let alter_kind = AlterKind::SetColumnCompression {
+                request: SetColumnCompressionRequest {
+                    column_name: "host".to_string(),
+                    options: Some(HashMap::from([(key.to_string(), value.to_string())])),
+                },
+            };
+            let err = match meta.builder_with_alter_kind("my_table", &alter_kind) {
+                Ok(_) => panic!("expected {key}={value} to be rejected"),
+                Err(err) => err,
+            };
+            assert!(err.to_string().contains(expected), "{key}={value}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_set_column_compression_rejects_unknown_column() {
+        let meta = meta_with_compression(123);
+        let alter_kind = AlterKind::SetColumnCompression {
+            request: SetColumnCompressionRequest {
+                column_name: "nope".to_string(),
+                options: Some(HashMap::new()),
+            },
+        };
+        let err = match meta.builder_with_alter_kind("my_table", &alter_kind) {
+            Ok(_) => panic!("expected an unknown column to be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(StatusCode::TableColumnNotFound, err.status_code(), "{err}");
     }
 
     #[test]
