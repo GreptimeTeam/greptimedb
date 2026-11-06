@@ -94,16 +94,13 @@ impl PayloadDecoder {
                 Ok(bytes)
             }
             1 => {
-                if self.context.is_none() {
-                    self.context = Some(
+                let context = match self.context {
+                    Some(ref mut context) => context,
+                    None => self.context.insert(
                         zstd::zstd_safe::DCtx::try_create()
                             .ok_or_else(|| invalid("cannot allocate series decoder context"))?,
-                    );
-                }
-                let context = self
-                    .context
-                    .as_mut()
-                    .ok_or_else(|| invalid("missing series decoder context"))?;
+                    ),
+                };
                 // Reset even after a previous corrupt, truncated, or oversized frame.
                 context
                     .reset(zstd::zstd_safe::ResetDirective::SessionOnly)

@@ -427,13 +427,13 @@ async fn read_block(
             .try_grow(bytes)
             .context(crate::error::ScanMemoryExhaustedSnafu)?;
     }
-    let mut decoder = codec::PayloadDecoder::default();
     let mut buffers = HashMap::new();
     if boundary {
         fetch_columns(reader, &[&block.columns[0]], &mut buffers, metrics).await?;
     } else {
         fetch_columns(reader, &columns, &mut buffers, metrics).await?;
     }
+    let mut decoder = codec::PayloadDecoder::default();
     let decode_started = Instant::now();
     let mut selected: Vec<usize> = (0..block.rows as usize).collect();
     let mut times = None;
@@ -463,11 +463,14 @@ async fn read_block(
     }
     metrics.add_elapsed("columnar_decode", decode_started.elapsed());
     if boundary {
+        // Release decoder scratch and context before waiting for the remaining payloads.
+        drop(decoder);
         let remaining = columns
             .into_iter()
             .filter(|column| column.role != 1)
             .collect::<Vec<_>>();
         fetch_columns(reader, &remaining, &mut buffers, metrics).await?;
+        decoder = codec::PayloadDecoder::default();
     }
     let decode_started = Instant::now();
     let mut arrays: BTreeMap<usize, ArrayRef> = BTreeMap::new();
