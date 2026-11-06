@@ -325,7 +325,7 @@ impl ColumnarPreparedSource {
             ));
         };
         preparation_metrics.add_elapsed("columnar_prepare_coverage", started.elapsed());
-        let started = Instant::now();
+        let timer = preparation_metrics.timer("columnar_prepare_samples_open_wall");
         let cache = input
             .cache_strategy
             .columnar_metadata(index.cache_namespace);
@@ -342,7 +342,7 @@ impl ColumnarPreparedSource {
             format::validate_sample_schema(&reader.schema(), metadata)?;
             samples.push(Arc::new(reader));
         }
-        preparation_metrics.add_elapsed("columnar_prepare_samples_open_wall", started.elapsed());
+        drop(timer);
         preparation_metrics
             .counts
             .insert("prepare_sample_readers", samples.len() as u64);
@@ -353,14 +353,14 @@ impl ColumnarPreparedSource {
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
         let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
         for id in indexes {
-            let started = Instant::now();
+            let timer = preparation_metrics.timer("columnar_prepare_series_open_wall");
             let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
                 index.store.clone(),
                 index.version.series_indexes[&id].clone(),
                 cache.clone(),
             )
             .await?;
-            preparation_metrics.add_elapsed("columnar_prepare_series_open_wall", started.elapsed());
+            drop(timer);
             let started = Instant::now();
             let schema = reader.schema();
             format::validate_series_schema(&schema, metadata)?;
@@ -403,10 +403,9 @@ impl ColumnarPreparedSource {
             preparation_metrics.add_elapsed("columnar_prepare_compile", started.elapsed());
             let mut batches = reader.read(request)?;
             loop {
-                let started = Instant::now();
+                let timer = preparation_metrics.timer("columnar_prepare_discovery_wall");
                 let batch = batches.try_next().await?;
-                preparation_metrics
-                    .add_elapsed("columnar_prepare_discovery_wall", started.elapsed());
+                drop(timer);
                 let Some(mut batch) = batch else {
                     break;
                 };
