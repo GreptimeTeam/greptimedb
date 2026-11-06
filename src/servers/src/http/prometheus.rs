@@ -59,7 +59,7 @@ use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, Que
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{Location, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
@@ -246,6 +246,7 @@ pub async fn query_exemplars(
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(&db);
         try_update_catalog_schema(&mut ctx, &catalog, &schema);
     }
+    ctx.set_channel(Channel::Prometheus);
     let ctx = Arc::new(ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
         .with_label_values(&[ctx.get_db_string().as_str(), "query_exemplars"])

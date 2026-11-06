@@ -36,18 +36,17 @@ pub struct Selector {
 pub struct Query {
     pub expression: String,
     pub selectors: Vec<Selector>,
-    /// Inclusive bounds; `None` means a valid interval with no integral nanosecond.
-    pub bounds: Option<(i64, i64)>,
+    /// Inclusive bounds, floored to nanoseconds before checking their order.
+    pub bounds: (i64, i64),
 }
 
 impl Query {
     pub fn parse(expression: String, start: &str, end: &str, schema: &str) -> Result<Self> {
-        let start = Decimal::timestamp(start)?;
-        let end = Decimal::timestamp(end)?;
-        if start.cmp(&end).is_gt() {
+        let start = Decimal::timestamp(start)?.round_ns(false)?;
+        let end = Decimal::timestamp(end)?.round_ns(false)?;
+        if start > end {
             return invalid("start must not exceed end");
         }
-        let (start, end) = (start.round_ns(true)?, end.round_ns(false)?);
         let expr = promql_parser::parser::parse(&expression)
             .map_err(|reason| InvalidQuerySnafu { reason }.build())?;
         struct Collector<'a> {
@@ -74,7 +73,7 @@ impl Query {
         Ok(Self {
             expression,
             selectors: collector.selectors,
-            bounds: (start <= end).then_some((start, end)),
+            bounds: (start, end),
         })
     }
 }
@@ -187,8 +186,9 @@ impl Decimal {
             return Self::parse(&format_ns(nanos));
         }
         let value = Self::parse(input)?;
+        // Flooring can discard a fraction above i64::MAX, matching RFC3339 parsing.
         if value.cmp(&Self::parse("-9223372036.854775808")?).is_lt()
-            || value.cmp(&Self::parse("9223372036.854775807")?).is_gt()
+            || value.cmp(&Self::parse("9223372036.854775808")?).is_ge()
         {
             return invalid("timestamp exceeds signed nanosecond range");
         }
@@ -361,29 +361,75 @@ mod tests {
             );
             assert!(!json.contains('"'));
         }
+        for input in ["1e-10", "-1e-10", "9223372036.8547758079"] {
+            assert!(
+                serde_json::from_str::<ExactTimestamp>(input).is_err(),
+                "{input}"
+            );
+        }
         for invalid in [
             "NaN",
             "inf",
             "",
             "1e99999999999999999999999",
+            "1e100",
             "9223372036.854775808",
             "-9223372036.854775809",
+            "-9223372036.8547758081",
         ] {
             assert!(Decimal::timestamp(invalid).is_err(), "{invalid}");
         }
-        assert!(
-            Query::parse("up".into(), "0.0000000001", "0.0000000002", "public")
-                .unwrap()
-                .bounds
-                .is_none()
-        );
-        assert!(Query::parse("up".into(), "0.0000000002", "0.0000000001", "public").is_err());
         assert!(
             Query::parse("1".into(), "0", "1", "public")
                 .unwrap()
                 .selectors
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn query_bounds_drop_subnanosecond_precision() {
+        for (numeric, rfc3339, expected) in [
+            ("1e-10", "1970-01-01T00:00:00.0000000001Z", 0),
+            ("-1e-10", "1969-12-31T23:59:59.9999999999Z", -1),
+            ("0.0000000019", "1970-01-01T00:00:00.0000000019Z", 1),
+            ("-0.0000000019", "1969-12-31T23:59:59.9999999981Z", -2),
+            ("1e-10", "1970-01-01T01:00:00.0000000001+01:00", 0),
+            (
+                "-9223372036.854775808",
+                "1677-09-21T00:12:43.145224192Z",
+                i64::MIN,
+            ),
+            (
+                "9223372036.8547758079",
+                "2262-04-11T23:47:16.8547758079Z",
+                i64::MAX,
+            ),
+        ] {
+            for input in [numeric, rfc3339] {
+                assert_eq!(
+                    Query::parse("up".into(), input, input, "public")
+                        .unwrap()
+                        .bounds,
+                    (expected, expected),
+                    "{input}",
+                );
+            }
+        }
+        for (start, end, expected) in [
+            ("0.0000000001", "0.0000000002", (0, 0)),
+            ("0.0000000002", "0.0000000001", (0, 0)),
+            ("-0.0000000001", "-0.0000000002", (-1, -1)),
+            ("-0.0000000001", "0.0000000001", (-1, 0)),
+        ] {
+            assert_eq!(
+                Query::parse("up".into(), start, end, "public")
+                    .unwrap()
+                    .bounds,
+                expected,
+            );
+        }
+        assert!(Query::parse("up".into(), "0.000000001", "0.0000000009", "public").is_err());
     }
 
     #[test]

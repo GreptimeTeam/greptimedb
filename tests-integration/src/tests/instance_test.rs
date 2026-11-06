@@ -5379,16 +5379,47 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
     }
 }
 
+#[rstest]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_exemplar_query_skips_malformed_rows_with_warning() {
+async fn test_exemplar_query_bounds_and_malformed_rows(
+    #[values(http::Method::GET, http::Method::POST)] method: http::Method,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use axum::body::{Body, to_bytes};
+    use common_base::Plugins;
     use http::Request;
+    use servers::exemplar::query::Query;
     use servers::http::{HttpOptions, HttpServerBuilder};
+    use servers::interceptor::{PromQueryInterceptor, PromQueryInterceptorRef};
+    use session::context::Channel;
+    use table::table_reference::TableReference;
     use tower::ServiceExt;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
 
+    struct Hook(AtomicUsize);
+
+    impl PromQueryInterceptor for Hook {
+        type Error = server_error::Error;
+
+        fn pre_execute_exemplars(
+            &self,
+            _query: &Query,
+            _table: TableReference<'_>,
+            ctx: QueryContextRef,
+        ) -> server_error::Result<()> {
+            assert_eq!(ctx.channel(), Channel::Prometheus);
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    let hook = Arc::new(Hook(AtomicUsize::new(0)));
+    let plugins = Plugins::new();
+    plugins.insert::<PromQueryInterceptorRef<server_error::Error>>(hook.clone());
     let instance = GreptimeDbStandaloneBuilder::new("exemplar_malformed_rows")
+        .with_plugin(plugins)
         .build()
         .await;
     let frontend = instance.fe_instance();
@@ -5410,25 +5441,35 @@ async fn test_exemplar_query_skips_malformed_rows_with_warning() {
         .with_prometheus_handler(frontend.clone())
         .build();
     let app = server.build(server.make_app()).unwrap();
-    for (query, end, skipped, series) in [
-        ("metric", "1", 3, 1),
-        ("%7Bjob%3D%22api%22%7D", "1", 5, 1),
-        ("metric", "0.000000001", 0, 1),
-        ("missing", "1", 0, 0),
-        ("bad_only", "1", 1, 0),
+    for (query, start, end, skipped, series) in [
+        ("metric", "0", "1", 3, 1),
+        ("%7Bjob%3D%22api%22%7D", "0", "1", 5, 1),
+        ("metric", "0", "0.000000001", 0, 1),
+        ("metric", "0.0000000011", "0.0000000012", 0, 1),
+        ("metric", "0.0000000012", "0.0000000011", 0, 1),
+        (
+            "metric",
+            "1970-01-01T00:00:00.0000000011Z",
+            "1970-01-01T00:00:00.0000000012Z",
+            0,
+            1,
+        ),
+        ("missing", "0", "1", 0, 0),
+        ("bad_only", "0", "1", 1, 0),
     ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::get(format!(
-                    "/v1/prometheus/api/v1/query_exemplars?query={query}&start=0&end={end}"
-                ))
+        let params = format!("query={query}&start={start}&end={end}");
+        let request = if method == http::Method::GET {
+            Request::get(format!("/v1/prometheus/api/v1/query_exemplars?{params}"))
                 .body(Body::empty())
-                .unwrap(),
-            )
-            .await
-            .unwrap();
+        } else {
+            Request::post("/v1/prometheus/api/v1/query_exemplars")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(Body::from(params))
+        }
+        .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(hook.0.swap(0, Ordering::Relaxed), 1);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
