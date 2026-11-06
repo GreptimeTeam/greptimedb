@@ -606,7 +606,9 @@ fn drop_metric_name_shares_clean_tags_and_mutation_is_isolated() {
 
 #[test]
 fn drop_metric_name_filters_rejected_tags_like_rebuild_labels() {
-    let cases: &[(&[(&str, &str)], &[(&str, &str)])] = &[
+    type Tags<'a> = &'a [(&'a str, &'a str)];
+
+    let cases: &[(Tags<'_>, Tags<'_>)] = &[
         (
             &[("a", ""), ("b", "2"), ("c", "3")],
             &[("b", "2"), ("c", "3")],

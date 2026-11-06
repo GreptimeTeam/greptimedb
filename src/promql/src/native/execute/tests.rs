@@ -10184,7 +10184,7 @@ fn a_literal_arithmetic_over_a_collecting_window_hands_on_its_flush() {
     assert!(out.iter().all(|chunk| name_of(chunk).is_none()));
     assert!(
         out.iter()
-            .any(|chunk| chunk.is_last && chunk.series.time.len() == 0),
+            .any(|chunk| chunk.is_last && chunk.series.time.is_empty()),
         "the tag set the flush answered empty did not close on a chunk carrying no row"
     );
     assert_eq!(

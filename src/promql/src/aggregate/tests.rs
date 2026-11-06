@@ -1087,10 +1087,12 @@ fn state_blocks_keep_absolute_indices_across_boundaries_and_gaps() {
 /// whole-series fold here.
 #[test]
 fn every_aggregate_folds_a_series_whole_and_as_its_runs() {
+    type Sample = (usize, Option<f64>, Option<f64>);
+
     let schema = schema_with_grid_len(&["a", "b"], 256);
     // Every row holds a value in at least one field. The positions straddle the 64-point block
     // edges, leave whole blocks empty, and repeat non-finite and signed-zero values.
-    let inputs: [(&str, &[(usize, Option<f64>, Option<f64>)]); 2] = [
+    let inputs: [(&str, &[Sample]); 2] = [
         (
             "h1",
             &[
