@@ -1637,6 +1637,58 @@ fn assert_decode_error(bytes: &[u8], expected: &str) {
 }
 
 #[test]
+fn renamed_reordered_value_columns_keep_field_identity_after_decode() {
+    let tree = rate_tree_of(two_field_schema());
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(format!("{PROMQL}.{OTHER}"), DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new(format!("{PROMQL}.{VALUE}"), DataType::Float64, true),
+    ]));
+    let node = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding_of(&tree, two_field_schema(), vec![HOST.to_string()]),
+        vec![input_plan(frame_schema_of(&two_field_schema()))],
+        Arc::new(datafusion::common::DFSchema::try_from(schema.as_ref().clone()).unwrap()),
+    )
+    .unwrap();
+    let decoded = FusedSeries::deserialize(&node.serialize().unwrap()).unwrap();
+    assert_eq!(node.schema(), decoded.schema());
+    let tags = decoded.output_tags().unwrap();
+    assert_eq!(vec![HOST], tags);
+    let classification =
+        super::classify_output(&schema, &two_field_schema().fields, &tags, TIME, PROMQL).unwrap();
+    let chunk = EvaluatedChunk::try_new(
+        Series {
+            metric: SeriesLabels::try_new(None, Vec::new()).unwrap(),
+            time: TimeAxis::from_grid_spans(grid(), vec![GridSpan::new(0, 1)]).unwrap(),
+            fields: SeriesFields::try_from_vec(vec![
+                Samples::from_float(Float64Array::from(vec![10.0])),
+                Samples::from_float(Float64Array::from(vec![20.0])),
+            ])
+            .unwrap(),
+        },
+        true,
+    )
+    .unwrap();
+    let batch = series_to_record_batch(&classification, &tags, &schema, &chunk).unwrap();
+    for (name, expected) in [(OTHER, 20.0), (VALUE, 10.0)] {
+        let values = batch
+            .column_by_name(&format!("{PROMQL}.{name}"))
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(expected, values.value(0));
+    }
+}
+
+#[test]
 fn plain_rows_decode_rejects_invalid_schemas() {
     let node = fused(rate_tree());
     let bytes = node.serialize().unwrap();
@@ -1694,6 +1746,32 @@ fn plain_rows_decode_rejects_invalid_schemas() {
     ];
     for (schema, expected) in malformed_schemas {
         assert_decode_error(&mutate_schema(&bytes, schema), expected);
+    }
+
+    let renamed = mutate_envelope_payload(&bytes, |payload| {
+        let mut fields = payload.output_schema.fields().to_vec();
+        let index = fields
+            .iter()
+            .position(|field| field.name() == VALUE)
+            .unwrap();
+        fields[index] = Arc::new(Field::new(PROMQL, DataType::Float64, true));
+        payload.output_schema = Schema::new(fields);
+    });
+    assert!(FusedSeries::deserialize(&renamed).is_ok());
+    for (data_type, nullable, expected) in [
+        (DataType::Int64, true, "must be Float64"),
+        (DataType::Float64, false, "must be nullable"),
+    ] {
+        let malformed = mutate_envelope_payload(&renamed, |payload| {
+            let mut fields = payload.output_schema.fields().to_vec();
+            let index = fields
+                .iter()
+                .position(|field| field.name() == PROMQL)
+                .unwrap();
+            fields[index] = Arc::new(Field::new(PROMQL, data_type, nullable));
+            payload.output_schema = Schema::new(fields);
+        });
+        assert_decode_error(&malformed, expected);
     }
 
     let scalar_decoded = FusedSeries::deserialize(&scalar_bytes).unwrap();

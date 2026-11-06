@@ -373,8 +373,8 @@ struct FusedSeriesPayload {
 
 impl FusedSeries {
     /// Serializes the native tree and the binding required to reconstruct this plan node.
-    /// The PromQL text is included for diagnostics only and never drives execution; children
-    /// remain ordinary Substrait inputs.
+    /// The PromQL text identifies expression-named output fields; children remain ordinary
+    /// Substrait inputs.
     ///
     /// This is only the node's own encoding. Whether a planner is allowed to place this node on
     /// another machine is a separate decision, made by the planner and the transport, not here.
@@ -491,6 +491,7 @@ impl FusedSeries {
                 &node.tree,
                 &node.output_tags()?,
                 &node.binding.time_index,
+                &node.promql,
             )?;
         }
         Ok(node)
@@ -1027,6 +1028,26 @@ impl FusedSeries {
     /// from the whole tree - a match narrows them, `or` joins both sides' and a wrapper around
     /// either keeps them - and the output schema is where it records that.
     fn output_tags(&self) -> DataFusionResult<Vec<String>> {
+        if matches!(self.tree.root().output, NativeType::Scalar(_)) {
+            return Ok(Vec::new());
+        }
+        if self.format == FusedOutputFormat::PlainRows {
+            let fields =
+                self.tree.root().output.samples().ok_or_else(|| {
+                    DataFusionError::Plan("FusedSeries output is not samples".into())
+                })?;
+            let names =
+                output_field_names(self.output_schema.inner(), &fields.fields, &self.promql);
+            return Ok(self
+                .output_schema
+                .fields()
+                .iter()
+                .filter(|field| {
+                    field.name() != &self.binding.time_index && !names.contains(field.name())
+                })
+                .map(|field| field.name().clone())
+                .collect());
+        }
         let field_names = self
             .tree
             .root()
@@ -1796,6 +1817,7 @@ fn validate_plain_output_schema(
     tree: &NativeTree,
     tags: &[String],
     time: &str,
+    promql: &str,
 ) -> DataFusionResult<()> {
     let fields = match &tree.root().output {
         NativeType::Samples(s) => s.fields.to_vec(),
@@ -1819,7 +1841,7 @@ fn validate_plain_output_schema(
             ));
         }
     };
-    classify_output(schema, &fields, tags, time)?;
+    classify_output(schema, &fields, tags, time, promql)?;
     Ok(())
 }
 
@@ -1908,13 +1930,46 @@ fn scalar_root_fields(
     }])
 }
 
+/// Names the fields in a row schema. Existing callers may still declare the tree's field names.
+fn output_field_names(
+    output_schema: &SchemaRef,
+    series_fields: &[FieldSpec],
+    promql: &str,
+) -> Vec<String> {
+    let expression_names = series_fields
+        .iter()
+        .map(|field| {
+            if series_fields.len() == 1 {
+                promql.to_string()
+            } else {
+                format!("{promql}.{}", field.name)
+            }
+        })
+        .collect::<Vec<_>>();
+    if expression_names.iter().all(|name| {
+        output_schema
+            .fields()
+            .iter()
+            .any(|field| field.name() == name)
+    }) {
+        expression_names
+    } else {
+        series_fields
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect()
+    }
+}
+
 /// Classifies every output column, rejecting anything the conversion cannot produce.
 pub(crate) fn classify_output(
     output_schema: &SchemaRef,
     series_fields: &[FieldSpec],
     tags: &[String],
     time_column: &str,
+    promql: &str,
 ) -> DataFusionResult<Vec<OutputColumn>> {
+    let field_names = output_field_names(output_schema, series_fields, promql);
     if output_schema
         .fields()
         .iter()
@@ -1937,7 +1992,7 @@ pub(crate) fn classify_output(
                 "tag column {tag:?} of FusedSeriesExec cannot be the time column"
             )));
         }
-        if series_fields.iter().any(|field| field.name.as_ref() == tag) {
+        if field_names.contains(tag) {
             return Err(DataFusionError::Plan(format!(
                 "tag column {tag:?} of FusedSeriesExec clashes with a series field"
             )));
@@ -1973,10 +2028,7 @@ pub(crate) fn classify_output(
             classification.push(OutputColumn::Time);
             continue;
         }
-        if let Some(index) = series_fields
-            .iter()
-            .position(|field| field.name.as_ref() == name)
-        {
+        if let Some(index) = field_names.iter().position(|field| field == name) {
             if std::mem::replace(&mut field_seen[index], true) {
                 return Err(DataFusionError::Plan(format!(
                     "duplicate field column {name:?} in FusedSeriesExec output schema"
@@ -2041,7 +2093,7 @@ pub(crate) fn classify_output(
         if !seen {
             return Err(DataFusionError::Plan(format!(
                 "missing field column {:?} in FusedSeriesExec output schema",
-                series_fields[index].name
+                field_names[index]
             )));
         }
     }
@@ -2336,7 +2388,7 @@ impl FusedSeriesExec {
             Vec::new()
         } else if scalar_root {
             let scalar_fields = scalar_root_fields(&output_schema, &tags, &time_column)?;
-            classify_output(&output_schema, &scalar_fields, &tags, &time_column)?
+            classify_output(&output_schema, &scalar_fields, &tags, &time_column, &promql)?
         } else {
             classify_output(
                 &output_schema,
@@ -2347,6 +2399,7 @@ impl FusedSeriesExec {
                     .fields,
                 &tags,
                 &time_column,
+                &promql,
             )?
         };
         let partition_count = inputs.first().map_or(1, |(input, _, _)| {

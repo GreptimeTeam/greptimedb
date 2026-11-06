@@ -1403,13 +1403,11 @@ impl PromPlanner {
                         let right_ctx = self.ctx.clone();
                         (left, left_ctx, right, right_ctx)
                     };
-                let left_field_columns = left_context.field_columns.clone();
                 let left_time_index_column = left_context.time_index_column.clone();
                 self.ctx = left_context.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let right_field_columns = right_context.field_columns.clone();
                 let right_time_index_column = right_context.time_index_column.clone();
                 self.ctx = right_context.clone();
                 let mut right_table_ref = self
@@ -1418,7 +1416,7 @@ impl PromPlanner {
 
                 // Both operands are planned first because only the planned contexts tell a tag
                 // from a value field. The rewrite merely adds matchers to a selector, so the
-                // table reference, time index and field columns captured above stay valid.
+                // table reference and time index captured above stay valid.
                 // Matcher propagation belongs to the legacy route: copying a matcher into the
                 // other operand's scan drops the groups that have no partner, which is exactly
                 // what lets the legacy join answer where Prometheus would report a duplicated
@@ -1457,6 +1455,8 @@ impl PromPlanner {
                     self.ctx = right_context.clone();
                 }
 
+                let left_field_columns = left_context.field_columns.clone();
+                let right_field_columns = right_context.field_columns.clone();
                 let left_is_empty_metric = Self::is_empty_metric(&left_input);
                 let right_is_empty_metric = Self::is_empty_metric(&right_input);
 

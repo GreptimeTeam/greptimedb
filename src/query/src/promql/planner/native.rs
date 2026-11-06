@@ -256,9 +256,14 @@ impl PromPlanner {
             .filter(|field| field.data_type() == &ArrowDataType::Utf8)
             .map(|field| field.name().clone())
             .collect();
-        output_ctx
-            .field_columns
-            .retain(|field| fields.iter().any(|column| column.name() == field));
+        output_ctx.field_columns = fields
+            .iter()
+            .filter(|field| {
+                field.data_type() == &ArrowDataType::Float64
+                    || field.data_type() == &native_histogram_value_type().as_arrow_type()
+            })
+            .map(|field| field.name().clone())
+            .collect();
         output_ctx.use_tsid = false;
         self.ctx = output_ctx.clone();
         let table_ref = self.table_ref();
@@ -476,8 +481,8 @@ impl PromPlanner {
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
-    /// The compiler's bound tree and selector schemas determine the native output names; the
-    /// existing planner is not consulted for capability or schema approval.
+    /// The expression names the value columns; the compiler's bound tree and selector schemas
+    /// determine their values. The existing planner is not consulted for capability or schema approval.
     ///
     /// The route is offered a whole expression because the compiler folds a range function and the
     /// math functions over it into one tree: offering a sub-expression instead would compile a tree
@@ -557,8 +562,13 @@ impl PromPlanner {
                 DEFAULT_TIME_INDEX_COLUMN.to_string()
             };
             // A data-free tree reads no input, so every field it answers is a float.
-            let output_schema =
-                fused_output_schema(&values, &output_tags, &time_index, FieldKind::Float)?;
+            let output_schema = fused_output_schema(
+                prom_expr,
+                &values,
+                &output_tags,
+                &time_index,
+                FieldKind::Float,
+            )?;
             let node = FusedSeries::try_new(
                 Arc::from(prom_expr.to_string()),
                 tree,
@@ -1297,7 +1307,7 @@ impl PromPlanner {
                     return Ok(None);
                 }
                 let Some(output_schema) =
-                    Self::fused_root_schema(&tree, &source_tags, &time, root_kind)
+                    Self::fused_root_schema(prom_expr, &tree, &source_tags, &time, root_kind)
                 else {
                     return Ok(None);
                 };
@@ -1378,18 +1388,8 @@ impl PromPlanner {
         let Some(root_fields) = native_root_fields(tree.root()) else {
             return Ok(None);
         };
-        // A root field can share a name with a tag or the time index, and under `or` the right
-        // table's tags join the left table's columns. The output names each column once, so such a
-        // statement keeps the existing plan.
-        let mut column_names = std::collections::HashSet::new();
-        if !std::iter::once(&time)
-            .chain(&root_fields)
-            .chain(&output_tags)
-            .all(|name| column_names.insert(name.as_str()))
-        {
-            return Ok(None);
-        }
-        let output_schema = fused_output_schema(&root_fields, &output_tags, &time, root_kind)?;
+        let output_schema =
+            fused_output_schema(prom_expr, &root_fields, &output_tags, &time, root_kind)?;
         // The children a node reads bind it: a `RawSeriesSource` child carries the frames and names
         // the metric it reads, so a node over them binds neither tags nor one metric name of its
         // own. A node whose children stay direct scans of one table reads that table through the
@@ -1423,12 +1423,13 @@ impl PromPlanner {
 
     /// The columns a [`FusedSeries`] node over `tree` produces.
     ///
-    /// Field and tag names are derived from the native tree. If this walk cannot derive a tag
-    /// set, the native route declines rather than consulting the legacy planner.
+    /// Fields and tags are derived from the native tree; the expression names the output fields.
+    /// If this walk cannot derive a tag set, the native route declines rather than consulting the
+    /// legacy planner.
     ///
-    /// `None` when the root is not a value the node can publish, or when a field would share a
-    /// name with a tag or the time index: the output names each column once.
+    /// `None` when the root is not a value the node can publish.
     fn fused_root_schema(
+        prom_expr: &PromExpr,
         tree: &NativeTree,
         source_tags: &[Vec<String>],
         time: &str,
@@ -1440,19 +1441,12 @@ impl PromPlanner {
             NativeType::AggregateState(_) => return None,
         };
         let root_fields = native_root_fields(tree.root())?;
-        let mut column_names = std::collections::HashSet::new();
-        let columns = std::iter::once(time)
-            .chain(root_fields.iter().map(String::as_str))
-            .chain(output_tags.iter().map(String::as_str));
-        if !columns.clone().all(|name| column_names.insert(name)) {
-            return None;
-        }
         // The kind is the one the statement's own root answers, derived before segmentation cut
         // anything. It cannot be recomputed here: a cut prefix is replaced by an input leaf whose
         // samples are already evaluated, so walking this tree would read every such leaf as the
         // kind its scan carried. `count_over_time(h[5m]) + on (__name__) ...` answers floats, and
         // its replaced leaf carries floats, while the scan below was a histogram.
-        fused_output_schema(&root_fields, &output_tags, time, root_kind).ok()
+        fused_output_schema(prom_expr, &root_fields, &output_tags, time, root_kind).ok()
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -1961,7 +1955,8 @@ fn canonical_boundary_stages(
         .map(|field| field.name.to_string())
         .collect::<Vec<_>>();
     let output_tags = fused_output_tags(tree.root(), source_tags)?;
-    let output_schema = fused_output_schema(&fields, &output_tags, time_index, root_kind).ok()?;
+    let output_schema =
+        fused_output_schema(prom_expr, &fields, &output_tags, time_index, root_kind).ok()?;
 
     // The producer: the statement's own tree, run per partition, exporting a frame.
     let producer = FusedSeries::try_new_canonical_producer(
@@ -2445,9 +2440,13 @@ async fn segment_tree(
     }
     let output_schema = match format {
         FusedOutputFormat::PlainRows => {
-            let Some(schema) =
-                PromPlanner::fused_root_schema(&parent, &child_tags, time_index, root_kind)
-            else {
+            let Some(schema) = PromPlanner::fused_root_schema(
+                prom_expr,
+                &parent,
+                &child_tags,
+                time_index,
+                root_kind,
+            ) else {
                 return Ok(None);
             };
             schema
@@ -2516,9 +2515,8 @@ fn native_root_fields(node: &NativeNode) -> Option<Vec<String>> {
 
 /// The columns a [`FusedSeries`] node produces.
 ///
-/// With `experimental_native_promql` enabled, a value column is named after its compiled root
-/// field (for example, `field_0`), not legacy planner expression text. Legacy headers in
-/// `tests/cases/**` are unaffected because the native route is opt-in and off by default.
+/// A single value is named after the expression. Multiple values append their compiled field
+/// names to the expression; the names inside the native tree remain unchanged.
 ///
 /// The shape is the one the existing unary pipeline consumes — the time index, then the series
 /// fields, then the tags — and each column is declared the way the node's own conversion reads it
@@ -2533,6 +2531,7 @@ fn native_root_fields(node: &NativeNode) -> Option<Vec<String>> {
 /// `field_kind` says what a field column carries. The physical conversion reads the same kind off
 /// this schema and dispatches on it, so the schema and the batch it describes cannot disagree.
 fn fused_output_schema(
+    prom_expr: &PromExpr,
     fields: &[String],
     tags: &[String],
     time_index: &str,
@@ -2551,7 +2550,13 @@ fn fused_output_schema(
             false,
         )),
     ));
-    for name in fields {
+    let expression = prom_expr.to_string();
+    for field in fields {
+        let name = if fields.len() == 1 {
+            expression.clone()
+        } else {
+            format!("{expression}.{field}")
+        };
         columns.push((None, Arc::new(Field::new(name, field_type.clone(), true))));
     }
     for name in tags {
@@ -3856,7 +3861,9 @@ mod tests {
                 .map(|field| field.name.as_ref())
                 .collect::<Vec<_>>()
         );
+        let expression = promql_parser::parser::parse("sum by (zone, host) ((x))").unwrap();
         let output = fused_output_schema(
+            &expression,
             &["v0".to_string(), "v1".to_string()],
             &["zone".to_string(), "host".to_string()],
             "ts",
@@ -3864,7 +3871,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            vec!["ts", "v0", "v1", "zone", "host"],
+            vec![
+                "ts".to_string(),
+                format!("{expression}.v0"),
+                format!("{expression}.v1"),
+                "zone".to_string(),
+                "host".to_string(),
+            ],
             output
                 .fields()
                 .iter()
