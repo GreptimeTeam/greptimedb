@@ -18,7 +18,7 @@ name: Narthex Native CI
 # fallback: a suite that passes with the switch on does not by itself show that a statement ran
 # natively. These jobs check the native route directly, each on its own axis:
 #
-#   promql-sqlness    the standalone environment, each case against its own `.result`
+#   promql-sqlness    every environment, each case against its own `.result`
 #   prometheus-compat GreptimeDB against the pinned Prometheus engine, answer by answer
 #   vm-performance    candidate, the narthex baseline and VictoriaMetrics on one machine
 #
@@ -129,14 +129,13 @@ jobs:
       - name: Restore the executable bit
         # An artifact does not carry file modes, so a downloaded binary is not executable.
         run: chmod +x bins/greptime bins/sqlness-runner
-      - name: Run the standalone environment on the native route
+      - name: Run every environment on the native route
         run: |
           set -o pipefail
           RUST_BACKTRACE=1 ./bins/sqlness-runner bare \
             -c tests/cases \
             --bins-dir ./bins \
             --enable-native-promql \
-            --env-filter '^standalone$' \
             --preserve-state 2>&1 | tee "$RUNNER_TEMP/sqlness-native.log"
           # `tee` would otherwise hide a runner that never started.
           grep -q 'All sqlness tests passed' "$RUNNER_TEMP/sqlness-native.log"
@@ -151,7 +150,7 @@ jobs:
         # The `.result` files are this run's output: sqlness replaced each one it compared against.
         # Only `TQL EXPLAIN`/`TQL ANALYZE` statements report a plan, so the check covers those.
         run: |
-          files=$(find tests/cases/standalone -name '*.result')
+          files=$(find tests/cases -name '*.result')
           # shellcheck disable=SC2086 # the paths are split into arguments on purpose
           python3 .github/scripts/narthex-native-route.py --require-native --input $files
       - uses: actions/upload-artifact@v4
