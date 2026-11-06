@@ -4224,6 +4224,10 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
         "stdvar(some_metric)",
         "sum by (tag_0) (rate(some_metric[5m]))",
         "sum without (tag_0) (some_metric)",
+        // The output columns are the whole tree's, not the Final half's state input's: `dst` is
+        // created by the prefix rewrite, so a grouping that keeps or names it publishes it.
+        r#"sum without (tag_0) (label_replace(some_metric, "dst", "$1", "tag_0", "(.*)"))"#,
+        r#"sum by (dst) (label_replace(some_metric, "dst", "$1", "tag_0", "(.*)"))"#,
         "sum(rate(some_metric[5m]))",
         "ceil(sum(some_metric))",
         // A literal scalar on either side of the fold. Below the aggregate it is part of the prefix,
@@ -4316,6 +4320,12 @@ async fn native_fused_aggregate_splits_into_a_final_over_a_partial_producer() {
             "stdvar(some_metric)" => &["field_0", "timestamp"],
             "sum by (tag_0) (rate(some_metric[5m]))" => &["field_0", "tag_0", "timestamp"],
             "sum without (tag_0) (some_metric)" => &["field_0", "timestamp"],
+            r#"sum without (tag_0) (label_replace(some_metric, "dst", "$1", "tag_0", "(.*)"))"# => {
+                &["dst", "field_0", "timestamp"]
+            }
+            r#"sum by (dst) (label_replace(some_metric, "dst", "$1", "tag_0", "(.*)"))"# => {
+                &["dst", "field_0", "timestamp"]
+            }
             "sum(rate(some_metric[5m]))" => &["field_0", "timestamp"],
             "ceil(sum(some_metric))" => &["field_0", "timestamp"],
             "sum(avg(some_metric) by (tag_0))" => &["field_0", "timestamp"],
@@ -5170,6 +5180,92 @@ async fn native_fused_label_rewrites_keep_legacy_output_labels() {
             "`{query}` must use the native plan only when it is enabled"
         );
     }
+}
+
+/// A `__name__` destination is native-only: the existing planner refuses the destination outright,
+/// so the only plan that can answer it is this one. What it must get right is which rewrites publish
+/// the name as a column and which leave the output without one.
+#[tokio::test]
+async fn native_fused_metric_name_rewrites_publish_or_drop_the_name() {
+    for (query, keeps_name) in [
+        // The rewrite at the statement root, and a join that writes a value into the name.
+        (
+            r#"label_replace(some_metric, "__name__", "same", "__name__", "(.*)")"#,
+            true,
+        ),
+        (r#"label_join(some_metric, "__name__", "-", "tag_0")"#, true),
+        // A delete-only rewrite of a scan that publishes no name column publishes none.
+        (
+            r#"label_replace(some_metric, "__name__", "", "__name__", "(.*)")"#,
+            false,
+        ),
+        (r#"label_join(some_metric, "__name__", "-")"#, false),
+        // A kernel above the rewrite computes a value of its own and drops the name with it.
+        (
+            r#"abs(label_replace(some_metric, "__name__", "same", "__name__", "(.*)"))"#,
+            false,
+        ),
+        (
+            r#"histogram_count(label_replace(some_metric, "__name__", "same", "__name__", "(.*)"))"#,
+            false,
+        ),
+        (
+            r#"timestamp(label_replace(some_metric, "__name__", "same", "__name__", "(.*)"))"#,
+            false,
+        ),
+        // A fresh name above a dropped one is a new label, and still becomes a column.
+        (
+            r#"label_replace(abs(some_metric), "__name__", "same", "__name__", "(.*)")"#,
+            true,
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` must run natively: {display}"
+        );
+        assert_eq!(
+            plan.schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == METRIC_NAME),
+            keeps_name,
+            "`{query}`: {display}"
+        );
+    }
+}
+
+/// A rewrite of the metric name over a discovered selector writes a label the source declares, so
+/// two metrics whose ordinary labels are equal are collected by the canonical boundary.
+#[tokio::test]
+async fn native_metric_discovery_name_rewrite_canonicalizes_by_name() {
+    let plan = build_native_fused_plan_with_provider(
+        r#"label_replace({tag_0="x"}, "__name__", "same", "__name__", "(.*)")"#,
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    let display = plan.display_indent().to_string();
+    assert!(
+        plan.schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == METRIC_NAME),
+        "the rewritten name is a column of the answer: {display}"
+    );
+    let fused = find_fused_series(&plan).expect("fused plan");
+    assert!(
+        fused.children().iter().any(|child| matches!(
+            child,
+            LogicalPlan::Extension(Extension { node })
+                if node
+                    .as_any()
+                    .downcast_ref::<FusedSeries>()
+                    .is_some_and(FusedSeries::is_canonical_producer)
+        )),
+        "the name rewrite runs through a canonical boundary: {display}"
+    );
 }
 
 #[tokio::test]

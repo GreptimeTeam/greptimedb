@@ -255,6 +255,20 @@ impl LabelRewrite {
         }
     }
 
+    /// Whether this change can write a nonempty value.
+    ///
+    /// An empty value removes the destination instead ([`set_label`]), so a change whose value is
+    /// necessarily empty only deletes a label and publishes none that its input did not carry.
+    /// `label_replace`'s template is judged as written: `$1` can expand to nothing for one series and
+    /// to a value for another, so it may write. A `label_join` with no source labels joins nothing
+    /// and is always empty.
+    pub fn writes_value(&self) -> bool {
+        match &self.0 {
+            Change::Replace { replacement, .. } => !replacement.is_empty(),
+            Change::Join { src, .. } => !src.is_empty(),
+        }
+    }
+
     /// `label_replace`'s change, failing on an invalid expression or an empty destination.
     pub fn replace(dst: &str, replacement: &str, src: &str, regex: &str) -> Result<Self> {
         let compiled = Regex::new(&format!("^(?s:{regex})$")).map_err(|_| {
