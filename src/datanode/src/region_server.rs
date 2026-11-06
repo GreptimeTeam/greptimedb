@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod catalog;
+mod grouped_read;
 mod registrations;
 mod remote_dyn_filter;
 
@@ -58,6 +59,9 @@ use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
 use query::QueryEngineRef;
+use query::dist_plan::{
+    DATANODE_GROUPED_READ_VERSION, GroupedReadEnvelopeError, peek_grouped_read_envelope,
+};
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
@@ -99,9 +103,9 @@ use crate::error::{
     ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
     ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, GetRegionMetadataSnafu,
     HandleBatchDdlRequestSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
-    NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu,
-    Result, RuntimeJoinSnafu, SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu,
-    UnsupportedOutputSnafu,
+    NewPlanDecoderSnafu, NotYetImplementedSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu,
+    RegionNotReadySnafu, Result, RuntimeJoinSnafu, SerializeJsonSnafu, StopRegionEngineSnafu,
+    UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::query_stream::QueryRuntimeStream;
@@ -290,11 +294,33 @@ impl RegionServer {
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
+        // Inspect only our root extension before constructing a region catalog. Other plans are
+        // decoded normally, including extensions this grouped-read peek does not recognize.
+        let grouped = match peek_grouped_read_envelope(&request.plan) {
+            Ok(payload) => payload,
+            Err(GroupedReadEnvelopeError::UnsupportedVersion(version)) => {
+                return NotYetImplementedSnafu {
+                    what: format!(
+                        "DatanodeGroupedRead version {version}, this datanode reads version \
+                         {DATANODE_GROUPED_READ_VERSION}"
+                    ),
+                }
+                .fail();
+            }
+            Err(GroupedReadEnvelopeError::Malformed(reason)) => {
+                return UnexpectedSnafu { violated: reason }.fail();
+            }
+        };
         let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
             None
         };
+        if let Some(payload) = grouped {
+            return self
+                .handle_grouped_read_inner(request, query_ctx, payload, permit)
+                .await;
+        }
 
         let region_id = RegionId::from_u64(request.region_id);
         let engine_ctx = self

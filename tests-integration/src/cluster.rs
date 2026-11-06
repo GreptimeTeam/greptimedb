@@ -197,6 +197,7 @@ pub struct GreptimeDbClusterBuilder {
     store_config: Option<ObjectStoreConfig>,
     store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
+    datanode_max_concurrent_queries: usize,
     datanode_wal_config: DatanodeWalConfig,
     metasrv_wal_config: MetasrvWalConfig,
     datanode_gc_config: GcConfig,
@@ -208,6 +209,9 @@ pub struct GreptimeDbClusterBuilder {
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
     real_datanode_grpc_addr: bool,
+    /// Whether the frontend reaches the datanodes over their real TCP addresses instead of the
+    /// in-process duplex lane (see [`GreptimeDbClusterBuilder::with_frontend_tcp_datanode_clients`]).
+    frontend_tcp_datanode_clients: bool,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -235,6 +239,7 @@ impl GreptimeDbClusterBuilder {
             store_config: None,
             store_providers: None,
             datanodes: None,
+            datanode_max_concurrent_queries: 0,
             datanode_wal_config: DatanodeWalConfig::default(),
             metasrv_wal_config: MetasrvWalConfig::default(),
             datanode_gc_config: GcConfig::default(),
@@ -246,6 +251,7 @@ impl GreptimeDbClusterBuilder {
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
             real_datanode_grpc_addr: false,
+            frontend_tcp_datanode_clients: false,
         }
     }
 
@@ -264,6 +270,12 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_datanodes(mut self, datanodes: u32) -> Self {
         self.datanodes = Some(datanodes);
+        self
+    }
+
+    #[must_use]
+    pub fn with_datanode_max_concurrent_queries(mut self, limit: usize) -> Self {
+        self.datanode_max_concurrent_queries = limit;
         self
     }
 
@@ -346,6 +358,22 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    /// Makes the frontend reach every datanode over the datanode's real TCP address instead of the
+    /// in-process duplex lane.
+    ///
+    /// The duplex lane keeps in-process traffic out of [`DatanodeRpcStats`], which is what most
+    /// tests want. A test that counts the frontend's own Flight requests needs them on the wire, so
+    /// it turns the in-process lane off here; this requires
+    /// [`Self::with_real_datanode_grpc_addr`] so that each datanode is listening.
+    #[must_use]
+    pub fn with_frontend_tcp_datanode_clients(
+        mut self,
+        frontend_tcp_datanode_clients: bool,
+    ) -> Self {
+        self.frontend_tcp_datanode_clients = frontend_tcp_datanode_clients;
+        self
+    }
+
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
@@ -407,6 +435,7 @@ impl GreptimeDbClusterBuilder {
             &datanode_instances,
             &datanode_options,
             &datanode_rpc_stats,
+            self.frontend_tcp_datanode_clients,
         )
         .await;
 
@@ -497,6 +526,10 @@ impl GreptimeDbClusterBuilder {
                 );
             }
             opts.node_id = Some(datanode_id);
+            opts.max_concurrent_queries = self.datanode_max_concurrent_queries;
+            if self.datanode_max_concurrent_queries > 0 {
+                opts.concurrent_query_limiter_timeout = Duration::from_millis(250);
+            }
             if self.real_datanode_grpc_addr {
                 // Give every datanode its own address, so that the other datanodes can
                 // reach it (see `with_real_datanode_grpc_addr`).
@@ -722,6 +755,7 @@ async fn build_datanode_clients(
     instances: &HashMap<DatanodeId, Datanode>,
     options: &[DatanodeOptions],
     rpc_stats: &HashMap<DatanodeId, Arc<DatanodeRpcStats>>,
+    frontend_tcp_datanode_clients: bool,
 ) {
     for opts in options {
         let datanode_id = opts.node_id.unwrap();
@@ -730,6 +764,7 @@ async fn build_datanode_clients(
             instance,
             &opts.grpc.server_addr,
             rpc_stats.get(&datanode_id).cloned(),
+            frontend_tcp_datanode_clients,
         )
         .await;
         clients
@@ -783,9 +818,11 @@ fn serve_datanode_region_server<I, IO>(
 
 /// Serves the region server of `datanode` and returns the address and the client of the address.
 ///
-/// The returned client is always an in-process client: the frontend and the datanodes of the test
-/// process reach the region server through a duplex stream, no matter which address they use. This
-/// keeps the in-process traffic out of `rpc_stats`.
+/// The returned client is in-process by default: the frontend and the datanodes of the test
+/// process reach the region server through a duplex stream, no matter which address they use, which
+/// keeps the in-process traffic out of `rpc_stats`. With `frontend_tcp` the client dials the
+/// datanode's real TCP address instead, so a test that counts the frontend's own Flight requests
+/// sees them.
 ///
 /// [`test_util::PEER_PLACEHOLDER_ADDR`] is not a real address, so it cannot be served over the
 /// network at all. Any other address is a real one: the region server is additionally served on
@@ -795,13 +832,18 @@ async fn create_datanode_client(
     datanode: &Datanode,
     addr: &str,
     rpc_stats: Option<Arc<DatanodeRpcStats>>,
+    frontend_tcp: bool,
 ) -> (String, Client) {
-    let (client, server) = tokio::io::duplex(1024);
-    serve_datanode_region_server(
-        datanode,
-        futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]),
-        None,
-    );
+    let mut in_process = None;
+    if !frontend_tcp {
+        let (client, server) = tokio::io::duplex(1024);
+        serve_datanode_region_server(
+            datanode,
+            futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]),
+            None,
+        );
+        in_process = Some(client);
+    }
 
     if addr != test_util::PEER_PLACEHOLDER_ADDR {
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -809,27 +851,30 @@ async fn create_datanode_client(
         serve_datanode_region_server(datanode, incoming, rpc_stats);
     }
 
-    let mut client = Some(client);
     let channel_manager = ChannelManager::new();
-    channel_manager
-        .reset_with_connector(
-            addr,
-            service_fn(move |_| {
-                let client = client.take();
+    if !frontend_tcp {
+        channel_manager
+            .reset_with_connector(
+                addr,
+                service_fn(move |_| {
+                    let client = in_process.take();
 
-                async move {
-                    client
-                        .map(TokioIo::new)
-                        .ok_or_else(|| std::io::Error::other("Client already taken"))
-                }
-            }),
-        )
-        .unwrap();
+                    async move {
+                        client
+                            .map(TokioIo::new)
+                            .ok_or_else(|| std::io::Error::other("Client already taken"))
+                    }
+                }),
+            )
+            .unwrap();
+    }
 
     (
         addr.to_string(),
         // The mock connector pool lives on this single manager, so both lanes
-        // intentionally share it (same semantics as the legacy constructor).
+        // intentionally share it (same semantics as the legacy constructor). Without the
+        // in-process lane the manager dials the datanode's real TCP address, which is how a test
+        // counts the frontend's own Flight requests.
         Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr]),
     )
 }

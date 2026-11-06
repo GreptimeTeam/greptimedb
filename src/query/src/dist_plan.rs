@@ -16,6 +16,7 @@ mod analyzer;
 mod commutativity;
 mod dyn_filter_bridge;
 mod filter_id;
+mod grouped_read;
 mod merge_scan;
 mod merge_sort;
 mod planner;
@@ -26,6 +27,13 @@ mod remote_dyn_filter_registry;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
+pub use grouped_read::{
+    DATANODE_GROUPED_READ_NAME, DATANODE_GROUPED_READ_VERSION, DatanodeGroupedReadPlan,
+    DatanodeReadGroup, GroupedReadEnvelopeError, GroupedReadPayload,
+    MAX_GROUPED_READ_PAYLOAD_BYTES, MAX_GROUPED_READ_REGIONS, build_grouped_read_plan,
+    eligible_remote_plan, encode_nested_plan, nested_plan_table, peek_grouped_read_envelope,
+    validate_grouped_read_nested_plan,
+};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub(crate) use merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
