@@ -1497,6 +1497,16 @@ impl FlushScheduler {
         status.pending_bulk_writes.push(request);
     }
 
+    /// Whether an ALTER owns a turn while waiting for its memtables to flush.
+    pub(crate) fn has_pending_alter(&self, region_id: RegionId) -> bool {
+        self.region_status.get(&region_id).is_some_and(|status| {
+            status
+                .pending_ddls
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::Alter(_)))
+        })
+    }
+
     /// Returns true if the region has pending DDLs or a close-time flush.
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         self.region_status
