@@ -68,8 +68,10 @@ pub(crate) fn histogram_group_is_single(group: &Grouping) -> bool {
 /// routing key. A single-owner histogram needs no such restriction. `topk`, a second aggregate and
 /// vector-vector matching still need a whole-vector boundary.
 ///
-/// An instant selection or window above the cut cannot be applied to the merged values under the
-/// tree's current binding: the cut output is evaluated, whereas these nodes consume raw samples.
+/// An instant selection or a window over raw samples above the cut cannot be applied to the merged
+/// values under the tree's current binding: the cut output is evaluated, whereas these nodes consume
+/// raw samples. A subquery window instead reads an evaluated input, so it is admitted when its
+/// declared grid equals its direct input's grid.
 pub(crate) fn split(
     node: &NativeNode,
     fields: &[FieldSpec],
@@ -182,8 +184,35 @@ pub(crate) fn split(
             ..
         } => Err(declined("a whole-vector operation above a split aggregate")),
         NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
+        // A window whose input is already evaluated - a subquery - applies to the merged values the
+        // suffix reads, provided it evaluates on that input's own grid. The declared grid must equal
+        // its direct input's grid; the cut's grid need not be that grid, because a window between
+        // them may already have re-gridded the values. A raw-sample window cannot sit above the cut.
+        NativeExpr::Window { input, op } => {
+            let Some(mut inner) = split(input, fields, time_index)? else {
+                return Ok(None);
+            };
+            let input_grid = input
+                .output
+                .samples()
+                .and_then(|schema| schema.eval_grid.as_ref());
+            if op.input_grid.as_ref().is_none_or(|declared| {
+                input_grid.is_none_or(|input| declared.spec() != input.spec())
+            }) {
+                return Err(declined(
+                    "a window above an aggregate with a different evaluation grid",
+                ));
+            }
+            inner.suffix = NativeNode {
+                expr: NativeExpr::Window {
+                    input: Box::new(inner.suffix),
+                    op: op.clone(),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
+        }
         NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Vector { input, .. }
         | NativeExpr::VectorOf { input }
@@ -480,9 +509,9 @@ impl Split {
 
 /// Puts `merged` at the cut and returns the suffix above it.
 ///
-/// A suffix is the spine of point-wise maps, constant-sided binaries and at most one histogram
-/// operation between the cut and the root, with scalar constants preserved. Other whole-vector
-/// operations are refused by `split`.
+/// A suffix is the spine of point-wise maps, constant-sided binaries, evaluated-input windows and at
+/// most one histogram operation between the cut and the root, with scalar constants preserved. Other
+/// whole-vector operations are refused by `split`.
 fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     let NativeNode { expr, output } = node;
     let rejected = || {
@@ -494,6 +523,11 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
         NativeExpr::Scalar(_) => {
             return Ok(NativeNode { expr, output });
         }
+        // A subquery window above the cut is rebuilt over the merged values, on its own grid.
+        NativeExpr::Window { input, op } => NativeExpr::Window {
+            input: Box::new(enter_suffix(*input, merged)?),
+            op,
+        },
         NativeExpr::Map { input, op } => NativeExpr::Map {
             input: Box::new(enter_suffix(*input, merged)?),
             op,

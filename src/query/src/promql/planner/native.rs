@@ -35,7 +35,7 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::native_histogram::native_histogram_value_type;
@@ -62,15 +62,16 @@ use promql::extension_plan::{
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series, uniform_field_kind,
+    AggregateStage, BoundAggregate, BoundInput, BoundVectorOp, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType, fused_output_tags, reads_across_series,
+    uniform_field_kind,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, MatchOp, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
-    VectorMatchCardinality, VectorSelector, token,
+    SubqueryExpr, VectorMatchCardinality, VectorSelector, token,
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::ResultExt;
@@ -79,7 +80,8 @@ use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
-    InfoInput, compile_selectors, compile_statement, info_input, statement_grid,
+    InfoInput, compile_selectors_with_grid, compile_statement_with_grid, info_input,
+    statement_grid, subquery_child_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
@@ -502,35 +504,61 @@ impl PromPlanner {
         if !self.native_fused {
             return Ok(None);
         }
-        // Over the wire this route plans the whole statement as one fused node over raw sources:
-        // each region answers the series it holds, and the node reconciles them before evaluating.
-        // In process a region can also run a split or a segmented tree over its own scan, so those
-        // shapes stay there. This is a planning choice, not a limit of what the node can encode.
         let self_contained = plans_over_remote_regions(query_engine_state);
-        // Only the statement root is offered: the tree is compiled against the statement's grid,
-        // and a subquery's expression is evaluated on its own, smaller one. A range-vector root is
-        // the instant query's raw sample result, which the existing path reports as a matrix rather
-        // than as one point per grid position.
-        if prom_expr.value_type() == ValueType::Matrix {
+        // A range selector returns raw samples, which have no evaluation grid to bind. A subquery
+        // root instead returns its inner expression on the subquery's child grid, and a range
+        // query has no grid to bind a matrix root to at all.
+        let subquery_root = root_subquery(prom_expr);
+        if prom_expr.value_type() == ValueType::Matrix
+            && (subquery_root.is_none() || self.ctx.start != self.ctx.end)
+        {
             return Ok(None);
         }
 
         let Some(stmt) = self.native_statement(prom_expr) else {
             return Ok(None);
         };
+        // The subquery root's inner expression is compiled on the child grid, with the statement
+        // left untouched: `@ start()` and `@ end()` inside it resolve against the statement's own
+        // bounds, not against the child's. A statement whose grid cannot be built is not one this
+        // route can evaluate, so it keeps the existing plan. The child grid is the compiler's own
+        // derivation, so both halves of the route agree on the step, the range and the anchor.
+        let child_grid = if let Some(subquery) = subquery_root {
+            let Ok(outer) = statement_grid(&stmt) else {
+                return Ok(None);
+            };
+            let Some(child) =
+                subquery_child_grid(&stmt, &outer, subquery).context(DataFusionPlanningSnafu)?
+            else {
+                return Ok(None);
+            };
+            Some(child.grid)
+        } else {
+            None
+        };
+        let effective_expr = match subquery_root {
+            Some(subquery) => subquery.expr.as_ref(),
+            None => &stmt.expr,
+        };
         let mut selectors = Vec::new();
-        if !collect_selectors(&stmt, prom_expr, &mut selectors) {
+        if !collect_selectors(&stmt, effective_expr, &mut selectors) {
             return Ok(None);
         }
         // The compiler decides which calls and shapes this route answers: a name it has no kernel
         // for comes back as `NotImplemented`, which is a decline below. A second list of names here
         // refused expressions the compiler does fold - a call under an aggregate was admitted while
         // the same call on its own was not - so there is one place that decides.
-        let Ok(grid) = statement_grid(&stmt) else {
+        let Ok(statement) = statement_grid(&stmt) else {
             return Ok(None);
         };
+        // The one grid every lowering path below binds: a subquery root is compiled on its child
+        // grid, and the rows it publishes carry that grid, so the split, the boundary and the
+        // segment nodes have to publish on it too rather than on the statement's.
+        let grid = child_grid.unwrap_or(statement);
         if selectors.is_empty() {
-            let tree = match compile_statement(&stmt) {
+            let mut compile_stmt = stmt.clone();
+            compile_stmt.expr = effective_expr.clone();
+            let tree = match compile_statement_with_grid(&compile_stmt, Arc::clone(&grid)) {
                 Ok(tree) => tree,
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
@@ -567,7 +595,7 @@ impl PromPlanner {
                 Arc::from(prom_expr.to_string()),
                 tree,
                 FusedSeriesBinding {
-                    grid,
+                    grid: Arc::clone(&grid),
                     time_index,
                     tags: Vec::new(),
                     metric_name: None,
@@ -911,8 +939,10 @@ impl PromPlanner {
             })
             .collect::<Result<Vec<_>>>()?;
         let bind_index = std::cell::Cell::new(0usize);
-        let compiled = match compile_selectors(
-            &stmt,
+        let mut compile_stmt = stmt.clone();
+        compile_stmt.expr = effective_expr.clone();
+        let compiled = match compile_selectors_with_grid(
+            &compile_stmt,
             &|req| {
                 let i = bind_index.get();
                 bind_index.set(i + 1);
@@ -937,6 +967,7 @@ impl PromPlanner {
                 Ok(Arc::clone(schema))
             },
             NATIVE_ORDERING,
+            Arc::clone(&grid),
         ) {
             Ok(v) => v,
             // The compiler refusing a shape is this route declining it.
@@ -1296,12 +1327,13 @@ impl PromPlanner {
                 let Some(rawinput) = children.into_iter().next() else {
                     return Ok(None);
                 };
+                let publish_grid = Arc::clone(&grid);
                 let node = plan_split_aggregate(
                     Arc::from(prom_expr.to_string()),
                     partial,
                     final_tree,
                     FusedSeriesBinding {
-                        grid,
+                        grid: publish_grid,
                         time_index: time.clone(),
                         tags,
                         metric_name: metric,
@@ -1392,11 +1424,14 @@ impl PromPlanner {
         } else {
             (tags, metric)
         };
+        // Every lowering path above publishes on the same grid the tree was compiled on, so the
+        // binding is that grid rather than a per-shape choice.
+        let publish_grid = Arc::clone(&grid);
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
             tree,
             FusedSeriesBinding {
-                grid,
+                grid: publish_grid,
                 time_index: time,
                 tags,
                 metric_name: metric,
@@ -1458,8 +1493,8 @@ impl PromPlanner {
     /// `None` means the bounds are not representable as a [`SystemTime`], which is not a grid a
     /// tree can be evaluated on either.
     fn native_statement(&self, prom_expr: &PromExpr) -> Option<EvalStmt> {
-        let start = UNIX_EPOCH.checked_add(Duration::from_millis(self.ctx.stmt_start as u64))?;
-        let end = UNIX_EPOCH.checked_add(Duration::from_millis(self.ctx.stmt_end as u64))?;
+        let start = epoch_millis(self.ctx.stmt_start)?;
+        let end = epoch_millis(self.ctx.stmt_end)?;
         Some(EvalStmt {
             expr: prom_expr.clone(),
             start,
@@ -1606,15 +1641,65 @@ fn exportable(node: &NativeNode) -> bool {
         .is_some_and(|schema| schema.eval_grid.is_some())
 }
 
+/// Whether `node` is a window over an evaluated input - the shape a subquery over anything but a
+/// bare selection compiles to.
+fn evaluated_input_window(node: &NativeNode) -> bool {
+    matches!(&node.expr, NativeExpr::Window { op, .. } if op.input_grid.is_some())
+}
+
+/// Whether the dist analyzer places a segment over `node` region-locally.
+///
+/// A segment is a `FusedSeries` node the analyzer has to move below the `MergeScan` for the physical
+/// planner to read the scans it names. The `FusedSeries` arm of `Categorizer::check_extension_plan`
+/// (`src/query/src/dist_plan/commutativity.rs`) is what decides that, from the bound tree alone: a
+/// root that [`reads_across_series`] is `NonCommutative` unless it is a per-series evaluation or the
+/// `Partial` half of a split fold. A segment it refuses stays above the merge, where the physical
+/// planner finds neither a region scan nor an explicit-label frame below it, so the statement fails
+/// while being planned instead of keeping the plan it had. Segmentation therefore asks that question
+/// before it cuts, and [`cut_as_segment`] declines the nodes this refuses.
+fn region_local_segment(node: &NativeNode) -> bool {
+    // A canonical cut is not judged by that predicate: the analyzer recognizes the canonical
+    // producer before it reads the tree (`canonical_boundary_region_node`), and asks whether that
+    // producer's prefix runs per partition instead. Which prefix a boundary is built over - a
+    // `Merge` under a rewrite over a `Vector` is one - is what [`canonical_boundary_stages`]
+    // decides when it builds one, so those cuts keep the admission they had.
+    if matches!(node.expr, NativeExpr::Merge { .. }) {
+        return true;
+    }
+    // The `Partial` half of a split fold is per partition by construction: it folds the rows its own
+    // partition scanned and exports only the state it folded.
+    if let NativeExpr::Aggregate { input, op } = &node.expr
+        && op.stage == AggregateStage::Partial
+        && !reads_across_series(input)
+    {
+        return true;
+    }
+    !reads_across_series(node) || pointwise_operand(node) || independent_scan_pair(node)
+}
+
 /// Whether `node` becomes a segment of its own under a parent that must gather.
 ///
 /// Cut local prefixes, global consumers and canonical merges separately so the prefix keeps its
 /// scan width, and every global consumer sees the canonical boundary below it. A pointwise wrapper
 /// of a global consumer is cut as well, so it cannot hide that consumer from recursive lowering.
 fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
+    // A window over an evaluated input answers per series on its own grid, so its own shape says
+    // nothing about where a segment over it can go: it drops the metric name, so two of the series
+    // it answers can end under one label set, and the dist analyzer reads it as cross-series
+    // ([`region_local_segment`]). Cutting one where the analyzer will not place it leaves a
+    // `FusedSeries` above the `MergeScan` that the physical planner cannot build, so the segment is
+    // only taken where the analyzer places it region-locally; otherwise the per-series prefix
+    // inside the window is cut instead, and where there is none the statement keeps the plan it had.
+    if evaluated_input_window(node) && !region_local_segment(node) {
+        return false;
+    }
+    // A window over an evaluated input is answered per series on its own grid, so it is not the
+    // global gather a raw window's locality reports.
+    let evaluated_window = evaluated_input_window(node);
     if !exportable(node)
         || matches!(node.expr, NativeExpr::Input(_))
         || (!canonical_segmentation
+            && !evaluated_window
             && matches!(input_locality(node), InputLocality::SinglePartition))
     {
         return false;
@@ -1845,6 +1930,21 @@ fn cut_segments(node: &NativeNode, canonical_segmentation: bool) -> Segment {
         node: rewritten,
         sources,
         cut,
+    }
+}
+
+/// The grid one `FusedSeries` publishes on. A root that is a window over an evaluated input - a
+/// subquery - produces on that window's own output grid; every other node is on the grid its tree
+/// was compiled on.
+///
+/// Every lowering path in this planner binds the one effective grid (the subquery's child grid for a
+/// matrix root, the statement's grid otherwise), so for a window root this answers that same grid;
+/// it stays because an evaluated-input segment is built from a subtree whose root is the window, and
+/// the builder needs the window's declared output grid rather than the caller's copy.
+fn fused_publish_grid(root: &NativeNode, statement_grid: &Arc<EvalGrid>) -> Arc<EvalGrid> {
+    match &root.expr {
+        NativeExpr::Window { op, .. } => Arc::clone(&op.output_grid),
+        _ => Arc::clone(statement_grid),
     }
 }
 
@@ -2093,11 +2193,12 @@ fn build_evaluated_segment(
     }
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
     let frame = DFSchema::try_from(frame.as_ref().clone()).ok()?;
+    let publish_grid = fused_publish_grid(tree.root(), grid);
     let plan = FusedSeries::try_new_with_format(
         Arc::from("segment"),
         tree,
         FusedSeriesBinding {
-            grid: Arc::clone(grid),
+            grid: publish_grid,
             time_index: time_index.to_string(),
             tags: output_tags.clone(),
             metric_name: None,
@@ -2141,6 +2242,13 @@ fn build_inner_segment(
         .collect::<Option<Vec<_>>>()?;
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
     let output_tags = native_output_tags(tree.root(), &source_tags)?;
+    // A segment whose root is a window over an evaluated input - a subquery - produces on that
+    // window's own output grid, not on the statement's. Every other segment is bound on the
+    // statement's grid, as before.
+    let segment_grid = match &tree.root().expr {
+        NativeExpr::Window { op, .. } => Arc::clone(&op.output_grid),
+        _ => Arc::clone(grid),
+    };
     let (inputs, metric, time_index, tags) = if let [index] = sources.as_slice() {
         let (metric, time_index, tags) = per_source.get(*index)?;
         (scans, metric.clone(), time_index.clone(), tags.clone())
@@ -2182,7 +2290,7 @@ fn build_inner_segment(
         Arc::from("segment"),
         tree,
         FusedSeriesBinding {
-            grid: Arc::clone(grid),
+            grid: segment_grid,
             time_index: time_index.clone(),
             tags: tags.clone(),
             metric_name: metric.clone(),
@@ -2224,7 +2332,15 @@ async fn segment_tree(
     root_kind: FieldKind,
     remote_raw_boundary: bool,
 ) -> Result<Option<LogicalPlan>> {
-    if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
+    // Only a tree the analyzer gathers is worth splitting: its per-series prefixes then run where
+    // their input is read. A window over an evaluated input can need that split even where
+    // [`input_locality`] reports a local tree - it drops the metric name, so [`reads_across_series`]
+    // reads it as cross-series - and the per-series prefix inside it is what keeps the partitions it
+    // scanned. Proceeding only admits the attempt: every cut is admitted by [`cut_as_segment`]
+    // individually, which is where the analyzer's placement is asked.
+    if !matches!(input_locality(tree.root()), InputLocality::SinglePartition)
+        && !evaluated_input_window(tree.root())
+    {
         return Ok(None);
     }
     // A segment boundary has to carry something, and the only thing it can carry is a per-series
@@ -2232,6 +2348,10 @@ async fn segment_tree(
     // such subtree inside it has nothing to cut, and cutting anything else - an aggregate's own
     // state, a constant - is either impossible or a plain recomputation of the same work in one
     // more node. Cutting on locality alone would accept one here.
+    //
+    // The window this tree may be rooted at is not one of those consumers, but it is no boundary
+    // either: `cut_as_segment` never cuts one, and what keeps its input's partitions is the
+    // per-series prefix below it, which the cuts below are admitted for.
     // A grouping by `__name__` keeps that label while the fused node's declared columns cannot
     // name it. With multiple sources, groups differing only by metric name would therefore be
     // reported under one label set. A single-source tree cannot merge distinct metric-name groups
@@ -2246,10 +2366,13 @@ async fn segment_tree(
     let mut first_iteration = true;
     let mut changed = false;
     loop {
+        // A tree the analyzer keeps partition-local needs no segment; a window over an evaluated
+        // input is still worth attempting one for, so its per-series prefix keeps its partitions.
         if !matches!(
             input_locality(current_tree.root()),
             InputLocality::SinglePartition
-        ) {
+        ) && !evaluated_input_window(current_tree.root())
+        {
             break;
         }
         let segment = cut_segments(current_tree.root(), canonical_segmentation);
@@ -2313,6 +2436,12 @@ async fn segment_tree(
             if built.is_none() && contains_global_consumer(cut) {
                 return Ok(None);
             }
+            // A cut the first iteration cannot build from the scans is built from the frames this
+            // loop has already published: the canonical pass inserts a merge under a label rewrite,
+            // and that boundary - rebuilt here as a producer, a frame and a router - is what answers
+            // one series per label set across partitions. Which cuts are taken is
+            // [`cut_as_segment`]'s decision, and it declines the evaluated-input window the analyzer
+            // will not place region-locally, so this fallback only ever sees the cuts it admitted.
             let built = built.or_else(|| {
                 build_evaluated_segment(
                     prom_expr,
@@ -2466,6 +2595,28 @@ async fn segment_tree(
     })))
 }
 
+/// The moment `millis` milliseconds from the Unix epoch, on whichever side of it that lands.
+///
+/// A pre-epoch statement (`TQL EVAL ('-60', '-60', '1m')`) reaches the planner as a negative
+/// millisecond, which `PromPlannerContext::from_eval_stmt` keeps on purpose. `None` means the bound
+/// is outside what a [`SystemTime`] represents.
+fn epoch_millis(millis: i64) -> Option<SystemTime> {
+    if millis.is_negative() {
+        UNIX_EPOCH.checked_sub(Duration::from_millis(millis.unsigned_abs()))
+    } else {
+        UNIX_EPOCH.checked_add(Duration::from_millis(millis as u64))
+    }
+}
+
+/// Finds a subquery at the statement root, treating parentheses as transparent.
+fn root_subquery(expr: &PromExpr) -> Option<&SubqueryExpr> {
+    match expr {
+        PromExpr::Subquery(subquery) => Some(subquery),
+        PromExpr::Paren(paren) => root_subquery(&paren.expr),
+        _ => None,
+    }
+}
+
 /// The native root's value columns, named from the compiled tree rather than legacy expressions.
 fn native_root_fields(node: &NativeNode) -> Option<Vec<String>> {
     match &node.output {
@@ -2578,10 +2729,20 @@ fn plan_split_aggregate(
         )))
         .context(DataFusionPlanningSnafu);
     }
+    // The partial tree publishes aggregate state on the cut aggregate's grid, which is not
+    // necessarily the statement's when the suffix re-grids the values - a subquery above the cut
+    // produces on its own grid. The final tree's binding is the one the caller derived for it.
+    let partial_binding = FusedSeriesBinding {
+        grid: match &partial.root().output {
+            NativeType::AggregateState(state) => Arc::clone(&state.grid),
+            _ => Arc::clone(&binding.grid),
+        },
+        ..binding.clone()
+    };
     let partial = FusedSeries::try_new_state_export(
         Arc::clone(&promql),
         partial,
-        binding.clone(),
+        partial_binding,
         vec![rawinput],
     )
     .context(DataFusionPlanningSnafu)?;
@@ -3169,6 +3330,12 @@ fn contains_aggregate_expression(expr: &PromExpr) -> bool {
             .args
             .iter()
             .any(|arg| contains_aggregate_expression(arg)),
+        // A subquery evaluates its expression on its own grid, but a fold inside it still folds a
+        // group no single region owns, so an operand holding one needs the split route just as a
+        // direct aggregate does. [`single_selector_operand`] counts a subquery's selector as the
+        // operand's one selector, so this is what keeps a subquery around an aggregate out of the
+        // join.
+        PromExpr::Subquery(subquery) => contains_aggregate_expression(&subquery.expr),
         _ => false,
     }
 }
@@ -3234,7 +3401,11 @@ fn collect_selectors<'a>(
             }
         }
         PromExpr::Aggregate(aggregate) => return collect_selectors(stmt, &aggregate.expr, out),
-        PromExpr::Subquery(_) => return false,
+        // A subquery evaluates its expression on its own grid; its selectors are prepared like any
+        // other, each with the scan bounds `raw_scan_bounds` derives from its own range and step.
+        PromExpr::Subquery(subquery) => {
+            return collect_selectors(stmt, &subquery.expr, out);
+        }
         _ => {}
     }
     true
@@ -3298,6 +3469,8 @@ fn calls_rate_or_increase(expr: &PromExpr) -> bool {
         }
         PromExpr::Unary(unary) => calls_rate_or_increase(&unary.expr),
         PromExpr::Aggregate(aggregate) => calls_rate_or_increase(&aggregate.expr),
+        // A rate inside a subquery is still a rate over a delta table's samples.
+        PromExpr::Subquery(subquery) => calls_rate_or_increase(&subquery.expr),
         _ => false,
     }
 }
@@ -3898,6 +4071,12 @@ mod tests {
             // the shapes that produced a `tag_0` planning error before the aggregate gate existed.
             "sum(A) / B",
             "A / sum(B)",
+            // The same fold one subquery down. The subquery's selector is the operand's one
+            // selector, so only the aggregate gate keeps this operand out of the join - without it
+            // the admitted operand fails at execution, where no planner can build the fused node
+            // over the gathered subquery.
+            "avg_over_time((sum by (job, host) (A))[5m:1m]) + on(job, host) B",
+            "A + on(job, host) avg_over_time((sum by (job, host) (B))[5m:1m])",
         ] {
             assert!(!hybrid_admission(query), "{query}");
         }
@@ -3908,6 +4087,30 @@ mod tests {
             "sort(A) / B",
             "absent(A) / B",
             "-A / B",
+        ] {
+            assert!(hybrid_admission(query), "{query}");
+        }
+    }
+
+    /// An aggregate inside a subquery is still an aggregate, so a hybrid operand that holds one is
+    /// not the per-series evaluation the join needs.
+    ///
+    /// This is the admission decision behind a statement that used to fail while executing: both
+    /// shapes below were admitted, and the operand's subquery then had to be gathered for a join
+    /// that no installed planner can build. Refusing them keeps the plan the existing route builds.
+    #[test]
+    fn subquery_aggregate_operand_is_refused() {
+        for query in [
+            "avg_over_time((sum by (job, host) (A))[5m:1m]) + on(job, host) B",
+            "A + on(job, host) avg_over_time((sum by (job, host) (B))[5m:1m])",
+        ] {
+            assert!(!hybrid_admission(query), "{query}");
+        }
+        // The subquery on its own is admitted: what the gate refuses is the fold inside it, not the
+        // subquery that carries it.
+        for query in [
+            "avg_over_time((A)[5m:1m]) + on(job, host) B",
+            "A + on(job, host) avg_over_time((B)[5m:1m])",
         ] {
             assert!(hybrid_admission(query), "{query}");
         }
