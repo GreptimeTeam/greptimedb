@@ -6277,6 +6277,13 @@ async fn native_promql_window_over_a_time_partitioned_table_keeps_whole_series()
             "{query}: the window runs above the region reads: {:?}",
             display_plan_tree(&root)
         );
+        // A fallback plan also produces the existing plan's rows, so the admission has to be
+        // asserted separately: the frontend tree must carry a fused node.
+        assert!(
+            observer.fused().is_some(),
+            "{query}: the tree must run natively, not on the existing plan: {:?}",
+            display_plan_tree(&root)
+        );
     }
 }
 
