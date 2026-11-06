@@ -519,8 +519,7 @@ impl NativeTree {
         report_node(self.root(), ROOT_PATH, metrics)
     }
 
-    /// This tree rendered under its operator line, with each node's own
-    /// figures when `metrics` holds them.
+    /// This tree rendered from column zero, with each node's own figures when `metrics` holds them.
     pub fn display_with<'a>(&'a self, metrics: &'a NodeMetricsSnapshot) -> NativeTreeDisplay<'a> {
         NativeTreeDisplay {
             tree: self,
@@ -538,9 +537,10 @@ pub struct NativeTreeDisplay<'a> {
 
 impl fmt::Display for NativeTreeDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The root sits one level in from the operator line it is drawn under, and each child one
-        // level below its consumer.
-        write_report(f, &self.tree.report(self.metrics), 1)
+        // The root starts at column zero: the block the caller brackets the tree in carries the
+        // indentation, so each line here is depth-relative to that block rather than to the
+        // caller's own place in the plan.
+        write_report(f, &self.tree.report(self.metrics), 0)
     }
 }
 
@@ -567,10 +567,11 @@ fn write_report(
 }
 
 impl fmt::Display for NativeTree {
-    /// One line per node, outermost first, two spaces per depth, without figures: this is the
-    /// tree's own shape, which is what a display that holds no metrics snapshot can show.
+    /// One line per node, outermost first, from column zero with two spaces per depth and without
+    /// figures: this is the tree's own shape, which is what a display that holds no metrics
+    /// snapshot can show.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_report(f, &self.report(&NodeMetricsSnapshot::default()), 1)
+        write_report(f, &self.report(&NodeMetricsSnapshot::default()), 0)
     }
 }
 

@@ -125,7 +125,7 @@ fn shown(lines: &[&str]) -> String {
 fn a_tree_is_plan_lines_only() {
     let tree = NativeTree::try_new(raw_input()).unwrap();
 
-    assert_eq!(tree.to_string(), shown(&["  Input: raw samples source=0"]));
+    assert_eq!(tree.to_string(), shown(&["Input: raw samples source=0"]));
     assert_eq!(
         NativeTree::try_new(window_over(
             raw_input(),
@@ -138,8 +138,8 @@ fn a_tree_is_plan_lines_only() {
         .unwrap()
         .to_string(),
         shown(&[
-            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "    Input: raw samples source=0",
+            "Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "  Input: raw samples source=0",
         ])
     );
 }
@@ -161,8 +161,8 @@ fn a_window_over_raw_samples_is_shown_once_per_node() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "    Input: raw samples source=0",
+            "Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "  Input: raw samples source=0",
         ])
     );
 }
@@ -187,9 +187,9 @@ fn a_map_nests_below_the_window_it_maps() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "  Map: abs, round 3",
-            "    Window: rate [300000ms] offset 60000 anchor - on grid 0/60000x4",
-            "      Input: raw samples source=0",
+            "Map: abs, round 3",
+            "  Window: rate [300000ms] offset 60000 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
         ])
     );
 }
@@ -211,8 +211,8 @@ fn a_window_names_its_constant_argument_and_its_anchor() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "  Window: quantile_over_time 0.9 [60000ms] offset 0 anchor 42 on grid 1000/60000x4",
-            "    Input: raw samples source=0",
+            "Window: quantile_over_time 0.9 [60000ms] offset 0 anchor 42 on grid 1000/60000x4",
+            "  Input: raw samples source=0",
         ])
     );
 }
@@ -236,7 +236,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let tree = NativeTree::try_new(evaluated_input).unwrap();
     assert_eq!(
         tree.to_string(),
-        shown(&["  Input: evaluated samples source=0, contiguous",])
+        shown(&["Input: evaluated samples source=0, contiguous",])
     );
 
     let interleaved = NativeType::Samples(Arc::new(SeriesSchema {
@@ -254,7 +254,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let tree = NativeTree::try_new(raw_input).unwrap();
     assert_eq!(
         tree.to_string(),
-        shown(&["  Input: raw samples source=0, interleaved"])
+        shown(&["Input: raw samples source=0, interleaved"])
     );
 }
 
@@ -268,7 +268,7 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
         output: NativeType::Scalar(Arc::clone(&out)),
     };
     let tree = NativeTree::try_new(scalar).unwrap();
-    assert_eq!(tree.to_string(), shown(&["  Scalar: 2"]));
+    assert_eq!(tree.to_string(), shown(&["Scalar: 2"]));
 
     let instant = NativeNode {
         expr: NativeExpr::Instant {
@@ -287,8 +287,8 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "  Instant: lookback 300000ms offset 60000 on grid 0/60000x4",
-            "    Input: raw samples source=0",
+            "Instant: lookback 300000ms offset 60000 on grid 0/60000x4",
+            "  Input: raw samples source=0",
         ])
     );
 }
@@ -320,9 +320,9 @@ fn an_aggregate_and_a_binary_name_their_binding() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "  Aggregate: sum by [job] complete",
-            "    Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      Input: raw samples source=0",
+            "Aggregate: sum by [job] complete",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
         ])
     );
 
@@ -356,10 +356,10 @@ fn an_aggregate_and_a_binary_name_their_binding() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "  Binary: + ignoring [] one-to-one",
-            "    Scalar: 2",
-            "    Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      Input: raw samples source=0",
+            "Binary: + ignoring [] one-to-one",
+            "  Scalar: 2",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
         ])
     );
 
@@ -375,7 +375,7 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             .to_string()
             .lines()
             .next(),
-        Some("  Binary: + ignoring [] one-to-one fill_right 0.5")
+        Some("Binary: + ignoring [] one-to-one fill_right 0.5")
     );
 }
 
@@ -409,15 +409,15 @@ fn a_set_operation_names_its_operator_and_labels() {
     };
     assert_eq!(
         root_line(SetOp::And, MatchingLabels::On(vec!["job".into()])),
-        "  Set: and on [job]"
+        "Set: and on [job]"
     );
     assert_eq!(
         root_line(SetOp::Or, MatchingLabels::Ignoring(vec!["job".into()])),
-        "  Set: or ignoring [job]"
+        "Set: or ignoring [job]"
     );
     assert_eq!(
         root_line(SetOp::Unless, MatchingLabels::Ignoring(Vec::new())),
-        "  Set: unless ignoring []"
+        "Set: unless ignoring []"
     );
 }
 
@@ -451,9 +451,9 @@ fn a_without_grouping_does_not_read_as_by() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "  Aggregate: sum without [job] complete",
-            "    Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      Input: raw samples source=0",
+            "Aggregate: sum without [job] complete",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
         ])
     );
 }
@@ -501,22 +501,22 @@ fn a_vector_operation_names_its_binding() {
                 top: false,
                 group: Grouping::Without(Arc::new(["job".into()])),
             },
-            "  Vector: bottomk 3 without [job]",
+            "Vector: bottomk 3 without [job]",
         ),
         (
             BoundVectorOp::LimitK {
                 k: 2.0,
                 group: Grouping::By(Arc::new([])),
             },
-            "  Vector: limitk 2 by []",
+            "Vector: limitk 2 by []",
         ),
         (
             BoundVectorOp::LimitRatio { ratio: -0.5 },
-            "  Vector: limit_ratio -0.5",
+            "Vector: limit_ratio -0.5",
         ),
         (
             BoundVectorOp::Sort(SortOrder::ByLabelDesc(vec!["job".into(), "le".into()])),
-            "  Vector: sort_by_label_desc [job, le]",
+            "Vector: sort_by_label_desc [job, le]",
         ),
         (
             BoundVectorOp::Absent {
@@ -529,14 +529,14 @@ fn a_vector_operation_names_its_binding() {
                 )
                 .unwrap(),
             },
-            r#"  Vector: absent {job="x"}"#,
+            r#"Vector: absent {job="x"}"#,
         ),
         (
             BoundVectorOp::CountValues {
                 label: "value".into(),
                 group: Grouping::Without(Arc::new(["job".into()])),
             },
-            r#"  Vector: count_values "value" without [job]"#,
+            r#"Vector: count_values "value" without [job]"#,
         ),
     ];
     for (op, line) in lines {
@@ -573,7 +573,7 @@ fn a_modified_window_names_its_modifier() {
     assert_eq!(
         tree.to_string().lines().next(),
         Some(
-            "  Window: rate [300000ms] smoothed lookback 300000ms offset 0 anchor - on grid \
+            "Window: rate [300000ms] smoothed lookback 300000ms offset 0 anchor - on grid \
              0/60000x4"
         )
     );
@@ -624,10 +624,10 @@ fn each_node_shows_only_the_figures_it_recorded() {
     assert_eq!(
         tree.display_with(&metrics).to_string(),
         shown(&[
-            "  Aggregate: sum by [job] complete, metrics=[groups: 120]",
-            "    Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4, \
+            "Aggregate: sum by [job] complete, metrics=[groups: 120]",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4, \
              metrics=[output_batches: 4, output_values: 7200]",
-            "      Input: raw samples source=0, metrics=[input_batches: 1, input_samples: 1486080]",
+            "    Input: raw samples source=0, metrics=[input_batches: 1, input_samples: 1486080]",
         ])
     );
 }

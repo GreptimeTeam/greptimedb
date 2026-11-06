@@ -2439,10 +2439,10 @@ impl Display for Explain<'_> {
 fn fmt_for_explain_prints_the_native_tree() {
     let text = Explain(&fused(rate_tree())).to_string();
     assert!(
-        text.starts_with("FusedSeries\n  Window: rate [300000ms]"),
+        text.starts_with("FusedSeries\nnative_tree=[\nWindow: rate [300000ms]"),
         "{text}"
     );
-    assert!(text.contains("    Input: raw samples source=0"), "{text}");
+    assert!(text.contains("\n  Input: raw samples source=0"), "{text}");
     assert!(!text.contains("metrics="), "{text}");
 }
 
@@ -2456,16 +2456,16 @@ fn fmt_as_prints_the_native_tree() {
     assert!(!text.contains("metrics="), "{text}");
 
     assert!(
-        text.starts_with("FusedSeriesExec\n  Window: rate"),
+        text.starts_with("FusedSeriesExec\nnative_tree=[\nWindow: rate"),
         "the node line precedes its tree: {text}"
     );
     // A distinctive line of the compiled tree: the window's bound range, offset, anchor and grid.
     assert!(
-        text.contains("  Window: rate [300000ms] offset 0 anchor - on grid 300000/60000x5"),
+        text.contains("\nWindow: rate [300000ms] offset 0 anchor - on grid 300000/60000x5"),
         "the node line carries the tree it runs: {text}"
     );
     assert!(
-        text.contains("    Input: raw samples"),
+        text.contains("\n  Input: raw samples"),
         "the node line carries the tree's source: {text}"
     );
 }
@@ -2480,7 +2480,7 @@ async fn fmt_as_reports_node_metrics_after_execution() {
     let text = displayable(exec.as_ref()).indent(false).to_string();
     println!("=== physical_plan after execution ===\n{text}");
     assert!(
-        text.starts_with("FusedSeriesExec\n  Window: rate"),
+        text.starts_with("FusedSeriesExec\nnative_tree=[\nWindow: rate"),
         "{text}"
     );
     assert!(text.contains("metrics=["), "{text}");
@@ -5832,7 +5832,7 @@ fn the_explain_text_names_the_frame_format_only() {
     assert!(
         Explain(&rows)
             .to_string()
-            .starts_with("FusedSeries\n  Window:")
+            .starts_with("FusedSeries\nnative_tree=[\nWindow:")
     );
     let framed = FusedSeries::try_new_with_format(
         rows.tree().clone(),
@@ -5845,21 +5845,21 @@ fn the_explain_text_names_the_frame_format_only() {
     assert!(
         Explain(&framed)
             .to_string()
-            .starts_with("FusedSeries: (output: series_frame)\n  Window:"),
+            .starts_with("FusedSeries: (output: series_frame)\nnative_tree=[\nWindow:"),
         "a frame output names its format: {}",
         Explain(&framed)
     );
     let framed_exec = plan_of(framed, memory_exec(Vec::new())).unwrap();
     let text = displayable(framed_exec.as_ref()).indent(false).to_string();
     assert!(
-        text.starts_with("FusedSeriesExec: (output: series_frame)\n  Window:"),
+        text.starts_with("FusedSeriesExec: (output: series_frame)\nnative_tree=[\nWindow:"),
         "{text}"
     );
     let canonical = canonical_producer_node();
     let text = Explain(&canonical).to_string();
     assert!(
         text.starts_with(
-            "FusedSeries: (output: series_frame, per-partition canonical merge)\n  Merge:"
+            "FusedSeries: (output: series_frame, per-partition canonical merge)\nnative_tree=[\nMerge:"
         ),
         "{text}"
     );
@@ -5867,7 +5867,7 @@ fn the_explain_text_names_the_frame_format_only() {
     let plain = plan(rate_tree(), memory_exec(Vec::new())).expect("the runtime executes the tree");
     let text = displayable(plain.as_ref()).indent(false).to_string();
     assert!(
-        text.starts_with("FusedSeriesExec\n  Window:"),
+        text.starts_with("FusedSeriesExec\nnative_tree=[\nWindow:"),
         "the row-table node line has no parameters: {text}"
     );
 }

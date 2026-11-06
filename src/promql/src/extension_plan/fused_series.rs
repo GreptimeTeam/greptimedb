@@ -1075,7 +1075,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
                 "{separator}(state routing: canonical labels except {excluded:?})"
             )?;
         }
-        write!(f, "\n{}", self.tree)
+        write!(f, "\nnative_tree=[\n{}\n]", self.tree)
     }
 
     fn with_exprs_and_inputs(
@@ -2593,7 +2593,11 @@ impl DisplayAs for FusedSeriesExec {
         if self.format == FusedOutputFormat::SeriesFrame {
             write!(f, ": (output: series_frame)")?;
         }
-        write!(f, "\n{}", self.tree.display_with(&self.node_metrics()))
+        write!(
+            f,
+            "\nnative_tree=[\n{}\n]",
+            self.tree.display_with(&self.node_metrics())
+        )
     }
 }
 
