@@ -32,9 +32,11 @@ use api::v1::{
     UnsetFulltext, UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions,
     set_index, unset_index,
 };
+use common_catalog::consts::RELATIONAL_ENGINE;
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
+use common_query::prelude::greptime_timestamp;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::json::JsonSettings;
@@ -73,7 +75,10 @@ use sql::statements::{
 };
 use sql::util::extract_tables_from_query;
 use store_api::mito_engine_options::{COMPACTION_OVERRIDE, COMPACTION_TYPE};
-use table::requests::{FILE_TABLE_META_KEY, TableOptions};
+use table::requests::{
+    FILE_TABLE_META_KEY, RELATIONAL_CONNECTION_KEY, RELATIONAL_META_KEY,
+    RELATIONAL_REMOTE_TABLE_KEY, RelationalOptions, TableOptions,
+};
 use table::table_reference::TableReference;
 #[cfg(feature = "enterprise")]
 pub use trigger::to_create_trigger_task_expr;
@@ -82,8 +87,9 @@ use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
     ConvertIdentifierSnafu, EncodeJsonSnafu, ExternalSnafu, FindNewColumnsOnInsertionSnafu,
     IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu, InvalidColumnDefSnafu,
-    InvalidFlowNameSnafu, InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu, ParseSqlValueSnafu,
-    PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
+    InvalidFlowNameSnafu, InvalidSqlSnafu, MissingRelationalOptionSnafu, NotSupportedSnafu,
+    ParseSqlSnafu, ParseSqlValueSnafu, PrepareFileTableSnafu, ReservedTimeIndexColumnSnafu, Result,
+    SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
 
 pub fn create_table_expr_by_column_schemas(
@@ -152,6 +158,96 @@ pub(crate) async fn create_external_expr(
             .context(ExternalSnafu)?;
 
     let mut table_options = create.options.into_map();
+
+    if create.engine == RELATIONAL_ENGINE {
+        let connection = table_options
+            .get(RELATIONAL_CONNECTION_KEY)
+            .cloned()
+            .context(MissingRelationalOptionSnafu {
+                name: RELATIONAL_CONNECTION_KEY,
+            })?;
+        let remote_table = table_options
+            .get(RELATIONAL_REMOTE_TABLE_KEY)
+            .cloned()
+            .context(MissingRelationalOptionSnafu {
+                name: RELATIONAL_REMOTE_TABLE_KEY,
+            })?;
+
+        let remote_columns =
+            crate::relational::fetch_mysql_columns(&connection, &remote_table).await?;
+
+        // `INFORMATION_SCHEMA.COLUMNS` nullability is not (yet) read, so treat
+        // every remote column as nullable.
+        let remote_column_schemas: Vec<ColumnSchema> = remote_columns
+            .into_iter()
+            .map(|column| ColumnSchema::new(column.name, column.data_type, true))
+            .collect();
+
+        let (time_index, primary_keys, table_column_schemas) = if !create.columns.is_empty() {
+            // Expanded form: user-declared columns/constraints, like the file engine.
+            // No synthetic time index is appended here, so a remote column named
+            // `greptime_timestamp` is an ordinary column, not a name clash.
+            let time_index = find_time_index(&create.constraints)?;
+            let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
+            let column_schemas = columns_to_column_schemas(
+                &create.columns,
+                &time_index,
+                Some(&query_ctx.timezone()),
+            )?;
+            (time_index, primary_keys, column_schemas)
+        } else {
+            // Inferred form: expose all remote columns + a synthetic time index.
+            // The synthetic column is reserved, so a remote column with the same
+            // name must be rejected rather than silently replaced.
+            let synthetic_time_index = greptime_timestamp();
+            ensure!(
+                !remote_column_schemas
+                    .iter()
+                    .any(|column| column.name == synthetic_time_index),
+                ReservedTimeIndexColumnSnafu {
+                    name: synthetic_time_index.to_string(),
+                }
+            );
+            let (column_schemas, time_index) = file_column_schemas_to_table(&remote_column_schemas);
+            // No user columns → no PRIMARY KEY to derive; external tables are read-only.
+            let primary_keys = vec![];
+            (time_index, primary_keys, column_schemas)
+        };
+
+        // Declared columns must exist in the remote table (with a castable type)
+        // or be nullable / have a default — the synthetic column passes via `DEFAULT 0`.
+        check_file_to_table_schema_compatibility(&remote_column_schemas, &table_column_schemas)
+            .context(SchemaIncompatibleSnafu)?;
+
+        let column_defs = column_schemas_to_defs(table_column_schemas, &primary_keys)?;
+
+        let meta = RelationalOptions {
+            connection,
+            remote_table,
+        };
+        table_options.insert(
+            RELATIONAL_META_KEY.to_string(),
+            serde_json::to_string(&meta).context(EncodeJsonSnafu)?,
+        );
+        // Drop the raw options so the plaintext connection isn't persisted twice
+        // nor echoed back by `SHOW CREATE TABLE`.
+        table_options.remove(RELATIONAL_CONNECTION_KEY);
+        table_options.remove(RELATIONAL_REMOTE_TABLE_KEY);
+
+        return Ok(CreateTableExpr {
+            catalog_name,
+            schema_name,
+            table_name,
+            desc: String::default(),
+            column_defs,
+            time_index,
+            primary_keys,
+            create_if_not_exists: create.if_not_exists,
+            table_options,
+            table_id: None,
+            engine: create.engine.clone(),
+        });
+    }
 
     let (object_store, files) = prepare_file_table_files(&table_options, local_file_access)
         .await

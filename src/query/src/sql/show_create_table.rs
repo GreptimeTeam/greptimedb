@@ -36,8 +36,8 @@ use sql::statements::{self, OptionMap, concrete_data_type_to_sql_data_type};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
-    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, TTL_KEY,
-    WRITE_BUFFER_SIZE_KEY,
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, RELATIONAL_META_KEY, SKIP_WAL_KEY,
+    TTL_KEY, WRITE_BUFFER_SIZE_KEY,
 };
 
 use crate::error::{
@@ -67,7 +67,7 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     for (k, v) in table_opts
         .extra_options
         .iter()
-        .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
+        .filter(|(k, _)| k != &FILE_TABLE_META_KEY && k != &RELATIONAL_META_KEY)
     {
         options.insert(k.clone(), v.clone());
     }
@@ -541,5 +541,33 @@ WITH(
 )"#,
             sql
         );
+    }
+
+    #[test]
+    fn test_show_create_table_redacts_relational_meta() {
+        let table_schema = SchemaRef::new(Schema::new(vec![]));
+        let mut options: TableOptions = Default::default();
+        let _ = options.extra_options.insert(
+            RELATIONAL_META_KEY.to_string(),
+            "{\"connection\":\"mysql://user:secret@127.0.0.1:3306/db\",\"remote_table\":\"sample\"}"
+                .to_string(),
+        );
+        let _ = options
+            .extra_options
+            .insert(FILE_TABLE_LOCATION_KEY.to_string(), "foo.csv".to_string());
+        let meta = TableMetaBuilder::empty()
+            .schema(table_schema)
+            .primary_key_indices(vec![])
+            .engine("relational".to_string())
+            .next_column_id(0)
+            .options(options)
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+
+        let opts = create_sql_options(&meta, None);
+        let str_map = opts.to_str_map();
+        assert!(!str_map.contains_key(RELATIONAL_META_KEY));
+        assert!(str_map.contains_key(FILE_TABLE_LOCATION_KEY));
     }
 }

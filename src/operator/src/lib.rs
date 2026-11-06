@@ -22,6 +22,7 @@ pub mod insert;
 pub mod metrics;
 pub mod procedure;
 pub mod region_req_factory;
+pub(crate) mod relational;
 pub mod req_convert;
 pub mod request;
 pub mod statement;

@@ -33,12 +33,41 @@ fn region_manifest_path(region_dir: &str) -> String {
     format!("{region_dir}manifest/_relational_manifest")
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RelationalRegionManifest {
     pub region_id: RegionId,
     pub column_metadatas: Vec<ColumnMetadata>,
     pub primary_key: Vec<ColumnId>,
     pub options: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for RelationalRegionManifest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut options = self.options.clone();
+        // `RELATIONAL_META_KEY` carries the plaintext connection DSN; redact
+        // it so `{:?}` on the manifest never leaks credentials.
+        if let Some(encoded) = options.get_mut(RELATIONAL_META_KEY) {
+            *encoded = redact_relational_options(encoded);
+        }
+        f.debug_struct("RelationalRegionManifest")
+            .field("region_id", &self.region_id)
+            .field("column_metadatas", &self.column_metadatas)
+            .field("primary_key", &self.primary_key)
+            .field("options", &options)
+            .finish()
+    }
+}
+
+/// Redacts the connection DSN inside a JSON-encoded [`RelationalOptions`]
+/// payload, falling back to a fully redacted string on parse failure.
+fn redact_relational_options(encoded: &str) -> String {
+    serde_json::from_str::<RelationalOptions>(encoded)
+        .ok()
+        .and_then(|opts| {
+            let redacted = opts.redacted();
+            serde_json::to_string(&redacted).ok()
+        })
+        .unwrap_or_else(|| "REDACTED".to_string())
 }
 
 impl RelationalRegionManifest {
@@ -191,5 +220,27 @@ mod tests {
         assert_eq!(metadata.column_metadatas[0].column_id, 0);
         assert_eq!(metadata.column_metadatas[1].column_id, 1);
         assert_eq!(metadata.column_metadatas[2].column_id, 2);
+    }
+
+    #[test]
+    fn test_manifest_debug_redacts_connection() {
+        let manifest = RelationalRegionManifest {
+            region_id: RegionId::new(3, 0),
+            column_metadatas: new_test_column_metadata(),
+            primary_key: vec![1],
+            options: HashMap::from([(
+                RELATIONAL_META_KEY.to_string(),
+                serde_json::to_string(&RelationalOptions {
+                    connection: "mysql://user:secret_password@127.0.0.1:3306/db".to_string(),
+                    remote_table: "sample".to_string(),
+                })
+                .unwrap(),
+            )]),
+        };
+
+        let debug = format!("{:?}", manifest);
+        assert!(!debug.contains("secret_password"));
+        assert!(debug.contains("REDACTED"));
+        assert!(debug.contains("sample"));
     }
 }

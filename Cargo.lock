@@ -10226,6 +10226,7 @@ dependencies = [
  "meter-macros",
  "mito-codec",
  "moka",
+ "mysql_async",
  "object-store",
  "partition",
  "path-slash",
@@ -15138,6 +15139,7 @@ dependencies = [
  "snafu 0.8.6",
  "store-api",
  "tokio",
+ "url",
 ]
 
 [[package]]
