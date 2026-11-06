@@ -1062,17 +1062,6 @@ impl PromPlanner {
             Err(_) => return Ok(None),
         };
         let root = tree.root();
-        // A canonical boundary routes each label set to one owner above its own producer, and a
-        // region-local producer only sees the partitions of the region it runs in. A table split
-        // along a partition column is planned region by region, so each region would answer a
-        // canonical label set from the piece it holds while the consumer above has no collection of
-        // the other regions' pieces. Without a proof that this query reads one region, decline the
-        // route instead of claiming a global canonical answer; the existing planner reads every
-        // region and reports what Prometheus reports. A tree with no canonical merge claims no such
-        // answer, so it is untouched: a per-series query on a partitioned table keeps fusing.
-        if any_partitioned && contains_canonical_merge(root) {
-            return Ok(None);
-        }
         // The placement facts the split and the segmentation below are chosen from, and the same
         // facts that say whether one node can run over the scans at all.
         let per_partition =
