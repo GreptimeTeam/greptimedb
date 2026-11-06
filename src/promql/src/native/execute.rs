@@ -3321,14 +3321,7 @@ impl RuntimeNode {
                 )
             }
             NativeExpr::Aggregate { input, op } => {
-                let schema = node
-                    .output
-                    .samples()
-                    .or_else(|| input.output.samples())
-                    .cloned()
-                    .ok_or_else(|| {
-                        DataFusionError::Execution("aggregate does not produce samples".to_string())
-                    })?;
+                let schema = aggregate_schema(&node.output, &input.output)?;
                 let mut state = NodeState::new(
                     format!("native.aggregate at {location}"),
                     Arc::clone(&metrics),
@@ -6123,6 +6116,38 @@ fn no_binary() -> DataFusionError {
 /// The error for an aggregate node whose fold is missing.
 fn no_aggregate() -> DataFusionError {
     DataFusionError::Execution("the node holds no aggregate".to_string())
+}
+
+/// The evaluated layout an aggregate folds on.
+///
+/// A folding stage reads values, so its own output or its input carries the fields and the grid, and
+/// either describes the fold: a `Complete` aggregate keeps both and a `Partial` one keeps the grid
+/// while turning the fields into accumulators. A `PartialReduce` has neither side in samples -- it
+/// is state in, state out -- so its layout is the state's own: the accumulators it indexes by field
+/// and the grid it indexes by position. Both sides are the same binding there, and the two are
+/// compared here rather than trusted, because a reduce that folded state of another layout would
+/// merge accumulators that mean something else.
+fn aggregate_schema(output: &NativeType, input: &NativeType) -> Result<Arc<SeriesSchema>> {
+    if let Some(schema) = output.samples().or_else(|| input.samples()) {
+        return Ok(Arc::clone(schema));
+    }
+    let (NativeType::AggregateState(declared), NativeType::AggregateState(provided)) =
+        (output, input)
+    else {
+        return Err(DataFusionError::Execution(
+            "an aggregate reads values or state, and this node has neither".to_string(),
+        ));
+    };
+    if **declared != **provided {
+        return Err(DataFusionError::Execution(
+            "a partial reduce folds the state it produces, and its input state is another layout"
+                .to_string(),
+        ));
+    }
+    Ok(Arc::new(SeriesSchema {
+        fields: declared.accumulators.clone(),
+        eval_grid: Some(Arc::clone(&declared.grid)),
+    }))
 }
 
 /// The error for a node asked to run a vector operation without one.

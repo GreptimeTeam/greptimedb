@@ -37,7 +37,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::{FusedOutputFormat, FusedSeries, SeriesDivide};
+use promql::extension_plan::{FusedOutputFormat, FusedSeries, SeriesDivide, state_is_finalized};
 use promql::native::plan::{AggregateStage, NativeExpr, NativeType};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -571,16 +571,19 @@ fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
 }
 
 /// Whether `plan` is the native route's whole plan: a `FusedSeries` node over its scan, or the
-/// `Final` half of a split aggregate over the `Partial` half that reads such a scan.
+/// `Final` half of a split aggregate over the state-exporting producer that reads such a scan.
 ///
 /// The split is the one shape that puts a node above the fused producer: the `Final` half runs on the
-/// frontend over the state every partition exported, and the `Partial` half below it still reads its
-/// own scan. Every other plan keeps the ordinary encoding checks.
+/// frontend over the state every partition exported, and the producer below it still reads its own
+/// scan. That producer is either the `Partial` aggregate itself, or a `PartialReduce` that folds the
+/// partial state into state again before it crosses. Every other plan keeps the ordinary encoding
+/// checks.
 ///
-/// The exception applies only when the outer node reads aggregate state, and its inner producer is
-/// a `SeriesFrame` over one table scan whose root is a `Partial` aggregate producing
-/// `AggregateState`. A `SeriesFrame` can also contain evaluated values, so its format and input
-/// shape alone do not establish that it exports state.
+/// The exception applies only when the outer node reads aggregate state, and the chain below it is
+/// exactly one of those two shapes: every state link is a `SeriesFrame` whose root is the stage that
+/// link claims - `PartialReduce` between the halves, `Partial` first - and produces `AggregateState`.
+/// A `SeriesFrame` can also contain evaluated values, so a link's format and input shape alone do not
+/// establish that it carries state.
 ///
 /// One wrapper may sit above the root: the projection that publishes a statement's own column names
 /// over a node whose internal fields are the metric's. It counts only when every expression is a
@@ -601,10 +604,7 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
     {
         return false;
     }
-    let LogicalPlan::Extension(extension) = root else {
-        return false;
-    };
-    let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>() else {
+    let Some(fused) = fused_series_node(root) else {
         return false;
     };
     if !fused.reads_aggregate_state() {
@@ -612,16 +612,55 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
         // same-table one-to-one pair the route admits over two.
         return true;
     }
-    let [LogicalPlan::Extension(partial)] = fused.children() else {
+    // The outer link must finalize into values, not be another state exporter: a reducer above a
+    // reducer would satisfy "reads state" too, but only a `Final` is the consumer this exception
+    // exists for. The suffix the split moved above that aggregate - scalar arithmetic, a map, a
+    // histogram function - does not change which aggregate folds the state, so the question is
+    // asked of the tree rather than of its root.
+    if !state_is_finalized(fused.tree().root()) {
+        return false;
+    }
+    let [child] = fused.children() else {
         return false;
     };
-    let Some(partial) = partial.node.as_any().downcast_ref::<FusedSeries>() else {
+    let Some(state_link) = fused_series_node(child) else {
         return false;
     };
-    partial.format() == FusedOutputFormat::SeriesFrame
-        && matches!(partial.children(), [LogicalPlan::TableScan(_)])
-        && matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial)
-        && matches!(&partial.tree().root().output, NativeType::AggregateState(_))
+    // A link exporting state is a `SeriesFrame` whose root is the stage that link runs and whose
+    // output is that stage's state, so an ordinary values producer cannot stand in for one.
+    let exports_state = |node: &FusedSeries, stage: AggregateStage| {
+        node.format() == FusedOutputFormat::SeriesFrame
+            && matches!(&node.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == stage)
+            && matches!(&node.tree().root().output, NativeType::AggregateState(_))
+    };
+    match &state_link.tree().root().expr {
+        // The producer reads the scan its partitions run.
+        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial => {
+            exports_state(state_link, AggregateStage::Partial)
+                && matches!(state_link.children(), [LogicalPlan::TableScan(_)])
+        }
+        // The reducer folds that producer's state, and reads nothing else.
+        NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::PartialReduce => {
+            let [producer] = state_link.children() else {
+                return false;
+            };
+            let Some(producer) = fused_series_node(producer) else {
+                return false;
+            };
+            exports_state(state_link, AggregateStage::PartialReduce)
+                && exports_state(producer, AggregateStage::Partial)
+                && matches!(producer.children(), [LogicalPlan::TableScan(_)])
+        }
+        _ => false,
+    }
+}
+
+/// The `FusedSeries` node `plan` is, if it is one.
+fn fused_series_node(plan: &LogicalPlan) -> Option<&FusedSeries> {
+    let LogicalPlan::Extension(extension) = plan else {
+        return None;
+    };
+    extension.node.as_any().downcast_ref::<FusedSeries>()
 }
 
 impl PlanRewriter {

@@ -26,8 +26,9 @@
 //! caller that schedules scans and exchanges guarantees it, and a plan that ran a `Complete`
 //! aggregate once per partition and then combined the answers would be combining values that were
 //! each missing the other partitions' contributions. The stages that exist for that shape are
-//! [`AggregateStage::Partial`] and [`AggregateStage::Final`], which carry kernel accumulator
-//! state between executions.
+//! [`AggregateStage::Partial`], [`AggregateStage::PartialReduce`] and [`AggregateStage::Final`],
+//! which carry kernel accumulator state between executions: a `Partial` folds values into state, a
+//! `PartialReduce` folds state into state, and a `Final` turns the state into the value.
 
 use std::sync::Arc;
 
@@ -118,7 +119,14 @@ impl AggregateRuntime {
                 grid: grid.clone(),
             })
         });
-        if op.stage == AggregateStage::Final {
+        // A `Final` and a `PartialReduce` both fold state rather than values: they read the
+        // accumulator state a producer exported and merge it, so they keep a merger and no fold.
+        // What separates them is what they answer with -- a value per group, or the merged state
+        // itself -- which [`Self::compute`] decides.
+        if matches!(
+            op.stage,
+            AggregateStage::Final | AggregateStage::PartialReduce
+        ) {
             let merger = FloatMerger::try_new(&schema, kind)?;
             buffer.resize(merger.state_bytes())?;
             return Ok(Self {
@@ -199,7 +207,13 @@ impl AggregateRuntime {
         buffer.resize(accumulator.state_bytes())
     }
 
-    /// Merges one state chunk into this final aggregate.
+    /// Merges one state chunk into this state-collecting aggregate.
+    ///
+    /// A `Final` and a `PartialReduce` read the same rows and fold them through the same merger; the
+    /// difference is what [`Self::compute`] does with the merge afterwards. The rows a state export
+    /// hands on are the decoded form (`StateChunk::Row`), which is what a state consumer above an
+    /// exchange reads: producer series come from a node in this same tree, and no tree binds one to
+    /// a state consumer without passing it through that exchange.
     pub(crate) fn accumulate_state(
         &mut self,
         chunk: StateChunk,
@@ -211,7 +225,7 @@ impl AggregateRuntime {
         })?;
         let StateChunk::Row(row) = chunk else {
             return Err(DataFusionError::Internal(
-                "Final aggregate received producer state series".into(),
+                "an aggregate state consumer received producer state series".into(),
             ));
         };
         if row.fields.kind() != expected.kind
@@ -251,8 +265,16 @@ impl AggregateRuntime {
     }
 
     /// The number of retained groups, for budgeting the output queue backing storage.
+    ///
+    /// A folding aggregate counts the groups it has opened; a state-collecting one counts the
+    /// groups it has merged, which is what it is about to hand on -- one series each, whether that
+    /// series is a value or a group's state.
     pub(crate) fn groups(&self) -> usize {
-        self.accumulator.as_ref().map_or(0, FloatAggregator::groups)
+        match (&self.accumulator, &self.merger) {
+            (Some(accumulator), _) => accumulator.groups(),
+            (None, Some(merger)) => merger.groups(),
+            (None, None) => 0,
+        }
     }
 
     /// Finishes the fold and returns one series per group, or `None` if the fold already ran.
@@ -260,6 +282,9 @@ impl AggregateRuntime {
     /// `None` is what a node reports after it has queued its series: the caller reads them from the
     /// queue, exactly as it reads the chunks a binary node queued, so a second pull does not finish
     /// a fold whose states are gone.
+    ///
+    /// A `PartialReduce` finishes nothing it merged: the states it folded are exported as state, so
+    /// the `Final` above it is still the only place an accumulator becomes a value.
     pub(crate) fn compute(
         &mut self,
         buffer: &mut NodeBuffer,
@@ -294,17 +319,44 @@ impl AggregateRuntime {
                     let chunk = state_chunk_from_partial(partial, state_schema)?;
                     Ok(Some(AggregateOutput::State(chunk)))
                 }
-                AggregateStage::Final => Err(no_fold(&self.describe())),
+                // A state-collecting stage keeps a merger rather than a fold, so one cannot
+                // have been taken here.
+                AggregateStage::PartialReduce | AggregateStage::Final => {
+                    Err(no_fold(&self.describe()))
+                }
             };
         }
         if let Some(merger) = self.merger.take() {
-            let output =
-                merger.finish_budgeted(|total| buffer.resize(total.saturating_add(queue_bytes)))?;
-            let output_vec_bytes = output
-                .capacity()
-                .saturating_mul(std::mem::size_of::<Series>());
-            charge_samples(buffer, &output, output_vec_bytes, queue_bytes)?;
-            return Ok(Some(AggregateOutput::Samples(output)));
+            return match self.op.stage {
+                AggregateStage::Final => {
+                    let output = merger.finish_budgeted(|total| {
+                        buffer.resize(total.saturating_add(queue_bytes))
+                    })?;
+                    let output_vec_bytes = output
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<Series>());
+                    charge_samples(buffer, &output, output_vec_bytes, queue_bytes)?;
+                    Ok(Some(AggregateOutput::Samples(output)))
+                }
+                AggregateStage::PartialReduce => {
+                    let state_schema = self
+                        .state_schema
+                        .clone()
+                        .ok_or_else(|| no_fold(&self.describe()))?;
+                    // The export admits the fold and the state it builds at once, because both are
+                    // live while it runs; the fold is dropped with the merge that owned it, so what
+                    // the node holds from here on is the chunk it hands over.
+                    let partial = merger
+                        .finish_partial_budgeted(|bytes| buffer.resize(bytes + queue_bytes))?;
+                    let chunk = state_chunk_from_partial(partial, state_schema)?;
+                    Ok(Some(AggregateOutput::State(chunk)))
+                }
+                // A folding stage keeps an accumulator rather than a merger, so one cannot have
+                // been taken here.
+                AggregateStage::Complete | AggregateStage::Partial => {
+                    Err(no_fold(&self.describe()))
+                }
+            };
         }
         Err(no_fold(&self.describe()))
     }

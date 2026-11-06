@@ -170,6 +170,7 @@ fn describe(node: &NativeNode) -> String {
             match op.stage {
                 AggregateStage::Complete => "complete",
                 AggregateStage::Partial => "partial",
+                AggregateStage::PartialReduce => "partial_reduce",
                 AggregateStage::Final => "final",
             }
         ),

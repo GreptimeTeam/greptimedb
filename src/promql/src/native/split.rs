@@ -402,24 +402,41 @@ pub(crate) fn declined(reason: &str) -> DataFusionError {
     ))
 }
 
-/// A split aggregate as the two trees that run it, and the state they exchange between them.
+/// How many state hops a split aggregate runs through.
+///
+/// `One` is the shape the split has always had: every partition exports the state it folded and the
+/// merge above them finishes it. `Two` inserts a [`AggregateStage::PartialReduce`] between those two
+/// halves, so the state is folded into state once more before any value is produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitDepth {
+    /// The producer exports state, and the merge above it finalizes.
+    One,
+    /// The producer exports state, a reducer folds state into state, and the merge finalizes that.
+    Two,
+}
+
+/// A split aggregate as the trees that run it, and the state they exchange between them.
 ///
 /// The prefix runs where the series are read and ends at a `Partial` aggregate exporting the state
 /// each partition folded. The suffix runs where every partition's state has arrived and starts at a
-/// `Final` aggregate consuming it, so nothing above the cut sees a partial contribution.
+/// `Final` aggregate consuming it, so nothing above the cut sees a partial contribution. At
+/// [`SplitDepth::Two`] a reducer sits between those two halves: it folds the exported state into
+/// state again, over the same binding, and its own output is what the merge finalizes.
 pub struct SplitTrees {
     /// The prefix, with the cut aggregate bound over it as `Partial`; it answers aggregate state.
     pub partial: NativeTree,
+    /// The `PartialReduce` over that state, when the split was asked for a second state hop.
+    pub reduce: Option<NativeTree>,
     /// The `Final` aggregate over that state, and everything the split moved above the cut.
     pub final_tree: NativeTree,
 }
 
 impl Split {
-    /// Binds this split as the two trees that run it.
+    /// Binds this split as the trees that run it.
     ///
     /// `Ok(None)` is an aggregate whose kernel keeps no mergeable state, which cannot cross a
     /// partition boundary at all.
-    pub fn into_trees(self) -> DfResult<Option<SplitTrees>> {
+    pub fn into_trees(self, depth: SplitDepth) -> DfResult<Option<SplitTrees>> {
         let Self {
             prefix,
             suffix,
@@ -453,6 +470,29 @@ impl Split {
             },
             output: NativeType::AggregateState(Arc::clone(&state)),
         })?;
+        // The reducer reads and writes one binding: the state the producer exported, and the state
+        // the merge above it finalizes. A reduce carries nothing else, so the `Some` below is the
+        // depth the caller asked for, not a capability the aggregate can lack.
+        let reduce = match depth {
+            SplitDepth::One => None,
+            SplitDepth::Two => Some(NativeTree::try_new(NativeNode {
+                expr: NativeExpr::Aggregate {
+                    input: Box::new(NativeNode {
+                        expr: NativeExpr::Input(BoundInput {
+                            source_index: 0,
+                            output: NativeType::AggregateState(Arc::clone(&state)),
+                            ordering: SeriesOrdering::Contiguous,
+                        }),
+                        output: NativeType::AggregateState(Arc::clone(&state)),
+                    }),
+                    op: BoundAggregate {
+                        stage: AggregateStage::PartialReduce,
+                        ..op.clone()
+                    },
+                },
+                output: NativeType::AggregateState(Arc::clone(&state)),
+            })?),
+        };
         let merged = NativeNode {
             expr: NativeExpr::Aggregate {
                 input: Box::new(NativeNode {
@@ -473,6 +513,7 @@ impl Split {
         let root = enter_suffix(suffix, &merged)?;
         Ok(Some(SplitTrees {
             partial,
+            reduce,
             final_tree: NativeTree::try_new(root)?,
         }))
     }

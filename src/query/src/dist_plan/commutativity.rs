@@ -444,7 +444,7 @@ mod tests {
     use datatypes::series::SeriesOrdering;
     use datatypes::series::aggregate_state::{AggregateStateKind, StateComponent};
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::extension_plan::{FusedSeries, FusedSeriesBinding, RawSeriesSource};
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding, RawSeriesSource, SplitDepth};
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
     };
@@ -1116,8 +1116,10 @@ mod tests {
             .unwrap(),
         );
 
-        let (partial_tree, final_tree) =
-            FusedSeries::split_aggregate(&tree, "ts").unwrap().unwrap();
+        let trees = FusedSeries::split_aggregate(&tree, "ts", SplitDepth::One)
+            .unwrap()
+            .unwrap();
+        let (partial_tree, final_tree) = (trees.partial, trees.final_tree);
         let partial = FusedSeries::try_new_state_export(
             Arc::from("sum(some_metric)"),
             partial_tree,
