@@ -1290,11 +1290,14 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
         .await
         .unwrap();
     assert_eq!(input, collect_rows(&all));
-    let full_bytes = {
+    let (full_bytes, first_window_bytes) = {
         let reads = reads.lock().unwrap();
         // Header, trailer, one leaf, then three windows of at most 128 blocks.
         assert_eq!(6, reads.len());
-        reads.iter().map(|(_, r)| r.size().unwrap()).sum::<u64>()
+        (
+            reads.iter().map(|(_, r)| r.size().unwrap()).sum::<u64>(),
+            reads[3].1.size().unwrap() as usize,
+        )
     };
     reads.lock().unwrap().clear();
     let mut request = full_request();
@@ -1354,6 +1357,37 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
     assert_eq!(vec![input[0], input[2]], collect_rows(&selected));
     // The intervening series is read as a gap, but never decoded or returned.
     assert_eq!(4, reads.lock().unwrap().len());
+
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    // The first pool rejects read-ahead outright. The second admits the first
+    // 128-block, four-column window but leaves no room for block decoding.
+    for capacity in [64 * 1024, 2 * first_window_bytes + 128 * 4 * 256] {
+        reads.lock().unwrap().clear();
+        let pool = Arc::new(GreedyMemoryPool::new(capacity));
+        let mut request = full_request();
+        request.memory_pool = Some(pool.clone());
+        let all = reader
+            .read(request.clone())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(input, collect_rows(&all));
+        assert_eq!(0, pool.reserved());
+        {
+            let reads = reads.lock().unwrap();
+            assert!(reads.len() > 6);
+            assert_eq!(
+                capacity != 64 * 1024,
+                reads[3].1.size().unwrap() as usize == first_window_bytes,
+                "only the larger pool should admit the initial prefetch"
+            );
+        }
+        let mut stream = reader.read(request).unwrap();
+        assert!(stream.try_next().await.unwrap().is_some());
+        drop(stream);
+        assert_eq!(0, pool.reserved());
+    }
 }
 
 #[tokio::test]
@@ -1507,8 +1541,11 @@ async fn aligned_payload_cache_assembles_columns_across_blocks() {
 }
 
 /// Sparse selections must bound aligned cache reads as well as selected column bytes.
+#[rstest::rstest]
+#[case(1024 * 1024)]
+#[case(128 * 1024)]
 #[tokio::test]
-async fn sparse_cached_reads_fit_the_scan_pool() {
+async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
     use crate::cache::{CacheManager, CacheStrategy};
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
     let store = store();
@@ -1545,7 +1582,7 @@ async fn sparse_cached_reads_fit_the_scan_pool() {
         if cached {
             reader = reader.with_payload_cache(strategy.columnar_payload(FileId::random()));
         }
-        let pool = Arc::new(GreedyMemoryPool::new(1024 * 1024));
+        let pool = Arc::new(GreedyMemoryPool::new(capacity));
         let mut request = full_request();
         request.memory_pool = Some(pool.clone());
         request.ids = Some(
