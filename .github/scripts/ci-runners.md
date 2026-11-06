@@ -13,8 +13,12 @@ AWS uses `aws-ec2-runner-provision.py` and `aws-ec2-runner-teardown.py` directly
 Repository variables supply `EC2_RUNNER_REGION`, `EC2_RUNNER_SUBNET_ID`, and
 `EC2_RUNNER_SECURITY_GROUP_ID`; credentials use `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, and `GH_PERSONAL_ACCESS_TOKEN` secrets.
-The current region is Singapore (`ap-southeast-1`). By default the script selects
-the newest available Canonical Ubuntu 24.04 amd64 server AMI in that region
+The runner region comes from `EC2_RUNNER_REGION` (currently `us-east-1`).
+The subnet and security group must belong to the selected AWS account and region.
+For benchmarks using real S3, `AWS_CI_TEST_BUCKET_REGION` must match the runner
+region; `AWS_CI_TEST_BUCKET` must be accessible with the configured credentials.
+By default the script selects the newest available Canonical Ubuntu 24.04 amd64
+server AMI in that region
 (owner `099720109477`) and logs its ID. Set `BENCHMARK_EC2_IMAGE_ID` to pin a
 prepared Ubuntu AMI. Existing build CI's `EC2_RUNNER_LINUX_AMD64_IMAGE_ID` is
 unaffected. Both workflows default `system_disk_gib` to `auto` (also accepting
