@@ -519,7 +519,7 @@ impl NativeTree {
         report_node(self.root(), ROOT_PATH, metrics)
     }
 
-    /// This tree rendered under the operator line that names the query, with each node's own
+    /// This tree rendered under its operator line, with each node's own
     /// figures when `metrics` holds them.
     pub fn display_with<'a>(&'a self, metrics: &'a NodeMetricsSnapshot) -> NativeTreeDisplay<'a> {
         NativeTreeDisplay {

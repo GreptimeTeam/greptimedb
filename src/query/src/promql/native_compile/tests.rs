@@ -1286,7 +1286,7 @@ fn the_supported_math_functions_map_to_their_kernels() {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        let root = display.lines().next().expect("a compiled tree has a root");
         assert_eq!(
             root,
             format!("  Map: {op}"),
@@ -2852,7 +2852,7 @@ fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        let root = display.lines().next().expect("a compiled tree has a root");
         assert_eq!(root, format!("  Vector: {op}"), "`{query}`");
     }
 
@@ -4286,7 +4286,7 @@ fn whole_vector_functions_bind_a_vector_operation() {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        let root = display.lines().next().expect("a compiled tree has a root");
         assert_eq!(root, format!("  Vector: {op}"), "`{query}`");
     }
 }
@@ -4829,7 +4829,7 @@ fn label_functions_bind_their_change_into_a_map() {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        let root = display.lines().next().expect("a compiled tree has a root");
         assert_eq!(root, format!("  Map: {op}"), "`{query}`");
     }
 }
@@ -4852,7 +4852,7 @@ fn histogram_functions_bind_their_kernel_into_a_map() {
         )
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        let root = display.lines().next().expect("a compiled tree has a root");
         assert_eq!(root, format!("  Map: {name}"), "`{query}`");
     }
 }

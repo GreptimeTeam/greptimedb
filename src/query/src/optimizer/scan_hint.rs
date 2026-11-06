@@ -1611,14 +1611,7 @@ mod test {
 
         LogicalPlan::Extension(Extension {
             node: Arc::new(
-                FusedSeries::try_new(
-                    Arc::from("some_metric"),
-                    tree,
-                    binding,
-                    vec![input],
-                    output_schema,
-                )
-                .unwrap(),
+                FusedSeries::try_new(tree, binding, vec![input], output_schema).unwrap(),
             ),
         })
     }

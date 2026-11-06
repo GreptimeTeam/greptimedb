@@ -101,9 +101,7 @@ use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, Mat
 use common_query::series_frame::series_frame_ordering;
 use common_query::series_frame::unpack_aggregate_state;
 
-/// The query every tree here is compiled from.
-const PROMQL: &str = "rate(x[5m])";
-/// The range the statement's window selects, which is the `5m` of [`PROMQL`].
+/// The range the statement's window selects, which is the `5m` of `rate(x[5m])`.
 const RANGE_MS: i64 = 300_000;
 /// The statement's grid: `rate(x[5m])` evaluated every minute from five minutes in.
 const GRID_START: i64 = 300_000;
@@ -567,7 +565,6 @@ fn timestamp_match_tree() -> NativeTree {
 
 fn partition_disjoint(tree: NativeTree, input: Arc<dyn ExecutionPlan>) -> bool {
     let node = FusedSeries::try_new(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -705,7 +702,6 @@ async fn scalar_binary_matching_key_is_not_routed_by_dropped_names() {
     let left_input = memory_exec_partitioned(vec![vec![frame(&left)], vec![]]);
     let right_input = memory_exec_partitioned(vec![vec![], vec![frame(&right)]]);
     let node = FusedSeries::try_new(
-        Arc::from("(x * 2) + on(__name__) (y * 2)"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -1027,7 +1023,6 @@ fn zone_node() -> FusedSeries {
         vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
     );
     FusedSeries::try_new(
-        Arc::from(PROMQL),
         tree,
         binding,
         vec![input_plan(frame_schema())],
@@ -1397,7 +1392,6 @@ fn canonical_producer_node() -> FusedSeries {
     })
     .unwrap();
     FusedSeries::try_new_canonical_producer(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -1411,7 +1405,6 @@ fn fused_series_encoding_preserves_state_and_canonical_producer() {
     // capability, not a decision about where it may run.
     let tree = partial_tree(rate_tree(), AggregateKind::Sum, &[HOST, JOB]);
     let producer = FusedSeries::try_new_state_export(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -1440,7 +1433,6 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     // `canonical_frame_schema` rather than with the plain row `output_schema`.
     let declared = canonical_frame_schema(&tree);
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree,
         original_binding.clone(),
         vec![input_plan(frame_schema())],
@@ -1467,7 +1459,6 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
         canonical.field_with_name(TIME).unwrap().clone(),
     ]));
     let reordered = FusedSeries::try_new(
-        Arc::from(PROMQL),
         rows.tree().clone(),
         rows.binding().clone(),
         rows.children().to_vec(),
@@ -1483,7 +1474,6 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     // labels after a tree operation such as label rewriting.
     let empty_binding = binding_of(rows.tree(), raw_schema(), Vec::new());
     let empty_tags = FusedSeries::try_new(
-        Arc::from(PROMQL),
         rate_tree(),
         empty_binding,
         vec![input_plan(frame_schema())],
@@ -1525,20 +1515,18 @@ fn fused_series_ordinary_encoding_round_trip_and_rejects_unsupported_payloads() 
     assert!(FusedSeries::deserialize(&trailing).is_err());
 }
 
-/// A payload written under another version is refused by its version, before its body is read.
+/// A payload marked with an unsupported version is refused before its body is read.
 ///
-/// The body here is the current payload's body with the version field set to a number this reader
-/// does not accept: it decodes cleanly under the current reader, which is exactly what makes it a
-/// control. A reader that checked the version only after decoding would accept it and hand back a
-/// node whose fields were read at the wrong offsets; this asserts the version is what answers, by
-/// name.
+/// The body here is the current payload's body with the version field set to a future number this
+/// reader does not accept: it decodes cleanly under the current reader, which makes it a control.
+/// A reader that checked the version only after decoding would accept it and hand back a node whose
+/// fields were read at the wrong offsets; this asserts the version is what answers, by name.
 #[test]
-fn fused_series_envelope_refuses_the_older_payload_version_before_reading_it() {
+fn fused_series_envelope_refuses_an_unsupported_payload_version() {
     let tree = rate_tree();
     let declared = canonical_frame_schema(&tree);
     let bound = binding(&tree);
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree,
         bound,
         vec![input_plan(frame_schema())],
@@ -1556,9 +1544,11 @@ fn fused_series_envelope_refuses_the_older_payload_version_before_reading_it() {
     // The control: the same body under the accepted version decodes.
     assert!(FusedSeries::deserialize(&bytes).is_ok());
 
-    let mut old = bytes.clone();
-    old[..4].copy_from_slice(&2u32.to_le_bytes());
-    let message = FusedSeries::deserialize(&old).unwrap_err().to_string();
+    let mut unsupported = bytes.clone();
+    unsupported[..4].copy_from_slice(&2u32.to_le_bytes());
+    let message = FusedSeries::deserialize(&unsupported)
+        .unwrap_err()
+        .to_string();
     assert!(
         message.contains("version") && message.contains('2'),
         "the version must be what is reported, not a field read at the wrong offset: {message}"
@@ -1574,7 +1564,6 @@ fn envelope_node_with_tags(tags: Vec<String>) -> FusedSeries {
     let binding = binding_of(&tree, raw_schema(), tags);
     let output_schema = canonical_frame_schema(&tree);
     FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree,
         binding,
         vec![input_plan(frame_schema())],
@@ -1614,7 +1603,6 @@ fn scalar_node(tree: NativeTree, value_name: &str) -> FusedSeries {
         Field::new(value_name, DataType::Float64, true),
     ]));
     FusedSeries::try_new(
-        Arc::from(PROMQL),
         tree,
         FusedSeriesBinding {
             grid: grid(),
@@ -1702,7 +1690,6 @@ fn plain_rows_decode_rejects_invalid_schemas() {
     // Binding tags describe the source; the carried schema independently describes outputs.
     let empty_binding = binding_of(node.tree(), raw_schema(), Vec::new());
     let cross_table = FusedSeries::try_new(
-        Arc::from(PROMQL),
         node.tree().clone(),
         empty_binding,
         node.children().to_vec(),
@@ -1733,7 +1720,6 @@ fn a_non_default_column_order_survives_the_round_trip() {
         [("schema-origin".to_string(), "carried".to_string())].into(),
     );
     let node = FusedSeries::try_new(
-        Arc::from(PROMQL),
         tree,
         binding,
         vec![input_plan(frame_schema())],
@@ -1769,7 +1755,6 @@ fn series_frame_decode_rejects_schema_mismatch() {
 fn state_export_decode_rejects_schema_and_format_mismatch() {
     let tree = partial_tree(rate_tree(), AggregateKind::Sum, &[HOST, JOB]);
     let node = FusedSeries::try_new_state_export(
-        Arc::from(PROMQL),
         tree.clone(),
         binding_of(&tree, raw_schema(), vec![HOST.to_string(), JOB.to_string()]),
         vec![input_plan(frame_schema())],
@@ -1986,7 +1971,6 @@ fn fused(tree: NativeTree) -> FusedSeries {
         output_schema()
     };
     FusedSeries::try_new(
-        Arc::from(PROMQL),
         tree,
         binding,
         vec![input_plan(frame_schema())],
@@ -2450,13 +2434,16 @@ impl Display for Explain<'_> {
     }
 }
 
-/// The logical node prints the query a reader wrote, not the tree it compiled to.
+/// The logical node prints the compiled tree without metrics.
 #[test]
-fn fmt_for_explain_prints_the_promql() {
-    assert_eq!(
-        "FusedSeries: rate(x[5m])",
-        Explain(&fused(rate_tree())).to_string()
+fn fmt_for_explain_prints_the_native_tree() {
+    let text = Explain(&fused(rate_tree())).to_string();
+    assert!(
+        text.starts_with("FusedSeries\n  Window: rate [300000ms]"),
+        "{text}"
     );
+    assert!(text.contains("    Input: raw samples source=0"), "{text}");
+    assert!(!text.contains("metrics="), "{text}");
 }
 
 /// The physical node prints the tree it was built from, rendered by the tree's own display.
@@ -2465,10 +2452,12 @@ fn fmt_as_prints_the_native_tree() {
     let exec =
         plan(rate_tree(), memory_exec(Vec::new())).expect("the runtime executes a rate tree");
     let text = displayable(exec.as_ref()).indent(false).to_string();
+    println!("=== physical_plan ===\n{text}");
+    assert!(!text.contains("metrics="), "{text}");
 
     assert!(
-        text.starts_with("FusedSeriesExec: rate(x[5m])"),
-        "the node line names the query first: {text}"
+        text.starts_with("FusedSeriesExec\n  Window: rate"),
+        "the node line precedes its tree: {text}"
     );
     // A distinctive line of the compiled tree: the window's bound range, offset, anchor and grid.
     assert!(
@@ -2479,6 +2468,24 @@ fn fmt_as_prints_the_native_tree() {
         text.contains("    Input: raw samples"),
         "the node line carries the tree's source: {text}"
     );
+}
+
+/// Physical ANALYZE renders the figures registered on the tree nodes that recorded them.
+#[tokio::test]
+async fn fmt_as_reports_node_metrics_after_execution() {
+    let exec = plan(rate_tree(), memory_exec(two_series_frames())).unwrap();
+    collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let text = displayable(exec.as_ref()).indent(false).to_string();
+    println!("=== physical_plan after execution ===\n{text}");
+    assert!(
+        text.starts_with("FusedSeriesExec\n  Window: rate"),
+        "{text}"
+    );
+    assert!(text.contains("metrics=["), "{text}");
+    assert!(text.contains("output_values:"), "{text}");
+    assert!(text.contains("Input: raw samples source=0"), "{text}");
 }
 
 /// `rate(x[5m])` runs end to end over two raw series: values, tags and the dropped metric name.
@@ -2573,7 +2580,6 @@ fn a_tree_bound_to_another_grid_is_rejected() {
         ..binding(&tree)
     };
     let error = FusedSeries::try_new(
-        Arc::from(PROMQL),
         tree,
         binding,
         vec![input_plan(frame_schema())],
@@ -2604,7 +2610,6 @@ fn a_separately_allocated_grid_with_an_equal_spec_is_accepted() {
         ..binding(&tree)
     };
     FusedSeries::try_new(
-        Arc::from(PROMQL),
         tree,
         binding,
         vec![input_plan(frame_schema())],
@@ -2625,7 +2630,6 @@ fn scalar_logical_node_has_no_children_and_refuses_a_child() {
         tags: vec![HOST.to_string()],
     };
     let node = FusedSeries::try_new(
-        Arc::from("vector(7)"),
         tree.clone(),
         binding.clone(),
         Vec::new(),
@@ -2636,7 +2640,6 @@ fn scalar_logical_node_has_no_children_and_refuses_a_child() {
     assert!(node.inputs().is_empty());
     assert!(
         FusedSeries::try_new(
-            Arc::from("vector(7)"),
             tree,
             binding,
             vec![input_plan(frame_schema())],
@@ -2654,7 +2657,6 @@ fn logical_children_and_inputs_roundtrip_in_source_order() {
     let left = input_plan_with_rows(frame_schema(), false);
     let right = input_plan_with_rows(frame_schema(), true);
     let node = FusedSeries::try_new(
-        Arc::from("left + right"),
         tree,
         binding(&rate_tree()),
         vec![left.clone(), right.clone()],
@@ -2722,7 +2724,6 @@ fn logical_source_indexes_must_match_dense_children() {
     ] {
         assert!(
             FusedSeries::try_new(
-                Arc::from(name),
                 tree.clone(),
                 binding(&tree),
                 children,
@@ -2741,7 +2742,6 @@ fn repeated_source_bindings_validate_fields_and_second_ordering() {
         binary_tree_over_sources(BinaryOp::Add, raw_schema(), two_field_schema(), 0, 0);
     assert!(
         FusedSeries::try_new(
-            Arc::from("x + x"),
             fields_mismatch.clone(),
             binding(&fields_mismatch),
             vec![input_plan(frame_schema())],
@@ -2897,7 +2897,6 @@ fn fragmented_raw_multi_input_is_reconciled_before_matching_router() {
     use common_query::series_frame::frame_schema_with;
     let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
     let node = FusedSeries::try_new(
-        Arc::from("left + right"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -2955,7 +2954,6 @@ fn fragmented_raw_multi_input_is_reconciled_before_matching_router() {
 async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
     let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
     let node = FusedSeries::try_new(
-        Arc::from("left + right"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -3035,7 +3033,6 @@ fn binary_identity_rows(batches: &[RecordBatch]) -> Vec<(Option<String>, i64, Op
 async fn matching_parallelism_uses_configured_width_without_changing_rows() {
     let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
     let node = FusedSeries::try_new(
-        Arc::from("left + right"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -3148,7 +3145,6 @@ async fn independent_sources_execute_all_partitions() {
         calls: Arc::clone(&right_calls),
     });
     let node = FusedSeries::try_new(
-        Arc::from("left - right"),
         tree.clone(),
         binding(&tree),
         vec![
@@ -3221,7 +3217,6 @@ async fn both_inputs_are_read_concurrently() {
         }
     });
     let node = FusedSeries::try_new(
-        Arc::from("left - right"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -3258,7 +3253,6 @@ async fn both_inputs_are_read_concurrently() {
 async fn binary_output_tags_are_projected_but_raw_binding_is_full() {
     let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
     let node = FusedSeries::try_new(
-        Arc::from("left - right"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -3303,7 +3297,6 @@ async fn binary_output_tags_are_projected_but_raw_binding_is_full() {
 async fn empty_first_source_does_not_end_gather_early() {
     let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
     let node = FusedSeries::try_new(
-        Arc::from("left - right"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -3339,7 +3332,6 @@ fn multiparty_gather_rejects_key_then_time_leaf_requirement() {
         &[SeriesOrdering::KeyThenTime, SeriesOrdering::Contiguous],
     );
     let node = FusedSeries::try_new(
-        Arc::from("left + right"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -3368,7 +3360,6 @@ fn multiparty_gather_rejects_key_then_time_leaf_requirement() {
 async fn later_source_error_drops_all_gathered_inputs() {
     let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
     let node = FusedSeries::try_new(
-        Arc::from("left - right"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -3538,7 +3529,6 @@ async fn physical_plan_accepts_scalar_root_without_sources() {
         ),
     ]));
     let node = FusedSeries::try_new(
-        Arc::from("4"),
         tree,
         binding.clone(),
         Vec::new(),
@@ -3667,7 +3657,6 @@ async fn physical_scalar_rejects_malformed_output_schema() {
     ];
     for schema in schemas {
         let node = FusedSeries::try_new(
-            Arc::from("4"),
             tree.clone(),
             binding.clone(),
             Vec::new(),
@@ -3677,7 +3666,6 @@ async fn physical_scalar_rejects_malformed_output_schema() {
         assert!(node.to_execution_plan(Vec::new()).is_err());
     }
     let tagged = FusedSeries::try_new(
-        Arc::from("4"),
         tree,
         FusedSeriesBinding {
             tags: vec![HOST.to_string()],
@@ -3709,14 +3697,9 @@ async fn physical_scalar_conversion_preserves_special_float_bits() {
                 false,
             ),
         ]));
-        let node = FusedSeries::try_new(
-            Arc::from("4"),
-            tree,
-            binding,
-            Vec::new(),
-            schema.to_dfschema_ref().unwrap(),
-        )
-        .unwrap();
+        let node =
+            FusedSeries::try_new(tree, binding, Vec::new(), schema.to_dfschema_ref().unwrap())
+                .unwrap();
         let exec = node.to_execution_plan(Vec::new()).unwrap();
         let batches = exec
             .execute(0, SessionContext::default().task_ctx())
@@ -4492,7 +4475,6 @@ fn unequal_binding_and_output_schema_are_not_ordered_equal() {
         ),
     ]));
     let right_node = FusedSeries::try_new(
-        Arc::from(PROMQL),
         tree,
         binding(&rate_tree()),
         vec![input_plan(frame_schema())],
@@ -4627,7 +4609,7 @@ async fn a_later_repeated_source_enqueue_failure_releases_the_input() {
     assert_eq!(batches_at_failure, pulled.load(Ordering::SeqCst));
 }
 
-/// Logical equality distinguishes source field layouts, even when the PromQL and output match.
+/// Logical equality distinguishes source field layouts even when the binding and output match.
 #[test]
 fn logical_identity_includes_native_source_field_order() {
     let ordered_schema = two_field_schema();
@@ -4639,7 +4621,6 @@ fn logical_identity_includes_native_source_field_order() {
     let make_node = |schema: Arc<SeriesSchema>| {
         let tree = rate_tree_of(schema);
         FusedSeries::try_new(
-            Arc::from(PROMQL),
             tree.clone(),
             binding(&tree),
             vec![input_plan(frame_schema())],
@@ -4649,7 +4630,6 @@ fn logical_identity_includes_native_source_field_order() {
     };
     let left = make_node(Arc::clone(&ordered_schema));
     let right = make_node(Arc::new(reversed_schema));
-    assert_eq!(left.promql(), right.promql());
     assert_eq!(left.binding(), right.binding());
     assert_ne!(left, right);
     assert_ne!(Some(std::cmp::Ordering::Equal), left.partial_cmp(&right));
@@ -4954,7 +4934,6 @@ fn partial_node(kind: AggregateKind) -> FusedSeries {
     let tree = partial_tree(tree, kind, &[HOST]);
     let schema = canonical_state_frame_schema(&tree);
     FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding_of(&tree, raw_schema(), vec![HOST.to_string()]),
         vec![input_plan(frame_schema())],
@@ -4975,7 +4954,6 @@ fn partial_plan(
 ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
     let tree = partial_tree(tree, op.kind, tags);
     FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding_of(
             &tree,
@@ -5044,7 +5022,6 @@ async fn decode_state_batches(batches: Vec<RecordBatch>) -> Vec<StateSeries> {
 async fn a_state_export_keys_its_labels_by_the_cut_aggregate_grouping() {
     let tree = partial_tree(rate_tree(), AggregateKind::Sum, &[JOB]);
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         // The scan is bound with `host`; the aggregate groups by `job`.
         binding_of(&tree, raw_schema(), vec![HOST.to_string()]),
@@ -5402,7 +5379,6 @@ async fn mixed_raw_and_evaluated_inputs_execute_with_source_local_decoders() {
     )
     .unwrap();
     let exec = FusedSeries::try_new(
-        Arc::from("mixed raw/evaluated"),
         tree.clone(),
         binding_of(
             &tree,
@@ -5516,7 +5492,6 @@ fn final_aggregate_state_input_constructs_with_evaluated_schema() {
     let tree = state_tree(AggregateStage::Final, NativeType::AggregateState(state));
     let schema = canonical_frame_schema(&tree);
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -5538,7 +5513,6 @@ fn partial_aggregate_declares_state_frame_schema() {
     );
     let state_schema = canonical_state_frame_schema(&tree);
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -5552,7 +5526,6 @@ fn partial_aggregate_declares_state_frame_schema() {
     );
 
     let error = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -5632,7 +5605,6 @@ fn repeated_source_with_state_and_samples_is_refused() {
 async fn series_frame_output_uses_evaluated_codec_schema() {
     let tree = rate_tree();
     let frame_node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -5649,7 +5621,6 @@ async fn series_frame_output_uses_evaluated_codec_schema() {
         "frame schema comes from the codec rather than the row output"
     );
     let wrong_schema = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -5674,7 +5645,6 @@ async fn series_frame_output_uses_evaluated_codec_schema() {
 fn series_frame_accepts_multiple_sources_with_equal_partition_counts() {
     let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -5713,7 +5683,6 @@ async fn series_frame_preserves_four_input_partitions() {
         .collect::<Vec<_>>();
     let tree = rate_tree();
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -5764,7 +5733,6 @@ async fn series_frame_rate_matches_plain_rows_bitwise() {
     );
     let tree = rate_tree();
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -5823,7 +5791,6 @@ async fn series_frame_rate_matches_plain_rows_bitwise() {
 async fn partial_empty_input_yields_valid_empty_state_frame_stream() {
     let tree = partial_tree(rate_tree(), AggregateKind::Sum, &[HOST]);
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -5846,7 +5813,6 @@ async fn partial_root_requires_frame_output() {
     let prefix = rate_tree();
     let tree = partial_tree(prefix, AggregateKind::Sum, &[HOST]);
     let error = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -5859,18 +5825,16 @@ async fn partial_root_requires_frame_output() {
 
 /// `EXPLAIN` says nothing extra about the row table and names the frame output.
 ///
-/// The row table is what a query returns, so its node line has to stay exactly what it was; a frame
-/// output answers something else, and the line is the only place a reader can see that.
+/// The row-table header has no parameters; a frame output names its format in the header.
 #[test]
 fn the_explain_text_names_the_frame_format_only() {
     let rows = fused(rate_tree());
-    assert_eq!(
-        "FusedSeries: rate(x[5m])",
-        Explain(&rows).to_string(),
-        "the row-table line is what it always was"
+    assert!(
+        Explain(&rows)
+            .to_string()
+            .starts_with("FusedSeries\n  Window:")
     );
     let framed = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         rows.tree().clone(),
         rows.binding().clone(),
         rows.inputs().into_iter().cloned().collect(),
@@ -5881,16 +5845,30 @@ fn the_explain_text_names_the_frame_format_only() {
     assert!(
         Explain(&framed)
             .to_string()
-            .contains("(output: series_frame)"),
+            .starts_with("FusedSeries: (output: series_frame)\n  Window:"),
         "a frame output names its format: {}",
         Explain(&framed)
+    );
+    let framed_exec = plan_of(framed, memory_exec(Vec::new())).unwrap();
+    let text = displayable(framed_exec.as_ref()).indent(false).to_string();
+    assert!(
+        text.starts_with("FusedSeriesExec: (output: series_frame)\n  Window:"),
+        "{text}"
+    );
+    let canonical = canonical_producer_node();
+    let text = Explain(&canonical).to_string();
+    assert!(
+        text.starts_with(
+            "FusedSeries: (output: series_frame, per-partition canonical merge)\n  Merge:"
+        ),
+        "{text}"
     );
 
     let plain = plan(rate_tree(), memory_exec(Vec::new())).expect("the runtime executes the tree");
     let text = displayable(plain.as_ref()).indent(false).to_string();
     assert!(
-        text.starts_with("FusedSeriesExec: rate(x[5m])\n"),
-        "the row-table node line is unchanged: {text}"
+        text.starts_with("FusedSeriesExec\n  Window:"),
+        "the row-table node line has no parameters: {text}"
     );
 }
 
@@ -5905,7 +5883,6 @@ fn the_logical_schema_follows_the_output_format() {
     assert_eq!(&output_schema(), rows.schema().inner());
 
     let framed = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         rows.tree().clone(),
         rows.binding().clone(),
         rows.inputs().into_iter().cloned().collect(),
@@ -5934,7 +5911,6 @@ fn the_logical_schema_follows_the_output_format() {
 fn rebuilding_a_frame_node_keeps_its_output_format() {
     let rows = fused(rate_tree());
     let framed = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         rows.tree().clone(),
         rows.binding().clone(),
         rows.inputs().into_iter().cloned().collect(),
@@ -5971,7 +5947,6 @@ fn a_series_frame_refuses_a_root_it_cannot_carry() {
         tags: vec![HOST.to_string(), NAME.to_string()],
     };
     let error = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         scalar,
         binding,
         Vec::new(),
@@ -6026,7 +6001,6 @@ async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
     });
     let tree = rate_tree();
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(schema)],
@@ -6132,7 +6106,6 @@ async fn fused_frame_input_error_terminates_and_releases_input() {
     });
     let tree = rate_tree();
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(schema)],
@@ -6182,7 +6155,6 @@ async fn a_frame_carries_the_closing_chunk_a_row_table_drops() {
     );
     let tree = rate_tree();
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -6267,7 +6239,6 @@ async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
     ];
     let tree = rate_tree();
     let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
@@ -6416,7 +6387,6 @@ fn duplicate_evidence_partitioned_exec(
     let tree =
         NativeTree::try_new(root).expect("differently bound instant selectors form a valid tree");
     let node = FusedSeries::try_new(
-        Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
@@ -6637,7 +6607,6 @@ fn histogram_over_sum_splits_and_declares_complete_bucket_routing() {
                     if op.stage == AggregateStage::Final && op.group == group
             ));
             let node = FusedSeries::try_new_with_format(
-                Arc::from("histogram over sum"),
                 final_tree.clone(),
                 binding(&final_tree),
                 vec![input_plan(
@@ -6652,8 +6621,8 @@ fn histogram_over_sum_splits_and_declares_complete_bucket_routing() {
             });
             let display = logical.display_indent().to_string();
             assert!(
-                display.lines().next().unwrap().ends_with(
-                    " (state routing: canonical labels except [\"le\", \"__name__\", \"__type__\", \"__unit__\"])"
+                display.lines().next().unwrap().starts_with(
+                    "FusedSeries: (output: series_frame) (state routing: canonical labels except [\"le\", \"__name__\", \"__type__\", \"__unit__\"])"
                 ),
                 "{display}"
             );
@@ -6802,7 +6771,6 @@ fn histogram_final_replaces_incompatible_state_router() {
         let tree = histogram_over_sum_tree(group, HistogramFunction::Quantile(0.5));
         let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME).unwrap().unwrap();
         let partial_node = FusedSeries::try_new_state_export(
-            Arc::from("partial"),
             partial.clone(),
             binding(&partial),
             vec![input_plan(frame_schema())],
@@ -6824,7 +6792,6 @@ fn histogram_final_replaces_incompatible_state_router() {
             .unwrap(),
         ) as Arc<dyn ExecutionPlan>;
         let final_node = FusedSeries::try_new_with_format(
-            Arc::from("final"),
             final_tree.clone(),
             binding(&final_tree),
             vec![input_plan(
@@ -6910,7 +6877,6 @@ async fn histogram_split_routes_whole_state_batches_and_preserves_each_bound() {
             ]),
         ];
         let partial_node = FusedSeries::try_new_state_export(
-            Arc::from("partial"),
             partial.clone(),
             binding(&partial),
             vec![input_plan(frame_schema())],
@@ -6951,7 +6917,6 @@ async fn histogram_split_routes_whole_state_batches_and_preserves_each_bound() {
             );
         }
         let final_node = FusedSeries::try_new_with_format(
-            Arc::from("final"),
             final_tree.clone(),
             binding(&final_tree),
             vec![input_plan(
@@ -7096,7 +7061,6 @@ async fn histogram_split_colocates_metadata_distinct_results_before_their_merge(
             }
         }
         let partial_node = FusedSeries::try_new_state_export(
-            Arc::from("partial"),
             partial.clone(),
             binding(&partial),
             vec![input_plan(frame_schema())],
@@ -7110,7 +7074,6 @@ async fn histogram_split_colocates_metadata_distinct_results_before_their_merge(
             )])
             .unwrap();
         let final_node = FusedSeries::try_new_with_format(
-            Arc::from("final"),
             final_tree.clone(),
             binding(&final_tree),
             vec![input_plan(

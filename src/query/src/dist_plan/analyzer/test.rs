@@ -339,7 +339,6 @@ fn hybrid_fused(scan: LogicalPlan, metric: &str) -> LogicalPlan {
     });
     let tree = compile(&stmt, series, SeriesOrdering::KeyThenTime).unwrap();
     let fused = FusedSeries::try_new(
-        Arc::from(metric),
         tree,
         FusedSeriesBinding {
             grid: statement_grid(&stmt).unwrap(),
@@ -424,7 +423,12 @@ fn hybrid_binary_join_rewrites_each_native_operand_boundary() {
             .as_any()
             .downcast_ref::<FusedSeries>()
             .expect("MergeScan remote input must be a FusedSeries root");
-        assert_eq!(expected_table, fused.promql());
+        assert!(
+            fused
+                .tree()
+                .to_string()
+                .contains("Input: raw samples source=0")
+        );
         assert_eq!(1, fused.children().len());
         let [LogicalPlan::TableScan(table_scan)] = fused.children() else {
             panic!("FusedSeries operand must directly consume a TableScan: {fused:?}");

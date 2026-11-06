@@ -1969,7 +1969,6 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
     ] {
         let scan_plan = scan_plan.clone().reset_state().unwrap();
         let exec = promql::extension_plan::FusedSeries::try_new_with_format(
-            Arc::from("native_demo"),
             tree.clone(),
             binding.clone(),
             vec![logical_child.clone()],

@@ -2418,7 +2418,6 @@ async fn fused_instant_complete_disjoint_publishes_before_other_input_eof() {
     .unwrap();
     let output_frame_schema = FusedSeries::series_frame_schema(&tree).unwrap();
     let logical = FusedSeries::try_new_with_format(
-        Arc::from("m"),
         tree,
         FusedSeriesBinding {
             grid: Arc::clone(&grid),
