@@ -171,8 +171,20 @@ impl Indexer {
             return true;
         };
 
-        let column_ids = indexer.column_ids().collect();
-        index_output.fulltext_bloom_columns = indexer.bloom_column_ids().collect();
+        let column_ids = indexer
+            .indexed_targets()
+            .filter_map(|target| match target {
+                IndexTarget::ColumnId(id) => Some(*id),
+                IndexTarget::JsonPath(_) => None,
+            })
+            .collect();
+        index_output.fulltext_bloom_columns = indexer
+            .bloom_indexed_targets()
+            .filter_map(|target| match target {
+                IndexTarget::ColumnId(id) => Some(*id),
+                IndexTarget::JsonPath(_) => None,
+            })
+            .collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_fulltext_index_output(

@@ -1008,6 +1008,7 @@ fn json2_hint(path: &str, data_type: ConcreteDataType) -> JsonTypeHint {
         data_type,
         inverted_index: false,
         skipping_index: None,
+        fulltext_index: None,
     }
 }
 
