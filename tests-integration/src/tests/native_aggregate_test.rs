@@ -86,6 +86,7 @@ use promql::vector_match::MatchingLabels;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::dist_plan::MergeScanExec;
 use query::options::QueryOptions;
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
@@ -426,9 +427,6 @@ struct AggregateCase {
     partial_state: Option<&'static str>,
     /// Whether this case's global aggregate has an explicitly specified single owner.
     single_owner: bool,
-    /// Native output schema. The native aggregate preserves its source field name (`v`), rather
-    /// than the legacy planner's computed-expression name.
-    native_value_column: &'static str,
 }
 
 /// Builds one case from a PromQL expression and its `(labels, value)` rows.
@@ -450,7 +448,6 @@ fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool
         root_values: None,
         partial_state: None,
         single_owner: false,
-        native_value_column: "v",
     }
 }
 
@@ -479,6 +476,19 @@ fn counter_case(
 /// The complete statement one case runs, reported in every assertion message.
 fn tql_eval(promql: &str) -> String {
     format!("TQL EVAL ({EVAL_SECS}, {EVAL_SECS}, '1m') {promql}")
+}
+
+fn expression_name(promql: &str) -> String {
+    let query = PromQuery {
+        query: promql.to_string(),
+        ..PromQuery::default()
+    };
+    let QueryStatement::Promql(stmt, _) =
+        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
+    else {
+        unreachable!()
+    };
+    stmt.expr.to_string()
 }
 
 /// Runs `promql` at [`EVAL_SECS`] and returns its rows with the native nodes its plans held.
@@ -1181,9 +1191,9 @@ fn assert_rows(actual: &[ResultRow], expected: &[ResultRow], context: &str) {
 }
 
 /// Asserts the native boundary's ordered names and types, independently of legacy names.
-fn assert_native_column_layout(native: &QueryResult, tags: &[&str], query: &str) {
-    let mut expected = vec!["ts", "v"];
-    expected.extend_from_slice(tags);
+fn assert_native_column_layout(native: &QueryResult, tags: &[&str], promql: &str, query: &str) {
+    let mut expected = vec!["ts".to_string(), expression_name(promql)];
+    expected.extend(tags.iter().map(|tag| (*tag).to_string()));
     assert_eq!(
         expected, native.columns,
         "`{query}`: native boundary columns"
@@ -1248,7 +1258,7 @@ fn assert_native_columns(
     );
     assert_eq!(
         expected_value_column, native.value_column,
-        "`{query}`: native value column must use the compiled root field name"
+        "`{query}`: native value column must use the statement expression"
     );
     assert_eq!(
         1,
@@ -1667,7 +1677,7 @@ async fn check_two_source_segregation(
         legacy.columns,
         "`{query}`: the legacy plan names the value column after its expression"
     );
-    assert_native_column_layout(&native, &[], &query);
+    assert_native_column_layout(&native, &[], promql, &query);
     assert_rows(
         &native.rows,
         &legacy.rows,
@@ -1766,7 +1776,7 @@ async fn check_nested_aggregate_case(
     assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, &case.promql, true, observer).await;
-    assert_native_column_layout(&native, &[], &query);
+    assert_native_column_layout(&native, &[], &case.promql, &query);
     assert_rows(
         &native.rows,
         &legacy.rows,
@@ -1799,7 +1809,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         .keys()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    assert_native_column_layout(&native, &tags, &query);
+    assert_native_column_layout(&native, &tags, promql, &query);
     if promql.starts_with("count ") {
         assert!(
             legacy.column_types.contains(&DataType::Int64),
@@ -1811,8 +1821,8 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         &legacy.rows,
         &format!("native `{query}` vs legacy"),
     );
-    assert_native_schema(&native, case.native_value_column, &case.expected, &query);
-    assert_native_columns(&native, &legacy, &query, "v");
+    assert_native_schema(&native, &expression_name(promql), &case.expected, &query);
+    assert_native_columns(&native, &legacy, &query, &expression_name(promql));
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
 
     assert_eq!(
@@ -2057,7 +2067,7 @@ async fn native_aggregate_topk_over_global_partitions() {
     let (legacy, legacy_capture) = run(false).await;
     assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
     let (native, capture) = run(true).await;
-    assert_native_columns(&native, &legacy, &sql, "v");
+    assert_native_columns(&native, &legacy, &sql, &expression_name(&promql));
     assert_rows(
         &native.rows,
         &legacy.rows,
@@ -2092,7 +2102,7 @@ async fn native_aggregate_topk_over_global_partitions() {
         }
     }
     expected.sort_by(|a, b| (a.ts_millis, &a.labels).cmp(&(b.ts_millis, &b.labels)));
-    assert_native_schema(&native, "v", &expected, &sql);
+    assert_native_schema(&native, &expression_name(&promql), &expected, &sql);
     assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
     // `topk` above a global aggregate is not split, so the scan side folds per series and the
     // ranking runs above it. A plan may hold several fused nodes (the frontend root and the region
@@ -2162,7 +2172,11 @@ async fn native_aggregate_clamp_executes_on_both_routes() {
         close_enough(native.rows[0].value.unwrap(), 10.0),
         "native `{query}` value"
     );
-    assert_eq!("v", native.value_column, "native `{query}` value column");
+    assert_eq!(
+        expression_name(&promql),
+        native.value_column,
+        "native `{query}` value column"
+    );
     assert_eq!(2, native.columns.len(), "native `{query}` columns");
     assert_eq!(1, capture.fused.len(), "native `{query}` fused producers");
     for fused in &capture.fused {
@@ -2609,9 +2623,9 @@ async fn native_histogram_over_the_cut_splits_and_matches_legacy() {
             &format!("native `{query}`"),
         );
         let tags: &[&str] = if *single_owner { &[] } else { &["job"] };
-        assert_native_column_layout(&native, tags, &query);
-        assert_native_schema(&native, "v", &legacy.rows, &query);
-        assert_native_columns(&native, &legacy, &query, "v");
+        assert_native_column_layout(&native, tags, promql, &query);
+        assert_native_schema(&native, &expression_name(promql), &legacy.rows, &query);
+        assert_native_columns(&native, &legacy, &query, &expression_name(promql));
         // The equivalence the admission rests on: the rows the same statement reports over the
         // complete input, labels included.
         assert_rows(
@@ -2844,13 +2858,16 @@ async fn native_bare_selector_aggregate_value_columns() {
         let mark = observer.mark();
         let (native_names, native_types, native_rows, capture) =
             read(&instance, &observer, &promql, true).await;
-        let expected_names = match (expected_values, single_owner) {
-            (1, true) => vec!["ts", "v"],
-            (1, false) => vec!["ts", "v", "job"],
-            (2, true) => vec!["ts", "a", "b"],
-            (2, false) => vec!["ts", "a", "b", "job"],
+        let expression = expression_name(&promql);
+        let mut expected_names = vec!["ts".to_string()];
+        match expected_values {
+            1 => expected_names.push(expression),
+            2 => expected_names.extend([format!("{expression}.a"), format!("{expression}.b")]),
             _ => unreachable!(),
-        };
+        }
+        if !single_owner {
+            expected_names.push("job".to_string());
+        }
         assert_eq!(
             expected_names, native_names,
             "`{query}` native boundary columns"
