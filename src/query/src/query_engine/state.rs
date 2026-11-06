@@ -884,7 +884,6 @@ mod tests {
         });
         for (disjoint, needs_router) in [(true, false), (false, true)] {
             let fused = FusedSeries::try_new(
-                Arc::from("metric"),
                 tree.clone(),
                 FusedSeriesBinding {
                     grid: Arc::clone(&grid),

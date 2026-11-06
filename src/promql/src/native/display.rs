@@ -17,15 +17,23 @@
 //! The tree is displayed by recursively visiting its bound expressions. The display is an
 //! observation of a compiled tree: it runs nothing, and every line reads as the node it is,
 //! making no claim about whether that node could run.
+//!
+//! A node that recorded figures shows them at the end of its own line, and only its own: the walk
+//! carries the path the runtime registered that node under, so the figures of one node are never
+//! reported as those of another. A tree whose nodes recorded nothing - one that was never run,
+//! which is what `EXPLAIN` shows - prints structure only.
 
+use std::borrow::Cow;
 use std::fmt::{self, Write};
 use std::sync::Arc;
 
+use common_recordbatch::adapter::{NativeTreeMetrics, format_metric};
 use datatypes::series::time::EvalGrid;
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 
 use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
+use crate::native::metrics::NodeMetricsSnapshot;
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
     NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
@@ -34,8 +42,39 @@ use crate::range_eval::RangeFunction;
 use crate::select::{MatchOp, SortOrder};
 use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp};
 
-/// The header line of every tree.
-const HEADER: &str = "NativeTree";
+/// The path the runtime registers a tree's root node under.
+///
+/// Every other path is this one and the segments of [`child_segments`], so the walk below asks for
+/// a node's figures by the same key its registration used.
+pub const ROOT_PATH: &str = "root";
+
+/// One displayed node: its line, the figures it recorded, and the nodes that consume its output.
+///
+/// The same report feeds the tree's text and, through the operator that owns the tree, the
+/// structure a machine-readable `ANALYZE` publishes, so the two cannot describe different trees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeNodeReport {
+    /// The node's line without figures, as `<kind>: <what it computes>`.
+    pub line: String,
+    /// The figures this node recorded, in [`crate::native::metrics::NodeMetric::ALL`] order.
+    pub metrics: Vec<(String, usize)>,
+    /// The nodes that consume this one's output, in the order the runtime feeds them.
+    pub children: Vec<NativeNodeReport>,
+}
+
+impl From<NativeNodeReport> for NativeTreeMetrics {
+    /// The same nodes, as the plain data a machine-readable `ANALYZE` publishes.
+    ///
+    /// The text and that record are built from one report, so a reader of either sees the same
+    /// nodes with the same figures.
+    fn from(report: NativeNodeReport) -> Self {
+        Self {
+            line: report.line,
+            metrics: report.metrics,
+            children: report.children.into_iter().map(Self::from).collect(),
+        }
+    }
+}
 
 /// A grid as `<start>/<step>x<len>`.
 fn grid_name(grid: &EvalGrid) -> String {
@@ -415,19 +454,20 @@ fn kind(expr: &NativeExpr) -> &'static str {
     }
 }
 
-/// One recursively displayed node and its children.
-fn display_node(
-    f: &mut fmt::Formatter<'_>,
-    node: &NativeNode,
-    depth: usize,
-    edge: &str,
-) -> fmt::Result {
-    f.write_char('\n')?;
-    // The root sits one level in from the header, and each child one level below its consumer.
-    for _ in 0..depth + 1 {
-        f.write_str("  ")?;
+/// The child nodes of `node` and the path segment each is registered under, in child order.
+///
+/// The segments are the ones the runtime registers, not the names the bound tree happens to give
+/// the operands: `info` binds its operands as `base` and `info`, while the runtime registers them
+/// as the kernel's `left` and `right`, so the display asks for the figures where they were put.
+fn child_segments(node: &NativeNode) -> Vec<(&NativeNode, Cow<'static, str>)> {
+    let mut children = Vec::new();
+    fn child<'a>(
+        children: &mut Vec<(&'a NativeNode, Cow<'static, str>)>,
+        segment: &'static str,
+        node: &'a NativeNode,
+    ) {
+        children.push((node, Cow::Borrowed(segment)));
     }
-    write!(f, "{edge} {} {}", kind(&node.expr), describe(node))?;
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
         NativeExpr::Instant { input, .. }
@@ -437,32 +477,101 @@ fn display_node(
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
         | NativeExpr::Vector { input, .. }
-        | NativeExpr::VectorOf { input } => display_node(f, input, depth + 1, "input")?,
+        | NativeExpr::VectorOf { input } => child(&mut children, "input", input),
         NativeExpr::ParameterizedMap {
             input, parameters, ..
         } => {
-            display_node(f, input, depth + 1, "input")?;
-            for parameter in parameters {
-                display_node(f, parameter, depth + 1, "parameter")?;
+            child(&mut children, "input", input);
+            for (index, parameter) in parameters.iter().enumerate() {
+                children.push((parameter, Cow::Owned(format!("parameter{index}"))));
             }
         }
         NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            display_node(f, left, depth + 1, "left")?;
-            display_node(f, right, depth + 1, "right")?;
+            child(&mut children, "left", left);
+            child(&mut children, "right", right);
         }
         NativeExpr::Info { base, info, .. } => {
-            display_node(f, base, depth + 1, "base")?;
-            display_node(f, info, depth + 1, "info")?;
+            child(&mut children, "left", base);
+            child(&mut children, "right", info);
         }
+    }
+    children
+}
+
+/// The node at `path` and everything below it, with the figures each node recorded.
+fn report_node(node: &NativeNode, path: &str, metrics: &NodeMetricsSnapshot) -> NativeNodeReport {
+    NativeNodeReport {
+        line: format!("{}: {}", kind(&node.expr), describe(node)),
+        metrics: metrics.described(path),
+        children: child_segments(node)
+            .into_iter()
+            .map(|(child, segment)| report_node(child, &format!("{path}.{segment}"), metrics))
+            .collect(),
+    }
+}
+
+impl NativeTree {
+    /// This tree, one report per node, carrying the figures each node recorded.
+    ///
+    /// A snapshot with no entries reports the tree's structure only, which is what a plan that was
+    /// never executed has to show.
+    pub fn report(&self, metrics: &NodeMetricsSnapshot) -> NativeNodeReport {
+        report_node(self.root(), ROOT_PATH, metrics)
+    }
+
+    /// This tree rendered from column zero, with each node's own figures when `metrics` holds them.
+    pub fn display_with<'a>(&'a self, metrics: &'a NodeMetricsSnapshot) -> NativeTreeDisplay<'a> {
+        NativeTreeDisplay {
+            tree: self,
+            metrics,
+        }
+    }
+}
+
+/// A tree as it appears below the operator line: one node per line, two spaces per depth, and each
+/// node's figures on its own line.
+pub struct NativeTreeDisplay<'a> {
+    tree: &'a NativeTree,
+    metrics: &'a NodeMetricsSnapshot,
+}
+
+impl fmt::Display for NativeTreeDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The root starts at column zero: the block the caller brackets the tree in carries the
+        // indentation, so each line here is depth-relative to that block rather than to the
+        // caller's own place in the plan.
+        write_report(f, &self.tree.report(self.metrics), 0)
+    }
+}
+
+fn write_report(
+    f: &mut fmt::Formatter<'_>,
+    report: &NativeNodeReport,
+    depth: usize,
+) -> fmt::Result {
+    write!(f, "{:indent$}{}", "", report.line, indent = depth * 2)?;
+    if !report.metrics.is_empty() {
+        let figures = report
+            .metrics
+            .iter()
+            .map(|(name, value)| format_metric(name, *value))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(f, ", metrics=[{figures}]")?;
+    }
+    for child in &report.children {
+        f.write_char('\n')?;
+        write_report(f, child, depth + 1)?;
     }
     Ok(())
 }
 
 impl fmt::Display for NativeTree {
-    /// One line per node, outermost first, indented two spaces per depth below the header.
+    /// One line per node, outermost first, from column zero with two spaces per depth and without
+    /// figures: this is the tree's own shape, which is what a display that holds no metrics
+    /// snapshot can show.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(HEADER)?;
-        display_node(f, self.root(), 0, "root")
+        write_report(f, &self.report(&NodeMetricsSnapshot::default()), 0)
     }
 }
 

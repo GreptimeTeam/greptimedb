@@ -14,17 +14,14 @@
 
 //! One node that runs a compiled native tree over raw series.
 //!
-//! [`FusedSeries`] is the logical half: it holds the PromQL text the tree was compiled from, the
-//! tree itself and the binding its input was compiled against. [`FusedSeriesExec`] is the physical
-//! half: it owns one execution of that tree per partition and decodes its input frames into raw
-//! series chunks and converts its evaluated chunks back into batches.
+//! [`FusedSeries`] is the logical half: it holds the compiled tree and the binding its input was
+//! compiled against. [`FusedSeriesExec`] is the physical half: it owns one execution of that tree
+//! per partition, decodes its input frames into raw series chunks, and converts evaluated chunks
+//! back into batches.
 //!
-//! The two halves show different things in `EXPLAIN`, which is the point of having both. The
-//! logical node prints the query a reader wrote ([`FusedSeries`]'s `fmt_for_explain`), and the
-//! physical node prints the tree it will run ([`FusedSeriesExec`]'s `fmt_as`, which embeds
-//! [`NativeTree`]'s own display rather than a second renderer). A reader comparing the two plans
-//! can therefore see whether a query was compiled the way they expected without decoding node
-//! names.
+//! Both halves show their own compiled tree in `EXPLAIN`, rendered by [`NativeTree`]'s display.
+//! The logical node shows its tree without metrics; the physical node includes each tree node's
+//! recorded metrics when available.
 //!
 //! Scope of this layer: the input is a stream of native raw series frames
 //! ([`raw_series_frame_schema`](datatypes::series::frame::raw_series_frame_schema)) — one row per
@@ -57,6 +54,7 @@ use common_query::series_frame::{
     pack_aggregate_state, pack_evaluated_series, series_frame_ordering, unpack_aggregate_state,
     unpack_evaluated_series, unpack_raw_series,
 };
+use common_recordbatch::adapter::{NATIVE_TREE_METRIC, NativeTreeMetric, NativeTreeMetrics};
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
@@ -70,7 +68,9 @@ use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
+};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
@@ -95,6 +95,7 @@ use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
+use crate::native::metrics::{NodeMetricsSnapshot, is_node_metric};
 use crate::native::plan::{
     AggregateStage, Grouping, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
     reads_across_series,
@@ -302,13 +303,10 @@ fn series_frame_output_schema(schema: &SeriesSchema) -> DataFusionResult<SchemaR
 
 /// The logical plan of one node that runs a compiled native tree.
 ///
-/// The node adds nothing to the tree: it records the query the tree was compiled from, so
-/// `EXPLAIN` shows the reader their own query rather than the shape it compiled to, and it carries
-/// the binding the tree's input was compiled against so the execution plan can be built from it.
+/// The node carries the binding the tree's input was compiled against so the execution plan can
+/// be built from it. `EXPLAIN` shows the compiled tree.
 #[derive(Debug)]
 pub struct FusedSeries {
-    /// The PromQL text this tree was compiled from.
-    promql: Arc<str>,
     /// The compiled tree to run.
     tree: NativeTree,
     /// What the tree's input was compiled against.
@@ -363,7 +361,6 @@ struct FusedSeriesPayload {
     time_index: String,
     tags: Vec<String>,
     format: FusedOutputFormat,
-    promql: Arc<str>,
     output_schema: datafusion::arrow::datatypes::Schema,
     /// Whether this node is the partition-local producer of a canonical merge; part of the node's
     /// identity, not of where it may be placed.
@@ -373,8 +370,7 @@ struct FusedSeriesPayload {
 
 impl FusedSeries {
     /// Serializes the native tree and the binding required to reconstruct this plan node.
-    /// The PromQL text is included for diagnostics only and never drives execution; children
-    /// remain ordinary Substrait inputs.
+    /// Children remain ordinary Substrait inputs.
     ///
     /// This is only the node's own encoding. Whether a planner is allowed to place this node on
     /// another machine is a separate decision, made by the planner and the transport, not here.
@@ -389,7 +385,6 @@ impl FusedSeries {
             time_index: self.binding.time_index.clone(),
             tags: self.binding.tags.clone(),
             format: self.format,
-            promql: Arc::clone(&self.promql),
             output_schema: self.output_schema.as_arrow().clone(),
             canonical_producer: self.canonical_producer,
         };
@@ -446,7 +441,6 @@ impl FusedSeries {
             time_index,
             tags,
             format,
-            promql,
             output_schema,
             canonical_producer: _,
         } = payload;
@@ -474,8 +468,7 @@ impl FusedSeries {
         }
         let output_schema = Arc::new(datafusion::common::DFSchema::try_from(output_schema)?);
         let canonical_producer = payload.canonical_producer;
-        let mut node =
-            Self::try_new_with_format(promql, tree, binding, children, output_schema, format)?;
+        let mut node = Self::try_new_with_format(tree, binding, children, output_schema, format)?;
         if canonical_producer {
             if !matches!(node.tree.root().expr, NativeExpr::Merge { .. }) {
                 return Err(DataFusionError::Plan(
@@ -503,14 +496,12 @@ impl FusedSeries {
 
     /// Creates the node, checking that `tree` is legal against `binding`.
     pub fn try_new(
-        promql: Arc<str>,
         tree: NativeTree,
         binding: FusedSeriesBinding,
         children: Vec<LogicalPlan>,
         output_schema: DFSchemaRef,
     ) -> DataFusionResult<Self> {
         Self::try_new_with_format(
-            promql,
             tree,
             binding,
             children,
@@ -526,7 +517,6 @@ impl FusedSeries {
     /// state frame the tree does not produce, which `try_new_with_format` would then only catch for
     /// some of its columns.
     pub fn try_new_state_export(
-        promql: Arc<str>,
         tree: NativeTree,
         binding: FusedSeriesBinding,
         children: Vec<LogicalPlan>,
@@ -538,7 +528,6 @@ impl FusedSeries {
             ))
         })?;
         Self::try_new_with_format(
-            promql,
             tree,
             binding,
             children,
@@ -577,7 +566,6 @@ impl FusedSeries {
 
     /// Creates a node with an explicitly selected output format.
     pub fn try_new_with_format(
-        promql: Arc<str>,
         tree: NativeTree,
         binding: FusedSeriesBinding,
         children: Vec<LogicalPlan>,
@@ -612,7 +600,6 @@ impl FusedSeries {
             }
         }
         Ok(Self {
-            promql,
             tree,
             binding,
             children,
@@ -634,7 +621,6 @@ impl FusedSeries {
     /// `output_schema` is the frame the evaluated root declares; it is derived here rather than
     /// taken from the caller so the two cannot disagree.
     pub fn try_new_canonical_producer(
-        promql: Arc<str>,
         tree: NativeTree,
         binding: FusedSeriesBinding,
         children: Vec<LogicalPlan>,
@@ -650,7 +636,6 @@ impl FusedSeries {
             frame.as_ref().clone(),
         )?);
         Ok(Self {
-            promql,
             tree,
             binding,
             children,
@@ -670,11 +655,6 @@ impl FusedSeries {
     /// Whether this node is the partition-local producer of a canonical boundary.
     pub fn is_canonical_producer(&self) -> bool {
         self.canonical_producer
-    }
-
-    /// The PromQL text this node was compiled from.
-    pub fn promql(&self) -> &str {
-        &self.promql
     }
 
     /// The selected output representation.
@@ -957,7 +937,6 @@ impl FusedSeries {
             })
             .collect::<DataFusionResult<Vec<_>>>()?;
         let exec: Arc<dyn ExecutionPlan> = Arc::new(FusedSeriesExec::build(
-            Arc::clone(&self.promql),
             inputs,
             Arc::new(self.tree.clone()),
             output_schema,
@@ -1074,23 +1053,29 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
     }
 
     fn fmt_for_explain(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "FusedSeries")?;
+        let mut has_params = false;
         match self.format {
-            FusedOutputFormat::SeriesFrame if self.canonical_producer => write!(
-                f,
-                "FusedSeries: {} (output: series_frame, per-partition canonical merge)",
-                self.promql
-            )?,
-            FusedOutputFormat::SeriesFrame => {
-                write!(f, "FusedSeries: {} (output: series_frame)", self.promql)?
+            FusedOutputFormat::SeriesFrame if self.canonical_producer => {
+                write!(f, ": (output: series_frame, per-partition canonical merge)")?;
+                has_params = true;
             }
-            FusedOutputFormat::PlainRows => write!(f, "FusedSeries: {}", self.promql)?,
+            FusedOutputFormat::SeriesFrame => {
+                write!(f, ": (output: series_frame)")?;
+                has_params = true;
+            }
+            FusedOutputFormat::PlainRows => {}
         }
         if let Some((_, SeriesRouting::CanonicalLabelsExcept(excluded))) =
             state_routing(self.tree.root())
         {
-            write!(f, " (state routing: canonical labels except {excluded:?})")?;
+            let separator = if has_params { " " } else { ": " };
+            write!(
+                f,
+                "{separator}(state routing: canonical labels except {excluded:?})"
+            )?;
         }
-        Ok(())
+        write!(f, "\nnative_tree=[\n{}\n]", self.tree)
     }
 
     fn with_exprs_and_inputs(
@@ -1100,7 +1085,6 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
     ) -> DataFusionResult<Self> {
         validate_binding(&self.tree, &self.binding, &inputs)?;
         Ok(Self {
-            promql: Arc::clone(&self.promql),
             tree: self.tree.clone(),
             binding: self.binding.clone(),
             children: inputs,
@@ -1113,8 +1097,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
 
 impl PartialEq for FusedSeries {
     fn eq(&self, other: &Self) -> bool {
-        self.promql == other.promql
-            && self.tree == other.tree
+        self.tree == other.tree
             && self.binding == other.binding
             && self.children == other.children
             && self.output_schema == other.output_schema
@@ -1127,7 +1110,6 @@ impl Eq for FusedSeries {}
 
 impl Hash for FusedSeries {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.promql.hash(state);
         self.binding.hash(state);
         self.children.hash(state);
         self.output_schema.hash(state);
@@ -1139,10 +1121,6 @@ impl Hash for FusedSeries {
 
 impl PartialOrd for FusedSeries {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.promql.partial_cmp(&other.promql) {
-            Some(Ordering::Equal) => {}
-            ord => return ord,
-        }
         match self.binding.partial_cmp(&other.binding) {
             Some(Ordering::Equal) => {}
             ord => return ord,
@@ -2122,8 +2100,6 @@ fn claim_evidence(
 
 /// The physical node that runs a compiled native tree over its input's raw series.
 pub struct FusedSeriesExec {
-    /// The PromQL text the tree was compiled from, which is what the plan line shows.
-    promql: Arc<str>,
     /// The tree this node runs, shared by every partition's execution.
     tree: Arc<NativeTree>,
     /// Each source's compiled raw schema, used to decode only that source's frames.
@@ -2142,8 +2118,11 @@ pub struct FusedSeriesExec {
     output_schema: SchemaRef,
     /// The evidence claimed by this plan's output partitions.
     duplicate_evidence: Mutex<EvidenceClaims>,
-    /// Per-node metrics, registered by each execution of the tree.
-    metric: ExecutionPlanMetricsSet,
+    /// Per-node metrics, registered by each execution of the tree, and the tree itself.
+    ///
+    /// Shared with the tree's own registration, which reads these figures when a reader asks for
+    /// the tree: that reader outlives this borrow, and must never keep the set alive.
+    metric: Arc<ExecutionPlanMetricsSet>,
     format: FusedOutputFormat,
     matching_parallelism: Option<usize>,
     /// Whether this node is a partition-local canonical producer.
@@ -2153,6 +2132,25 @@ pub struct FusedSeriesExec {
     canonical_producer_for_test: bool,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
+}
+
+/// Registers the tree `tree` runs as one of the metrics `metric` holds.
+///
+/// What is registered reads the tree when it is asked for, because a node's figures are only final
+/// once the tree ran, and `ANALYZE` reads them after it did. The reader holds `metric` weakly: the
+/// set holds the reader, so a strong handle would keep the set alive for as long as the reader.
+fn register_tree_metric(tree: &Arc<NativeTree>, metric: &Arc<ExecutionPlanMetricsSet>) {
+    let tree = Arc::clone(tree);
+    let figures = Arc::downgrade(metric);
+    MetricBuilder::new(metric).build(MetricValue::Custom {
+        name: NATIVE_TREE_METRIC.into(),
+        value: Arc::new(NativeTreeMetric::new(move || {
+            let Some(figures) = figures.upgrade() else {
+                return NativeTreeMetrics::default();
+            };
+            NativeTreeMetrics::from(tree.report(&NodeMetricsSnapshot::read(&figures)))
+        })),
+    });
 }
 
 fn preserves_partition_identity(node: &NativeNode) -> bool {
@@ -2228,12 +2226,11 @@ impl FusedSeriesExec {
     /// [`RawLabelSource::Explicit`]. `time_column` and `tags` name the columns of the output, which
     /// is a row table rather than a frame.
     ///
-    /// The parameters stay separate because each is a fact its own caller has: the query, the plan
+    /// The parameters stay separate because each is a fact its own caller has: the plan
     /// below, the frame's label binding and ordering, the tree, and the three things the output
     /// schema is classified by. A struct over them would be the same list under another name.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
-        promql: Arc<str>,
         inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
         tree: Arc<NativeTree>,
         output_schema: SchemaRef,
@@ -2241,7 +2238,6 @@ impl FusedSeriesExec {
         tags: Vec<String>,
     ) -> DataFusionResult<Self> {
         Self::build(
-            promql,
             inputs,
             tree,
             output_schema,
@@ -2255,7 +2251,6 @@ impl FusedSeriesExec {
 
     #[allow(clippy::too_many_arguments)]
     fn build(
-        promql: Arc<str>,
         inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
         tree: Arc<NativeTree>,
         output_schema: SchemaRef,
@@ -2528,8 +2523,9 @@ impl FusedSeriesExec {
                     input.properties().boundedness
                 }),
         ));
+        let metric = Arc::new(ExecutionPlanMetricsSet::new());
+        register_tree_metric(&tree, &metric);
         Ok(Self {
-            promql,
             tree,
             series_schemas: raw_schemas,
             source_kinds,
@@ -2542,7 +2538,7 @@ impl FusedSeriesExec {
                 evidence: None,
                 claimed: Vec::new(),
             }),
-            metric: ExecutionPlanMetricsSet::new(),
+            metric,
             properties,
             format,
             matching_parallelism,
@@ -2555,6 +2551,20 @@ impl FusedSeriesExec {
     /// The name this node is shown under.
     pub const fn name() -> &'static str {
         "FusedSeriesExec"
+    }
+
+    /// The figures the tree this node runs recorded, keyed by the path each node registered under.
+    fn node_metrics(&self) -> NodeMetricsSnapshot {
+        NodeMetricsSnapshot::read(&self.metric)
+    }
+
+    /// Every registration this node's tree made, exactly as it was registered.
+    ///
+    /// [`Self::metrics`] leaves these out because a flat set cannot say which node recorded what;
+    /// this is the same set unfiltered, for a reader that keys by name - the names are
+    /// `native.<path>.<metric>` (see [`crate::native::metrics`]).
+    pub fn node_metric_set(&self) -> MetricsSet {
+        self.metric.clone_inner()
     }
 }
 
@@ -2571,14 +2581,23 @@ impl std::fmt::Debug for FusedSeriesExec {
 }
 
 impl DisplayAs for FusedSeriesExec {
-    /// The query, then the tree it compiles to: the tree is rendered by [`NativeTree`]'s own
-    /// `Display`, so `EXPLAIN` and the node's metrics name the same nodes.
+    /// The compiled tree, one line per node.
+    ///
+    /// Each node's own figures are read from the metrics this node registered, so a statement that
+    /// never ran - every plain `EXPLAIN`, verbose included - draws the tree without them. That is
+    /// the whole difference between `EXPLAIN` and `ANALYZE` here: nothing switches it on.
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)?;
+        write!(f, "FusedSeriesExec")?;
+        // On the operator's own line, where the logical node also puts it: a second line would read
+        // as another node beside the tree this one draws.
         if self.format == FusedOutputFormat::SeriesFrame {
-            write!(f, "\noutput: series_frame")?;
+            write!(f, ": (output: series_frame)")?;
         }
-        Ok(())
+        write!(
+            f,
+            "\nnative_tree=[\n{}\n]",
+            self.tree.display_with(&self.node_metrics())
+        )
     }
 }
 
@@ -2587,8 +2606,24 @@ impl ExecutionPlan for FusedSeriesExec {
         Self::name()
     }
 
+    /// The metrics this node records itself, which is none of its tree's.
+    ///
+    /// A [`MetricsSet`] is a flat, name-keyed bag: reporting the tree's figures through it would
+    /// attribute every node's figures to this node, because the reader cannot tell them apart. Each
+    /// node reports its own on its own line instead - and, as data, through the tree this node
+    /// registers as [`NativeTreeMetric`] - so they are left out here and this node reports only what
+    /// an operator of its own would add.
     fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metric.clone_inner())
+        let mut own = MetricsSet::new();
+        for metric in self.metric.clone_inner().iter() {
+            // The tree is not a figure of this node: it is what the node runs, reported on its own
+            // (see `NativeTreeMetric`), so it stays here rather than being flattened into a number.
+            let tree = matches!(metric.value(), MetricValue::Custom { .. });
+            if tree || !is_node_metric(metric.value().name()) {
+                own.push(Arc::clone(metric));
+            }
+        }
+        Some(own)
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -2645,7 +2680,6 @@ impl ExecutionPlan for FusedSeriesExec {
         // Rebuilt rather than patched: the new child's schema is what the frame is validated
         // against, so a child that changed shape is refused instead of decoded with a stale layout.
         Ok(Arc::new(Self::build(
-            Arc::clone(&self.promql),
             children,
             Arc::clone(&self.tree),
             self.output_schema.clone(),

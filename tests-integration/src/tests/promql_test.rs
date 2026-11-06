@@ -2118,7 +2118,7 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
             .to_string();
         if split {
             assert!(
-                display.contains("Aggregate sum by [] final"),
+                display.contains("Aggregate: sum by [] final"),
                 "{query}: {display}"
             );
             let producer = observer.fused().expect("native partial producer");
@@ -2132,11 +2132,11 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
         } else {
             assert!(display.contains("FusedSeriesExec"), "{query}: {display}");
             assert!(
-                display.contains("Vector topk 1 by []"),
+                display.contains("Vector: topk 1 by []"),
                 "{query}: {display}"
             );
             assert!(
-                display.contains("Aggregate sum by [] complete"),
+                display.contains("Aggregate: sum by [] complete"),
                 "{query}: {display}"
             );
         }
@@ -4253,13 +4253,13 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
     let histogram_producer = histogram_router.children()[0].clone();
     // The boundary's own tree is the merge over the rewrite: `histogram_count` is not in it, so the
     // router that validates the collected label set runs below the map rather than above it. The
-    // node's explain line names the whole statement, so the tree is read from its own header on.
+    // physical node renders its own tree directly below its operator line.
     let producer_display = datafusion::physical_plan::displayable(histogram_producer.as_ref())
-        .indent(false)
+        .one_line()
         .to_string();
     let producer_tree = producer_display
-        .split_once("NativeTree")
-        .map(|(_, tree)| format!("NativeTree{tree}"))
+        .split_once('\n')
+        .map(|(_, tree)| tree)
         .unwrap_or_else(|| panic!("the producer renders its tree: {producer_display}"));
     assert!(
         producer_tree.contains("Merge"),
@@ -7507,10 +7507,11 @@ async fn native_promql_explain_and_analyze_execute_fused_plan() {
                 .sum::<usize>();
             assert_eq!(output_values, 1, "ANALYZE executes the fused series");
         } else if statement.contains("EXPLAIN") && enabled {
-            assert!(text.contains("FusedSeries: native_explain"));
+            assert!(text.contains("Input: raw samples source=0"), "{text}");
             assert!(text.contains("MergeScanExec"));
+            assert!(!text.contains("metrics="), "{text}");
         } else if !enabled {
-            assert!(!text.contains("FusedSeries:"));
+            assert!(!text.contains("FusedSeries"));
         }
     }
 }
@@ -7687,7 +7688,7 @@ fn holds_split_merge(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -
     let mut stack = vec![plan.clone()];
     while let Some(node) = stack.pop() {
         let display = datafusion::physical_plan::displayable(node.as_ref())
-            .indent(false)
+            .one_line()
             .to_string();
         if node.name() == "FusedSeriesExec" && display.contains(" final") {
             let mut descendants = node.children().into_iter().cloned().collect::<Vec<_>>();
@@ -9341,21 +9342,22 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
             "a global topk answers one partition"
         );
         let parent_display = datafusion::physical_plan::displayable(parent.as_ref())
-            .indent(true)
+            .one_line()
             .to_string();
         let parent_tree = parent_display
-            .split_once("NativeTree")
-            .map_or(parent_display.as_str(), |(_, tree)| tree);
+            .split_once('\n')
+            .expect("the parent renders its own tree")
+            .1;
         assert!(
-            parent_tree.contains("Aggregate sum by [] complete"),
+            parent_tree.contains("Aggregate: sum by [] complete"),
             "the parent owns the complete sum: {parent_tree}"
         );
         assert!(
-            parent_tree.contains("Vector topk 1 by []"),
+            parent_tree.contains("Vector: topk 1 by []"),
             "the parent owns the global topk: {parent_tree}"
         );
         assert!(
-            parent_tree.contains("Input evaluated samples source=0"),
+            parent_tree.contains("Input: evaluated samples source=0"),
             "the parent reads its child's evaluated frame, not a scan: {parent_tree}"
         );
         assert!(
@@ -9378,13 +9380,13 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
             "the prefix keeps the scan's partitions, which is the point of cutting below the topk"
         );
         let child_display = datafusion::physical_plan::displayable(child.as_ref())
-            .indent(true)
+            .one_line()
             .to_string();
-        // The first line names the statement the node was built for, which is the same for both
-        // segments; what a segment computes is the tree below it.
+        // Each segment renders its own compiled tree below the operator line.
         let child_tree = child_display
-            .split_once("NativeTree")
-            .map_or(child_display.as_str(), |(_, tree)| tree);
+            .split_once('\n')
+            .expect("the child renders its own tree")
+            .1;
         assert!(
             child_tree.contains("Instant"),
             "the child owns the per-series prefix: {child_tree}"
@@ -9978,20 +9980,20 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
         }
         if query == "sum(topk(1, seg_a)) + vector(1)" {
             let parent = datafusion::physical_plan::displayable(frontend[0].as_ref())
-                .indent(true)
+                .one_line()
                 .to_string();
-            let parent_tree = parent.split_once("NativeTree").unwrap().1;
+            let parent_tree = parent.split_once('\n').unwrap().1;
             assert!(parent_tree.contains("VectorOf"), "{parent_tree}");
             assert!(
-                parent_tree.contains("Input evaluated samples source=0"),
+                parent_tree.contains("Input: evaluated samples source=0"),
                 "the parent must read the data segment: {parent_tree}"
             );
             assert!(!parent_tree.contains("Instant"), "{parent_tree}");
             assert_eq!(regions.len(), 1, "{query}: the data prefix must be cut");
             let prefix = datafusion::physical_plan::displayable(regions[0].as_ref())
-                .indent(true)
+                .one_line()
                 .to_string();
-            let prefix_tree = prefix.split_once("NativeTree").unwrap().1;
+            let prefix_tree = prefix.split_once('\n').unwrap().1;
             assert!(prefix_tree.contains("Instant"), "{prefix_tree}");
             assert!(!prefix_tree.contains("VectorOf"), "{prefix_tree}");
             let mut rows = eval_values(native_tql_output(&instance, &sql, true).await);
@@ -11427,7 +11429,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         .indent(true)
         .to_string();
     assert!(
-        pair_sum_display.contains("Aggregate sum by [] complete"),
+        pair_sum_display.contains("Aggregate: sum by [] complete"),
         "the fold is a complete aggregate over the assembled series: {pair_sum_display}"
     );
     assert!(
@@ -11502,7 +11504,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         // state standing in for the collection.
         if shape == "a fold" {
             assert!(
-                display.contains("Aggregate sum by [] complete"),
+                display.contains("Aggregate: sum by [] complete"),
                 "{shape}: the fold is a complete aggregate over the assembled frames: {display}"
             );
             assert!(
@@ -11597,7 +11599,7 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         .indent(true)
         .to_string();
     assert!(
-        sum_display.contains("Aggregate sum by [] complete"),
+        sum_display.contains("Aggregate: sum by [] complete"),
         "the fold runs natively as a complete aggregate over the boundary: {sum_display}"
     );
     assert!(

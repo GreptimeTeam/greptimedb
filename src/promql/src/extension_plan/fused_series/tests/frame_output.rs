@@ -158,7 +158,6 @@ async fn sparse_instant_frame_preserves_positions_nulls_and_nan_across_formats()
     let binding = binding_of(&tree, Arc::clone(&schema), vec![HOST.into(), NAME.into()]);
     let make_node = |format| {
         FusedSeries::try_new_with_format(
-            Arc::from("instant(x)"),
             tree.clone(),
             binding.clone(),
             vec![input_plan(frame_schema_of(&schema))],
@@ -217,7 +216,6 @@ async fn abs_rate_frame_matches_plain_rows_with_exact_values_and_labels() {
     let binding = binding(&tree);
     let make_node = |format| {
         FusedSeries::try_new_with_format(
-            Arc::from("abs(rate(x[5m]))"),
             tree.clone(),
             binding.clone(),
             vec![input_plan(frame_schema())],
@@ -321,7 +319,6 @@ async fn rewritten_identical_labels_keep_disjoint_chains_in_one_encoder() {
     let binding = binding_of(&tree, Arc::clone(&schema), vec![HOST.into(), NAME.into()]);
     let make_node = |format| {
         FusedSeries::try_new_with_format(
-            Arc::from("rewritten instant"),
             tree.clone(),
             binding.clone(),
             vec![input_plan(frame_schema())],

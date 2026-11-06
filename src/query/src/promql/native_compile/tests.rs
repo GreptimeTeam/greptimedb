@@ -1039,9 +1039,8 @@ fn the_display_of_a_compiled_tree_is_the_tree() {
     assert_eq!(
         tree.to_string(),
         [
-            "NativeTree",
-            "  root Window rate [300000ms] offset 0 anchor - on grid 0/5000x21",
-            "    input Input raw samples source=0",
+            "Window: rate [300000ms] offset 0 anchor - on grid 0/5000x21",
+            "  Input: raw samples source=0",
         ]
         .join("\n")
     );
@@ -1056,32 +1055,29 @@ fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
         (
             "sum by(job)(rate(x[5m]) * 100)",
             &[
-                "NativeTree",
-                "  root Aggregate sum by [job] complete",
-                "    input Binary * ignoring [] one-to-one",
-                "      left Window rate [300000ms] offset 0 anchor - on grid 0/5000x21",
-                "        input Input raw samples source=0",
-                "      right Scalar 100",
+                "Aggregate: sum by [job] complete",
+                "  Binary: * ignoring [] one-to-one",
+                "    Window: rate [300000ms] offset 0 anchor - on grid 0/5000x21",
+                "      Input: raw samples source=0",
+                "    Scalar: 100",
             ],
         ),
         (
             "-x",
             &[
-                "NativeTree",
-                "  root Binary * ignoring [] one-to-one",
-                "    left Scalar -1",
-                "    right Instant lookback 5000ms offset 0 on grid 0/5000x21",
-                "      input Input raw samples source=0",
+                "Binary: * ignoring [] one-to-one",
+                "  Scalar: -1",
+                "  Instant: lookback 5000ms offset 0 on grid 0/5000x21",
+                "    Input: raw samples source=0",
             ],
         ),
         (
             "0 < x",
             &[
-                "NativeTree",
-                "  root Binary < ignoring [] one-to-one",
-                "    left Scalar 0",
-                "    right Instant lookback 5000ms offset 0 on grid 0/5000x21",
-                "      input Input raw samples source=0",
+                "Binary: < ignoring [] one-to-one",
+                "  Scalar: 0",
+                "  Instant: lookback 5000ms offset 0 on grid 0/5000x21",
+                "    Input: raw samples source=0",
             ],
         ),
     ];
@@ -1290,10 +1286,10 @@ fn the_supported_math_functions_map_to_their_kernels() {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        let root = display.lines().next().expect("a compiled tree has a root");
         assert_eq!(
             root,
-            format!("  root Map {op}"),
+            format!("Map: {op}"),
             "`{query}` bound the wrong kernel"
         );
     }
@@ -2856,8 +2852,8 @@ fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
-        assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
+        let root = display.lines().next().expect("a compiled tree has a root");
+        assert_eq!(root, format!("Vector: {op}"), "`{query}`");
     }
 
     let error = compile(
@@ -4290,8 +4286,8 @@ fn whole_vector_functions_bind_a_vector_operation() {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
-        assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
+        let root = display.lines().next().expect("a compiled tree has a root");
+        assert_eq!(root, format!("Vector: {op}"), "`{query}`");
     }
 }
 
@@ -4833,8 +4829,8 @@ fn label_functions_bind_their_change_into_a_map() {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
-        assert_eq!(root, format!("  root Map {op}"), "`{query}`");
+        let root = display.lines().next().expect("a compiled tree has a root");
+        assert_eq!(root, format!("Map: {op}"), "`{query}`");
     }
 }
 
@@ -4856,8 +4852,8 @@ fn histogram_functions_bind_their_kernel_into_a_map() {
         )
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
-        let root = display.lines().nth(1).expect("a compiled tree has a root");
-        assert_eq!(root, format!("  root Map {name}"), "`{query}`");
+        let root = display.lines().next().expect("a compiled tree has a root");
+        assert_eq!(root, format!("Map: {name}"), "`{query}`");
     }
 }
 

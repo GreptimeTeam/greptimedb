@@ -560,7 +560,6 @@ impl PromPlanner {
             let output_schema =
                 fused_output_schema(&values, &output_tags, &time_index, FieldKind::Float)?;
             let node = FusedSeries::try_new(
-                Arc::from(prom_expr.to_string()),
                 tree,
                 FusedSeriesBinding {
                     grid,
@@ -1260,7 +1259,6 @@ impl PromPlanner {
         if selectors.len() == 1
             && matches!(&tree.root().expr, NativeExpr::Merge { input } if pointwise_operand(input) && canonical_local_prefix(input) && !contains_global_consumer(input))
             && let Some(plan) = canonical_boundary_plan(
-                prom_expr,
                 &tree,
                 &children,
                 &source_tags,
@@ -1305,7 +1303,6 @@ impl PromPlanner {
                     return Ok(None);
                 };
                 let node = plan_split_aggregate(
-                    Arc::from(prom_expr.to_string()),
                     partial,
                     final_tree,
                     FusedSeriesBinding {
@@ -1329,7 +1326,6 @@ impl PromPlanner {
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = Box::pin(segment_tree(
-                prom_expr,
                 &tree,
                 &children,
                 &source_tags,
@@ -1401,7 +1397,6 @@ impl PromPlanner {
             (tags, metric)
         };
         let node = FusedSeries::try_new(
-            Arc::from(prom_expr.to_string()),
             tree,
             FusedSeriesBinding {
                 grid,
@@ -1903,7 +1898,6 @@ fn cut_segments(node: &NativeNode, canonical_segmentation: bool) -> Segment {
 /// `None` when the boundary cannot be built, so the caller keeps the plan it would have chosen.
 #[allow(clippy::too_many_arguments)]
 fn canonical_boundary_plan(
-    prom_expr: &PromExpr,
     tree: &NativeTree,
     children: &[LogicalPlan],
     source_tags: &[Vec<String>],
@@ -1914,7 +1908,6 @@ fn canonical_boundary_plan(
     root_kind: FieldKind,
 ) -> Option<LogicalPlan> {
     let (plan, _) = canonical_boundary_stages(
-        prom_expr,
         tree,
         children,
         source_tags,
@@ -1934,7 +1927,6 @@ fn canonical_boundary_plan(
 /// anything else reads the assembled frames as an ordinary evaluated input.
 #[allow(clippy::too_many_arguments)]
 fn canonical_boundary_stages(
-    prom_expr: &PromExpr,
     tree: &NativeTree,
     children: &[LogicalPlan],
     source_tags: &[Vec<String>],
@@ -1965,7 +1957,6 @@ fn canonical_boundary_stages(
 
     // The producer: the statement's own tree, run per partition, exporting a frame.
     let producer = FusedSeries::try_new_canonical_producer(
-        Arc::from(prom_expr.to_string()),
         tree.clone(),
         FusedSeriesBinding {
             grid: Arc::clone(grid),
@@ -2004,7 +1995,6 @@ fn canonical_boundary_stages(
         None
     };
     let consumer = FusedSeries::try_new_with_format(
-        Arc::from(prom_expr.to_string()),
         consumer_tree,
         FusedSeriesBinding {
             grid: Arc::clone(grid),
@@ -2043,7 +2033,6 @@ fn find_input_node(node: &NativeNode, source_index: usize) -> Option<&BoundInput
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn build_evaluated_segment(
-    prom_expr: &PromExpr,
     node: &NativeNode,
     children: &[LogicalPlan],
     source_tags: &[Vec<String>],
@@ -2106,7 +2095,6 @@ fn build_evaluated_segment(
     // boundary and read as a frame.
     if matches!(tree.root().expr, NativeExpr::Merge { .. }) {
         let (plan, tags) = canonical_boundary_stages(
-            prom_expr,
             &tree,
             &inputs,
             &local_tags,
@@ -2127,7 +2115,6 @@ fn build_evaluated_segment(
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
     let frame = DFSchema::try_from(frame.as_ref().clone()).ok()?;
     let plan = FusedSeries::try_new_with_format(
-        Arc::from("segment"),
         tree,
         FusedSeriesBinding {
             grid: Arc::clone(grid),
@@ -2212,7 +2199,6 @@ fn build_inner_segment(
     let frame = FusedSeries::series_frame_schema(&tree).ok()?;
     let frame = DFSchema::try_from(frame.as_ref().clone()).ok()?;
     let plan = FusedSeries::try_new_with_format(
-        Arc::from("segment"),
         tree,
         FusedSeriesBinding {
             grid: Arc::clone(grid),
@@ -2242,7 +2228,6 @@ fn build_inner_segment(
 /// root publishes rows.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 async fn segment_tree(
-    prom_expr: &PromExpr,
     tree: &NativeTree,
     children: &[LogicalPlan],
     source_tags: &[Vec<String>],
@@ -2313,7 +2298,6 @@ async fn segment_tree(
                     return Ok(None);
                 };
                 let plan = Box::pin(segment_tree(
-                    prom_expr,
                     &cut_tree,
                     &current_children,
                     &current_tags,
@@ -2348,7 +2332,6 @@ async fn segment_tree(
             }
             let built = built.or_else(|| {
                 build_evaluated_segment(
-                    prom_expr,
                     cut,
                     &current_children,
                     &current_tags,
@@ -2422,7 +2405,6 @@ async fn segment_tree(
             }
         }
         return Ok(canonical_boundary_stages(
-            prom_expr,
             &parent,
             &inputs,
             &child_tags,
@@ -2480,7 +2462,6 @@ async fn segment_tree(
     };
     let (segment_metric, segment_time_index) = segment_binding(&current_source_ids);
     let Ok(plan) = FusedSeries::try_new_with_format(
-        Arc::from(prom_expr.to_string()),
         parent,
         FusedSeriesBinding {
             grid: Arc::clone(grid),
@@ -2583,7 +2564,6 @@ fn fused_output_schema(
 /// The statement's output value columns must match the partial state's accumulator count; a
 /// mismatch means the declared output shape does not match the state schema of the split tree.
 fn plan_split_aggregate(
-    promql: Arc<str>,
     partial: NativeTree,
     final_tree: NativeTree,
     binding: FusedSeriesBinding,
@@ -2593,9 +2573,9 @@ fn plan_split_aggregate(
     let state_accumulators = match &partial.root().output {
         NativeType::AggregateState(state) => state.accumulators.len(),
         _ => {
-            return Err(DataFusionError::Plan(format!(
-                "the partial tree for `{promql}` does not produce aggregate state"
-            )))
+            return Err(DataFusionError::Plan(
+                "the partial tree does not produce aggregate state".into(),
+            ))
             .context(DataFusionPlanningSnafu);
         }
     };
@@ -2606,20 +2586,14 @@ fn plan_split_aggregate(
         .count();
     if values != state_accumulators {
         return Err(DataFusionError::Plan(format!(
-            "the partial state for `{promql}` has {state_accumulators} accumulator(s), but the output schema declares \
+            "the partial state has {state_accumulators} accumulator(s), but the output schema declares \
              {values} value column(s)"
         )))
         .context(DataFusionPlanningSnafu);
     }
-    let partial = FusedSeries::try_new_state_export(
-        Arc::clone(&promql),
-        partial,
-        binding.clone(),
-        vec![rawinput],
-    )
-    .context(DataFusionPlanningSnafu)?;
+    let partial = FusedSeries::try_new_state_export(partial, binding.clone(), vec![rawinput])
+        .context(DataFusionPlanningSnafu)?;
     FusedSeries::try_new(
-        promql,
         final_tree,
         binding,
         vec![LogicalPlan::Extension(Extension {

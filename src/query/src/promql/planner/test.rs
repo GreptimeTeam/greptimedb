@@ -2621,14 +2621,13 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
 
     let display = plan.display_indent().to_string();
     assert!(
-        display.contains("FusedSeries: rate(some_metric[5m])"),
+        display.contains("native_tree=[\nWindow: rate [300000ms]"),
         "{display}"
     );
     // The node reads the selector's own scan; nothing between them packs the frame it reads.
     assert!(display.contains("TableScan: some_metric"), "{display}");
-    // The node carries the query a reader wrote, not the shape it compiled to.
+    // The node keeps the compiled tree, not the query text.
     let fused = find_fused_series(&plan).expect("the plan holds a native node");
-    assert_eq!("rate(some_metric[5m])", fused.promql());
     assert_eq!(
         vec!["timestamp", "field_0", "tag_0"],
         plan.schema()
@@ -3413,7 +3412,6 @@ async fn native_histogram_count_drops_float_input() {
     let query = "histogram_count(some_metric)";
     let plan = build_native_fused_plan(query, true).await;
     let fused = find_fused_series(&plan).expect("histogram_count uses the native route");
-    assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
     assert!(format!("{:?}", fused.tree()).contains("Count"));
     // The in-memory table scan is not a RegionScanExec or an explicit raw-frame source, so this
     // unit harness cannot execute a region-backed native plan. Native histogram kernels test that
@@ -3425,7 +3423,9 @@ async fn native_ceil_maps_raw_float_input() {
     let query = "ceil(some_metric)";
     let plan = build_native_fused_plan(query, true).await;
     let fused = find_fused_series(&plan).expect("ceil uses the native route");
-    assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
+    let tree = fused.tree().to_string();
+    assert!(tree.contains("Map: ceil"), "{tree}");
+    assert!(tree.contains("Input: raw samples source=0"), "{tree}");
     let mut names = plan
         .schema()
         .fields()
@@ -3453,7 +3453,6 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).expect("the plan holds a native node");
-        assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
         assert_eq!(2, fused.inputs().len(), "{query}");
         if query.contains("on()") || query.contains("ignoring(tag_0)") {
             assert_eq!(vec!["field_0", "timestamp"], sorted_column_names(&plan));
@@ -4229,6 +4228,53 @@ fn sorted_column_names(plan: &LogicalPlan) -> Vec<String> {
     names
 }
 
+/// Render a split exactly as EXPLAIN displays the frontend and remote region plans.
+#[tokio::test]
+async fn native_split_explain_renders_each_tree_including_remote_input() {
+    let query = "100 - avg by (tag_0) (irate(some_metric[1m])) * 100";
+    let plan = build_native_fused_plan(query, true).await;
+    let final_node = find_final_split(&plan).expect("split final");
+    let [partial] = final_node.children() else {
+        panic!("split partial");
+    };
+    let remote =
+        crate::dist_plan::MergeScanLogicalPlan::new(partial.clone(), false).into_logical_plan();
+    let final_node = final_node
+        .with_exprs_and_inputs(vec![], vec![remote])
+        .unwrap();
+    let logical = LogicalPlan::Extension(Extension {
+        node: Arc::new(final_node),
+    });
+    let text = logical.display_indent().to_string();
+    let verbose = logical.display_indent_schema().to_string();
+    println!("=== logical_plan ===\n{text}\n=== logical_plan VERBOSE ===\n{verbose}");
+    let (final_text, remote_text) = text
+        .split_once("MergeScan [is_placeholder=false, remote_input=[")
+        .expect("the partial is inside a merge scan");
+    assert!(
+        final_text.starts_with("FusedSeries\nnative_tree=[\nBinary:"),
+        "{text}"
+    );
+    assert!(
+        final_text.contains("Aggregate: avg by [tag_0] final"),
+        "{text}"
+    );
+    assert!(
+        remote_text.contains(
+            "FusedSeries: (output: series_frame)\nnative_tree=[\nAggregate: avg by [tag_0] partial"
+        ),
+        "{text}"
+    );
+    assert!(remote_text.contains("Window: irate [60000ms]"), "{text}");
+    assert!(
+        remote_text.contains("Input: raw samples source=0"),
+        "{text}"
+    );
+    assert_ne!(final_text, remote_text);
+    assert!(!text.contains("metrics="), "{text}");
+    assert!(!verbose.contains("metrics="), "{verbose}");
+}
+
 /// An aggregate is split: the merge stays on the frontend and the per-series prefix runs in the
 /// producer. Native names follow the compiled tree; grouping labels, values and timestamps retain
 /// their existing schema roles.
@@ -4371,7 +4417,6 @@ async fn native_fused_data_free_vector_does_not_block_segmentation() {
         .as_any()
         .downcast_ref::<FusedSeries>()
         .unwrap_or_else(|| panic!("expected a fused root rather than a legacy root: {native}"));
-    assert_eq!(parent.promql(), parser::parse(query).unwrap().to_string());
     let NativeExpr::Binary { left, right, .. } = &parent.tree().root().expr else {
         panic!("expected the whole binary expression in the native parent: {native}");
     };
@@ -4537,7 +4582,6 @@ async fn native_split_and_complete_aggregate_produce_identical_values() {
     let final_node = find_final_split(&split).expect("the query must use a split aggregate");
     let partial = partial_below(final_node).unwrap();
     let complete = FusedSeries::try_new(
-        Arc::from(query),
         complete_tree,
         final_node.binding().clone(),
         partial.children().to_vec(),
@@ -5083,7 +5127,7 @@ async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
     // Only the Final node over state publishes this suffix, so the plan's own text pins it.
     assert!(
         display.contains(
-            " (state routing: canonical labels except [\"le\", \"__name__\", \"__type__\", \"__unit__\"])"
+            "FusedSeries: (state routing: canonical labels except [\"le\", \"__name__\", \"__type__\", \"__unit__\"])"
         ),
         "`{query}`: {display}"
     );
@@ -8124,7 +8168,7 @@ async fn native_histogram_selector_plans_a_native_producer() {
     let table_provider = build_test_native_histogram_table_provider("some_metric").await;
     let plan = build_native_fused_plan_with_provider("some_metric", true, table_provider).await;
     let display = plan.display_indent_schema().to_string();
-    assert!(display.contains("FusedSeries: "), "{display}");
+    assert!(display.contains("Input: raw samples source=0"), "{display}");
     assert!(!display.contains("HistogramFold:"), "{display}");
     let fused = find_fused_series(&plan).expect("the statement plans to a native producer");
     // The output field column is the canonical native histogram struct.

@@ -18,12 +18,17 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+
 use super::super::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundSetOp, BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree,
-    NativeType,
+    NativeType, ParameterizedOp,
 };
+use super::child_segments;
+use crate::info::InfoSelector;
 use crate::map::MathOp;
+use crate::native::metrics::{NodeMetrics, NodeMetricsSnapshot};
 use crate::native::plan::{InstantValue, MapOp};
 use crate::range_eval::{RangeFunction, RangeModifier, RangeWindow};
 use crate::select::SortOrder;
@@ -114,17 +119,29 @@ fn shown(lines: &[&str]) -> String {
     lines.join("\n")
 }
 
-/// The header comes first and is exactly `NativeTree`, so the output says what it is before it
-/// says anything about the tree.
+/// A tree is plan lines and nothing else: no header above them and no word beside a node, so every
+/// line reads as the operator it is, one level in from the operator line it is drawn under.
 #[test]
-fn the_first_line_names_the_tree() {
+fn a_tree_is_plan_lines_only() {
     let tree = NativeTree::try_new(raw_input()).unwrap();
 
+    assert_eq!(tree.to_string(), shown(&["Input: raw samples source=0"]));
     assert_eq!(
-        tree.to_string(),
-        shown(&["NativeTree", "  root Input raw samples source=0"])
+        NativeTree::try_new(window_over(
+            raw_input(),
+            RangeFunction::Rate,
+            300_000,
+            0,
+            None,
+            grid(0, 60_000, 4),
+        ))
+        .unwrap()
+        .to_string(),
+        shown(&[
+            "Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "  Input: raw samples source=0",
+        ])
     );
-    assert_eq!(tree.to_string().lines().next(), Some("NativeTree"));
 }
 
 /// A compiled tree is one line per node, outermost first: the window is the root and the scan it
@@ -144,9 +161,8 @@ fn a_window_over_raw_samples_is_shown_once_per_node() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "NativeTree",
-            "  root Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "    input Input raw samples source=0",
+            "Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "  Input: raw samples source=0",
         ])
     );
 }
@@ -171,10 +187,9 @@ fn a_map_nests_below_the_window_it_maps() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "NativeTree",
-            "  root Map abs, round 3",
-            "    input Window rate [300000ms] offset 60000 anchor - on grid 0/60000x4",
-            "      input Input raw samples source=0",
+            "Map: abs, round 3",
+            "  Window: rate [300000ms] offset 60000 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
         ])
     );
 }
@@ -196,9 +211,8 @@ fn a_window_names_its_constant_argument_and_its_anchor() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "NativeTree",
-            "  root Window quantile_over_time 0.9 [60000ms] offset 0 anchor 42 on grid 1000/60000x4",
-            "    input Input raw samples source=0",
+            "Window: quantile_over_time 0.9 [60000ms] offset 0 anchor 42 on grid 1000/60000x4",
+            "  Input: raw samples source=0",
         ])
     );
 }
@@ -222,10 +236,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let tree = NativeTree::try_new(evaluated_input).unwrap();
     assert_eq!(
         tree.to_string(),
-        shown(&[
-            "NativeTree",
-            "  root Input evaluated samples source=0, contiguous",
-        ])
+        shown(&["Input: evaluated samples source=0, contiguous",])
     );
 
     let interleaved = NativeType::Samples(Arc::new(SeriesSchema {
@@ -243,10 +254,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let tree = NativeTree::try_new(raw_input).unwrap();
     assert_eq!(
         tree.to_string(),
-        shown(&[
-            "NativeTree",
-            "  root Input raw samples source=0, interleaved"
-        ])
+        shown(&["Input: raw samples source=0, interleaved"])
     );
 }
 
@@ -260,7 +268,7 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
         output: NativeType::Scalar(Arc::clone(&out)),
     };
     let tree = NativeTree::try_new(scalar).unwrap();
-    assert_eq!(tree.to_string(), shown(&["NativeTree", "  root Scalar 2"]));
+    assert_eq!(tree.to_string(), shown(&["Scalar: 2"]));
 
     let instant = NativeNode {
         expr: NativeExpr::Instant {
@@ -279,9 +287,8 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "NativeTree",
-            "  root Instant lookback 300000ms offset 60000 on grid 0/60000x4",
-            "    input Input raw samples source=0",
+            "Instant: lookback 300000ms offset 60000 on grid 0/60000x4",
+            "  Input: raw samples source=0",
         ])
     );
 }
@@ -313,10 +320,9 @@ fn an_aggregate_and_a_binary_name_their_binding() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "NativeTree",
-            "  root Aggregate sum by [job] complete",
-            "    input Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      input Input raw samples source=0",
+            "Aggregate: sum by [job] complete",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
         ])
     );
 
@@ -350,11 +356,10 @@ fn an_aggregate_and_a_binary_name_their_binding() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "NativeTree",
-            "  root Binary + ignoring [] one-to-one",
-            "    left Scalar 2",
-            "    right Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      input Input raw samples source=0",
+            "Binary: + ignoring [] one-to-one",
+            "  Scalar: 2",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
         ])
     );
 
@@ -369,8 +374,8 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             .unwrap()
             .to_string()
             .lines()
-            .nth(1),
-        Some("  root Binary + ignoring [] one-to-one fill_right 0.5")
+            .next(),
+        Some("Binary: + ignoring [] one-to-one fill_right 0.5")
     );
 }
 
@@ -400,19 +405,19 @@ fn a_set_operation_names_its_operator_and_labels() {
             output: evaluated(Arc::clone(&out)),
         })
         .unwrap();
-        tree.to_string().lines().nth(1).unwrap().to_string()
+        tree.to_string().lines().next().unwrap().to_string()
     };
     assert_eq!(
         root_line(SetOp::And, MatchingLabels::On(vec!["job".into()])),
-        "  root Set and on [job]"
+        "Set: and on [job]"
     );
     assert_eq!(
         root_line(SetOp::Or, MatchingLabels::Ignoring(vec!["job".into()])),
-        "  root Set or ignoring [job]"
+        "Set: or ignoring [job]"
     );
     assert_eq!(
         root_line(SetOp::Unless, MatchingLabels::Ignoring(Vec::new())),
-        "  root Set unless ignoring []"
+        "Set: unless ignoring []"
     );
 }
 
@@ -446,10 +451,9 @@ fn a_without_grouping_does_not_read_as_by() {
     assert_eq!(
         tree.to_string(),
         shown(&[
-            "NativeTree",
-            "  root Aggregate sum without [job] complete",
-            "    input Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      input Input raw samples source=0",
+            "Aggregate: sum without [job] complete",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
         ])
     );
 }
@@ -497,22 +501,22 @@ fn a_vector_operation_names_its_binding() {
                 top: false,
                 group: Grouping::Without(Arc::new(["job".into()])),
             },
-            "  root Vector bottomk 3 without [job]",
+            "Vector: bottomk 3 without [job]",
         ),
         (
             BoundVectorOp::LimitK {
                 k: 2.0,
                 group: Grouping::By(Arc::new([])),
             },
-            "  root Vector limitk 2 by []",
+            "Vector: limitk 2 by []",
         ),
         (
             BoundVectorOp::LimitRatio { ratio: -0.5 },
-            "  root Vector limit_ratio -0.5",
+            "Vector: limit_ratio -0.5",
         ),
         (
             BoundVectorOp::Sort(SortOrder::ByLabelDesc(vec!["job".into(), "le".into()])),
-            "  root Vector sort_by_label_desc [job, le]",
+            "Vector: sort_by_label_desc [job, le]",
         ),
         (
             BoundVectorOp::Absent {
@@ -525,14 +529,14 @@ fn a_vector_operation_names_its_binding() {
                 )
                 .unwrap(),
             },
-            r#"  root Vector absent {job="x"}"#,
+            r#"Vector: absent {job="x"}"#,
         ),
         (
             BoundVectorOp::CountValues {
                 label: "value".into(),
                 group: Grouping::Without(Arc::new(["job".into()])),
             },
-            r#"  root Vector count_values "value" without [job]"#,
+            r#"Vector: count_values "value" without [job]"#,
         ),
     ];
     for (op, line) in lines {
@@ -544,7 +548,7 @@ fn a_vector_operation_names_its_binding() {
             output: evaluated(Arc::clone(&out)),
         })
         .unwrap();
-        assert_eq!(tree.to_string().lines().nth(1), Some(line));
+        assert_eq!(tree.to_string().lines().next(), Some(line));
     }
 }
 
@@ -567,10 +571,129 @@ fn a_modified_window_names_its_modifier() {
     }
     let tree = NativeTree::try_new(node).unwrap();
     assert_eq!(
-        tree.to_string().lines().nth(1),
+        tree.to_string().lines().next(),
         Some(
-            "  root Window rate [300000ms] smoothed lookback 300000ms offset 0 anchor - on grid \
+            "Window: rate [300000ms] smoothed lookback 300000ms offset 0 anchor - on grid \
              0/60000x4"
         )
     );
+}
+
+/// An aggregate over a window over a scan, which is the shape whose three nodes each record
+/// something different.
+fn aggregate_over_window(out: Arc<EvalGrid>) -> NativeTree {
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_over(
+                raw_input(),
+                RangeFunction::Rate,
+                300_000,
+                0,
+                None,
+                Arc::clone(&out),
+            )),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(out),
+    })
+    .unwrap()
+}
+
+/// A node's figures end its own line, and only its own: the walk asks for them by the path the
+/// runtime registered that node under, so one node never reports another's work.
+#[test]
+fn each_node_shows_only_the_figures_it_recorded() {
+    let tree = aggregate_over_window(grid(0, 60_000, 4));
+    let set = ExecutionPlanMetricsSet::new();
+
+    let aggregate = NodeMetrics::default();
+    aggregate.record_state(120, 0);
+    aggregate.register("root", &set, 0);
+    let window = NodeMetrics::default();
+    window.record_output(4, 7200);
+    window.register("root.input", &set, 0);
+    let input = NodeMetrics::default();
+    input.record_input(1, 1_486_080);
+    input.register("root.input.input", &set, 0);
+
+    let metrics = NodeMetricsSnapshot::read(&set);
+    assert_eq!(
+        tree.display_with(&metrics).to_string(),
+        shown(&[
+            "Aggregate: sum by [job] complete, metrics=[groups: 120]",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4, \
+             metrics=[output_batches: 4, output_values: 7200]",
+            "    Input: raw samples source=0, metrics=[input_batches: 1, input_samples: 1486080]",
+        ])
+    );
+}
+
+/// A tree whose nodes recorded nothing - one that was never run, which is what `EXPLAIN` shows -
+/// is the same lines without figures. No flag says so: an empty snapshot is what an unexecuted
+/// registration leaves.
+#[test]
+fn a_tree_that_recorded_nothing_shows_no_figures() {
+    let tree = aggregate_over_window(grid(0, 60_000, 4));
+
+    assert_eq!(
+        tree.display_with(&NodeMetricsSnapshot::default())
+            .to_string(),
+        tree.to_string()
+    );
+    assert!(!tree.to_string().contains("metrics="));
+}
+
+/// A node's figures are read from the path the runtime registers, not from the name the bound tree
+/// gives the operand: `info` binds its operands as `base` and `info`, and the runtime registers them
+/// as the kernel's `left` and `right`.
+#[test]
+fn every_child_is_read_from_the_path_the_runtime_registers() {
+    let out = grid(0, 60_000, 4);
+    let scalar = NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value: 2.0 }),
+        output: NativeType::Scalar(Arc::clone(&out)),
+    };
+    let parameterized = NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(window_over(
+                raw_input(),
+                RangeFunction::Rate,
+                300_000,
+                0,
+                None,
+                Arc::clone(&out),
+            )),
+            op: ParameterizedOp::Round,
+            parameters: vec![scalar.clone(), scalar],
+        },
+        output: evaluated(Arc::clone(&out)),
+    };
+    let segments = |node: &NativeNode| {
+        child_segments(node)
+            .into_iter()
+            .map(|(_, segment)| segment.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        segments(&parameterized),
+        ["input", "parameter0", "parameter1"]
+    );
+
+    let info = NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(raw_input()),
+            info: Box::new(raw_input()),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: false,
+            },
+        },
+        output: evaluated(out),
+    };
+    assert_eq!(segments(&info), ["left", "right"]);
 }

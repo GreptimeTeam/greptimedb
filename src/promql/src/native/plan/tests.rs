@@ -1589,14 +1589,8 @@ fn a_scalar_root_claiming_samples_is_refused() {
         metric_name: None,
     };
 
-    let error = FusedSeries::try_new(
-        Arc::from("1"),
-        tree,
-        binding,
-        Vec::new(),
-        Arc::new(DFSchema::empty()),
-    )
-    .expect_err("a samples root reads no source while reporting samples");
+    let error = FusedSeries::try_new(tree, binding, Vec::new(), Arc::new(DFSchema::empty()))
+        .expect_err("a samples root reads no source while reporting samples");
 
     assert!(
         error.to_string().contains("does not produce a scalar"),
@@ -1614,14 +1608,8 @@ fn a_samples_root_without_an_input_is_refused() {
         tags: vec![],
         metric_name: None,
     };
-    let error = FusedSeries::try_new(
-        Arc::from("some_metric"),
-        tree,
-        binding,
-        Vec::new(),
-        Arc::new(DFSchema::empty()),
-    )
-    .expect_err("a samples root without an input is refused");
+    let error = FusedSeries::try_new(tree, binding, Vec::new(), Arc::new(DFSchema::empty()))
+        .expect_err("a samples root without an input is refused");
     assert!(error.to_string().contains("source indexes"), "{error}");
 }
 
