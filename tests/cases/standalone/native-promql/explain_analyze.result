@@ -1,0 +1,370 @@
+-- The native fused-series route renders the tree it runs as ordinary plan lines: one line per native
+-- node, two spaces per level, children under the node that consumes them. `EXPLAIN` shows the
+-- structure, `ANALYZE` the same lines with each node's own figures.
+--
+-- The route needs both the server option and the per-request hint; this case runs under
+-- `--enable-native-promql`, which sets both.
+CREATE TABLE native_ea(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+CREATE TABLE native_ebb(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+INSERT INTO native_ea VALUES (1.0, 1000, "a"), (2.0, 2000, "a"), (4.0, 1000, "b"), (8.0, 2000, "b");
+
+Affected Rows: 4
+
+INSERT INTO native_ebb VALUES (1.0, 1000, "a"), (3.0, 2000, "a"), (5.0, 1000, "b"), (7.0, 2000, "b");
+
+Affected Rows: 4
+
+-- An aggregate chain: the aggregate folds the window, which reads the scan. The aggregate is split
+-- across the two nodes of a standalone instance, so `EXPLAIN` shows the final half here and
+-- `ANALYZE` shows the partial half as the remote stage below it.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+TQL EXPLAIN (0, 10, '5s') sum by(k)(rate(native_ea[10s]));
+
++---------------+-----------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                        |
++---------------+-----------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | FusedSeries: sum by (k) (rate(native_ea[10s]))                                                                              |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                                                           |
+|               | FusedSeries: sum by (k) (rate(native_ea[10s])) (output: series_frame)                                                       |
+|               |   TableScan: native_ea, partial_filters=[j > TimestampMillisecond(-10000, None) AND j <= TimestampMillisecond(10000, None)] |
+|               | ]]                                                                                                                          |
+| physical_plan | FusedSeriesExec: sum by (k) (rate(native_ea[10s]))                                                                          |
+|               |   Aggregate: sum by [k] final                                                                                               |
+|               |     Input: aggregate state                                                                                                  |
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=1                                                                      |
+|               |     MergeScanExec: REDACTED
+|               |                                                                                                                             |
++---------------+-----------------------------------------------------------------------------------------------------------------------------+
+
+-- Verbose explains the same plan and still reports no figures: nothing ran.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+TQL EXPLAIN VERBOSE (0, 10, '5s') sum by(k)(rate(native_ea[10s]));
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| initial_logical_plan_| FusedSeries: sum by (k) (rate(native_ea[10s]))_|
+|_|_FusedSeries: sum by (k) (rate(native_ea[10s])) (output: series_frame)_|
+|_|_TableScan: native_ea, partial_filters=[j > TimestampMillisecond(-10000, None) AND j <= TimestampMillisecond(10000, None)]_|
+| logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
+| logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
+| logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
+| logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
+| logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
+| logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after DistPlannerAnalyzer_| FusedSeries: sum by (k) (rate(native_ea[10s]))_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| FusedSeries: sum by (k) (rate(native_ea[10s])) (output: series_frame)_|
+|_|_TableScan: native_ea, partial_filters=[j > TimestampMillisecond(-10000, None) AND j <= TimestampMillisecond(10000, None)]_|
+|_| ]]_|
+| logical_plan after JsonSchemaConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
+| logical_plan after expr_depth_| SAME TEXT AS ABOVE_|
+| analyzed_logical_plan_| SAME TEXT AS ABOVE_|
+| logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan_| FusedSeries: sum by (k) (rate(native_ea[10s]))_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| FusedSeries: sum by (k) (rate(native_ea[10s])) (output: series_frame)_|
+|_|_TableScan: native_ea, partial_filters=[j > TimestampMillisecond(-10000, None) AND j <= TimestampMillisecond(10000, None)]_|
+|_| ]]_|
+| initial_physical_plan_| FusedSeriesExec: sum by (k) (rate(native_ea[10s]))_|
+|_|_Aggregate: sum by [k] final_|
+|_|_Input: aggregate state_|
+|_|_SeriesRepartitionExec: REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_stats_| FusedSeriesExec: sum by (k) (rate(native_ea[10s]))_|
+|_|_Aggregate: sum by [k] final_|
+|_|_Input: aggregate state, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_SeriesRepartitionExec: REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_schema_| FusedSeriesExec: sum by (k) (rate(native_ea[10s]))_|
+|_|_Aggregate: sum by [k] final_|
+|_|_Input: aggregate state, schema=[j:Timestamp(ms), i:Float64;N, k:Utf8;N]_|
+|_|_SeriesRepartitionExec: REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
+|_|_FusedSeriesExec: sum by (k) (rate(native_ea[10s]))_|
+|_|_Aggregate: sum by [k] final_|
+|_|_Input: aggregate state_|
+|_|_SeriesRepartitionExec: REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
+| physical_plan after join_selection_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after parallelize_scan_| SAME TEXT AS ABOVE_|
+| physical_plan after PromqlTsidNarrowJoin_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after WindowTopN_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureRequirements_| SAME TEXT AS ABOVE_|
+| physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
+| physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after OutputRequirements_| FusedSeriesExec: sum by (k) (rate(native_ea[10s]))_|
+|_|_Aggregate: sum by [k] final_|
+|_|_Input: aggregate state_|
+|_|_SeriesRepartitionExec: REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
+| physical_plan after HashJoinBuffering_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after TopKRepartition_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after PushdownSort_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureCooperative_| SAME TEXT AS ABOVE_|
+| physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
+| physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
+| physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
+| physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
+| physical_plan after SeriesFrameOutput_| SAME TEXT AS ABOVE_|
+| physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
+| physical_plan_| FusedSeriesExec: sum by (k) (rate(native_ea[10s]))_|
+|_|_Aggregate: sum by [k] final_|
+|_|_Input: aggregate state_|
+|_|_SeriesRepartitionExec: REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_stats_| FusedSeriesExec: sum by (k) (rate(native_ea[10s]))_|
+|_|_Aggregate: sum by [k] final_|
+|_|_Input: aggregate state, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_SeriesRepartitionExec: REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_schema_| FusedSeriesExec: sum by (k) (rate(native_ea[10s]))_|
+|_|_Aggregate: sum by [k] final_|
+|_|_Input: aggregate state, schema=[j:Timestamp(ms), i:Float64;N, k:Utf8;N]_|
+|_|_SeriesRepartitionExec: REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- The same tree under ANALYZE: every figure sits on the node that recorded it.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (SeriesScanExec:.*) SeriesScanExec REDACTED
+-- SQLNESS REPLACE (self_compute_time_ns:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (current_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (peak_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE ((?m)\x20+\|$) |
+TQL ANALYZE (0, 10, '5s') sum by(k)(rate(native_ea[10s]));
+
++-+-+-+
+| stage | node | plan|
++-+-+-+
+| 0     | 0    |  FusedSeriesExec: sum by (k) (rate(native_ea[10s])) metrics=[]|
+|       |      |    Aggregate: sum by [k] final, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |      Input: aggregate state, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |   SeriesRepartitionExec metrics=[]|
+|       |      |     MergeScanExec: REDACTED
+|       |      ||
+| 1     | 0    |  SeriesRepartitionExec metrics=[]|
+|       |      |   FusedSeriesExec: sum by (k) (rate(native_ea[10s])) (output: series_frame) metrics=[]|
+|       |      |     Aggregate: sum by [k] partial, metrics=[input_batches: 2, output_batches: 4, input_samples: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |       Window: rate [10000ms] offset 0 anchor - on grid 0/5000x3, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |         Input: raw samples source=0, contiguous, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |     CooperativeExec metrics=[]|
+|       |      |       SeriesScanExec REDACTED
+|       |      ||
+|       |      | Total rows: 4|
++-+-+-+
+
+-- A three-level chain without an aggregate: the map reads the window, which reads the scan.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (SeriesScanExec:.*) SeriesScanExec REDACTED
+-- SQLNESS REPLACE (self_compute_time_ns:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (current_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (peak_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE ((?m)\x20+\|$) |
+TQL ANALYZE (0, 10, '5s') abs(rate(native_ea[10s]));
+
++-+-+-+
+| stage | node | plan|
++-+-+-+
+| 0     | 0    |  CooperativeExec metrics=[]|
+|       |      |   MergeScanExec: REDACTED
+|       |      ||
+| 1     | 0    |  FusedSeriesExec: abs(rate(native_ea[10s])) metrics=[]|
+|       |      |    Map: abs, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |      Window: rate [10000ms] offset 0 anchor - on grid 0/5000x3, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |        Input: raw samples source=0, contiguous, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |   CooperativeExec metrics=[]|
+|       |      |     SeriesScanExec REDACTED
+|       |      ||
+|       |      | Total rows: 4|
++-+-+-+
+
+-- A binary operation is one native node with two children, each with its own figures.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (SeriesScanExec:.*) SeriesScanExec REDACTED
+-- SQLNESS REPLACE (self_compute_time_ns:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (current_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (peak_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE ((?m)\x20+\|$) |
+TQL EXPLAIN (0, 10, '5s') native_ea + native_ebb;
+
++-+-+
+| plan_type     | plan|
++-+-+
+| logical_plan  | FusedSeries: native_ea + native_ebb|
+|               |   MergeScan [is_placeholder=false, remote_input=[|
+|               | RawSeriesSource: metric=native_ea, tags=[k], fields=[i]|
+|               |   TableScan: native_ea, partial_filters=[j > TimestampMillisecond(-300000, None) AND j <= TimestampMillisecond(10000, None)]|
+|               | ]]|
+|               |   MergeScan [is_placeholder=false, remote_input=[|
+|               | RawSeriesSource: metric=native_ebb, tags=[k], fields=[i]|
+|               |   TableScan: native_ebb, partial_filters=[j > TimestampMillisecond(-300000, None) AND j <= TimestampMillisecond(10000, None)]|
+|               | ]]|
+| physical_plan | FusedSeriesExec: native_ea + native_ebb|
+|               |   Binary: + ignoring [] one-to-one|
+|               |     Instant: lookback 300000ms offset 0 on grid 0/5000x3|
+|               |       Input: raw samples source=0, contiguous|
+|               |     Instant: lookback 300000ms offset 0 on grid 0/5000x3|
+|               |       Input: raw samples source=1, contiguous|
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=1|
+|               |     MergeScanExec: REDACTED
+|               |   SeriesRepartitionExec: outputs=4, input_partitions=1|
+|               |     MergeScanExec: REDACTED
+|               ||
++-+-+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (SeriesScanExec:.*) SeriesScanExec REDACTED
+-- SQLNESS REPLACE (self_compute_time_ns:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (current_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (peak_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE ((?m)\x20+\|$) |
+TQL ANALYZE (0, 10, '5s') native_ea + native_ebb;
+
++-+-+-+
+| stage | node | plan|
++-+-+-+
+| 0     | 0    |  FusedSeriesExec: native_ea + native_ebb metrics=[]|
+|       |      |    Binary: + ignoring [] one-to-one, metrics=[input_batches: 4, output_batches: 2, input_samples: 8, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |      Instant: lookback 300000ms offset 0 on grid 0/5000x3, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |        Input: raw samples source=0, contiguous, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |      Instant: lookback 300000ms offset 0 on grid 0/5000x3, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |        Input: raw samples source=1, contiguous, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |   SeriesRepartitionExec metrics=[]|
+|       |      |     MergeScanExec: REDACTED
+|       |      |   SeriesRepartitionExec metrics=[]|
+|       |      |     MergeScanExec: REDACTED
+|       |      ||
+| 1     | 0    |  SeriesRepartitionExec metrics=[]|
+|       |      |   RawSeriesSourceExec metrics=[]|
+|       |      |     CooperativeExec metrics=[]|
+|       |      |       SeriesScanExec REDACTED
+|       |      ||
+| 1     | 0    |  SeriesRepartitionExec metrics=[]|
+|       |      |   RawSeriesSourceExec metrics=[]|
+|       |      |     CooperativeExec metrics=[]|
+|       |      |       SeriesScanExec REDACTED
+|       |      ||
+|       |      | Total rows: 4|
++-+-+-+
+
+-- A set operation reads both sides too.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (SeriesScanExec:.*) SeriesScanExec REDACTED
+-- SQLNESS REPLACE (self_compute_time_ns:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (current_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (peak_reserved_bytes:\s)[^,\]\n]+ ${1}REDACTED
+-- SQLNESS REPLACE ((?m)\x20+\|$) |
+TQL ANALYZE (0, 10, '5s') native_ea and native_ebb;
+
++-+-+-+
+| stage | node | plan|
++-+-+-+
+| 0     | 0    |  FusedSeriesExec: native_ea and native_ebb metrics=[]|
+|       |      |    Set: and ignoring [], metrics=[input_batches: 4, output_batches: 2, input_samples: 8, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |      Input: evaluated samples source=0, contiguous, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |      Input: evaluated samples source=1, contiguous, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |   CooperativeExec metrics=[]|
+|       |      |     MergeScanExec: REDACTED
+|       |      |   CooperativeExec metrics=[]|
+|       |      |     MergeScanExec: REDACTED
+|       |      ||
+| 1     | 0    |  SeriesRepartitionExec metrics=[]|
+|       |      |   FusedSeriesExec: segment (output: series_frame) metrics=[]|
+|       |      |     Instant: lookback 300000ms offset 0 on grid 0/5000x3, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |       Input: raw samples source=0, contiguous, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |     CooperativeExec metrics=[]|
+|       |      |       SeriesScanExec REDACTED
+|       |      ||
+| 1     | 0    |  SeriesRepartitionExec metrics=[]|
+|       |      |   FusedSeriesExec: segment (output: series_frame) metrics=[]|
+|       |      |     Instant: lookback 300000ms offset 0 on grid 0/5000x3, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, evaluated_grid_points: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |       Input: raw samples source=0, contiguous, metrics=[input_batches: 2, output_batches: 2, input_samples: 4, output_values: 4, completed_series: 2, self_compute_time_ns: REDACTED, peak_reserved_bytes: REDACTED]|
+|       |      |     CooperativeExec metrics=[]|
+|       |      |       SeriesScanExec REDACTED
+|       |      ||
+|       |      | Total rows: 4|
++-+-+-+
+
+DROP TABLE native_ea;
+
+Affected Rows: 0
+
+DROP TABLE native_ebb;
+
+Affected Rows: 0
+
