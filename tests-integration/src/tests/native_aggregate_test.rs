@@ -943,28 +943,24 @@ async fn check_hybrid_binary_cases(instance: &Arc<Instance>, observer: &NativePl
             scan_tables.contains(&COUNTER_RHS_TABLE),
             "{promql}: independent RHS scan missing: {scan_tables:?}"
         );
-        // Only an operand producer keeps the scan width: a native binary matches by label set, so
-        // its output partitions are keyed by the match group and an input partition may contribute
-        // nothing to a given one. The producer's own partitions still each read their share.
-        for fused in capture
+        // The binary routes by label set, so its output partitions are keyed by the match group and
+        // an input partition may contribute nothing to a given one. What must still hold is that
+        // each operand registered its values on every partition it reads - the same check the
+        // unpartitioned pair makes with the operand metrics.
+        let binary = capture
             .fused
             .iter()
-            .filter(|node| node.children().len() == 1)
-        {
-            let per_fused = NativeCapture {
-                fused: vec![Arc::clone(fused)],
-                finalize: Vec::new(),
-            };
-            let counts = fused_root_metric_per_partition(
-                &per_fused,
-                ROOT_OUTPUT_VALUES_METRIC,
-                &format!("hybrid `{promql}`"),
-            );
-            assert!(
-                counts.iter().all(|count| count.is_some_and(|n| n > 0)),
-                "{promql}: each scan partition must emit values, got {counts:?}"
-            );
-        }
+            .find(|node| node.children().len() > 1)
+            .unwrap_or_else(|| panic!("{promql}: no native binary among {:?}", capture.fused));
+        let left =
+            fused_node_count_per_partition(binary, "native.root.left.output_values", &promql);
+        let right =
+            fused_node_count_per_partition(binary, "native.root.right.output_values", &promql);
+        assert!(
+            left.iter().chain(&right).all(Option::is_some),
+            "{promql}: operand metrics must be registered for every partition: \
+             left={left:?}, right={right:?}"
+        );
         // The pair is matched by the native binary above its own sources; the frontend join and
         // its uniqueness operators only existed while the binary could not be planned natively.
         assert!(
