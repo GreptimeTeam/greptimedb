@@ -1329,7 +1329,12 @@ impl PromPlanner {
                 FusedOutputFormat::PlainRows,
                 contains_canonical_merge(root),
                 root_kind,
-                self_contained,
+                // A bare-scan cut is wrong only when the scan reads a table split into regions: a
+                // per-region prefix then evaluates a window over one region's fragments, so `rate`
+                // never sees the samples the other region holds. The evaluated segment keeps each
+                // source and runs the prefix above reconciliation. An unpartitioned table's scans
+                // are whole in one region, so its cuts keep the bare-scan form.
+                self_contained || (per_source_inputs && any_partitioned),
             ))
             .await?;
             if let Some(plan) = plan {
