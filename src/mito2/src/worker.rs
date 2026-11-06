@@ -735,6 +735,7 @@ impl<S: LogStore> WorkerStarter<S> {
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
+            pending_alters: Default::default(),
             schema_metadata_manager: self.schema_metadata_manager,
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
@@ -1052,6 +1053,8 @@ struct RegionWorkerLoop<S> {
     request_wait_time: Histogram,
     /// Queues for region edit requests.
     region_edit_queues: RegionEditQueues,
+    /// ALTER requests waiting for the current edit or ALTER to finish.
+    pending_alters: handle_alter::PendingAlters,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
     /// Datanode level file references manager.
