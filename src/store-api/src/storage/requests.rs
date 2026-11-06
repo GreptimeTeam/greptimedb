@@ -47,6 +47,9 @@ pub enum TimeSeriesDistribution {
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct ScanRequest {
+    /// Requests bounded asynchronous exact-count preparation for a scalar COUNT.
+    /// This is an optimization hint; unsupported scans retain normal execution.
+    pub metadata_count_hint: bool,
     /// Optional projection information for the scan. `None` reads all root
     /// columns.
     pub projection: Option<Vec<usize>>,
