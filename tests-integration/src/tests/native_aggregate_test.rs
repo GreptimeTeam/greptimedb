@@ -1361,14 +1361,6 @@ fn final_input_samples_per_partition(capture: &NativeCapture, context: &str) -> 
 /// a wildcard. An exchange above the scan would re-partition the frames, and the producer's
 /// per-partition fold would then no longer be one series at a time - so the plan would be wrong even
 /// if a result appeared.
-/// Asserts the fused producer reads the raw series scan itself, with no exchange between them.
-///
-/// One node may sit in between: the cooperative-scheduling decorator clones its input's properties,
-/// changes only the scheduling type, and forwards `execute` unchanged, so it neither re-partitions
-/// nor re-orders the frames. It is accepted only as a single typed wrapper above the scan, never as
-/// a wildcard. An exchange above the scan would re-partition the frames, and the producer's
-/// per-partition fold would then no longer be one series at a time - so the plan would be wrong even
-/// if a result appeared.
 fn assert_fused_reads_scan_directly(fused: &Arc<dyn ExecutionPlan>, context: &str) {
     let plan = displayable(fused.as_ref()).indent(false).to_string();
     assert_eq!(

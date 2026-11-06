@@ -6735,6 +6735,13 @@ async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independ
             "`{query}` reads one region input per selector occurrence: {:?}",
             display_plan_tree(&root)
         );
+        // The values alone cannot tell native matching from a legacy frontend join that reads the
+        // same regions, so require the native binary in the frontend tree.
+        assert!(
+            find_plan_node(&root, "FusedSeriesExec").is_some(),
+            "`{query}` must match natively above its region inputs: {:?}",
+            display_plan_tree(&root)
+        );
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");
