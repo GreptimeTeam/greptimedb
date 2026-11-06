@@ -79,6 +79,32 @@ pub trait LogicalPlanner: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 }
 
+/// A remote native plan may place fused evaluation only above independent raw sources.
+/// In particular, a bare scan under FusedSeries would require shipping the process-local
+/// fused plan to a region, which this gate must not admit.
+fn remote_native_raw_plan_supported(plan: &LogicalPlan) -> bool {
+    fn walk(plan: &LogicalPlan, found_raw: &mut bool) -> bool {
+        if matches!(plan, LogicalPlan::TableScan(_)) {
+            return false;
+        }
+        if let LogicalPlan::Extension(extension) = plan
+            && extension
+                .node
+                .as_any()
+                .is::<promql::extension_plan::RawSeriesSource>()
+        {
+            *found_raw = true;
+            return matches!(
+                extension.node.inputs().as_slice(),
+                [LogicalPlan::TableScan(_)]
+            );
+        }
+        plan.inputs().iter().all(|child| walk(child, found_raw))
+    }
+    let mut found_raw = false;
+    walk(plan, &mut found_raw) && found_raw
+}
+
 pub struct DfLogicalPlanner {
     engine_state: Arc<QueryEngineState>,
     session_state: SessionState,
@@ -351,36 +377,53 @@ impl DfLogicalPlanner {
             scheduled_state.clone(),
             &query_ctx,
         )?);
-        let table_provider = DfTableSourceProvider::new(
-            self.engine_state.catalog_manager().clone(),
-            self.engine_state.disallow_cross_catalog_query(),
-            query_ctx.clone(),
-            plan_decoder,
-            scheduled_state
-                .config_options()
-                .sql_parser
-                .enable_ident_normalization,
-        );
+        let table_provider = || {
+            DfTableSourceProvider::new(
+                self.engine_state.catalog_manager().clone(),
+                self.engine_state.disallow_cross_catalog_query(),
+                query_ctx.clone(),
+                plan_decoder.clone(),
+                scheduled_state
+                    .config_options()
+                    .sql_parser
+                    .enable_ident_normalization,
+            )
+        };
+        let native_requested = native_route_allowed
+            && !allow_query_fallback
+            && self.engine_state.experimental_native_promql()
+            && crate::promql::planner::native::native_promql_requested(&query_ctx);
         let plan = PromPlanner::stmt_to_plan_with_annotations(
-            table_provider,
+            table_provider(),
             stmt,
             &self.engine_state,
-            promql_annotations,
-            // A query allowed to fall back keeps the existing plan. The native node's physical
-            // planner needs the bare region scan as its input; the fallback rewriter instead wraps
-            // every table scan in `MergeScan`, so the node above it would have no physical plan and
-            // the query would fail after the fallback was already taken. Declining here keeps the
-            // whole query on the legacy path.
-            native_route_allowed
-                && !allow_query_fallback
-                && self.engine_state.experimental_native_promql()
-                && self.engine_state.in_process_region_transport()
-                && crate::promql::planner::native::native_promql_requested(&query_ctx),
+            promql_annotations.clone(),
+            // A fallback rewriter can wrap a native region scan in an unusable MergeScan.
+            native_requested,
         )
         .await
         .map_err(BoxedError::new)
         .context(QueryPlanSnafu)?;
 
+        // Only per-selector raw sources have a supported remote transport. Decide while the
+        // original statement is still available: physical planning cannot fall back safely.
+        let plan = if native_requested
+            && !self.engine_state.in_process_region_transport()
+            && !remote_native_raw_plan_supported(&plan)
+        {
+            PromPlanner::stmt_to_plan_with_annotations(
+                table_provider(),
+                stmt,
+                &self.engine_state,
+                promql_annotations,
+                false,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(QueryPlanSnafu)?
+        } else {
+            plan
+        };
         let context = QueryEngineContext::new(scheduled_state, query_ctx);
         Ok(self
             .engine_state
@@ -958,6 +1001,18 @@ mod tests {
                 table: EmptyTable::from_table_info(&logical_info),
             })
             .unwrap();
+        let mut other_info = logical_info.clone();
+        other_info.ident.table_id = 1025;
+        other_info.name = "other_metric".to_string();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: other_info.name.clone(),
+                table_id: other_info.ident.table_id,
+                table: EmptyTable::from_table_info(&other_info),
+            })
+            .unwrap();
 
         QueryEngineFactory::try_new_with_plugins_and_region_transport(
             catalog_manager,
@@ -1082,6 +1137,53 @@ mod tests {
                 native,
                 "engine={engine}, session={session}, hint={hint:?}: {plan}"
             );
+        }
+    }
+
+    /// Remote native planning accepts independent raw sources only. Unsupported shapes are
+    /// replanned through the legacy route, while the in-process route remains unchanged.
+    #[tokio::test]
+    async fn test_remote_native_promql_admission_replans_unsupported_shapes() {
+        for (in_process, query, native) in [
+            (false, "some_metric + other_metric", true),
+            (false, "rate(some_metric[5m])", false),
+            (true, "rate(some_metric[5m])", true),
+        ] {
+            let engine = create_promql_test_engine_with(
+                crate::options::QueryOptions {
+                    experimental_native_promql: true,
+                    ..Default::default()
+                },
+                in_process,
+            );
+            let query_ctx = Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), "true".to_string())
+                    .build(),
+            );
+            let stmt = QueryLanguageParser::parse_promql(
+                &PromQuery {
+                    query: query.to_string(),
+                    start: "0".to_string(),
+                    end: "10".to_string(),
+                    step: "5s".to_string(),
+                    lookback: "300s".to_string(),
+                    alias: None,
+                },
+                &query_ctx,
+            )
+            .unwrap();
+            let plan = engine.planner().plan(&stmt, query_ctx).await.unwrap();
+            let display = plan.display_indent().to_string();
+            assert_eq!(
+                display.contains("FusedSeries"),
+                native,
+                "in_process={in_process}, query={query}: {display}"
+            );
+            if native && !in_process {
+                assert!(remote_native_raw_plan_supported(&plan), "{display}");
+                assert!(display.contains("RawSeriesSource"), "{display}");
+            }
         }
     }
 

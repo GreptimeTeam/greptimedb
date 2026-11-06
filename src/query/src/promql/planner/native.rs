@@ -49,6 +49,7 @@ use datafusion::logical_expr::UserDefinedLogicalNode;
 use datafusion::logical_expr::{
     EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
 };
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::data_type::DataType as _;
@@ -56,8 +57,8 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
-    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality, RawSeriesSource,
-    input_locality, matching_operands_drop_key, tree_source_fields,
+    FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
+    RawSeriesSource, input_locality, matching_operands_drop_key, tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -81,6 +82,7 @@ use crate::promql::native_compile::{
     InfoInput, compile_selectors, compile_statement, info_input, statement_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
+use crate::query_engine::QueryEngineState;
 
 /// The query-context key that turns the native fused-series route on for one query.
 ///
@@ -106,6 +108,58 @@ pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
     query_ctx
         .extension(NATIVE_PROMQL_EXTENSION_KEY)
         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// The analyzer rule an engine that plans distributed statements installs on its session; see
+/// [`DistPlannerAnalyzer`](crate::dist_plan::analyzer::DistPlannerAnalyzer).
+const DIST_PLANNER_RULE: &str = "DistPlannerAnalyzer";
+
+/// Whether a plan built here is split into a frontend plan over regions reached over the wire.
+///
+/// This is the one condition under which every scan this route prepares has to be a
+/// [`RawSeriesSource`]. The remote transport carries a region's half as Substrait bytes, which can
+/// only encode that source, so over the wire the single fused node over raw sources is the only
+/// shape admitted; in process a region accepts a `LogicalPlan` and the split and segmented shapes
+/// keep running region-locally, so those stay and this returns `false`.
+///
+/// An engine that plans no distributed statement plans no region at all, and its plans are the
+/// standalone ones: it installs the distributed planner as an analyzer rule exactly when it was
+/// built to split statements, so the rule says whether this engine has a region to satisfy.
+fn plans_over_remote_regions(query_engine_state: &QueryEngineState) -> bool {
+    !query_engine_state.in_process_region_transport()
+        && query_engine_state
+            .session_state()
+            .analyzer()
+            .rules
+            .iter()
+            .any(|rule| rule.name() == DIST_PLANNER_RULE)
+}
+
+/// Whether this executable plan is the native raw PromQL topology, the one plan shape whose
+/// region reads one query-wide body budget cannot deadlock.
+///
+/// That topology is a chain of [`FusedSeriesExec`] nodes over region reads: the split aggregate's
+/// final and partial halves are one unary chain, and each fused node polls its input while that
+/// input is being drained, so a region body holding a permit keeps making progress.
+/// Admission stops there: a plan with any other multi-input node (a join, or the union a
+/// discovered selector builds) keeps its per-scan bounds only and is not counted against the
+/// query-wide target until its own topology is checked against the budget.
+pub(crate) fn native_raw_plan_bounds_region_reads(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    fn walk(node: &dyn ExecutionPlan, fused: &mut usize) -> bool {
+        let is_fused = node.is::<FusedSeriesExec>();
+        if is_fused {
+            *fused += 1;
+        }
+        if node.children().len() > 1 && !is_fused {
+            return false;
+        }
+        node.children()
+            .iter()
+            .all(|child| walk(child.as_ref(), fused))
+    }
+
+    let mut fused = 0;
+    walk(plan.as_ref(), &mut fused) && fused > 0
 }
 
 /// The ordering this route compiles its trees against.
@@ -176,9 +230,13 @@ impl PromPlanner {
     pub(super) async fn try_plan_native_operand(
         &mut self,
         expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
         let saved = self.ctx.clone();
-        let (plan, operand_ctx) = match self.try_plan_native_fused_with_context(expr).await? {
+        let (plan, operand_ctx) = match self
+            .try_plan_native_fused_with_context(expr, query_engine_state)
+            .await?
+        {
             Some((plan, Some(operand_ctx))) => (plan, operand_ctx),
             _ => {
                 self.ctx = saved;
@@ -213,6 +271,7 @@ impl PromPlanner {
 
     /// Builds the scan of the one logical table the current context is bound to. The caller has
     /// already preprocessed this selector's matchers and set the context to its table.
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_one_scan(
         &mut self,
         matchers: Matchers,
@@ -221,6 +280,7 @@ impl PromPlanner {
         logical_scan_id: &mut Option<u32>,
         logical_ids_differ: &mut bool,
         statement_kind: &mut Option<FieldKind>,
+        self_contained: bool,
     ) -> Result<Option<PreparedInput>> {
         let (Some(metric), Some(time)) = (
             self.ctx.table_name.clone(),
@@ -343,18 +403,17 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        // Preserve the existing single-selector guard that its partition keys are tags.
+        // Preserve the existing single-selector guard that its partition keys are tags. A partition
+        // column that is not a tag is the time index, so one series spans several regions; a bare
+        // scan cannot reconcile the fragments, which is why this route kept the existing plan for
+        // it. The raw source can, so the guard only holds the shapes that read a bare scan - the
+        // ones a region can run in process.
         if selector_count == 1
+            && !self_contained
             && !table_meta
                 .partition_column_names()
                 .all(|column| tags.iter().any(|tag| tag == column))
         {
-            return Ok(None);
-        }
-        // A multi-scan plan has no placement over a table split into several regions: the
-        // dist analyzer refuses a multi-child node there, so such a query keeps the
-        // existing plan instead of failing.
-        if selector_count > 1 && table_meta.partition_column_names().next().is_some() {
             return Ok(None);
         }
         // This route declares one output column per field, so every field it binds carries
@@ -410,9 +469,10 @@ impl PromPlanner {
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
         Ok(self
-            .try_plan_native_fused_with_context(prom_expr)
+            .try_plan_native_fused_with_context(prom_expr, query_engine_state)
             .await?
             .map(|(plan, _)| plan))
     }
@@ -436,10 +496,16 @@ impl PromPlanner {
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, Option<super::PromPlannerContext>)>> {
         if !self.native_fused {
             return Ok(None);
         }
+        // Over the wire this route plans the whole statement as one fused node over raw sources:
+        // each region answers the series it holds, and the node reconciles them before evaluating.
+        // In process a region can also run a split or a segmented tree over its own scan, so those
+        // shapes stay there. This is a planning choice, not a limit of what the node can encode.
+        let self_contained = plans_over_remote_regions(query_engine_state);
         // Only the statement root is offered: the tree is compiled against the statement's grid,
         // and a subquery's expression is evaluated on its own, smaller one. A range-vector root is
         // the instant query's raw sample result, which the existing path reports as a matrix rather
@@ -668,6 +734,7 @@ impl PromPlanner {
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
                                 &mut statement_kind,
+                                self_contained,
                             )
                             .await?
                         else {
@@ -765,6 +832,7 @@ impl PromPlanner {
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
                         &mut statement_kind,
+                        self_contained,
                     )
                     .await?
                 else {
@@ -801,6 +869,17 @@ impl PromPlanner {
                 .map(|(scan, ..)| scan)
                 .filter(|scan| !is_empty_discovered_input(scan)),
         ) || logical_ids_differ;
+        // A multi-selector tree over a partitioned table has no in-process placement whose matching
+        // and uniqueness semantics equal the frontend route. One node over several scans of one
+        // partitioned table reads neither the other scans nor the fragments another region holds,
+        // and one node over several tables' sources matches every series those sources delivered,
+        // where the frontend route copies the operands' matchers into their scans first and checks
+        // uniqueness above the join. Keep the existing plan in process; the hybrid route lifts such
+        // a tree one operand at a time. Over the wire every occurrence is already its own raw source
+        // reconciled above the regions, so the route keeps those trees.
+        if selectors.len() > 1 && !self_contained && prepared.iter().any(|input| input.5) {
+            return Ok(None);
+        }
         // The first input names the output's time index and, on one table, binds every scan.
         let Some((_, _, metric, time, tags, _)) = prepared.first() else {
             return Ok(None);
@@ -1004,7 +1083,11 @@ impl PromPlanner {
                         LogicalPlan::Extension(extension)
                             if extension.node.as_any().is::<RawSeriesSource>()
                     );
-                if !cross_table || already_sourced {
+                // A scan stays bare only where a region runs the node over it in process. Over the
+                // wire every input is a raw source, whichever table it reads: the source is what the
+                // transport carries, and it is also what reconciles the fragments of a series that
+                // several regions hold.
+                if (!cross_table && !self_contained) || already_sourced {
                     return Ok(scan);
                 }
                 let Some(metric) = metric else {
@@ -1111,7 +1194,13 @@ impl PromPlanner {
         // The aggregate split keeps its prefix per-series, which is why it declines an operation
         // whose answer depends on the order its input arrives in. A multi-input node reads its
         // inputs' partitions in the order they became ready, so that refusal is repeated here.
-        if multi_input && depends_on_input_order(root) {
+        if (multi_input || (self_contained && children.len() > 1)) && depends_on_input_order(root) {
+            return Ok(None);
+        }
+        // Two sources that report groups by metric name need a column for that name: without one,
+        // groups that differ only by metric would be reported as the same label set. A discovered
+        // selector carries that column itself; several explicit selectors do not.
+        if (multi_input || (self_contained && children.len() > 1)) && groups_by_metric_name(root) {
             return Ok(None);
         }
         // The native output schema can name only compiled value fields, the time index and the tag
@@ -1126,8 +1215,9 @@ impl PromPlanner {
         // Catch construction-time refusals before choosing native execution: errors raised during
         // physical planning cannot fall back. This includes unsupported aggregates and `topk`,
         // `limitk` or CountValues groupings; it does not cover data-dependent errors raised while
-        // executing the tree.
-        if multi_input
+        // executing the tree. A tree planned over the wire commits to the fused node without the
+        // split or a segment above it, so it validates itself the same way before that choice.
+        if (multi_input || self_contained)
             && NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
                 .is_err()
         {
@@ -1169,7 +1259,9 @@ impl PromPlanner {
             // would. The general segmentation below is the fallback for the trees it declines,
             // which are the ones its per-series prefix cannot express. The split is decided before
             // anything consumes a child, so a tree it declines keeps the plan it would have built
-            // without this route.
+            // without this route. Its producer reads whatever input the statement prepared: over
+            // the wire that is the raw series source, and the partial/final halves stay on the
+            // frontend above the regions, so per-series work keeps the scan width.
             let split = if !multi_input && selectors.len() == 1 {
                 FusedSeries::split_aggregate(&tree, &time).context(DataFusionPlanningSnafu)?
             } else {
@@ -1216,6 +1308,9 @@ impl PromPlanner {
                 return Ok(None);
             }
         }
+        // A segment over the wire keeps the raw source as its input rather than a bare scan: the
+        // segment's prefixes run on the frontend above the regions, so the raw series source is
+        // what each of them reads.
         if required_placement || matches!(locality, InputLocality::SinglePartition) {
             let segment_metric = if cross_table { None } else { metric.clone() };
             let plan = Box::pin(segment_tree(
@@ -1232,6 +1327,7 @@ impl PromPlanner {
                 FusedOutputFormat::PlainRows,
                 contains_canonical_merge(root),
                 root_kind,
+                self_contained,
             ))
             .await?;
             if let Some(plan) = plan {
@@ -1277,8 +1373,9 @@ impl PromPlanner {
         // already carry their own labels, so it binds neither tags nor one metric name of its own -
         // each child names the metric it reads. A multi-input plan whose children stay direct
         // scans reads one table through the one metric and tag set they share, and keeps this
-        // binding, which is the same identity those scans carry.
-        let (tags, metric) = if cross_table {
+        // binding, which is the same identity those scans carry. The same holds over the wire,
+        // where every input is a raw source.
+        let (tags, metric) = if cross_table || self_contained {
             (Vec::new(), None)
         } else {
             (tags, metric)
@@ -2113,6 +2210,7 @@ async fn segment_tree(
     format: FusedOutputFormat,
     canonical_segmentation: bool,
     root_kind: FieldKind,
+    remote_raw_boundary: bool,
 ) -> Result<Option<LogicalPlan>> {
     if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
         return Ok(None);
@@ -2183,6 +2281,7 @@ async fn segment_tree(
                     FusedOutputFormat::SeriesFrame,
                     canonical_segmentation,
                     root_kind,
+                    remote_raw_boundary,
                 ))
                 .await?;
                 match plan {
@@ -2194,7 +2293,7 @@ async fn segment_tree(
                     }
                     None => None,
                 }
-            } else if first_iteration && !canonical {
+            } else if first_iteration && !canonical && !remote_raw_boundary {
                 build_inner_segment(cut, bare_scans, per_source, grid)
             } else {
                 None
@@ -3197,6 +3296,7 @@ mod tests {
 
     use std::time::{Duration, UNIX_EPOCH};
 
+    use datafusion::physical_plan::ExecutionPlan;
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
     use promql::native::plan::{NativeExpr, NativeNode, NativeTree};
@@ -3205,8 +3305,32 @@ mod tests {
     use super::{
         ArrowDataType, ArrowTimeUnit, FieldKind, METRIC_NAME, NATIVE_PROMQL_EXTENSION_KEY,
         NativeType, collect_selectors, cut_segments, fused_output_schema, hybrid_binary_admitted,
-        independent_scan_pair, native_output_tags, native_promql_requested, scan_time_filter,
+        independent_scan_pair, native_output_tags, native_promql_requested,
+        native_raw_plan_bounds_region_reads, scan_time_filter,
     };
+
+    #[test]
+    fn native_raw_region_read_budget_needs_the_native_topology() {
+        let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+            datafusion::arrow::datatypes::Field::new(
+                "ts",
+                datafusion::arrow::datatypes::DataType::Int64,
+                false,
+            ),
+        ]));
+        let scan = || {
+            Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                schema.clone(),
+            )) as Arc<dyn ExecutionPlan>
+        };
+
+        // No `FusedSeriesExec`: nothing here reads regions the way the budget assumes.
+        assert!(!native_raw_plan_bounds_region_reads(&scan()));
+        // A union drains its inputs one after another, so a body budget could stall it.
+        let union = datafusion::physical_plan::union::UnionExec::try_new(vec![scan(), scan()])
+            .expect("two inputs");
+        assert!(!native_raw_plan_bounds_region_reads(&union));
+    }
 
     fn compiled_test_tree(query: &str) -> NativeTree {
         compiled_test_tree_with_fields(query, &["v0"])

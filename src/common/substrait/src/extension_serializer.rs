@@ -20,7 +20,7 @@ use datafusion_common::DataFusionError;
 use datafusion_expr::UserDefinedLogicalNode;
 use promql::extension_plan::{
     Absent, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate, RangeManipulate,
-    ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    RawSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 
 #[derive(Debug)]
@@ -94,6 +94,13 @@ impl SerializerRegistry for ExtensionSerializer {
                     .expect("Failed to downcast to UnionDistinctOn");
                 Ok(union_distinct_on.serialize())
             }
+            name if name == RawSeriesSource::name() => {
+                let raw_series_source = node
+                    .as_any()
+                    .downcast_ref::<RawSeriesSource>()
+                    .expect("Failed to downcast to RawSeriesSource");
+                Ok(raw_series_source.serialize())
+            }
             name if name == EmptyMetric::name() => Err(DataFusionError::Substrait(
                 "EmptyMetric should not be serialized".to_string(),
             )),
@@ -145,6 +152,9 @@ impl SerializerRegistry for ExtensionSerializer {
                 let union_distinct_on = UnionDistinctOn::deserialize(bytes)?;
                 Ok(Arc::new(union_distinct_on))
             }
+            name if name == RawSeriesSource::name() => {
+                Ok(Arc::new(RawSeriesSource::deserialize(bytes)?))
+            }
             name if name == EmptyMetric::name() => Err(DataFusionError::Substrait(
                 "EmptyMetric should not be deserialized".to_string(),
             )),
@@ -153,5 +163,93 @@ impl SerializerRegistry for ExtensionSerializer {
                 other
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use datafusion::datasource::{MemTable, provider_as_source};
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, col, lit};
+    use datafusion::prelude::SessionContext;
+
+    use super::*;
+    use crate::{DFLogicalSubstraitConvertor, SubstraitPlan};
+
+    #[tokio::test]
+    async fn raw_series_source_substrait_roundtrip_restores_scan() {
+        let table_name = "raw_source_input";
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("z", DataType::Utf8, false),
+            Field::new("value_b", DataType::Float64, false),
+            Field::new("value_a", DataType::Float64, false),
+            Field::new("a", DataType::Utf8, false),
+            Field::new("unused", DataType::Utf8, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let provider = Arc::new(MemTable::try_new(input_schema, vec![vec![]]).unwrap());
+        let filter = col("raw_source_input.z").eq(lit("web-1"));
+        let input = LogicalPlanBuilder::scan_with_filters(
+            table_name,
+            provider_as_source(provider.clone()),
+            Some(vec![0, 3, 2, 1, 5]),
+            vec![filter],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let LogicalPlan::TableScan(expected_scan) = &input else {
+            panic!("expected table scan");
+        };
+        let expected_projection = expected_scan.projection.clone();
+        let expected_schema = Arc::clone(&expected_scan.projected_schema);
+        let expected_filters = expected_scan.filters.clone();
+        let source = RawSeriesSource::try_new(
+            Arc::from("http_requests_total"),
+            vec!["z".into(), "a".into()],
+            vec!["value_b".into(), "value_a".into()],
+            input,
+        )
+        .unwrap();
+        let expected_source_schema = Arc::clone(source.schema());
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(source),
+        });
+        let converter = DFLogicalSubstraitConvertor;
+        let bytes = converter.encode(&plan, ExtensionSerializer).unwrap();
+        let state = SessionStateBuilder::new()
+            .with_default_features()
+            .with_serializer_registry(Arc::new(ExtensionSerializer))
+            .build();
+        let context = SessionContext::new_with_state(state);
+        context.register_table(table_name, provider).unwrap();
+        let decoded = converter.decode(bytes, context.state()).await.unwrap();
+
+        let LogicalPlan::Extension(extension) = decoded else {
+            panic!("expected restored RawSeriesSource extension");
+        };
+        let restored = extension
+            .node
+            .as_any()
+            .downcast_ref::<RawSeriesSource>()
+            .expect("expected RawSeriesSource");
+        assert_eq!(restored.metric_name(), "http_requests_total");
+        assert_eq!(restored.tags(), ["z", "a"]);
+        assert_eq!(restored.fields(), ["value_b", "value_a"]);
+        assert_eq!(restored.schema(), &expected_source_schema);
+        let inputs = extension.node.inputs();
+        assert_eq!(inputs.len(), 1);
+        let LogicalPlan::TableScan(scan) = inputs[0] else {
+            panic!("expected restored table scan child, got: {inputs:?}");
+        };
+        assert_eq!(scan.table_name.to_string(), table_name);
+        assert_eq!(scan.projection, expected_projection);
+        assert_eq!(scan.projected_schema, expected_schema);
+        assert_eq!(scan.filters, expected_filters);
     }
 }

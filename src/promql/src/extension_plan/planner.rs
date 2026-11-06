@@ -22,6 +22,10 @@ use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::PhysicalExpr;
+use datafusion::physical_plan::expressions::Column;
+use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::{FrameLabelMode, SeriesFrameDeclaration};
@@ -122,7 +126,11 @@ fn plan_fused_series(
             .to_execution_plan_with_parallelism(Vec::new(), target_partitions)
             .map(Some);
     }
-    if let Some(inputs) = physical_inputs
+    let explicit_inputs = physical_inputs
+        .iter()
+        .map(normalize_raw_union)
+        .collect::<DfResult<Vec<_>>>()?;
+    if let Some(inputs) = explicit_inputs
         .iter()
         .map(|input| {
             explicit_label_frame_ordering(input.schema().as_ref())
@@ -250,10 +258,145 @@ fn series_scan(
 }
 
 /// The ordering an input declares when it produces raw frames that carry their own labels.
+/// Restate a raw union's ordering as the weakest guarantee its members make.
+///
+/// `UnionExec` reports the frame metadata of its last child, so a fragmented member beside one
+/// whose series are complete can look contiguous, and the fused node would skip the reconciliation
+/// of the fragments. The union itself is not rewritten; only the declaration on this edge is
+/// lowered, and the fused node's own interleaved-input path inserts the router.
+fn normalize_raw_union(input: &Arc<dyn ExecutionPlan>) -> DfResult<Arc<dyn ExecutionPlan>> {
+    let Some(union) = input.downcast_ref::<UnionExec>() else {
+        return Ok(Arc::clone(input));
+    };
+    if explicit_label_frame_ordering(input.schema().as_ref()) != Some(SeriesOrdering::Contiguous)
+        || weakest_union_ordering(union) != SeriesOrdering::Interleaved
+    {
+        return Ok(Arc::clone(input));
+    }
+    let mut metadata = input.schema().metadata().clone();
+    metadata.insert(RAW_SERIES_ORDERING_KEY.into(), "interleaved".into());
+    let schema = Arc::new(Schema::new_with_metadata(
+        input.schema().fields().clone(),
+        metadata,
+    ));
+    let exprs = input
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            (
+                Arc::new(Column::new(field.name(), index)) as Arc<dyn PhysicalExpr>,
+                field.name().clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(Arc::new(ProjectionExec::try_new_with_schema_metadata(
+        exprs,
+        Arc::clone(input),
+        schema.as_ref(),
+    )?))
+}
+
+/// The schema metadata key a frame's ordering is declared under; see
+/// [`common_query::series_frame`].
+const RAW_SERIES_ORDERING_KEY: &str = "greptime.series.ordering";
+
+/// The weakest ordering any member of this union declares. A member that is itself a union is
+/// asked the same question; a member that already reconciles keeps its own guarantee.
+fn weakest_union_ordering(union: &UnionExec) -> SeriesOrdering {
+    union
+        .children()
+        .iter()
+        .map(|child| match child.downcast_ref::<UnionExec>() {
+            Some(nested) => weakest_union_ordering(nested),
+            None => explicit_label_frame_ordering(child.schema().as_ref())
+                .unwrap_or(SeriesOrdering::Contiguous),
+        })
+        .find(|ordering| *ordering == SeriesOrdering::Interleaved)
+        .unwrap_or(SeriesOrdering::Contiguous)
+}
+
 fn explicit_label_frame_ordering(schema: &Schema) -> Option<SeriesOrdering> {
     let declaration = SeriesFrameDeclaration::parse(schema).ok()?;
     if declaration.labels() != FrameLabelMode::Explicit {
         return None;
     }
     series_frame_ordering(schema).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_query::series_frame::{
+        raw_series_frame_schema_with_ordering, series_frame_ordering,
+    };
+    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::union::UnionExec;
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+
+    use super::normalize_raw_union;
+
+    fn raw_frame(ordering: SeriesOrdering) -> Arc<datafusion::arrow::datatypes::Schema> {
+        let series = SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("val"),
+            }]
+            .into(),
+            eval_grid: None,
+        };
+        raw_series_frame_schema_with_ordering(
+            &series,
+            &store_api::region_engine::RawLabelSource::Explicit,
+            ordering,
+        )
+        .expect("a raw schema declares an explicit-label frame")
+    }
+
+    fn union(children: &[SeriesOrdering]) -> Arc<dyn ExecutionPlan> {
+        let children = children
+            .iter()
+            .map(|ordering| {
+                Arc::new(EmptyExec::new(raw_frame(*ordering))) as Arc<dyn ExecutionPlan>
+            })
+            .collect::<Vec<_>>();
+        UnionExec::try_new(children).expect("two framed children")
+    }
+
+    /// A union reports the ordering of its last child. The declaration this edge hands to the
+    /// fused node must instead be the weakest of the members, in either order, and must stay the
+    /// union's own when every member is complete.
+    #[test]
+    fn raw_union_declaration_lowers_to_the_weakest_member() {
+        for members in [
+            vec![SeriesOrdering::Interleaved, SeriesOrdering::Contiguous],
+            vec![SeriesOrdering::Contiguous, SeriesOrdering::Interleaved],
+        ] {
+            let union = union(&members);
+            assert_eq!(
+                series_frame_ordering(union.schema().as_ref()).unwrap(),
+                *members.last().unwrap(),
+                "the union itself keeps its last child's declaration"
+            );
+            let normalized =
+                normalize_raw_union(&Arc::clone(&union)).expect("a raw union normalizes");
+            assert_eq!(
+                series_frame_ordering(normalized.schema().as_ref()).unwrap(),
+                SeriesOrdering::Interleaved,
+                "the fused edge sees the weakest member"
+            );
+        }
+
+        let union = union(&[SeriesOrdering::Contiguous, SeriesOrdering::Contiguous]);
+        let normalized = normalize_raw_union(&(Arc::clone(&union) as Arc<dyn ExecutionPlan>))
+            .expect("a raw union normalizes");
+        assert_eq!(
+            series_frame_ordering(normalized.schema().as_ref()).unwrap(),
+            SeriesOrdering::Contiguous,
+            "nothing is lowered when every member is complete"
+        );
+    }
 }

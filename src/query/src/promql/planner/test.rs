@@ -3757,17 +3757,65 @@ async fn native_fused_same_table_nested_match_keeps_prior_admission() {
     );
 }
 
-/// Two selectors over tables split into regions are not one two-input node, across tables as on
-/// one; the hybrid route may still plan each operand natively under the existing join.
+/// On the wire, partitioned cross-table operands are independently transported by raw sources:
+/// the pair is one fused node whose two inputs each name the metric they read. In process the same
+/// pair keeps the frontend hybrid route instead, because only that route copies the matcher's
+/// labels into each operand's scan and checks uniqueness above the join. Repeated scans of one
+/// partitioned table retain the region-local multi-scan refusal on both routes.
 #[tokio::test]
-async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
-    let plan = build_native_fused_plan_with_provider(
+async fn native_fused_partitioned_pair_requires_per_selector_raw_sources() {
+    let state = QueryEngineState::try_new_with_region_transport(
+        new_memory_catalog_manager().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        true,
+        false,
+        Plugins::default(),
+        QueryOptions::default(),
+    )
+    .unwrap();
+    let eval_stmt = build_eval_stmt("some_metric / other_metric");
+    let plan = PromPlanner::stmt_to_plan_with_annotations(
+        native_two_table_provider(vec![0]).await,
+        &eval_stmt,
+        &state,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    let fused = find_fused_series(&plan).expect("cross-table pair is native on the wire");
+    assert_eq!(fused.inputs().len(), 2, "{plan}");
+    for input in fused.inputs() {
+        assert!(
+            matches!(input, LogicalPlan::Extension(extension)
+            if extension.node.as_any().is::<RawSeriesSource>()),
+            "{plan}"
+        );
+    }
+    // The same pair in process must not become one two-input node: the frontend hybrid route is
+    // what the matcher propagation and the uniqueness check live in, and that is the plan the
+    // partitioned-RHS hybrid cases assert.
+    let in_process = build_native_fused_plan_with_provider(
         "some_metric / other_metric",
         true,
         native_two_table_provider(vec![0]).await,
     )
     .await;
-    assert!(!has_pair_node(&plan), "{plan}");
+    assert!(
+        !has_pair_node(&in_process),
+        "an in-process partitioned pair keeps the hybrid route: {in_process}"
+    );
+    let repeated = build_native_fused_plan_with_provider(
+        "some_metric / some_metric",
+        true,
+        native_two_table_provider(vec![0]).await,
+    )
+    .await;
+    assert!(!has_pair_node(&repeated), "{repeated}");
 }
 
 /// `some_metric` as [`native_two_table_provider`] builds it, and `other_metric` whose tags are
@@ -4113,22 +4161,17 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
     }
 }
 
-/// More than two selectors over tables split into regions are not one multi-input node, on one
-/// table as across two.
+/// More than two same-table selectors on a partitioned table must not be placed as a
+/// multi-child region-local node. Cross-table occurrences may each use a raw source.
 #[tokio::test]
-async fn native_fused_three_selectors_on_partitioned_tables_fall_back() {
-    for query in [
+async fn native_fused_same_table_three_selectors_on_partitioned_table_fall_back() {
+    let plan = build_native_fused_plan_with_provider(
         "some_metric + some_metric + some_metric",
-        "some_metric / other_metric * some_metric",
-    ] {
-        let plan = build_native_fused_plan_with_provider(
-            query,
-            true,
-            native_two_table_provider(vec![0]).await,
-        )
-        .await;
-        assert!(!has_pair_node(&plan), "{query}: {plan}");
-    }
+        true,
+        native_two_table_provider(vec![0]).await,
+    )
+    .await;
+    assert!(!has_pair_node(&plan), "{plan}");
 }
 
 /// Find the final half of a split aggregate.
@@ -4865,9 +4908,10 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
     else {
         unreachable!()
     };
+    let query_engine_state = build_query_engine_state();
     for operand in [&binary.lhs, &binary.rhs] {
         let (_, context) = planner
-            .try_plan_native_operand(operand)
+            .try_plan_native_operand(operand, &query_engine_state)
             .await
             .unwrap()
             .expect("each histogram call is admitted as one native operand");
