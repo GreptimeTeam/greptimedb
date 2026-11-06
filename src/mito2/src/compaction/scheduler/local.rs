@@ -73,29 +73,6 @@ impl Drop for InflightCompaction {
     }
 }
 
-/// Balances the inflight charge for a polled job on completion, unwind or drop.
-/// An unpolled job never acquires a charge.
-struct InflightCompaction(IntGauge);
-
-impl InflightCompaction {
-    /// Runs the job inside the same accounting scope on every exit path.
-    async fn run(job: impl Future<Output = ()>, gauge: IntGauge) {
-        let _inflight = Self::start(gauge);
-        job.await;
-    }
-
-    fn start(gauge: IntGauge) -> Self {
-        gauge.inc();
-        Self(gauge)
-    }
-}
-
-impl Drop for InflightCompaction {
-    fn drop(&mut self) {
-        self.0.dec();
-    }
-}
-
 /// A request's local units. All transitions run on the owning region worker.
 #[derive(Debug)]
 pub(crate) struct LocalCompaction {
@@ -717,61 +694,6 @@ mod tests {
     }
 
     #[test]
-    #[rstest::rstest]
-    #[case::completed(false)]
-    #[case::panicked(true)]
-    #[tokio::test]
-    async fn test_inflight_job_balances_count_on_exit(#[case] panics: bool) {
-        let gauge = IntGauge::new("test_inflight_compaction", "isolated inflight gauge").unwrap();
-        let (resume, paused) = oneshot::channel();
-        let job = InflightCompaction::run(
-            async move {
-                paused.await.unwrap();
-                if panics {
-                    panic!("inflight job panic fixture");
-                }
-            },
-            gauge.clone(),
-        );
-        let mut job = Box::pin(std::panic::AssertUnwindSafe(job).catch_unwind());
-
-        assert_eq!(0, gauge.get());
-        assert!(futures::poll!(job.as_mut()).is_pending());
-        // Assertions outside catch_unwind cannot masquerade as the fixture panic.
-        assert_eq!(1, gauge.get());
-        resume.send(()).unwrap();
-        let outcome = job.await;
-        if panics {
-            let payload = outcome.unwrap_err();
-            assert_eq!(
-                Some("inflight job panic fixture"),
-                payload.downcast_ref::<&str>().copied()
-            );
-        } else {
-            assert!(outcome.is_ok());
-        }
-        assert_eq!(0, gauge.get());
-    }
-
-    #[rstest::rstest]
-    #[case::unpolled(false)]
-    #[case::started(true)]
-    #[tokio::test]
-    async fn test_inflight_job_drop_balances_started_count(#[case] started: bool) {
-        let gauge = IntGauge::new("test_inflight_compaction", "isolated inflight gauge").unwrap();
-        let mut job = Box::pin(InflightCompaction::run(
-            std::future::pending::<()>(),
-            gauge.clone(),
-        ));
-        assert_eq!(0, gauge.get());
-        if started {
-            assert!(futures::poll!(job.as_mut()).is_pending());
-            assert_eq!(1, gauge.get());
-        }
-        drop(job);
-        assert_eq!(0, gauge.get());
-    }
-
     fn test_compaction_unit_apply_accepts_independent_executions() {
         let mut local = local_compaction();
         assert!(!local.can_apply(1));

@@ -476,8 +476,9 @@ impl WorkerGroup {
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
-        let compact_job_pool =
-            Arc::new(CompactionCoordinator::new_local(config.max_background_compactions));
+        let compact_job_pool = Arc::new(CompactionCoordinator::new_local(
+            config.max_background_compactions,
+        ));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(

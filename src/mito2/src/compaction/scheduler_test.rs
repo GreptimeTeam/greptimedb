@@ -3561,6 +3561,26 @@ async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_fir
         .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
         .await;
     let shared = scheduler.region_status[&region_id].shared_state.clone();
+    let rejected = if reject_after_first { UNITS - 1 } else { 0 };
+    // Admission is engine-wide now: the executor rejects the units it cannot take and
+    // the worker observes each rejection through the asynchronous Released notification.
+    for _ in 0..rejected {
+        let message = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("rejected unit did not report release")
+            .expect("request channel closed");
+        let WorkerRequest::Background {
+            region_id: notified_region,
+            notify: BackgroundNotify::CompactionUnit(CompactionUnitNotification::Released { plan_id }),
+        } = message.request
+        else {
+            panic!("expected a release notification");
+        };
+        assert_eq!(notified_region, region_id);
+        scheduler
+            .on_unit_released(region_id, plan_id, &manifest, schemas.clone())
+            .await;
+    }
     let CompactionPhase::Units(local) = &scheduler.region_status[&region_id].active.phase else {
         panic!("expected admitted local units");
     };
@@ -3572,7 +3592,6 @@ async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_fir
     assert!(references >= 2);
     let mut ids = local.unit_ids_for_test();
     ids.sort_unstable();
-    let rejected = if reject_after_first { UNITS - 1 } else { 0 };
     assert_eq!(local.released_units_for_test(), rejected);
     assert_eq!(ids.len(), UNITS - rejected);
     assert_eq!(jobs.jobs.num_jobs(), UNITS - rejected);
