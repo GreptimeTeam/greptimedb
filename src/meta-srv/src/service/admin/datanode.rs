@@ -293,6 +293,14 @@ mod tests {
             (json!({"strategy": null}), StatusCode::BAD_REQUEST),
             (json!({"timeout": "0s"}), StatusCode::BAD_REQUEST),
             (
+                json!({"timeout": "9223372036854775s"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                json!({"timeout": "9223372036854776s"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
                 json!({"timeout": "invalid"}),
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
@@ -336,6 +344,13 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+        assert!(
+            metasrv
+                .node_scheduling_manager()
+                .is_schedulable(NodeSchedulingRole::Datanode, 1)
+                .await
+                .unwrap()
         );
         metasrv.procedure_manager().stop().await.unwrap();
     }
