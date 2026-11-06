@@ -1868,6 +1868,26 @@ fn observed_physical_nodes(
     nodes
 }
 
+/// The region reads a native node answers from, descending through cooperative wrappers and the
+/// segments a statement cut out of itself.
+fn native_region_inputs(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    out: &mut Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+) {
+    for child in plan.children() {
+        let child = if child.is::<CooperativeExec>() {
+            child.children()[0]
+        } else {
+            child
+        };
+        if child.is::<MergeScanExec>() {
+            out.push(Arc::clone(child));
+        } else {
+            native_region_inputs(child, out);
+        }
+    }
+}
+
 fn observed_series_scans(observer: &NativePlanObserver) -> Vec<Arc<dyn ExecutionPlan>> {
     observed_physical_nodes(observer)
         .into_iter()
@@ -2880,11 +2900,11 @@ fn repeated_selector_fixture_inserts(prefix: &str) -> String {
 }
 
 /// Real two-datanode TCP acceptance for a repeated selector over ONE partitioned metric table.
-/// Over the wire every prepared scan becomes its own raw source with its own time bounds, so two
-/// occurrences of the same fragmented table - a ratio of two windows, or a binary expression over
-/// two identical ones - stay independent instead of falling back. In process the same expression
-/// would place one node region-locally over both scans of the one table, which no region can serve,
-/// so this admission is remote-only.
+/// Every prepared scan becomes its own raw source with its own time bounds, so two occurrences of
+/// the same fragmented table - a ratio of two windows, or a binary expression over two identical
+/// ones - stay independent instead of falling back. Over the wire the transport carries those
+/// sources; in process they keep the node out of the region, which cannot serve one node over both
+/// scans of the one table.
 #[tokio::test(flavor = "multi_thread")]
 async fn distributed_native_promql_repeated_selector_over_partitioned_table() {
     common_telemetry::init_default_ut_logging();
@@ -6202,16 +6222,15 @@ async fn native_promql_info_enriches_from_the_info_table() {
     }
 }
 
-/// A two-selector query over a table split into regions never fuses the binary itself.
+/// A query over two selectors of one partitioned table matches above the regions.
 ///
-/// A fused node with more than one input has no placement on such a table — the dist analyzer
-/// refuses it with "only accept plan with at most one child" — so admitting one used to make the
-/// whole query fail instead of falling back. Each operand may still be fused on its own: that is a
-/// single-input node over a region-local scan, which places fine, and it is what the hybrid
-/// operand route does. What must never appear is a fused node with two children, so that is what
-/// is asserted rather than "no fused node at all".
+/// A fused node over the bare scans of such a table has no placement in a region — the dist
+/// analyzer refuses it with "only accept plan with at most one child" — so each selector
+/// occurrence reads that table through its own raw region input instead. Every input is one read of
+/// the whole table, and the matching the query asks for runs once above them, over every region's
+/// contribution: two inputs for a two-selector query, three for a three-selector one.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfused() {
+async fn native_promql_two_selectors_on_a_partitioned_table_match_above_independent_regions() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_partitioned_pair",
     ))
@@ -6231,10 +6250,11 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
         QueryContext::arc(),
     )
     .await;
-    for (query, expected) in [
+    for (query, expected, sources) in [
         (
             "native_partitioned_pair{kind=\"a\"} and on(host) native_partitioned_pair{kind=\"b\",host=\"h0\"}",
             vec![(5_000, "h0".to_string(), 1.0)],
+            2,
         ),
         (
             "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"}",
@@ -6242,8 +6262,10 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
                 (5_000, "h0".to_string(), -1.0),
                 (5_000, "h2".to_string(), -1.0),
             ],
+            2,
         ),
-        // Three selectors: the inner pair may take the hybrid route under the outer join.
+        // Three selectors: the inner pair matches above its own two region inputs, under the outer
+        // match.
         (
             "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"} \
              + on(host) native_partitioned_pair{kind=\"a\"}",
@@ -6251,17 +6273,28 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
                 (5_000, "h0".to_string(), 0.0),
                 (5_000, "h2".to_string(), 2.0),
             ],
+            3,
         ),
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        if let Some(fused) = observer.fused() {
-            assert_eq!(
-                fused.children().len(),
-                1,
-                "`{query}` fused the two-selector binary, which has no placement on a partitioned \
-                 table: {fused:?}"
+        // The frontend's own tree: the fused node above the regions, not the region-side plan the
+        // observer also wraps.
+        let root = observer.root_plan();
+        let mut inputs = Vec::new();
+        native_region_inputs(&root, &mut inputs);
+        assert_eq!(
+            sources,
+            inputs.len(),
+            "`{query}` reads one region input per selector occurrence: {:?}",
+            display_plan_tree(&root)
+        );
+        for (index, input) in inputs.iter().enumerate() {
+            assert!(
+                input.is::<MergeScanExec>(),
+                "`{query}`: input {index} is not a region read: {:?}",
+                display_plan_tree(input)
             );
         }
         assert_eq!(native, expected, "{query}");
