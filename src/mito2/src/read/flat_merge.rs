@@ -934,6 +934,8 @@ pub struct FlatMergeReader {
     metrics: MergeMetrics,
     /// Optional metrics reporter.
     metrics_reporter: Option<Arc<dyn MergeMetricsReport>>,
+    /// A node whose batch advance is deferred until the output batch is consumed.
+    pending_batch_advance: Option<StreamNode>,
 }
 
 impl FlatMergeReader {
@@ -970,6 +972,7 @@ impl FlatMergeReader {
             batch_size,
             metrics,
             metrics_reporter,
+            pending_batch_advance: None,
         };
         let elapsed = start.elapsed();
         reader.metrics.init_cost += elapsed;
@@ -981,6 +984,8 @@ impl FlatMergeReader {
     /// Fetches next sorted batch.
     pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         let start = Instant::now();
+        self.advance_pending_batch().await?;
+        self.algo.refill_hot();
         while self.algo.has_rows() && self.output_batch.is_none() {
             if self.algo.can_fetch_batch() && !self.in_progress.is_empty() {
                 // Only one batch in the hot heap, but we have pending rows, output the pending rows first.
@@ -1007,6 +1012,25 @@ impl FlatMergeReader {
         }
     }
 
+    async fn advance_pending_batch(&mut self) -> Result<()> {
+        let Some(mut hottest) = self.pending_batch_advance.take() else {
+            return Ok(());
+        };
+
+        let fetch_start = Instant::now();
+        let next = hottest.advance_batch().await?;
+        self.metrics.fetch_cost += fetch_start.elapsed();
+        if let Some(next) = next {
+            self.in_progress.push_batch(hottest.node_index, next);
+            // The output batch consumed all indices, so the previous batch for this
+            // stream can be released now that the deferred advance is complete.
+            debug_assert!(self.in_progress.is_empty());
+            self.in_progress.retain_batches();
+        }
+        self.algo.reheap_after_batch_transition(hottest);
+        Ok(())
+    }
+
     /// Converts the reader into a stream.
     pub fn into_stream(mut self) -> impl Stream<Item = Result<RecordBatch>> {
         try_stream! {
@@ -1021,16 +1045,16 @@ impl FlatMergeReader {
         debug_assert!(self.in_progress.is_empty());
 
         // Safety: next_batch() ensures the heap is not empty.
-        let mut hottest = self.algo.pop_hot_for_batch_transition().unwrap();
+        let hottest = self.algo.pop_hot_for_batch_transition().unwrap();
         debug_assert!(!hottest.current_cursor().is_finished());
-        let node_index = hottest.node_index;
-        let start = Instant::now();
-        let next = hottest.advance_batch().await?;
-        self.metrics.fetch_cost += start.elapsed();
-        // The node is the heap is not empty, so it must have existing rows in the builder.
-        let batch = self.in_progress.take_remaining_rows(node_index, next);
+        // The current batch's remainder is safe to output because the hot/cold window
+        // guarantees that no cold node can overlap it. Defer advancing the source until
+        // the next call so a pending source cannot delay this output.
+        let batch = self
+            .in_progress
+            .take_remaining_rows(hottest.node_index, None);
         Self::maybe_output_batch(batch, &mut self.output_batch);
-        self.algo.reheap_after_batch_transition(hottest);
+        self.pending_batch_advance = Some(hottest);
 
         Ok(())
     }
@@ -1053,6 +1077,16 @@ impl FlatMergeReader {
             }
         }
 
+        // Defer the batch advance only when the selected row completed the output
+        // batch and is the last row of the current source batch. Advancing within
+        // the current batch is immediate and cannot await source input.
+        if self.output_batch.is_some() && at_batch_boundary {
+            self.pending_batch_advance = Some(boundary_node.take().unwrap());
+            return Ok(());
+        }
+
+        // Only read the clock when advancing will attempt to fetch the next batch.
+        // Check first because `None` means either no fetch or EOF after a fetch attempt.
         let start = at_batch_boundary.then(Instant::now);
         let next = if let Some(hottest) = &mut boundary_node {
             hottest.advance_row().await?
@@ -1252,6 +1286,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::task::Poll;
+    use std::time::Duration;
 
     use api::v1::OpType;
     use datatypes::arrow::array::builder::BinaryDictionaryBuilder;
@@ -1261,7 +1296,7 @@ mod tests {
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
-    use futures::FutureExt;
+    use futures::{FutureExt, StreamExt, stream};
 
     use super::*;
     use crate::error::UnexpectedSnafu;
@@ -1786,6 +1821,246 @@ mod tests {
             reason: "test source failed".to_string(),
         }
         .build()
+    }
+
+    fn pending_after_batch(batch: RecordBatch) -> BoxedRecordBatchStream {
+        Box::pin(stream::iter(vec![Ok(batch)]).chain(stream::pending()))
+    }
+
+    fn finite_test_stream(batches: Vec<RecordBatch>) -> BoxedRecordBatchStream {
+        Box::pin(stream::iter(batches.into_iter().map(Ok)))
+    }
+
+    #[derive(Clone, Copy)]
+    enum DeferredFetch {
+        Error,
+        Cancelled,
+    }
+
+    fn deferred_fetch_stream(
+        batch: RecordBatch,
+        fetch: DeferredFetch,
+        fetch_pending: Arc<AtomicBool>,
+    ) -> BoxedRecordBatchStream {
+        let mut first_batch = Some(batch);
+        Box::pin(stream::poll_fn(move |_cx| {
+            if let Some(batch) = first_batch.take() {
+                Poll::Ready(Some(Ok(batch)))
+            } else {
+                match fetch {
+                    DeferredFetch::Error => Poll::Ready(Some(Err(test_source_error()))),
+                    DeferredFetch::Cancelled => {
+                        fetch_pending.store(true, AtomicOrdering::Relaxed);
+                        Poll::Pending
+                    }
+                }
+            }
+        }))
+    }
+
+    async fn assert_deferred_fetch(
+        merge: &mut FlatMergeReader,
+        fetch: DeferredFetch,
+        fetch_pending: &AtomicBool,
+    ) {
+        match fetch {
+            DeferredFetch::Error => assert!(merge.next_batch().await.is_err()),
+            DeferredFetch::Cancelled => {
+                assert!(Box::pin(merge.next_batch()).now_or_never().is_none());
+                assert!(fetch_pending.load(AtomicOrdering::Relaxed));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reader_returns_remainder_before_pending_next_batch() {
+        let batch = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 2000],
+            &[21, 22],
+            &[OpType::Put, OpType::Put],
+            &[11, 12],
+        );
+        let schema = batch.schema();
+        let mut reader =
+            FlatMergeReader::new(schema, vec![pending_after_batch(batch.clone())], 1024, None)
+                .await
+                .unwrap();
+
+        let output = tokio::time::timeout(Duration::from_secs(1), reader.next_batch())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(output, batch);
+    }
+
+    #[tokio::test]
+    async fn test_reader_returns_full_batch_before_pending_next_batch() {
+        let batch1 = create_test_record_batch(&[b"k1"], &[1000], &[21], &[OpType::Put], &[11]);
+        let batch2 = create_test_record_batch(&[b"k1"], &[1000], &[20], &[OpType::Put], &[10]);
+        let schema = batch1.schema();
+        let mut reader = FlatMergeReader::new(
+            schema,
+            vec![
+                pending_after_batch(batch1.clone()),
+                pending_after_batch(batch2),
+            ],
+            1,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let output = tokio::time::timeout(Duration::from_secs(1), reader.next_batch())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(output, batch1);
+    }
+
+    #[tokio::test]
+    async fn test_reader_completes_after_deferred_advance() {
+        let batches = vec![
+            create_test_record_batch(&[b"k1"], &[1000], &[21], &[OpType::Put], &[11]),
+            create_test_record_batch(&[b"k1"], &[2000], &[20], &[OpType::Put], &[10]),
+            create_test_record_batch(&[b"k2"], &[1000], &[19], &[OpType::Put], &[9]),
+        ];
+        let schema = batches[0].schema();
+        let mut reader = FlatMergeReader::new(
+            schema,
+            vec![finite_test_stream(batches.clone())],
+            1024,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut output = Vec::new();
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            output.push(batch);
+            assert!(reader.in_progress.batches.len() <= 1);
+        }
+
+        assert_eq!(output.len(), batches.len());
+        assert_record_batches_eq(&batches, &output);
+    }
+
+    #[tokio::test]
+    async fn test_reader_retains_cold_source_after_deferred_fetch_failure() {
+        for fetch in [DeferredFetch::Error, DeferredFetch::Cancelled] {
+            let first = create_test_record_batch(&[b"k1"], &[1], &[1], &[OpType::Put], &[1]);
+            let surviving = create_test_record_batch(&[b"k1"], &[10], &[1], &[OpType::Put], &[10]);
+            let fetch_pending = Arc::new(AtomicBool::new(false));
+            let mut reader = FlatMergeReader::new(
+                first.schema(),
+                vec![
+                    deferred_fetch_stream(first.clone(), fetch, Arc::clone(&fetch_pending)),
+                    finite_test_stream(vec![surviving.clone()]),
+                ],
+                1024,
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(Some(first), reader.next_batch().await.unwrap());
+            assert_deferred_fetch(&mut reader, fetch, &fetch_pending).await;
+            assert_eq!(Some(surviving), reader.next_batch().await.unwrap());
+            assert!(reader.next_batch().await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reader_restores_hot_window_after_deferred_fetch_failure() {
+        for fetch in [DeferredFetch::Error, DeferredFetch::Cancelled] {
+            let first = create_test_record_batch(&[b"k1"], &[1], &[2], &[OpType::Put], &[2]);
+            let second = create_test_record_batch(
+                &[b"k1", b"k1"],
+                &[1, 10],
+                &[1, 1],
+                &[OpType::Put, OpType::Put],
+                &[1, 10],
+            );
+            let cold = create_test_record_batch(&[b"k1"], &[5], &[1], &[OpType::Put], &[5]);
+            let fetch_pending = Arc::new(AtomicBool::new(false));
+            let mut reader = FlatMergeReader::new(
+                first.schema(),
+                vec![
+                    deferred_fetch_stream(first.clone(), fetch, Arc::clone(&fetch_pending)),
+                    finite_test_stream(vec![second.clone()]),
+                    finite_test_stream(vec![cold.clone()]),
+                ],
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(Some(first.clone()), reader.next_batch().await.unwrap());
+            assert_deferred_fetch(&mut reader, fetch, &fetch_pending).await;
+
+            let mut output = Vec::new();
+            while let Some(batch) = reader.next_batch().await.unwrap() {
+                output.push(batch);
+            }
+            let expected = vec![second.slice(0, 1), cold, second.slice(1, 1)];
+            assert_eq!(expected.len(), output.len());
+            assert_record_batches_eq(&expected, &output);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reader_retains_order_after_successful_deferred_fetch() {
+        for deferred_batch in [
+            None,
+            Some(create_test_record_batch(
+                &[b"k1"],
+                &[3],
+                &[1],
+                &[OpType::Put],
+                &[3],
+            )),
+        ] {
+            let first = create_test_record_batch(&[b"k1"], &[1], &[2], &[OpType::Put], &[2]);
+            let second = create_test_record_batch(
+                &[b"k1", b"k1"],
+                &[1, 10],
+                &[1, 1],
+                &[OpType::Put, OpType::Put],
+                &[1, 10],
+            );
+            let cold = create_test_record_batch(&[b"k1"], &[5], &[1], &[OpType::Put], &[5]);
+            let mut first_batches = vec![first.clone()];
+            if let Some(batch) = &deferred_batch {
+                first_batches.push(batch.clone());
+            }
+            let mut reader = FlatMergeReader::new(
+                first.schema(),
+                vec![
+                    finite_test_stream(first_batches),
+                    finite_test_stream(vec![second.clone()]),
+                    finite_test_stream(vec![cold.clone()]),
+                ],
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+            let mut output = Vec::new();
+            while let Some(batch) = reader.next_batch().await.unwrap() {
+                output.push(batch);
+            }
+            let mut expected = vec![first, second.slice(0, 1)];
+            if let Some(batch) = deferred_batch {
+                expected.push(batch);
+            }
+            expected.extend([cold, second.slice(1, 1)]);
+            assert_eq!(expected.len(), output.len());
+            assert_record_batches_eq(&expected, &output);
+        }
     }
 
     #[test]
