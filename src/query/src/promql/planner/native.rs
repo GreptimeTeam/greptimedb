@@ -1084,6 +1084,13 @@ impl PromPlanner {
                         LogicalPlan::Extension(extension)
                             if extension.node.as_any().is::<RawSeriesSource>()
                     );
+                // The typed empty frame of a selector that matched no table is already the input:
+                // it reads no region, so there is no source to wrap it in and no metric to bind to
+                // it. Wrapping it would name a metric it does not have, which is why it stays
+                // itself on both routes.
+                if is_empty_discovered_input(&scan) {
+                    return Ok(scan);
+                }
                 // A scan stays bare only where a region runs the node over it in process. Over the
                 // wire every input is a raw source, whichever table it reads: the source is what the
                 // transport carries, and it is also what reconciles the fragments of a series that
@@ -1483,12 +1490,7 @@ impl PromPlanner {
 /// frame producer it is instead of looking for a region scan below the node. Its labels are
 /// explicit, which is the mode a producer names each series in rather than a scan's storage key.
 fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
-    let schema = Arc::new(SeriesSchema {
-        fields: Arc::from([FieldSpec {
-            name: Arc::from(DEFAULT_FIELD_COLUMN),
-        }]),
-        eval_grid: None,
-    });
+    let schema = empty_discovered_series_schema();
     let frame =
         raw_series_frame_schema_with_ordering(&schema, &RawLabelSource::Explicit, NATIVE_ORDERING)
             .context(DataFusionPlanningSnafu)?;
@@ -1502,12 +1504,38 @@ fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
     Ok((input, schema, None, time_index, Vec::new(), false))
 }
 
+/// The raw series schema of the typed empty input [`empty_discovered_input`] builds.
+fn empty_discovered_series_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from(DEFAULT_FIELD_COLUMN),
+        }]),
+        eval_grid: None,
+    })
+}
+
 /// Whether `plan` is the typed empty input [`empty_discovered_input`] builds.
 ///
 /// It reads no region and holds no scan, so it is not one of the tables a node's binding is derived
-/// from: two selectors are "of one table" only if the tables they scan are one.
-fn is_empty_discovered_input(plan: &LogicalPlan) -> bool {
-    matches!(plan, LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row)
+/// from: two selectors are "of one table" only if the tables they scan are one. The remote
+/// admission gate reads the same shape back, to tell a node with nothing to ship from one that does
+/// read regions, so the declared frame is part of the check: an empty relation that does not
+/// declare the raw explicit-label frame is some other plan, not this input.
+pub(crate) fn is_empty_discovered_input(plan: &LogicalPlan) -> bool {
+    let LogicalPlan::EmptyRelation(relation) = plan else {
+        return false;
+    };
+    if relation.produce_one_row {
+        return false;
+    }
+    let Ok(frame) = raw_series_frame_schema_with_ordering(
+        &empty_discovered_series_schema(),
+        &RawLabelSource::Explicit,
+        NATIVE_ORDERING,
+    ) else {
+        return false;
+    };
+    relation.schema.as_arrow() == frame.as_ref()
 }
 
 /// The subtrees a [`NativeNode`] reads, in the order the node evaluates them.
@@ -2042,6 +2070,10 @@ fn build_evaluated_segment(
             .samples()
             .is_some_and(|schema| schema.eval_grid.is_some())
             || is_raw_series_source(&child)
+            // The typed empty frame of a selector that matched no table is an input in its own
+            // right: it reads no region and carries no metric, so there is nothing to wrap it in.
+            // A segment over it is still an explicit-label frame with no series.
+            || is_empty_discovered_input(&child)
         {
             inputs.push(child);
             local_tags.push(source_tags.get(index)?.clone());
