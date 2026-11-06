@@ -6979,16 +6979,20 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     let on_empty_sql = format!(
         r#"TQL EVAL (1, 1, '1s') {table}{{host="h001"}} - on() ({table}{{host="h001"}} * 2)"#
     );
-    async fn unlabeled_rows(output: Output) -> Vec<(i64, f64, bool)> {
+    async fn unlabeled_rows(output: Output) -> Vec<(i64, f64)> {
         let batches = match output.data {
             OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
             OutputData::RecordBatches(batches) => batches,
             _ => unreachable!("TQL EVAL returns record batches"),
         };
+        let schema = batches.schema();
+        let schema = schema.arrow_schema();
+        assert_eq!(schema.fields().len(), 2, "only timestamp and value");
+        assert!(schema.field_with_name("host").is_err());
+        assert!(schema.field_with_name("__name__").is_err());
         batches
             .iter()
             .flat_map(|batch| {
-                assert!(batch.column_by_name("host").is_none());
                 let timestamps = batch
                     .column_by_name("ts")
                     .unwrap()
@@ -7003,13 +7007,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
                 assert_eq!(values.len(), 1);
                 let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
                 (0..batch.num_rows())
-                    .map(|row| {
-                        (
-                            timestamps.value(row),
-                            values.value(row),
-                            batch.num_columns() == 2,
-                        )
-                    })
+                    .map(|row| (timestamps.value(row), values.value(row)))
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -7017,8 +7015,10 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     observer.clear();
     let on_empty_rows =
         unlabeled_rows(native_tql_output(&instance, &on_empty_sql, true).await).await;
-    assert!(observer.fused().is_none(), "{on_empty_sql}");
-    assert_eq!(on_empty_rows, vec![(1_000, -1_001.0, true)]);
+    let on_empty_plan = observer.two_input_fused();
+    assert_eq!(on_empty_plan.name(), "FusedSeriesExec", "{on_empty_sql}");
+    assert_eq!(on_empty_plan.schema().fields().len(), 2, "{on_empty_sql}");
+    assert_eq!(on_empty_rows, vec![(1_000, -1_001.0)]);
     let on_empty_legacy =
         unlabeled_rows(native_tql_output(&instance, &on_empty_sql, false).await).await;
     assert_eq!(on_empty_rows, on_empty_legacy);
@@ -7036,29 +7036,122 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
         native_result_rows(native_tql_output(&instance, &different_matchers, false).await).await;
     assert_eq!(different_matcher_rows, different_matcher_legacy);
 
-    // Group matching drops the full series identity, and a subquery stays on the ordinary planner path.
-    let fallback_expected = expected[..HOSTS].to_vec();
-    for (sql, expected_rows) in [
+    // Group matching executes natively; the subquery case remains on the ordinary path, unchanged.
+    let grouped_expected = expected[..HOSTS].to_vec();
+    for (index, (sql, expected_rows)) in [
         (
             format!(
                 r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
             ),
-            fallback_expected.clone(),
+            grouped_expected,
         ),
         (
             format!(r#"TQL EVAL (1, 1, '1s') rate({table}{{host="h000"}}[2s:1s])"#),
             vec![(1_000, "h000".to_string(), 0.5)],
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         observer.clear();
         let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert!(
-            observer.fused().is_none(),
-            "a fallback shape must not plan a fused node: {sql}"
-        );
+        if index == 0 {
+            let plan = observer.two_input_fused();
+            assert_two_source_native_plan(&observer, &plan, false);
+        } else {
+            assert!(
+                observer.fused().is_none(),
+                "a fallback shape must not plan a fused node: {sql}"
+            );
+        }
         assert_eq!(rows, expected_rows, "{sql}");
         let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(rows, legacy_rows, "{sql}");
+    }
+}
+
+/// Empty-key grouped matches retain the many side's labels and report kernel cardinality errors.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_hybrid_binary_empty_on_grouped_matching_and_errors() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_binary_empty_on_matching",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_empty_match (host STRING, kind STRING, zone_name STRING, \
+         ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, kind, zone_name)); \
+         INSERT INTO native_empty_match VALUES \
+         ('h0', 'a', '', 0, 10), ('h0', 'b', '', 0, 20), ('h0', 'c', 'z', 0, 2)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let labels = |kind: &str| {
+        [
+            ("host".to_string(), "h0".to_string()),
+            ("kind".to_string(), kind.to_string()),
+            ("zone_name".to_string(), "z".to_string()),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    for (query, expected) in [
+        (
+            r#"native_empty_match{kind=~"a|b"} - on() group_left(zone_name) native_empty_match{kind="c"}"#,
+            vec![(0, labels("a"), 8.0), (0, labels("b"), 18.0)],
+        ),
+        (
+            r#"native_empty_match{kind="c"} - on() group_right(zone_name) native_empty_match{kind=~"a|b"}"#,
+            vec![(0, labels("a"), -8.0), (0, labels("b"), -18.0)],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let (columns, rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.two_input_fused();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(columns, vec!["host", "kind", "ts", "val", "zone_name"]);
+        assert_eq!(rows, expected, "{query}");
+        let (_, legacy) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(rows, legacy, "legacy: {query}");
+    }
+
+    for (query, expected_error) in [
+        (
+            r#"native_empty_match{kind="c"} - on() native_empty_match{kind=~"a|b"}"#,
+            "found duplicate series for the match group {} on the right hand-side of the operation at 0 ms",
+        ),
+        (
+            r#"native_empty_match{kind=~"a|b"} - on() native_empty_match{kind="c"}"#,
+            "multiple matches for labels {} at 0 ms: many-to-one matching must be explicit",
+        ),
+        (
+            r#"native_empty_match{kind="c"} - on() group_left() native_empty_match{kind=~"a|b"}"#,
+            "found duplicate series for the match group {} on the right hand-side of the operation at 0 ms",
+        ),
+        (
+            r#"native_empty_match{kind=~"a|b"} - on() group_right() native_empty_match{kind="c"}"#,
+            "found duplicate series for the match group {} on the left hand-side of the operation at 0 ms",
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let result = instance
+            .do_query(&sql, native_query_context(true, 4))
+            .await
+            .remove(0);
+        let error = match result {
+            Ok(output) => collect_error(output).await,
+            Err(error) => error.to_string(),
+        };
+        let plan = observer.two_input_fused();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert!(error.contains(expected_error), "{query}: {error}");
     }
 }
 
