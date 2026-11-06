@@ -80,60 +80,104 @@ use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels,
 /// its result does not report.
 const LE_LABEL: &str = "le";
 
+/// The label a metric name is stored under, which a scan binds beside its tag columns rather than
+/// among them.
+const METRIC_NAME: &str = "__name__";
+
 /// Metadata labels the runtime removes from histogram result label sets.
 const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
-/// The label columns `node` reports, from the tags of the scan each input reads and the labels the
-/// nodes above it write.
+/// The complete label set `node` reports at run time, from the labels each input reports and the
+/// ones the nodes above it write.
+///
+/// This is the identity a [`NativeExpr::Merge`] groups by and a vector match reads, so the metric
+/// name is part of it whenever the series carries one. The caller's `source_tags` are the complete
+/// label sets of the sources, indexed by the `source_index` of the leaf that reads each: a scan
+/// bound to a single metric names every series it hands over even though the name is not one of its
+/// tag columns, so the canonical pass includes `__name__` in that source's entry. The query planner
+/// derives the *output columns* with its own walk, which reads the same algebra from the tag columns
+/// each source declares; the two have to agree on where a kernel drops the name, which is why this
+/// walk drops it exactly where the runtime does.
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
 /// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
 /// of each value keeps its operand's; a scalar and `vector(s)` have none; `count_values` keeps its
-/// grouping and the label it writes. `None` for a node whose labels this walk does not derive - a
-/// label rewrite of the metric name, an `absent` naming a label no input column carries, and a
-/// `count_values` whose destination is the metric name or no label at all, none of which is a column
-/// here - so a tree holding one reports no label set here. `None` is not the query's answer: the
-/// caller asks the existing planner for the columns the node is named after instead of declining the
-/// query.
+/// grouping and the label it writes; a label rewrite writes its destination, and a destination that
+/// names the metric name writes that name.
+///
+/// A node that reports a value of its own drops the name where its kernel does - `timestamp`, a
+/// range function whose result is computed (`rate`, `increase`, ...), a math or histogram map,
+/// `histogram_quantile`, every non-filtering binary - so a name rewrite below one of them cannot
+/// make the name reappear above it.
+///
+/// `None` for a node whose labels this walk does not derive - a `count_values` whose destination is
+/// empty. `None` proves nothing, so the caller treats it as "may alias" rather than as "distinct".
 pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
         NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } | NativeExpr::VectorOf { .. } => {
             Some(Vec::new())
         }
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Timestamp { input } => fused_output_tags(input, source_tags),
+        // These report a value of their own rather than the sample they read, and the runtime drops
+        // the name for each of them. `source_tags` is the authority on what an input carries, so a
+        // discovery input arrives carrying `__name__` and these arms are what decides it does not
+        // survive.
+        NativeExpr::Instant { input, op } => {
+            let tags = fused_output_tags(input, source_tags)?;
+            Some(match op.value {
+                InstantValue::Timestamp => without_metric_name(tags),
+                InstantValue::Sample | InstantValue::InfoTimestamp => tags,
+            })
+        }
+        NativeExpr::Window { input, op } => {
+            let tags = fused_output_tags(input, source_tags)?;
+            Some(if op.function.drops_metric_name() {
+                without_metric_name(tags)
+            } else {
+                tags
+            })
+        }
+        NativeExpr::Timestamp { input } => {
+            Some(without_metric_name(fused_output_tags(input, source_tags)?))
+        }
         // A label rewrite changes the label set itself: `label_replace` adds its destination label
-        // and an empty replacement removes it, so the input's labels are not the output's. A map of
-        // math alone keeps them.
+        // and an empty replacement removes it, so the input's labels are not the output's. A math or
+        // histogram kernel drops the metric name where it runs, and the ops apply in written order,
+        // so what follows a rewrite sees the set the rewrite left.
         NativeExpr::Map { input, op } => {
             let mut tags = fused_output_tags(input, source_tags)?;
             for operation in op.ops.iter() {
-                if let MapOp::Label(rewrite) = operation {
-                    let destination = rewrite.destination();
-                    if destination == "__name__" {
-                        return None;
+                match operation {
+                    MapOp::Label(rewrite) => {
+                        let destination = rewrite.destination();
+                        if tags.iter().any(|tag| tag == destination) {
+                            // The input carries the label, so the rewrite changes its value - and an
+                            // empty replacement may remove it, which the column still represents.
+                            tags.retain(|tag| tag != destination);
+                            tags.push(destination.to_string());
+                        } else if rewrite.writes_value() {
+                            // A fresh destination is a label the output only carries when the
+                            // rewrite can write a value; a delete-only rewrite of a label no input
+                            // carried publishes nothing.
+                            tags.push(destination.to_string());
+                        }
                     }
-                    tags.retain(|tag| tag != destination);
-                    tags.push(destination.to_string());
+                    MapOp::Math(_) | MapOp::Histogram(_) => tags = without_metric_name(tags),
                 }
             }
             Some(tags)
         }
-        // Its parameters are scalars, which carry no labels, so what the node reports are its
-        // input's labels.
-        NativeExpr::ParameterizedMap { input, .. } => fused_output_tags(input, source_tags),
+        // Its parameters are scalars, which carry no labels; the map computes a value of its own
+        // with the input, and its kernel drops the metric name.
+        NativeExpr::ParameterizedMap { input, .. } => {
+            Some(without_metric_name(fused_output_tags(input, source_tags)?))
+        }
         // An aggregate reports the grouping labels its input carries: `by(...)` keeps exactly the
         // ones it names, and `without(...)` keeps the rest and drops the metric name, as Prometheus
-        // does.
-        //
-        // What this derives is the set of *output columns*, which is what the node's schema needs.
-        // It is not the complete runtime label set: a chunk's labels also carry the metric name,
-        // which is bound separately from these tag columns rather than being one of them. A
-        // grouping by `__name__` keeps that name in the labels while contributing no column here,
-        // and `sum by (__name__)` over one metric is still one column set.
+        // does. A grouping by `__name__` keeps the name where the input reports one; a named scan
+        // only reports it among the runtime labels, so the aggregate keeps it there and publishes no
+        // column for it, which is what `sum by (__name__)` over one metric reports.
         NativeExpr::Aggregate { input, op } => {
             let input_tags = fused_output_tags(input, source_tags)?;
             Some(match &op.group {
@@ -144,7 +188,7 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                 Grouping::Without(dropped) => input_tags
                     .into_iter()
                     .filter(|tag| {
-                        tag != "__name__"
+                        tag != METRIC_NAME
                             && !dropped.iter().any(|name| name.as_ref() == tag.as_str())
                     })
                     .collect(),
@@ -158,63 +202,51 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
             | BoundVectorOp::Sort(_) => fused_output_tags(input, source_tags),
-            BoundVectorOp::Absent { labels } => {
-                let input_tags = fused_output_tags(input, source_tags)?;
-                let named = labels
+            // `absent` reports the labels its own matchers name, not the input's set and not the
+            // table's columns: it answers one series carrying exactly those, so a label the input
+            // does not carry is still a label of the result.
+            BoundVectorOp::Absent { labels } => Some(
+                labels
                     .tags()
                     .iter()
-                    .map(|label| label.name.as_ref())
-                    .collect::<Vec<_>>();
-                // `absent` reports matcher-named labels, not all input labels or the table's columns;
-                // only named labels present as input columns can be represented as frame columns.
-                if named
-                    .iter()
-                    .any(|name| !input_tags.iter().any(|tag| tag == name))
-                {
-                    return None;
-                }
-                Some(
-                    input_tags
-                        .into_iter()
-                        .filter(|tag| named.contains(&tag.as_str()))
-                        .collect(),
-                )
-            }
+                    .map(|label| label.name.to_string())
+                    .collect(),
+            ),
             // `count_values` writes the value it counts into its own label and then keeps its
             // grouping: `by(...)` keeps the labels named plus that destination, `without(...)`
             // keeps the rest minus the labels named and the metric name. What the node reports is
             // therefore the grouping applied to the labels its input carries, with the destination
             // among them - not the input's set, and not the scan's, since the grouping narrows both.
             //
-            // The destination is a column the node creates, so a rewrite of it above this node is a
-            // rewrite of an existing label. A destination naming the metric name, or no label at
-            // all, writes something that is not a column here, which leaves the set underivable for
-            // the same reason a map's `__name__` destination does. This walk derives the labels; it
-            // does not decide which groupings the kernel accepts, and those refusals stay where they
-            // are.
-            BoundVectorOp::CountValues { label, group }
-                if !label.is_empty() && label.as_ref() != "__name__" =>
-            {
+            // The destination is a label the node creates, so a rewrite of it above this node is a
+            // rewrite of an existing label. A destination naming the metric name writes the name
+            // the node groups by, which is the one label its result carries. This walk derives the
+            // labels; it does not decide which groupings the kernel accepts, and those refusals stay
+            // where they are.
+            BoundVectorOp::CountValues { label, group } if !label.is_empty() => {
                 let mut tags = fused_output_tags(input, source_tags)?;
-                let keeps_destination = match group {
-                    Grouping::By(kept) => {
-                        tags.retain(|tag| kept.iter().any(|name| name.as_ref() == tag.as_str()));
-                        // `by` keeps the label the node writes whether the input carried it or not.
-                        true
-                    }
-                    Grouping::Without(dropped) => {
-                        tags.retain(|tag| {
-                            tag != "__name__"
-                                && !dropped.iter().any(|name| name.as_ref() == tag.as_str())
-                        });
-                        // `without` removes it only when the grouping names it.
-                        !dropped.iter().any(|name| name.as_ref() == label.as_ref())
-                    }
-                };
-                if keeps_destination && !tags.iter().any(|tag| tag.as_str() == label.as_ref()) {
+                if !tags.contains(&label.to_string()) {
                     tags.push(label.to_string());
                 }
-                Some(tags)
+                Some(match group {
+                    Grouping::By(names) => {
+                        let mut output = tags
+                            .into_iter()
+                            .filter(|tag| names.iter().any(|name| name.as_ref() == tag))
+                            .collect::<Vec<_>>();
+                        // `by` keeps the label the node writes whether the input carried it or not.
+                        if !output.contains(&label.to_string()) {
+                            output.push(label.to_string());
+                        }
+                        output
+                    }
+                    Grouping::Without(names) => tags
+                        .into_iter()
+                        .filter(|tag| {
+                            tag != METRIC_NAME && !names.iter().any(|name| name.as_ref() == tag)
+                        })
+                        .collect(),
+                })
             }
             BoundVectorOp::CountValues { .. } => None,
             // A classic histogram function folds the bucket series that share the other labels into
@@ -233,60 +265,72 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             left,
             right,
             matching,
-        } => match (&left.output, &right.output) {
-            (NativeType::Scalar(_), _) => fused_output_tags(right, source_tags),
-            (_, NativeType::Scalar(_)) => fused_output_tags(left, source_tags),
-            _ => {
-                let kept = |tags: Vec<String>| -> Vec<String> {
-                    match &matching.labels {
-                        MatchingLabels::On(names) if !names.is_empty() => tags
-                            .into_iter()
-                            .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
-                            .collect(),
-                        MatchingLabels::Ignoring(names) => tags
-                            .into_iter()
-                            .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
-                            .collect(),
-                        MatchingLabels::On(_) => tags,
-                    }
-                };
-                let left_tags = fused_output_tags(left, source_tags)?;
-                let right_tags = fused_output_tags(right, source_tags)?;
-                // `on`/`ignoring` narrow which of the many side's labels survive; a group modifier
-                // then copies the names it lists *from the one side*, with that side's values. The
-                // names are bound in the modifier and the values come from the series, so both
-                // halves are needed to say what the output carries: a `group_left(container)`
-                // keeps the left side's labels and adds `container`, which only the right side has.
-                let mut tags = match &matching.cardinality {
-                    Cardinality::OneToOne => kept(left_tags.clone()),
-                    Cardinality::ManyToOne(_) => left_tags.clone(),
-                    Cardinality::OneToMany(_) => right_tags.clone(),
-                };
-                let (includes, include_tags): (&[Arc<str>], &Vec<String>) =
-                    match &matching.cardinality {
-                        Cardinality::OneToOne => (&[], &left_tags),
-                        Cardinality::ManyToOne(labels) => (labels, &right_tags),
-                        Cardinality::OneToMany(labels) => (labels, &left_tags),
+        } => {
+            let keeps_name = keeps_metric_name(matching);
+            let tags = match (&left.output, &right.output) {
+                (NativeType::Scalar(_), _) => fused_output_tags(right, source_tags)?,
+                (_, NativeType::Scalar(_)) => fused_output_tags(left, source_tags)?,
+                _ => {
+                    let kept = |tags: Vec<String>| -> Vec<String> {
+                        match &matching.labels {
+                            MatchingLabels::On(names) if !names.is_empty() => tags
+                                .into_iter()
+                                .filter(|tag| {
+                                    names.iter().any(|name| name.as_ref() == tag.as_str())
+                                })
+                                .collect(),
+                            MatchingLabels::Ignoring(names) => tags
+                                .into_iter()
+                                .filter(|tag| {
+                                    !names.iter().any(|name| name.as_ref() == tag.as_str())
+                                })
+                                .collect(),
+                            MatchingLabels::On(_) => tags,
+                        }
                     };
-                for tag in include_tags {
-                    if includes.iter().any(|label| label.as_ref() == tag.as_str())
-                        && !tags.contains(tag)
-                    {
-                        tags.push(tag.clone());
-                    }
-                }
-                // A filled left side takes an unmatched right series' matching labels, so those
-                // results carry the right side's tags.
-                if matching.fill.lhs.is_some() {
-                    for tag in kept(fused_output_tags(right, source_tags)?) {
-                        if !tags.contains(&tag) {
-                            tags.push(tag);
+                    let left_tags = fused_output_tags(left, source_tags)?;
+                    let right_tags = fused_output_tags(right, source_tags)?;
+                    // `on`/`ignoring` narrow which of the many side's labels survive; a group modifier
+                    // then copies the names it lists *from the one side*, with that side's values. The
+                    // names are bound in the modifier and the values come from the series, so both
+                    // halves are needed to say what the output carries: a `group_left(container)`
+                    // keeps the left side's labels and adds `container`, which only the right side has.
+                    let mut tags = match &matching.cardinality {
+                        Cardinality::OneToOne => kept(left_tags.clone()),
+                        Cardinality::ManyToOne(_) => left_tags.clone(),
+                        Cardinality::OneToMany(_) => right_tags.clone(),
+                    };
+                    let (includes, include_tags): (&[Arc<str>], &Vec<String>) =
+                        match &matching.cardinality {
+                            Cardinality::OneToOne => (&[], &left_tags),
+                            Cardinality::ManyToOne(labels) => (labels, &right_tags),
+                            Cardinality::OneToMany(labels) => (labels, &left_tags),
+                        };
+                    for tag in include_tags {
+                        if includes.iter().any(|label| label.as_ref() == tag.as_str())
+                            && !tags.contains(tag)
+                        {
+                            tags.push(tag.clone());
                         }
                     }
+                    // A filled left side takes an unmatched right series' matching labels, so those
+                    // results carry the right side's tags.
+                    if matching.fill.lhs.is_some() {
+                        for tag in kept(fused_output_tags(right, source_tags)?) {
+                            if !tags.contains(&tag) {
+                                tags.push(tag);
+                            }
+                        }
+                    }
+                    tags
                 }
-                Some(tags)
-            }
-        },
+            };
+            Some(if keeps_name {
+                tags
+            } else {
+                without_metric_name(tags)
+            })
+        }
         NativeExpr::Set { left, right, op } => {
             let mut tags = fused_output_tags(left, source_tags)?;
             if op.op == SetOp::Or {
@@ -319,6 +363,23 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             Some(tags)
         }
     }
+}
+/// Whether a binary operation reports the samples of the side it keeps, name included.
+///
+/// A filtering comparison reports those samples, so the name survives it. Every other binary
+/// operation computes new values, and `bool` reports the comparison's own outcome rather than
+/// either operand's samples, so both drop the name.
+fn keeps_metric_name(matching: &BinaryMatching) -> bool {
+    matches!(
+        matching.op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
+    ) && !matching.return_bool
+}
+
+/// The labels a node reports after the metric name is dropped, which is what a kernel that computes
+/// a value of its own does to the samples it reports.
+fn without_metric_name(tags: Vec<String>) -> Vec<String> {
+    tags.into_iter().filter(|tag| tag != METRIC_NAME).collect()
 }
 
 /// What one node produces.
@@ -884,10 +945,21 @@ pub struct NativeNode {
 ///
 /// The rewrite is judged by the labels it writes and the ones its input carries, which is why the
 /// caller supplies what it knows about each source's tags, indexed by the `source_index` the leaves
-/// were bound to: a destination that names no label of the input writes a fresh one, and a fresh
-/// label cannot make two series equal. That is the difference between `label_replace(x, "dst", "$1",
-/// "host", "(.*)")` - which no merge has to collect - and `label_replace(x, "host", "same", "host",
-/// ".*")`, which folds every series of `x` into one label set.
+/// were bound to: a destination that names no ordinary label of the input writes a fresh one, and a
+/// fresh ordinary label cannot make two series equal. That is the difference between
+/// `label_replace(x, "dst", "$1", "host", "(.*)")` - which no merge has to collect - and
+/// `label_replace(x, "host", "same", "host", ".*")`, which folds every series of `x` into one label
+/// set.
+///
+/// A source's entry is its complete runtime label set, so `__name__` is one of its labels whenever
+/// its series carry a name - a scan bound to one metric names every series from its binding. That is
+/// what makes `label_replace(x, "__name__", "same", "__name__", ".*")` a rewrite of an existing
+/// label: two metrics whose ordinary labels are equal can be told apart by name alone, and rewriting
+/// that name folds them into one identity. A name write is collected even when the derived set no
+/// longer carries `__name__` - after `abs`, a `timestamp` or a range function dropped it - because
+/// the scan below those kernels can still hold several metrics whose ordinary labels are equal, and
+/// writing one name puts them under one identity; the walk has no proof that the input reads a
+/// single metric, so the conservative answer is the one that collects.
 ///
 /// Everything else either keeps the set it read or answers a set of its own:
 ///
@@ -970,6 +1042,12 @@ pub fn duplicates_canonical_labels(node: &NativeNode, source_tags: &[Vec<String>
 ///
 /// The walk is over the ops in written order, starting from the labels the input reports. A
 /// destination the input already carries can fold two series into one; a fresh destination cannot.
+/// A `__name__` destination is always treated as carried, even when the derived set has lost it: a
+/// kernel such as `abs`, `timestamp` or a range function drops the name, but the scan below it can
+/// still hold several metrics whose ordinary labels are equal, and writing one name puts those
+/// identities under one label set. Nothing here proves the input reads a single metric, so the
+/// conservative answer is the one that collects.
+///
 /// `None` when the input's label set is not derivable, which is treated as "it may carry the
 /// destination" by the caller: an unknown set proves nothing, so the conservative answer is the one
 /// that collects.
@@ -983,10 +1061,12 @@ fn map_writes_existing_label(
     for operation in op.ops.iter() {
         if let MapOp::Label(rewrite) = operation {
             let destination = rewrite.destination();
-            if destination == "__name__" || tags.iter().any(|tag| tag == destination) {
+            if destination == METRIC_NAME || tags.iter().any(|tag| tag == destination) {
                 existing = true;
             }
-            if !tags.iter().any(|tag| tag == destination) {
+            // A label the input did not carry is one the rewrite publishes only when it can write a
+            // value; a delete-only rewrite adds nothing a later op could read as carried.
+            if rewrite.writes_value() && !tags.iter().any(|tag| tag == destination) {
                 tags.push(destination.to_string());
             }
         }
