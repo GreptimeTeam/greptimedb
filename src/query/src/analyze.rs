@@ -463,6 +463,15 @@ impl Display for JsonMetrics {
 #[cfg(test)]
 mod tests {
     use datafusion::physical_plan::empty::EmptyExec;
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::frame::{FrameLabelMode, raw_series_frame_schema};
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datatypes::series::time::{EvalGrid, GridSpec};
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
+    use promql::native::plan::{
+        BoundInput, BoundInstant, InstantValue, NativeExpr, NativeNode, NativeTree, NativeType,
+    };
+    use store_api::region_engine::RawLabelSource;
 
     use super::*;
 
@@ -571,49 +580,115 @@ mod tests {
     /// another node, which is the only place a fused operator runs in a standalone server.
     #[test]
     fn qbs_analyze_json_nests_the_native_tree_below_its_operator() {
-        fn node(
-            line: &str,
-            metrics: &[(&str, usize)],
-            children: Vec<NativeTreeMetrics>,
-        ) -> NativeTreeMetrics {
-            NativeTreeMetrics {
-                line: line.to_string(),
-                metrics: metrics
-                    .iter()
-                    .map(|(name, value)| (name.to_string(), *value))
-                    .collect(),
-                children,
-            }
-        }
-        let metrics = JsonMetrics::from_record_batch_metrics(RecordBatchMetrics {
-            plan_metrics: vec![PlanMetrics {
-                plan: "FusedSeriesExec: rate(x[5m])\n  Window: rate".to_string(),
-                plan_name: "FusedSeriesExec".to_string(),
-                level: 0,
-                metrics: vec![],
-                native: Some(node(
-                    "Window: rate [300000ms] offset 0 anchor -",
-                    &[("output_values", 3)],
-                    vec![node("Input: raw samples source=0", &[], vec![])],
-                )),
-            }],
-            ..Default::default()
+        let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 2).unwrap()).unwrap());
+        let schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec {
+                name: Arc::from("value"),
+            }]),
+            eval_grid: None,
         });
-        let value = serde_json::to_value(metrics).unwrap();
+        let raw = NativeType::Samples(Arc::clone(&schema));
+        let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: schema.fields.clone(),
+            eval_grid: Some(Arc::clone(&grid)),
+        }));
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        source_index: 0,
+                        output: raw.clone(),
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: raw,
+                }),
+                op: BoundInstant {
+                    lookback_ms: 0,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value: InstantValue::Sample,
+                    output_grid: Arc::clone(&grid),
+                },
+            },
+            output: evaluated,
+        })
+        .unwrap();
+        let frame_schema = raw_series_frame_schema(&schema, FrameLabelMode::Explicit).unwrap();
+        let child = datafusion::logical_expr::LogicalPlan::EmptyRelation(
+            datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(
+                    datafusion_common::DFSchema::try_from(frame_schema.clone()).unwrap(),
+                ),
+            },
+        );
+        let binding = FusedSeriesBinding {
+            grid,
+            metric_name: None,
+            time_index: "time".to_string(),
+            tags: vec![],
+        };
+        let rows = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new(
+                "time",
+                DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let frame = FusedSeries::series_frame_schema(&tree).unwrap();
+        for (output, format, header, param) in [
+            (
+                rows,
+                promql::extension_plan::FusedOutputFormat::PlainRows,
+                "FusedSeriesExec",
+                "",
+            ),
+            (
+                frame,
+                promql::extension_plan::FusedOutputFormat::SeriesFrame,
+                "FusedSeriesExec: (output: series_frame)",
+                "(output: series_frame)",
+            ),
+        ] {
+            let fused = FusedSeries::try_new_with_format(
+                tree.clone(),
+                binding.clone(),
+                vec![child.clone()],
+                Arc::new(datafusion_common::DFSchema::try_from(output).unwrap()),
+                format,
+            )
+            .unwrap();
+            let exec = fused
+                .to_execution_plan(vec![(
+                    Arc::new(EmptyExec::new(frame_schema.clone())),
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous,
+                )])
+                .unwrap();
+            let mut collector = MetricCollector::new(false);
+            accept(exec.as_ref(), &mut collector).unwrap();
+            let mut collected = collector.record_batch_metrics;
+            collected.plan_metrics.truncate(1);
+            let plan = &collected.plan_metrics[0];
+            assert_eq!(plan.plan.lines().next().unwrap(), header, "{}", plan.plan);
+            assert!(plan.native.is_some(), "the native tree must be collected");
+            let metrics = JsonMetrics::from_record_batch_metrics(collected);
+            let value = serde_json::to_value(metrics).unwrap();
 
-        assert_eq!(value["name"], "FusedSeriesExec");
-        assert_eq!(value["param"], "rate(x[5m])");
-        assert_eq!(value["children"][0]["name"], "Window");
-        assert_eq!(
-            value["children"][0]["param"],
-            "rate [300000ms] offset 0 anchor -"
-        );
-        assert_eq!(value["children"][0]["metrics"]["output_values"], 3);
-        assert_eq!(value["children"][0]["children"][0]["name"], "Input");
-        assert_eq!(
-            value["children"][0]["children"][0]["param"],
-            "raw samples source=0"
-        );
+            assert_eq!(value["name"], "FusedSeriesExec");
+            assert_eq!(value["param"], param);
+            assert_eq!(value["children"][0]["name"], "Instant");
+            assert_eq!(
+                value["children"][0]["param"],
+                "lookback 0ms offset 0 on grid 0/1000x2"
+            );
+            assert_eq!(value["children"][0]["children"][0]["name"], "Input");
+            assert_eq!(
+                value["children"][0]["children"][0]["param"],
+                "raw samples source=0, contiguous"
+            );
+        }
     }
 
     #[test]

@@ -576,14 +576,7 @@ mod tests {
         );
         LogicalPlan::Extension(Extension {
             node: Arc::new(
-                FusedSeries::try_new(
-                    Arc::from("some_metric{host=\"left\"} + on(host) some_metric{host=\"right\"}"),
-                    tree,
-                    binding,
-                    vec![left, right],
-                    output_schema,
-                )
-                .unwrap(),
+                FusedSeries::try_new(tree, binding, vec![left, right], output_schema).unwrap(),
             ),
         })
     }
@@ -630,14 +623,7 @@ mod tests {
 
         LogicalPlan::Extension(Extension {
             node: Arc::new(
-                FusedSeries::try_new(
-                    Arc::from("some_metric"),
-                    tree,
-                    binding,
-                    vec![input],
-                    output_schema,
-                )
-                .unwrap(),
+                FusedSeries::try_new(tree, binding, vec![input], output_schema).unwrap(),
             ),
         })
     }
@@ -677,12 +663,7 @@ mod tests {
         let tree = NativeTree::try_new(merge).unwrap();
         LogicalPlan::Extension(Extension {
             node: Arc::new(
-                FusedSeries::try_new_canonical_producer(
-                    Arc::from("some_metric"),
-                    tree,
-                    binding,
-                    vec![input],
-                )
+                FusedSeries::try_new_canonical_producer(tree, binding, vec![input])
                 .unwrap(),
             ),
         })
@@ -1294,15 +1275,9 @@ mod tests {
 
         let (partial_tree, final_tree) =
             FusedSeries::split_aggregate(&tree, "ts").unwrap().unwrap();
-        let partial = FusedSeries::try_new_state_export(
-            Arc::from("sum(some_metric)"),
-            partial_tree,
-            binding.clone(),
-            vec![input],
-        )
-        .unwrap();
+        let partial =
+            FusedSeries::try_new_state_export(partial_tree, binding.clone(), vec![input]).unwrap();
         let final_node = FusedSeries::try_new(
-            Arc::from("sum(some_metric)"),
             final_tree,
             binding,
             vec![LogicalPlan::Extension(Extension {
