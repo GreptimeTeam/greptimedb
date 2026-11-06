@@ -292,6 +292,137 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_select_admin_function_requires_admin_privilege() {
+        use auth::{
+            DefaultPermissionChecker, Identity, Password, PermissionCheckerRef, UserProvider,
+            static_user_provider_from_option,
+        };
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(DefaultPermissionChecker::arc());
+        let standalone =
+            GreptimeDbStandaloneBuilder::new("test_select_admin_function_requires_admin_privilege")
+                .with_plugin(plugins)
+                .build()
+                .await;
+        let instance = standalone.fe_instance();
+
+        create_table(
+            instance,
+            "CREATE TABLE admin_fn_demo(host STRING, ts TIMESTAMP TIME INDEX)",
+        )
+        .await;
+
+        async fn user_ctx(username: &str, mode: &str) -> QueryContextRef {
+            let provider = static_user_provider_from_option(&format!(
+                "static_user_provider:cmd:{username}:{mode}={username}_pwd"
+            ))
+            .unwrap();
+            let user = provider
+                .authenticate(
+                    Identity::UserId(username, None),
+                    Password::PlainText(format!("{username}_pwd").into()),
+                )
+                .await
+                .unwrap();
+            let ctx = QueryContext::arc();
+            ctx.set_current_user(user);
+            ctx
+        }
+
+        async fn assert_select_admin_denied(instance: &Instance, ctx: &QueryContextRef) {
+            for sql in [
+                "SELECT flush_table('admin_fn_demo')",
+                "SELECT compact_table('admin_fn_demo')",
+                "SELECT flush_region(0)",
+                "SELECT compact_region(0)",
+                "SELECT migrate_region(1, 2, 3)",
+                "SELECT gc_regions(0)",
+                "SELECT gc_table('admin_fn_demo')",
+                "SELECT build_index('admin_fn_demo')",
+                "SELECT build_series_index('admin_fn_demo')",
+                "SELECT flush_flow('admin_fn_demo')",
+                "SELECT reconcile_catalog()",
+                "SELECT reconcile_database('public')",
+                "SELECT reconcile_table('admin_fn_demo')",
+            ] {
+                let mut results = SqlQueryHandler::do_query(instance, sql, ctx.clone()).await;
+                let output = results
+                    .remove(0)
+                    .unwrap_or_else(|e| panic!("unexpected error for {sql}: {e}"));
+                let OutputData::Stream(stream) = output.data else {
+                    panic!("{sql} must return a stream, got {:?}", output.data)
+                };
+                let err = common_recordbatch::util::collect_batches(stream)
+                    .await
+                    .expect_err("read-only user must be denied");
+                assert_eq!(
+                    StatusCode::PermissionDenied,
+                    err.status_code(),
+                    "unexpected error for {sql}: {err}"
+                );
+            }
+        }
+
+        let readonly_ctx = user_ctx("ro_user", "ro").await;
+        let readwrite_ctx = user_ctx("rw_user", "rw").await;
+
+        assert_select_admin_denied(instance, &readonly_ctx).await;
+
+        let mut results = SqlQueryHandler::do_query(
+            instance.as_ref(),
+            "ADMIN FLUSH_TABLE('admin_fn_demo')",
+            readwrite_ctx.clone(),
+        )
+        .await;
+        assert!(
+            results.remove(0).is_ok(),
+            "ADMIN FLUSH_TABLE must keep working for read-write users"
+        );
+
+        for sql in [
+            "SELECT flush_table('admin_fn_demo')",
+            "SELECT compact_table('admin_fn_demo')",
+        ] {
+            let mut results =
+                SqlQueryHandler::do_query(instance.as_ref(), sql, readwrite_ctx.clone()).await;
+            let output = results
+                .remove(0)
+                .unwrap_or_else(|e| panic!("unexpected error for {sql}: {e}"));
+            let OutputData::Stream(stream) = output.data else {
+                panic!("{sql} must return a stream");
+            };
+            let batches = common_recordbatch::util::collect_batches(stream)
+                .await
+                .unwrap_or_else(|e| panic!("unexpected error for {sql}: {e}"));
+            assert_eq!(
+                1,
+                batches.iter().count(),
+                "{sql} must return one record batch"
+            );
+        }
+
+        let mut results = SqlQueryHandler::do_query(
+            instance.as_ref(),
+            "ADMIN FLUSH_TABLE('admin_fn_demo')",
+            readonly_ctx.clone(),
+        )
+        .await;
+        let err = results.remove(0).unwrap_err();
+        assert_eq!(
+            StatusCode::PermissionDenied,
+            err.status_code(),
+            "unexpected error: {err}"
+        );
+
+        let output = query(instance, "DROP TABLE admin_fn_demo").await;
+        let OutputData::AffectedRows(x) = output.data else {
+            unreachable!()
+        };
+        assert_eq!(x, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_sql_interceptor_plugin() {
         #[derive(Default)]
         struct AssertionHook {
