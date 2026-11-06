@@ -3787,10 +3787,9 @@ async fn native_fused_same_table_nested_match_keeps_prior_admission() {
     );
 }
 
-/// Partitioned cross-table operands are independently transported by raw sources: the pair is one
-/// native binary whose two inputs each name the metric they read. Repeated scans of one partitioned
-/// table retain the region-local multi-scan refusal, since that node would read neither the other
-/// scans nor the fragments another region holds.
+/// Partitioned operands are independently transported by raw sources: the pair is one native
+/// binary whose two inputs each name the metric they read. Repeated selectors of one partitioned
+/// table read that table once per occurrence too, so no region is handed a node over bare scans.
 #[tokio::test]
 async fn native_fused_partitioned_pair_requires_per_selector_raw_sources() {
     let plan = build_native_fused_plan_with_provider(
@@ -3808,13 +3807,25 @@ async fn native_fused_partitioned_pair_requires_per_selector_raw_sources() {
             "{plan}"
         );
     }
+    // Repeated selectors of one partitioned table are admitted the same way: each occurrence reads
+    // that table through its own raw source, so the match runs above the regions rather than
+    // inside one of them.
     let repeated = build_native_fused_plan_with_provider(
         "some_metric / some_metric",
         true,
         native_two_table_provider(vec![0]).await,
     )
     .await;
-    assert!(!has_pair_node(&repeated), "{repeated}");
+    let repeated_fused =
+        find_fused_series(&repeated).unwrap_or_else(|| panic!("repeated selectors: {repeated}"));
+    assert_eq!(2, repeated_fused.inputs().len(), "{repeated}");
+    for input in repeated_fused.inputs() {
+        assert!(
+            matches!(input, LogicalPlan::Extension(extension)
+            if extension.node.as_any().is::<RawSeriesSource>()),
+            "each occurrence reads its own source: {repeated}"
+        );
+    }
 }
 
 /// `some_metric` as [`native_two_table_provider`] builds it, and `other_metric` whose tags are
@@ -4162,17 +4173,37 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
     }
 }
 
-/// More than two same-table selectors on a partitioned table must not be placed as a
-/// multi-child region-local node. Cross-table occurrences may each use a raw source.
+/// More than two same-table selectors on a partitioned table each read that table through their own
+/// source, so the match runs above the regions. No region is handed a node over the bare scans, which
+/// is the shape it refuses.
 #[tokio::test]
-async fn native_fused_same_table_three_selectors_on_partitioned_table_fall_back() {
+async fn native_fused_same_table_three_selectors_on_partitioned_table_bind_their_sources() {
     let plan = build_native_fused_plan_with_provider(
         "some_metric + some_metric + some_metric",
         true,
         native_two_table_provider(vec![0]).await,
     )
     .await;
-    assert!(!has_pair_node(&plan), "{plan}");
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{plan}"));
+    assert!(fused.inputs().len() > 1, "{plan}");
+    assert_eq!(
+        vec![
+            "some_metric".to_string(),
+            "some_metric".to_string(),
+            "some_metric".to_string()
+        ],
+        fused_input_metrics(&plan),
+        "each selector occurrence reads its own source: {plan}"
+    );
+    // The node keeps no bare scan of its own: every child of it is a native node that reads through
+    // its own source, so nothing hands a region a multi-scan node.
+    for input in fused.inputs() {
+        assert!(
+            matches!(input, LogicalPlan::Extension(extension)
+                if extension.node.as_any().is::<FusedSeries>()),
+            "{plan}"
+        );
+    }
 }
 
 /// Find the final half of a split aggregate.
@@ -4866,9 +4897,10 @@ async fn native_classic_histogram_provider() -> DfTableSourceProvider {
     )
 }
 
-/// Two classic-histogram functions over raw series, each admitted as one native operand: a
-/// `histogram_quantile` reads each histogram off the bucket series that share its other labels and
-/// drops `le`, so neither operand keeps `le` in its binding nor in the statement's output.
+/// Two classic-histogram functions over raw series: a `histogram_quantile` reads each histogram off
+/// the bucket series that share its other labels and drops `le`, so neither operand keeps `le` in
+/// its binding nor in the statement's output. Each occurrence reads its own source, so the division
+/// matches above both of them instead of joining two separately fused operands.
 #[tokio::test]
 async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching() {
     let provider = native_classic_histogram_provider().await;
@@ -4879,9 +4911,15 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
     )
     .await;
     let display = plan.display_indent().to_string();
-    // The whole statement has two same-table selectors and declines at that guard. Each
-    // histogram_quantile is nevertheless a one-selector operand and is admitted by the hybrid path.
-    assert_eq!(4, display.matches("FusedSeries").count(), "{display}");
+    // One node over one segment per selector occurrence: the two reads are independent, so the
+    // division matches above them rather than below a join of two fused operands.
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{display}"));
+    assert_eq!(2, fused.inputs().len(), "{display}");
+    assert_eq!(
+        vec!["m".to_string(), "m".to_string()],
+        fused_input_metrics(&plan),
+        "each selector occurrence reads its own source: {display}"
+    );
     assert!(
         !display.contains(".le ="),
         "join key still references dropped `le`: {display}"
@@ -4921,11 +4959,13 @@ async fn native_fused_histogram_quantile_binary_drops_le_from_operand_matching()
     }
 }
 
-/// A shape the split cannot keep correct keeps the existing plan: a binary operation whose sibling
-/// is data would match one side's series before the merge, a sibling a call computes has no native
-/// node at all, and a group by a value field cannot be named by the state rows. A literal scalar
-/// sibling is not one of them: the operation is computed per series below the fold, or rebuilt over
-/// the merged values above it.
+/// A shape neither the split nor the node can keep correct keeps the existing plan: a sibling a
+/// call computes has no native node at all, a group by a value field cannot be named by the state
+/// rows, and a kernel the compiler does not fold keeps it too.
+///
+/// `sum(m) / m` and `m + sum(m)` are not on this list. The fold and the plain selector are two
+/// occurrences, so each reads its own source and the operation above them answers over both; the
+/// split is only the optimization the one-input shapes keep.
 ///
 /// `timestamp(sum(m))` and `sum(timestamp(abs(m)))` are not on this list. `timestamp` over a
 /// computed vector reports the evaluation time, which is what Prometheus reports too - an aggregate
@@ -4937,10 +4977,6 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     for query in [
         "quantile(0.5, some_metric)",
         "sum(quantile(0.5, some_metric))",
-        // The sibling is data rather than a literal scalar, so the operation would pair each series
-        // with the aggregate's series before the merge.
-        "sum(some_metric) / some_metric",
-        "some_metric + sum(some_metric)",
         // A scalar a call computes is not a literal the split could keep: `scalar(...)` has no
         // native node, so the statement keeps the existing plan.
         "sum(some_metric) / scalar(some_metric)",
@@ -4962,6 +4998,38 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
             native.display_indent().to_string(),
             without_flag.display_indent().to_string(),
             "`{query}` must keep the existing plan"
+        );
+    }
+}
+
+/// A fold beside a plain selector is two occurrences, so each reads its own source and the fold and
+/// the match run above both. No partition needs to hold the whole of the input for that: the inputs
+/// are reconciled before the node evaluates them.
+#[tokio::test]
+async fn native_fused_aggregate_above_an_independent_selector_is_admitted() {
+    for query in [
+        "sum(some_metric) / some_metric",
+        "some_metric + sum(some_metric)",
+    ] {
+        let native = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&native).unwrap_or_else(|| panic!("`{query}`: {native}"));
+        assert_eq!(2, fused.inputs().len(), "`{query}`: {native}");
+        assert_eq!(
+            vec!["some_metric".to_string(), "some_metric".to_string()],
+            fused_input_metrics(&native),
+            "`{query}`: each selector occurrence reads its own source: {native}"
+        );
+        assert!(
+            find_final_split(&native).is_none(),
+            "`{query}`: a tree over two inputs is not a one-input split: {native}"
+        );
+        let without_flag = build_native_fused_plan(query, false).await;
+        assert!(
+            !without_flag
+                .display_indent()
+                .to_string()
+                .contains("FusedSeries"),
+            "`{query}` takes the native plan only when it is enabled: {without_flag}"
         );
     }
 }
@@ -5185,19 +5253,28 @@ async fn native_fused_preparation_decline_preserves_legacy_plan() {
     );
 }
 
-/// An aggregate is answered natively now (`sum(rate(..))`, `avg by(..)(..)` are split), so what
-/// still falls back here is the shape the split cannot carry: a fold over two actual sources, which
-/// no partition holds the whole of.
+/// An aggregate is answered natively now (`sum(rate(..))`, `avg by(..)(..)` are split), and so is a
+/// fold beside a plain selector of the same table: two occurrences are two inputs, each bound to its
+/// own source, and the match above them answers over both.
 #[tokio::test]
-async fn native_fused_aggregate_falls_back_to_legacy_plan() {
+async fn native_fused_aggregate_runs_above_independent_inputs() {
     for query in ["some_metric + sum(some_metric)"] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
-        assert!(!display.contains("FusedSeries"), "{query}: {display}");
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        assert_eq!(2, fused.inputs().len(), "{query}: {display}");
+        assert_eq!(
+            vec!["some_metric".to_string(), "some_metric".to_string()],
+            fused_input_metrics(&plan),
+            "{query}: each selector occurrence reads its own source: {display}"
+        );
         assert!(find_final_split(&plan).is_none(), "{query}: {display}");
-        assert!(display.contains("Aggregate:"), "{query}: {display}");
         let legacy = build_native_fused_plan(query, false).await;
-        assert_eq!(display, legacy.display_indent().to_string(), "{query}");
+        let legacy_display = legacy.display_indent().to_string();
+        assert!(
+            !legacy_display.contains("FusedSeries"),
+            "{query}: the native plan is enabled only by the flag: {legacy_display}"
+        );
     }
 }
 
