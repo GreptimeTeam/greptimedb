@@ -61,15 +61,7 @@ use crate::error::{
     ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result, SerializePartitionExprSnafu,
     UnexpectedSnafu,
 };
-use crate::metrics::{
-    PRECISE_FILTER_ROWS_PARQUET_TOTAL, READ_ROW_GROUPS_BEFORE_FILTERING_TOTAL,
-    READ_ROW_GROUPS_BLOOM_FILTER_INDEX_FILTERED_TOTAL,
-    READ_ROW_GROUPS_FULLTEXT_INDEX_FILTERED_TOTAL, READ_ROW_GROUPS_INVERTED_INDEX_FILTERED_TOTAL,
-    READ_ROW_GROUPS_MINMAX_INDEX_FILTERED_TOTAL, READ_ROWS_IN_ROW_GROUP_BEFORE_FILTERING_TOTAL,
-    READ_ROWS_IN_ROW_GROUP_BLOOM_FILTER_INDEX_FILTERED_TOTAL,
-    READ_ROWS_IN_ROW_GROUP_FULLTEXT_INDEX_FILTERED_TOTAL,
-    READ_ROWS_IN_ROW_GROUP_INVERTED_INDEX_FILTERED_TOTAL, READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
-};
+use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
@@ -1633,24 +1625,6 @@ impl ReaderFilterMetrics {
                 .get_or_insert_with(Default::default)
                 .merge_from(other_metrics);
         }
-    }
-
-    /// Reports metrics.
-    pub(crate) fn observe(&self) {
-        READ_ROW_GROUPS_BEFORE_FILTERING_TOTAL.inc_by(self.rg_total as u64);
-        READ_ROW_GROUPS_FULLTEXT_INDEX_FILTERED_TOTAL.inc_by(self.rg_fulltext_filtered as u64);
-        READ_ROW_GROUPS_INVERTED_INDEX_FILTERED_TOTAL.inc_by(self.rg_inverted_filtered as u64);
-        READ_ROW_GROUPS_MINMAX_INDEX_FILTERED_TOTAL.inc_by(self.rg_minmax_filtered as u64);
-        READ_ROW_GROUPS_BLOOM_FILTER_INDEX_FILTERED_TOTAL.inc_by(self.rg_bloom_filtered as u64);
-
-        PRECISE_FILTER_ROWS_PARQUET_TOTAL.inc_by(self.rows_precise_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_BEFORE_FILTERING_TOTAL.inc_by(self.rows_total as u64);
-        READ_ROWS_IN_ROW_GROUP_FULLTEXT_INDEX_FILTERED_TOTAL
-            .inc_by(self.rows_fulltext_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_INVERTED_INDEX_FILTERED_TOTAL
-            .inc_by(self.rows_inverted_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_BLOOM_FILTER_INDEX_FILTERED_TOTAL
-            .inc_by(self.rows_bloom_filtered as u64);
     }
 
     fn update_index_metrics(&mut self, index_type: &str, row_group_count: usize, row_count: usize) {
