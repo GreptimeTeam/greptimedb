@@ -27,6 +27,70 @@ spec.loader.exec_module(storage)
 
 
 class StorageTests(unittest.TestCase):
+    def test_trace_partial_query_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / 'report.json'
+            summary = root / 'ci-summary.md'
+            participant = dict(id='victoriatraces', target='victoriatraces', role='comparison')
+            result = dict(participant='victoriatraces', health='recorded healthy snapshots',
+                          queries=dict(T01=dict(status='passed'), T06=dict(status='failed', reason='HTTP 400'),
+                                       T08=dict(status='unsupported')))
+            data = dict(workloads=[dict(id='traces', participants=[participant],
+                                       scenarios=[dict(id='main', results=[result])])])
+
+            def run(payload, allow=True):
+                report.write_text(json.dumps(payload))
+                summary.write_text('original summary\n')
+                return storage.audit(root, report, ['victoriatraces'], 'file',
+                                     allow_trace_query_failures=allow)
+
+            with self.assertRaisesRegex(ValueError, 'failed or unavailable'):
+                run(data, allow=False)
+            output = run(data)
+            self.assertTrue(output['passed'])
+            self.assertEqual(output['query_failures'], [dict(workload='traces', scenario='main',
+                             participant='victoriatraces', query='T06', reason='HTTP 400')])
+            self.assertEqual(json.loads(report.read_text()), data)
+            self.assertIn('not an all-pass query run', summary.read_text())
+            self.assertIn('victoriatraces / T06: failed', summary.read_text())
+            for workload in ('metrics', 'agent'):
+                changed = copy.deepcopy(data)
+                changed['workloads'][0]['id'] = workload
+                with self.subTest(workload=workload), self.assertRaisesRegex(ValueError, 'failed or unavailable'):
+                    run(changed)
+            for status in ('failed', 'unsupported'):
+                changed = copy.deepcopy(data)
+                changed['workloads'][0]['scenarios'][0]['results'][0]['queries']['T01']['status'] = status
+                with self.subTest(status=status), self.assertRaisesRegex(ValueError, 'no successful'):
+                    run(changed)
+            for health in (None, 'unhealthy', 'incomplete health snapshots'):
+                changed = copy.deepcopy(data)
+                changed['workloads'][0]['scenarios'][0]['results'][0]['health'] = health
+                with self.subTest(health=health), self.assertRaisesRegex(ValueError, 'unhealthy trace evidence'):
+                    run(changed)
+            changed = copy.deepcopy(data)
+            changed['workloads'][0]['scenarios'][0]['results'][0]['queries']['T06']['status'] = 'unavailable'
+            with self.assertRaisesRegex(ValueError, 'failed or unavailable'):
+                run(changed)
+            changed = copy.deepcopy(data)
+            changed['workloads'][0]['scenarios'][0]['results'] = []
+            with self.assertRaisesRegex(ValueError, 'missing trace participant'):
+                run(changed)
+            changed['workloads'][0]['scenarios'] = []
+            with self.assertRaisesRegex(ValueError, 'missing trace scenarios'):
+                run(changed)
+            manifest = root / 'o11ybench/target/run-manifest.json'
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('{"status":"failed"}')
+            with self.assertRaisesRegex(ValueError, 'incomplete target manifest'):
+                run(data)
+
+    def test_trace_partial_query_workflow_scope(self):
+        for name in ('tracesbench', 'agent-observability', 'vmbench-long-range'):
+            text = (ROOT / '.github/workflows' / (name + '.yml')).read_text()
+            self.assertEqual(text.count('--allow-trace-query-failures'), int(name == 'tracesbench'))
+
     def test_admission(self):
         self.assertEqual(storage.validate({}), 'file')
         env = dict(GREPTIMEDB_STORAGE='both', RUN_GREPTIMEDB='true', PROVIDER='AWS',

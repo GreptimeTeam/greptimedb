@@ -522,7 +522,7 @@ jobs:
         python3 greptimedb/.github/scripts/o11ybench-storage.py overview "$RUN_ROOT-query-report.json" \
           | tee -a "$RUN_ROOT/ci-summary.md" >> "$GITHUB_STEP_SUMMARY"
         python3 greptimedb/.github/scripts/o11ybench-storage.py audit --root "$RUN_ROOT" \
-          --report "$RUN_ROOT-query-report.json" --targets "$TARGETS"
+          --report "$RUN_ROOT-query-report.json" --targets "$TARGETS" --allow-trace-query-failures
     - name: Stage benchmark artifacts
       if: always()
       run: |
