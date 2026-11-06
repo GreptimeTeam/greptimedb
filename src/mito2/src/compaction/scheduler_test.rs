@@ -3242,3 +3242,166 @@ async fn test_compaction_tasks_shared_state_pending_replacement_and_teardown() {
         assert!(pending.is_none(), "pending task survived {terminal}");
     }
 }
+
+/// A many-window cycle publishes progress without rebuilding its live-unit collection.
+#[rstest::rstest]
+#[case::completed(false)]
+#[case::submission_rejected(true)]
+#[tokio::test]
+async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_first: bool) {
+    use std::sync::atomic::Ordering;
+
+    struct SubmissionScheduler {
+        jobs: VecScheduler,
+        reject_after_first: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Scheduler for SubmissionScheduler {
+        fn schedule(&self, job: Job) -> Result<()> {
+            if self.reject_after_first && self.jobs.num_jobs() > 0 {
+                InvalidSchedulerStateSnafu.fail()
+            } else {
+                self.jobs.schedule(job)
+            }
+        }
+
+        async fn stop(&self, await_termination: bool) -> Result<()> {
+            self.jobs.stop(await_termination).await
+        }
+    }
+
+    const UNITS: usize = 64;
+    let jobs = Arc::new(SubmissionScheduler {
+        jobs: VecScheduler::default(),
+        reject_after_first,
+    });
+    let env = SchedulerEnv::new().await.scheduler(jobs.clone());
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler_with_config(
+        tx,
+        MitoConfig {
+            max_background_compactions: UNITS,
+            ..Default::default()
+        },
+    );
+    let mut builder = VersionControlBuilder::new();
+    for window in 0..UNITS as i64 {
+        let start = window * 60_000;
+        builder
+            .push_l0_file(start, start + 1000)
+            .push_l0_file(start + 100, start + 1000);
+    }
+    let version = Arc::new(builder.build());
+    let region_id = version.region_id();
+    let manifest = env
+        .mock_manifest_context(version.current().version.metadata.clone())
+        .await;
+    let (schemas, _kv_backend) = mock_schema_metadata_manager();
+    let (waiter_tx, waiter_rx) = oneshot::channel();
+    scheduler
+        .schedule_manual_compaction(
+            Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            &version,
+            &env.access_layer,
+            OptionOutputTx::from(waiter_tx),
+            &manifest,
+            schemas.clone(),
+            UNITS,
+            None,
+        )
+        .unwrap();
+    let finished = tokio::time::timeout(
+        Duration::from_secs(10),
+        recv_compaction_pick_finished(&mut rx),
+    )
+    .await
+    .expect("strict-window planning did not finish");
+    let CompactionPlanningResult::Prepared(prepared) = &finished.result else {
+        panic!("expected strict-window plan");
+    };
+    assert_eq!(prepared.picker_output.outputs.len(), UNITS);
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas.clone())
+        .await;
+    let shared = scheduler.region_status[&region_id].shared_state.clone();
+    let CompactionPhase::Units(local) = &scheduler.region_status[&region_id].active.phase else {
+        panic!("expected admitted local units");
+    };
+    let publications = local.publication_count_for_test();
+    let baseline_publications = publications.load(Ordering::Relaxed);
+    let (collection, len, references) = local.inspection_stats_for_test();
+    assert_eq!(len, UNITS);
+    // The worker and published task share one collection, not per-publication copies.
+    assert!(references >= 2);
+    let mut ids = local.unit_ids_for_test();
+    ids.sort_unstable();
+    let rejected = if reject_after_first { UNITS - 1 } else { 0 };
+    assert_eq!(local.released_units_for_test(), rejected);
+    assert_eq!(ids.len(), UNITS - rejected);
+    assert_eq!(jobs.jobs.num_jobs(), UNITS - rejected);
+    let mut previous = CompactionState::current(&shared).0.unwrap();
+    let initial = previous.snapshot(Some(7));
+    assert_eq!(initial.total_units, Some(UNITS as u64));
+    assert_eq!(initial.completed_units, Some(rejected as u64));
+
+    let mut legacy_handle_clones = 0;
+    for (index, id) in ids.iter().copied().enumerate() {
+        // Replay the same terminal-result/task-exit trace without reading synthetic SSTs.
+        // The old current_state collected every remaining handle on both publications.
+        legacy_handle_clones += ids.len() - index;
+        let before_finish = publications.load(Ordering::Relaxed);
+        scheduler.on_unit_finished(region_id, id, Ok(false));
+        assert_eq!(publications.load(Ordering::Relaxed), before_finish + 1);
+        let current = CompactionState::current(&shared).0.unwrap();
+        assert!(!Arc::ptr_eq(&previous, &current));
+        assert_eq!(
+            current.snapshot(Some(7)).completed_units,
+            Some((rejected + index + 1) as u64)
+        );
+        previous = current;
+        let CompactionPhase::Units(local) = &scheduler.region_status[&region_id].active.phase
+        else {
+            panic!("finished unit must remain until release");
+        };
+        let (ptr, len, references) = local.inspection_stats_for_test();
+        assert_eq!((ptr, len), (collection, UNITS));
+        assert!(references >= 2);
+        assert_eq!(local.released_units_for_test(), rejected + index);
+
+        legacy_handle_clones += ids.len() - index - 1;
+        let before_release = publications.load(Ordering::Relaxed);
+        scheduler
+            .on_unit_released(region_id, id, &manifest, schemas.clone())
+            .await;
+        assert_eq!(publications.load(Ordering::Relaxed), before_release + 1);
+        if index + 1 < ids.len() {
+            let current = CompactionState::current(&shared).0.unwrap();
+            assert!(!Arc::ptr_eq(&previous, &current));
+            previous = current;
+            let CompactionPhase::Units(local) = &scheduler.region_status[&region_id].active.phase
+            else {
+                panic!("siblings must remain active");
+            };
+            let (ptr, len, references) = local.inspection_stats_for_test();
+            assert_eq!((ptr, len), (collection, UNITS));
+            assert!(references >= 2);
+            assert_eq!(local.released_units_for_test(), rejected + index + 1);
+        } else {
+            assert!(CompactionState::current(&shared).0.is_none());
+        }
+    }
+    let added_publications = publications.load(Ordering::Relaxed) - baseline_publications;
+    assert_eq!(added_publications, 2 * ids.len());
+    assert_eq!(legacy_handle_clones, ids.len() * ids.len());
+    if !reject_after_first {
+        assert_eq!(added_publications, 128);
+        assert_eq!(legacy_handle_clones, 4096);
+    }
+    let result = tokio::time::timeout(Duration::from_secs(10), waiter_rx)
+        .await
+        .expect("local compaction waiter did not finish")
+        .unwrap();
+    assert_eq!(result.is_err(), reject_after_first);
+    assert!(!scheduler.is_compacting(region_id));
+}
