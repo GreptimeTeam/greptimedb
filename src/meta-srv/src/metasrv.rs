@@ -861,6 +861,11 @@ impl Metasrv {
         &self.kv_backend
     }
 
+    /// Returns the shared KV backend that caches metadata while the leader cache is enabled.
+    pub fn leader_cached_kv_backend(&self) -> &Arc<LeaderCachedKvBackend> {
+        &self.leader_cached_kv_backend
+    }
+
     /// Returns the undecorated peer client.
     ///
     /// Its `active_datanodes` does not know about node scheduling states. Use
