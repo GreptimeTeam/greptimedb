@@ -122,6 +122,17 @@ async fn write(
     timestamp: i64,
     value: Option<f64>,
 ) {
+    write_with_tags(engine, region, tsid, timestamp, value, &["a", "x"]).await;
+}
+
+async fn write_with_tags(
+    engine: &MitoEngine,
+    region: &MitoRegionRef,
+    tsid: u64,
+    timestamp: i64,
+    value: Option<f64>,
+    tags: &[&str],
+) {
     let metadata = region.version().metadata.clone();
     let mut schema = vec![
         ColumnSchema {
@@ -138,7 +149,7 @@ async fn write(
         },
     ];
     let mut values = vec![
-        ValueData::BinaryValue(new_sparse_primary_key(&["a", "x"], &metadata, 10, tsid)),
+        ValueData::BinaryValue(new_sparse_primary_key(tags, &metadata, 10, tsid)),
         ValueData::TimestampMillisecondValue(timestamp),
     ];
     let request = if let Some(value) = value {
@@ -2161,5 +2172,99 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
         }
         assert_eq!(results[0], results[1]);
     }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn overlapping_buckets_retain_only_new_label_rows() {
+    let (_env, engine, region) = fixture().await;
+    const LATER: i64 = 6 * 86_400_000;
+    for timestamp in [3000, LATER] {
+        for id in 1..=32 {
+            let tag = format!("tag-{id}");
+            write_with_tags(&engine, &region, id, timestamp, Some(1.0), &["a", &tag]).await;
+        }
+        flush_region(&engine, region.region_id, None).await;
+    }
+    write_with_tags(&engine, &region, 33, LATER, Some(1.0), &["a", "tag-33"]).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    assert!(region.series_index_version().series_indexes.len() >= 2);
+    let scan = scanner(&region, region.series_index_store.clone().unwrap());
+    scan.prepare_series(
+        &QueryScanContext::default(),
+        &ExecutionPlanMetricsSet::new(),
+        &labels(scan.metadata()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    assert_eq!(34, prepared.candidates.len());
+    let mut retained = HashMap::new();
+    for candidate in prepared.candidates.iter() {
+        let (batch, _) = candidate.metadata_row.as_ref().unwrap();
+        retained.insert(Arc::as_ptr(batch), batch.num_rows());
+        let expected = if candidate.id.tsid == 0 {
+            "x".to_string()
+        } else {
+            format!("tag-{}", candidate.id.tsid)
+        };
+        assert_eq!(
+            candidate.metric.as_ref().unwrap().get("tag_1"),
+            Some(expected.as_str())
+        );
+    }
+    assert_eq!(34, retained.values().sum::<usize>());
+    engine.stop().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::direct(false)]
+#[case::mixed_fallback(true)]
+#[tokio::test]
+async fn overlapping_buckets_reject_conflicting_physical_tags(#[case] mixed: bool) {
+    let (_env, engine, region) = fixture().await;
+    write_with_tags(
+        &engine,
+        &region,
+        0,
+        6 * 86_400_000,
+        Some(1.0),
+        &["a", "different"],
+    )
+    .await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    assert!(region.series_index_version().series_indexes.len() >= 2);
+    let mut input = scan_input(
+        &region,
+        region.series_index_store.clone().unwrap(),
+        SelectedFormat::Columnar,
+        (0..region.version().metadata.column_metadatas.len()).collect(),
+    );
+    if mixed {
+        input.predicate = PredicateGroup::new(
+            &region.version().metadata,
+            &[col("tag_0").eq(lit("a")).or(col("field_0").gt(lit(0.0)))],
+        )
+        .unwrap();
+    }
+    let scan = SeriesScan::new(input, false);
+    let mut binding = labels(scan.metadata());
+    if let RawLabelSource::PrimaryKey { logical_tags, .. } = &mut binding {
+        // The conflict is in an unbound physical tag, which must still be checked.
+        *logical_tags = logical_tags[..1].to_vec().into();
+    }
+    let error = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &binding,
+        )
+        .await
+        .err()
+        .expect("conflicting physical tags must fail preparation");
+    assert!(error.output_msg().contains("conflicting labels"), "{error}");
     engine.stop().await.unwrap();
 }

@@ -8512,6 +8512,9 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
         .downcast_ref::<promql::extension_plan::FusedSeriesExec>()
         .unwrap();
     assert!(fused.has_partition_disjoint_identities());
+    let matched = format!("TQL EVAL (120, 120, '1m') sum_over_time({TABLE}{{host=\"b\"}}[2m])");
+    let matched_rows = native_result_rows(native_tql_output(&instance, &matched, true).await).await;
+    assert_eq!(matched_rows, vec![(120_000, "b".to_string(), 80.0)]);
 }
 
 /// No published series index: the columnar `Float64` selector must answer from the raw memtable

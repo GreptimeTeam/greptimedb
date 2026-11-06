@@ -33,7 +33,7 @@ use datatypes::arrow::array::{
     UInt64Array,
 };
 use datatypes::arrow::buffer::{Buffer, OffsetBuffer};
-use datatypes::arrow::compute::{cast, filter_record_batch};
+use datatypes::arrow::compute::{cast, filter_record_batch, take_record_batch};
 use datatypes::arrow::datatypes::{Schema, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::{SeriesLabelBatch, SeriesLabels, SeriesOrdering};
@@ -310,6 +310,59 @@ struct Candidate {
     metadata_row: Option<(Arc<RecordBatch>, usize)>,
 }
 
+/// Checks every physical tag before retaining only rows that introduce new identities.
+fn compact_candidate_batch(
+    batch: &RecordBatch,
+    candidates: &BTreeMap<MetricSeriesId, Candidate>,
+    tags: &[(u32, String)],
+) -> Result<RecordBatch> {
+    let table = batch
+        .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+        .and_then(|a| a.as_any().downcast_ref::<UInt32Array>())
+        .ok_or_else(|| invalid("invalid table ID column"))?;
+    let tsid = batch
+        .column_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+        .and_then(|a| a.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| invalid("invalid TSID column"))?;
+    let mut new_rows = HashMap::new();
+    let mut selected = Vec::new();
+    for row in 0..batch.num_rows() {
+        let id = MetricSeriesId {
+            table_id: table.value(row),
+            tsid: tsid.value(row),
+        };
+        let previous = candidates
+            .get(&id)
+            .and_then(|c| c.metadata_row.as_ref())
+            .map(|(batch, row)| (batch.as_ref(), *row))
+            .or_else(|| new_rows.get(&id).map(|row| (batch, *row)));
+        if let Some((previous, previous_row)) = previous {
+            for (_, name) in tags {
+                let current = batch
+                    .column_by_name(name)
+                    .and_then(|a| a.as_any().downcast_ref::<StringArray>())
+                    .ok_or_else(|| invalid("invalid series tag array"))?;
+                let previous = previous
+                    .column_by_name(name)
+                    .and_then(|a| a.as_any().downcast_ref::<StringArray>())
+                    .ok_or_else(|| invalid("incompatible duplicate label metadata"))?;
+                if previous.is_null(previous_row) != current.is_null(row)
+                    || (!current.is_null(row) && previous.value(previous_row) != current.value(row))
+                {
+                    return Err(invalid("conflicting labels for the same table ID and TSID"));
+                }
+            }
+        } else {
+            new_rows.insert(id, row);
+            selected.push(row as u64);
+        }
+    }
+    if selected.len() == batch.num_rows() {
+        return Ok(batch.clone());
+    }
+    take_record_batch(batch, &UInt64Array::from(selected)).context(ComputeArrowSnafu)
+}
+
 struct ColumnarPreparedSource {
     context: Arc<StreamContext>,
     labels: RawLabelSource,
@@ -486,6 +539,12 @@ impl ColumnarPreparedSource {
                     .entry("prepare_selected_rows")
                     .or_default() += batch.num_rows() as u64;
                 let started = Instant::now();
+                let mut duplicate_rows = 0_u64;
+                if direct_labels {
+                    let rows = batch.num_rows();
+                    batch = compact_candidate_batch(&batch, &candidates, &tags)?;
+                    duplicate_rows = (rows - batch.num_rows()) as u64;
+                }
                 let table = batch
                     .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
                     .ok_or_else(|| invalid("missing table ID column"))?
@@ -510,7 +569,7 @@ impl ColumnarPreparedSource {
                         Ok((*id, strings))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let shared_batch = Arc::new(batch.clone());
+                let shared_batch = direct_labels.then(|| Arc::new(batch.clone()));
                 let label_batch = if direct_labels {
                     let RawLabelSource::PrimaryKey { logical_tags, .. } = &labels else {
                         return Err(invalid("expected bound labels"));
@@ -547,7 +606,6 @@ impl ColumnarPreparedSource {
                 };
                 let mut encoded_key_bytes = 0_u64;
                 let mut tag_values = 0_u64;
-                let mut duplicate_rows = 0_u64;
                 let mut batch_series = 0_u64;
                 for row in 0..batch.num_rows() {
                     let id = MetricSeriesId {
@@ -587,26 +645,7 @@ impl ColumnarPreparedSource {
                     }
                     if let Some(previous) = candidates.get(&id) {
                         duplicate_rows += 1;
-                        let conflict = if let Some((previous_batch, previous_row)) =
-                            &previous.metadata_row
-                        {
-                            let mut conflict = false;
-                            for ((_, current), (_, name)) in tag_arrays.iter().zip(tags.iter()) {
-                                let previous = previous_batch
-                                    .column_by_name(name)
-                                    .and_then(|array| array.as_any().downcast_ref::<StringArray>())
-                                    .ok_or_else(|| {
-                                        invalid("incompatible duplicate label metadata")
-                                    })?;
-                                conflict |= previous.is_null(*previous_row) != current.is_null(row)
-                                    || (!current.is_null(row)
-                                        && previous.value(*previous_row) != current.value(row));
-                            }
-                            conflict
-                        } else {
-                            previous.key.as_slice() != key.as_slice()
-                        };
-                        if conflict {
+                        if previous.key.as_slice() != key.as_slice() {
                             return Err(invalid(
                                 "conflicting labels for the same table ID and TSID",
                             ));
@@ -660,7 +699,7 @@ impl ColumnarPreparedSource {
                             merge_key,
                             tags: values,
                             metric,
-                            metadata_row: direct_labels.then(|| (shared_batch.clone(), row)),
+                            metadata_row: shared_batch.as_ref().map(|batch| (batch.clone(), row)),
                         },
                     );
                 }
