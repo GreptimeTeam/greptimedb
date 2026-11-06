@@ -234,6 +234,10 @@ pub struct MitoConfig {
     /// Whether to enable the experimental two-phase mode for eligible metric series scans.
     pub experimental_series_scan_v2: bool,
 
+    /// Answers eligible scalar COUNT queries from manifest row counts.
+    /// Reads no SST data or metadata to do so; ingestion does no extra work.
+    pub experimental_metadata_count: bool,
+
     pub gc: GcConfig,
 }
 
@@ -293,6 +297,7 @@ impl Default for MitoConfig {
             default_flat_format: true,
             // FIXME(#9435): Keep v2 opt-in while long-range scan memory usage is investigated.
             experimental_series_scan_v2: false,
+            experimental_metadata_count: false,
             gc: GcConfig::default(),
         };
 
@@ -459,6 +464,17 @@ impl MitoConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_metadata_count_config_roundtrip() {
+        assert!(!MitoConfig::default().experimental_metadata_count);
+        let config: MitoConfig = toml::from_str("experimental_metadata_count = true").unwrap();
+        assert!(config.experimental_metadata_count);
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("experimental_metadata_count = true"));
+        let restored: MitoConfig = toml::from_str(&serialized).unwrap();
+        assert!(restored.experimental_metadata_count);
+    }
 
     #[test]
     fn test_scan_memory_policy_upgrade() {

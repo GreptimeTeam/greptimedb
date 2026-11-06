@@ -14,6 +14,11 @@
 
 //! Scans a region according to the scan request.
 
+mod count;
+pub(crate) use count::StatisticsSplitPlan;
+#[cfg(any(test, feature = "test", feature = "testing"))]
+pub use count::overlap as metadata_count_overlap;
+
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
@@ -246,6 +251,7 @@ pub(crate) struct ScanRegion {
     scan_memory_tracker: Option<QueryMemoryTracker>,
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
+    experimental_metadata_count: bool,
     /// Whether to ignore range indexes during scans.
     ignore_range_index: bool,
     /// Whether to ignore inverted index.
@@ -284,6 +290,7 @@ impl ScanRegion {
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             scan_memory_tracker: None,
             experimental_series_scan_v2: false,
+            experimental_metadata_count: false,
             ignore_range_index: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
@@ -333,6 +340,12 @@ impl ScanRegion {
     #[must_use]
     pub(crate) fn with_experimental_series_scan_v2(mut self, enabled: bool) -> Self {
         self.experimental_series_scan_v2 = enabled;
+        self
+    }
+
+    /// Enables optional exact-count preparation for hinted scalar count scans.
+    pub(crate) fn with_experimental_metadata_count(mut self, enabled: bool) -> Self {
+        self.experimental_metadata_count = enabled;
         self
     }
 
@@ -628,7 +641,15 @@ impl ScanRegion {
         } else {
             input
         };
-        Ok(input.build())
+        let mut input = input.build();
+        if self.experimental_metadata_count && self.request.metadata_count_hint {
+            match count::prepare(&input, &self.request).await {
+                Some(count::MetadataCount::Exact(rows)) => input.exact_num_rows = Some(rows),
+                Some(count::MetadataCount::Split(plan)) => input.statistics_split = Some(plan),
+                None => {}
+            }
+        }
+        Ok(input)
     }
 
     /// Builds the deduplicated root column ids required by the projection and
@@ -911,6 +932,10 @@ fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle
 
 /// Common input for different scanners.
 pub struct ScanInput {
+    /// Count proven against this read view and the complete static predicate.
+    pub(crate) exact_num_rows: Option<usize>,
+    /// Exact and residual sources of a hinted COUNT, taken by the scanner.
+    pub(crate) statistics_split: Option<StatisticsSplitPlan>,
     /// Pinned series-index snapshot and its storage, when configured.
     pub(crate) series_index: Option<SeriesIndexReadContext>,
     /// Whether to ignore range indexes while retaining series-index candidate discovery.
@@ -987,6 +1012,7 @@ pub struct ScanInput {
 
 /// Cached output of scan request analysis: the optional range-cache fingerprint
 /// plus the derived implied time range used by range cache and prefilter.
+#[derive(Clone)]
 struct ScanAnalysis {
     /// `None` when the scan is not eligible for range caching.
     fingerprint: Option<ScanRequestFingerprint>,
@@ -1004,6 +1030,59 @@ pub(crate) struct ScanInputBuilder {
 }
 
 impl ScanInput {
+    /// Returns this scan restricted to the given sources, sharing the read
+    /// view and every query setting. Opens no SST data.
+    pub(crate) fn with_sources(
+        &self,
+        files: Vec<FileHandle>,
+        memtables: Vec<MemRangeBuilder>,
+        exact_num_rows: Option<usize>,
+    ) -> Option<Self> {
+        #[cfg(feature = "enterprise")]
+        if !self.extension_ranges.is_empty() {
+            return None;
+        }
+        Some(Self {
+            exact_num_rows,
+            statistics_split: None,
+            series_index: self.series_index.clone(),
+            ignore_range_index: self.ignore_range_index,
+            access_layer: self.access_layer.clone(),
+            mapper: self.mapper.clone(),
+            read_cols: self.read_cols.clone(),
+            time_range: self.time_range,
+            scan_analysis: self.scan_analysis.clone(),
+            predicate: self.predicate.clone(),
+            region_partition_expr: self.region_partition_expr.clone(),
+            memtables,
+            files,
+            primary_key_mapper: self.primary_key_mapper.clone(),
+            batch_size: self.batch_size,
+            cache_strategy: self.cache_strategy.clone(),
+            ignore_file_not_found: self.ignore_file_not_found,
+            max_concurrent_scan_files: self.max_concurrent_scan_files,
+            scan_memory_tracker: self.scan_memory_tracker.clone(),
+            inverted_index_appliers: self.inverted_index_appliers.clone(),
+            bloom_filter_index_appliers: self.bloom_filter_index_appliers.clone(),
+            fulltext_index_appliers: self.fulltext_index_appliers.clone(),
+            query_start: self.query_start,
+            append_mode: self.append_mode,
+            filter_deleted: self.filter_deleted,
+            merge_mode: self.merge_mode,
+            series_row_selector: self.series_row_selector,
+            distribution: self.distribution,
+            explain_flat_format: self.explain_flat_format,
+            snapshot_sequence: self.snapshot_sequence,
+            sequence_range: self.sequence_range,
+            compaction: self.compaction,
+            compaction_read_parallelism: self.compaction_read_parallelism,
+            json2_rewrite_targets: self.json2_rewrite_targets.clone(),
+            query_stat_counters: self.query_stat_counters.clone(),
+            #[cfg(feature = "enterprise")]
+            extension_ranges: Vec::new(),
+        })
+    }
+
     /// Creates a new [ScanInputBuilder].
     #[must_use]
     pub(crate) fn builder(
@@ -1012,6 +1091,8 @@ impl ScanInput {
     ) -> ScanInputBuilder {
         ScanInputBuilder {
             input: ScanInput {
+                exact_num_rows: None,
+                statistics_split: None,
                 series_index: None,
                 ignore_range_index: false,
                 access_layer,
