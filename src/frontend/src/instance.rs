@@ -16,6 +16,7 @@ pub mod builder;
 mod copy_in;
 mod dashboard;
 mod entity_graph;
+mod exemplar;
 mod export_database;
 mod grpc;
 mod import_packed;
@@ -1286,6 +1287,14 @@ impl Instance {
 
 #[async_trait]
 impl PrometheusHandler for Instance {
+    async fn query_exemplars(
+        &self,
+        query: servers::exemplar::query::Query,
+        ctx: QueryContextRef,
+    ) -> server_error::Result<Vec<servers::exemplar::query::Series>> {
+        self.query_exemplars_inner(query, ctx).await
+    }
+
     #[tracing::instrument(skip_all)]
     async fn do_query(
         &self,
