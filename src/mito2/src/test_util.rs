@@ -148,6 +148,18 @@ impl CheckpointTaskBlocker {
         Self::block_write(delta_file(version), false)
     }
 
+    pub(crate) async fn wait_until_blocked(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    pub(crate) fn arm_next_close(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+
     fn block_write(file_name: String, at_close: bool) -> (Self, MockLayer) {
         let blocker = Self {
             entered: Arc::new(Notify::new()),
@@ -170,18 +182,6 @@ impl CheckpointTaskBlocker {
             .build()
             .unwrap();
         (blocker, layer)
-    }
-
-    pub(crate) async fn wait_until_blocked(&self) {
-        self.entered.notified().await;
-    }
-
-    pub(crate) fn release(&self) {
-        self.release.notify_one();
-    }
-
-    pub(crate) fn arm_next_close(&self) {
-        self.armed.store(true, Ordering::Release);
     }
 
     async fn block_once(&self) {

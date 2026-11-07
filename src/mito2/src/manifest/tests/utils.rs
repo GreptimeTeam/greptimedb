@@ -56,17 +56,8 @@ pub fn basic_region_metadata() -> RegionMetadata {
     builder.build().unwrap()
 }
 
-struct NotFoundReader;
-
-impl oio::StreamRead for NotFoundReader {
-    async fn open(&self, _: BytesRange) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
-        Err(MockError::new(
-            ErrorKind::NotFound,
-            "mock listed manifest delta not found",
-        ))
-    }
-}
-
+/// Returns a layer that fails reads of manifest deltas with `NotFound` and leaves other reads
+/// untouched.
 pub(crate) fn fail_manifest_delta_reads_layer() -> MockLayer {
     MockLayerBuilder::default()
         .reader_factory(Arc::new(|path, _args, inner| {
@@ -132,4 +123,15 @@ pub async fn manifest_recovery_usage(path: impl AsRef<Path>) -> u64 {
         }
     }
     total
+}
+
+struct NotFoundReader;
+
+impl oio::StreamRead for NotFoundReader {
+    async fn open(&self, _: BytesRange) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        Err(MockError::new(
+            ErrorKind::NotFound,
+            "mock listed manifest delta not found",
+        ))
+    }
 }
