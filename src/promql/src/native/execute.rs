@@ -48,8 +48,8 @@ use crate::histogram_eval::{
 };
 use crate::info::{InfoSelector, info_with_reservation};
 use crate::instant_eval::{
-    info_sample_times, select_instant_at, select_instants, timestamp_of_evaluated,
-    timestamp_of_selection,
+    info_sample_times, instant_candidate_span, select_instant_at, select_instants,
+    timestamp_of_evaluated, timestamp_of_selection,
 };
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
@@ -893,19 +893,11 @@ impl InstantRuntime {
             .saturating_add(rows_of_points.saturating_mul(2))
     }
 
-    /// The number of grid points [`select_instants`] clips the buffered series to.
+    /// The number of candidate grid points [`select_instants`] reserves for the buffered series.
     ///
-    /// The gather clips its scan to the series it holds instead of reading the whole planned grid:
-    /// the candidate points run from the first sample's instant to the last sample's plus the
-    /// lookback, aligned to the grid and held inside the query range. A workspace is charged per
-    /// point, so the count has to be the clipped one -- charging the planned grid charges the pool
-    /// for rows a short series can never produce, and a pool sized for what the series costs then
-    /// refuses the gather. The clipping below is [`select_instants`]' own, repeated rather than
-    /// approximated: an estimate that disagrees with the kernel is a bug here rather than a
-    /// conservative bound. It is the kernel's own candidate count -- the one it sizes its arrays
-    /// with -- so it bounds the rows it can report even though a candidate at the lookback edge
-    /// itself selects nothing. Both ends come from chunks the node already holds, so the count
-    /// reads two timestamps rather than the rows.
+    /// Candidate points can select nothing, but charging the whole planned grid would refuse short
+    /// series that fit the pool. The shared clipping uses only the first and last buffered samples,
+    /// so admission does not gather the series or scan its samples.
     fn selected_points(&self, closing: &RawSeriesChunk) -> usize {
         let spec = self.selection.output_grid.spec();
         if self.selection.at_ms.is_some() {
@@ -915,40 +907,26 @@ impl InstantRuntime {
         if spec.step_ms <= 0 || self.selection.lookback_ms < 0 {
             return 0;
         }
-        let query_start = i128::from(spec.start_ms);
-        let query_end = i128::from(grid_end_ms(spec));
-        if query_end < query_start {
+        let query_end = grid_end_ms(spec);
+        if query_end < spec.start_ms {
             return 0;
         }
         let series = || self.chunks.iter().chain(std::iter::once(closing));
-        let (Some(first), Some(last)) = (
-            series().find_map(|chunk| chunk.time.as_buffer().first().copied()),
-            series()
-                .rev()
-                .find_map(|chunk| chunk.time.as_buffer().last().copied()),
-        ) else {
-            // A series of no sample decides no point.
-            return 0;
-        };
-        let offset = i128::from(self.selection.offset_ms);
-        let lookback = i128::from(self.selection.lookback_ms);
-        let first = i128::from(first) + offset;
-        let last = i128::from(last) + offset;
-        let useful_last = if lookback == 0 {
-            last
-        } else {
-            last + lookback - 1
-        };
-        let max_start = first.max(query_start);
-        let min_end = useful_last.min(query_end);
-        if max_start > min_end {
-            return 0;
-        }
-        let step = i128::from(spec.step_ms);
-        let aligned_start = query_start + (max_start - query_start) / step * step;
-        let aligned_end = query_end - (query_end - min_end) / step * step;
-        let points = (aligned_end - aligned_start) / step + 1;
-        usize::try_from(points).unwrap_or(usize::MAX)
+        let endpoints = series()
+            .find_map(|chunk| chunk.time.as_buffer().first().copied())
+            .zip(
+                series()
+                    .rev()
+                    .find_map(|chunk| chunk.time.as_buffer().last().copied()),
+            );
+        let span = instant_candidate_span(
+            endpoints,
+            spec.start_ms..=query_end,
+            spec.step_ms,
+            self.selection.lookback_ms,
+            self.selection.offset_ms,
+        );
+        usize::try_from(span.count).unwrap_or(usize::MAX)
     }
 
     /// The largest histogram a row of each field can carry, `None` for a field of floats.

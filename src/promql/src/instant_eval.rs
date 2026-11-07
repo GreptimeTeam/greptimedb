@@ -47,6 +47,58 @@ pub fn select_instant_at(
     Ok(indices.into_iter().next())
 }
 
+/// The candidate evaluation timestamps the instant kernel scans and reserves for.
+///
+/// These bounds include grid points which may select no row, including points rounded outward by
+/// alignment, the exclusive lookback edge, gaps and stale samples.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct InstantCandidateSpan {
+    pub(crate) start: i128,
+    pub(crate) end: i128,
+    pub(crate) count: i128,
+}
+
+/// Clips the candidate span using only the source axis endpoints; allocates nothing.
+///
+/// The caller validates `step_ms > 0`, `lookback_ms >= 0` and the ordered query range. The wide
+/// count leaves each caller's existing conversion to `usize` unchanged. The end is a scan bound,
+/// not necessarily a grid position when the query end is not aligned to its start.
+pub(crate) fn instant_candidate_span(
+    endpoints: Option<(i64, i64)>,
+    range: RangeInclusive<i64>,
+    step_ms: i64,
+    lookback_ms: i64,
+    offset_ms: i64,
+) -> InstantCandidateSpan {
+    let empty = InstantCandidateSpan {
+        start: 1,
+        end: 0,
+        count: 0,
+    };
+    let Some((first, last)) = endpoints else {
+        return empty;
+    };
+    let first = first as i128 + offset_ms as i128;
+    let last = last as i128 + offset_ms as i128;
+    let useful_last = if lookback_ms == 0 {
+        last
+    } else {
+        last + lookback_ms as i128 - 1
+    };
+    let query_start = *range.start() as i128;
+    let query_end = *range.end() as i128;
+    let step = step_ms as i128;
+    let max_start = first.max(query_start);
+    let min_end = useful_last.min(query_end);
+    if max_start > min_end {
+        return empty;
+    }
+    let start = query_start + (max_start - query_start) / step * step;
+    let end = query_end - (query_end - min_end) / step * step;
+    let count = (end - start) / step + 1;
+    InstantCandidateSpan { start, end, count }
+}
+
 /// Selects source rows for an aligned PromQL instant-evaluation range.
 ///
 /// Returns original logical row indices and evaluation timestamps from a complete source axis
@@ -102,38 +154,19 @@ pub fn select_instants(
         return Ok((Vec::new(), Vec::new()));
     }
 
-    // Match the native-tick selector's bounds calculation in wide arithmetic before scanning.
-    let first = timestamps[0] as i128 + offset_ms as i128;
-    let last = timestamps[timestamps.len() - 1] as i128 + offset_ms as i128;
-    let useful_last = if lookback_ms == 0 {
-        last
-    } else {
-        last + lookback_ms as i128 - 1
-    };
-    let query_start = start as i128;
-    let query_end = end as i128;
-    let step = step_ms as i128;
-    let max_start = first.max(query_start);
-    let min_end = useful_last.min(query_end);
-    let (aligned_start, aligned_end) = if max_start > min_end {
-        (1_i128, 0_i128)
-    } else {
-        (
-            query_start + (max_start - query_start) / step * step,
-            query_end - (query_end - min_end) / step * step,
-        )
-    };
-    let estimated_points = if aligned_end >= aligned_start {
-        (aligned_end - aligned_start) / step + 1
-    } else {
-        0
-    };
-    let mut indices = Vec::with_capacity(estimated_points as usize);
-    let mut evaluation_timestamps = Vec::with_capacity(estimated_points as usize);
+    let span = instant_candidate_span(
+        Some((timestamps[0], timestamps[timestamps.len() - 1])),
+        range,
+        step_ms,
+        lookback_ms,
+        offset_ms,
+    );
+    let mut indices = Vec::with_capacity(span.count as usize);
+    let mut evaluation_timestamps = Vec::with_capacity(span.count as usize);
     let mut sample_iters: Vec<_> = fields.iter().map(|field| field.iter()).collect();
     let mut current_stale = false;
     let mut cursor = 0usize;
-    for expected in (aligned_start..=aligned_end).step_by(step_ms as usize) {
+    for expected in (span.start..=span.end).step_by(step_ms as usize) {
         let source_expected = expected - offset_ms as i128;
         while cursor < timestamps.len() && timestamps[cursor] as i128 <= source_expected {
             current_stale = false;

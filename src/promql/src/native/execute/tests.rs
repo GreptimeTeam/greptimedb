@@ -41,16 +41,17 @@ fn is_resources_exhausted(error: &DataFusionError) -> bool {
 }
 
 use super::{
-    BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
-    NodeState, PairKernel, Reader, RetainedInput, RuntimeNode, RuntimeOp, absorb_rebuilds,
-    evaluated_bytes, grid_chunk_bytes, grid_end_ms, grid_position, map_chunk, map_workspace_bytes,
-    operand_chunk_bytes, raw_bytes, vector_series_with_k, vector_workspace_bytes,
+    BinaryRuntime, Emitted, InputId, InputSlot, InstantRuntime, NativeChunk, NativeExecutionState,
+    NativeExecutor, NodeState, PairKernel, Reader, RetainedInput, RuntimeNode, RuntimeOp,
+    absorb_rebuilds, buffered_fields, buffered_time, evaluated_bytes, grid_chunk_bytes,
+    grid_end_ms, grid_position, map_chunk, map_workspace_bytes, operand_chunk_bytes, raw_bytes,
+    vector_series_with_k, vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::info::InfoSelector;
-use crate::instant_eval::select_instants;
+use crate::instant_eval::{instant_candidate_span, select_instants};
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::map_time::DateFunction;
@@ -5828,6 +5829,256 @@ fn an_instant_selection_reserves_the_workspace_it_gathers() {
     );
 }
 
+/// The estimator charges exactly the kernel's candidate span, which can contain points that the
+/// kernel does not select. Check independently listed candidate and selected timestamps as well as
+/// coverage: a shared mistake in the estimator and kernel must not make this test pass.
+#[test]
+fn instant_candidate_span_covers_native_selection_at_boundaries() {
+    struct Case {
+        name: &'static str,
+        times: &'static [i64],
+        grid: (i64, i64, u64),
+        lookback: i64,
+        offset: i64,
+        stale_first: bool,
+        candidates: &'static [i64],
+        selected: &'static [i64],
+    }
+    let cases = [
+        Case {
+            name: "aligned samples",
+            times: &[100, 110, 120, 130, 140, 150],
+            grid: (100, 10, 6),
+            lookback: 0,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100, 110, 120, 130, 140, 150],
+            selected: &[100, 110, 120, 130, 140, 150],
+        },
+        Case {
+            name: "positive offset and exclusive lookback edge",
+            times: &[90, 100, 110],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 10,
+            stale_first: false,
+            candidates: &[100, 110, 120, 130],
+            selected: &[100, 110, 120],
+        },
+        Case {
+            name: "negative offset and outward grid alignment",
+            times: &[125, 135],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: -10,
+            stale_first: false,
+            candidates: &[110, 120, 130, 140],
+            selected: &[120, 130],
+        },
+        Case {
+            name: "clipped at both query bounds",
+            times: &[80, 110, 180],
+            grid: (100, 10, 6),
+            lookback: 101,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100, 110, 120, 130, 140, 150],
+            selected: &[100, 110, 120, 130, 140, 150],
+        },
+        Case {
+            name: "empty input",
+            times: &[],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+        Case {
+            name: "sample too old",
+            times: &[0],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+        Case {
+            name: "sample after range",
+            times: &[200],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+        Case {
+            name: "exclusive edge at range start",
+            times: &[90],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+        Case {
+            name: "inside lookback at range start",
+            times: &[91],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100],
+            selected: &[100],
+        },
+        Case {
+            name: "outward alignment with no selected points",
+            times: &[104],
+            grid: (100, 10, 6),
+            lookback: 3,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100, 110],
+            selected: &[],
+        },
+        Case {
+            name: "zero lookback and gaps",
+            times: &[100, 115, 140],
+            grid: (100, 10, 6),
+            lookback: 0,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100, 110, 120, 130, 140],
+            selected: &[100, 140],
+        },
+        Case {
+            name: "staleness suppresses candidates",
+            times: &[100, 120],
+            grid: (100, 10, 5),
+            lookback: 30,
+            offset: 0,
+            stale_first: true,
+            candidates: &[100, 110, 120, 130, 140],
+            selected: &[120, 130, 140],
+        },
+        Case {
+            name: "wide offset reaches grid",
+            times: &[i64::MAX],
+            grid: (-11, 10, 3),
+            lookback: 0,
+            offset: i64::MIN,
+            stale_first: false,
+            candidates: &[-1],
+            selected: &[-1],
+        },
+        Case {
+            name: "shifted times below i64 range",
+            times: &[i64::MIN],
+            grid: (i64::MIN, 1, 3),
+            lookback: i64::MAX,
+            offset: i64::MIN,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+    ];
+
+    let schema = raw_schema();
+    for case in cases {
+        let out_grid = grid(case.grid.0, case.grid.1, case.grid.2);
+        let selection = BoundInstant {
+            lookback_ms: case.lookback,
+            offset_ms: case.offset,
+            at_ms: None,
+            value: InstantValue::Sample,
+            output_grid: Arc::clone(&out_grid),
+        };
+        let mut runtime = InstantRuntime::try_new(&schema, &selection).unwrap();
+        let values: Vec<_> = case
+            .times
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                if index == 0 && case.stale_first {
+                    f64::from_bits(common_query::prometheus::PROMETHEUS_STALE_NAN_BITS)
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let chunk = |times: &[i64], values: &[f64], is_last| {
+            if !times.is_empty() {
+                return raw_chunk(&schema, times, values, is_last);
+            }
+            // Empty chunks cannot be constructed through try_new, but may occur on this internal
+            // boundary; exercise admission's endpoint search and the kernel's empty-axis path.
+            RawSeriesChunk {
+                primary_key: Buffer::from_slice_ref(b"series-a"),
+                metric: Some(metric()),
+                time: RawTimestamps::try_new(ScalarBuffer::from(Vec::<i64>::new())).unwrap(),
+                fields: SeriesFields::one(Samples::from_float(Float64Array::new_null(0))),
+                is_last,
+            }
+        };
+        let split = case.times.len() / 2;
+        runtime.chunks.push(chunk(&[], &[], false));
+        runtime
+            .chunks
+            .push(chunk(&case.times[..split], &values[..split], false));
+        runtime.chunks.push(chunk(&[], &[], false));
+        let closing = chunk(&case.times[split..], &values[split..], true);
+        let estimate = runtime.selected_points(&closing);
+
+        let mut all_chunks = runtime.chunks.clone();
+        all_chunks.push(closing);
+        let time = buffered_time(&all_chunks).unwrap();
+        let fields = buffered_fields(&all_chunks, schema.fields.len()).unwrap();
+        let spec = out_grid.spec();
+        let range = spec.start_ms..=grid_end_ms(spec);
+        let endpoints = time
+            .as_buffer()
+            .first()
+            .copied()
+            .zip(time.as_buffer().last().copied());
+        let span = instant_candidate_span(
+            endpoints,
+            range.clone(),
+            spec.step_ms,
+            case.lookback,
+            case.offset,
+        );
+        let candidates: Vec<_> = (span.start..=span.end)
+            .step_by(spec.step_ms as usize)
+            .map(|timestamp| i64::try_from(timestamp).unwrap())
+            .collect();
+        assert_eq!(candidates, case.candidates, "{}", case.name);
+        assert_eq!(span.count, case.candidates.len() as i128, "{}", case.name);
+        assert_eq!(estimate, case.candidates.len(), "{}", case.name);
+
+        let (rows, selected) = select_instants(
+            &time,
+            &fields,
+            range,
+            spec.step_ms,
+            case.lookback,
+            case.offset,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), selected.len(), "{}", case.name);
+        assert_eq!(selected, case.selected, "{}", case.name);
+        assert!(
+            selected.iter().all(|point| candidates.contains(point)),
+            "{}",
+            case.name
+        );
+        assert!(selected.len() <= estimate, "{}", case.name);
+    }
+}
+
 /// A selection reserves the points it can decide, not the points the grid plans.
 ///
 /// The review's shape: a seven-day grid at a one-minute step is 10,081 points, and one sample at
@@ -5835,8 +6086,8 @@ fn an_instant_selection_reserves_the_workspace_it_gathers() {
 /// grid-scaled terms of `InstantRuntime::gather_bytes` at the planned grid -- the selection's two
 /// arrays and the doubled builder columns -- are about 504 KB, which the 64 KiB pool here is far
 /// below; the handful of points really decided need a few hundred bytes, so this gather has to be
-/// admitted. What it hands out is the rows `select_instants` reports for the same series, which is
-/// the count the reservation has to agree with.
+/// admitted. What it hands out is the rows `select_instants` reports for the same series, bounded
+/// by the candidate count the reservation agrees with.
 ///
 /// The second half is the other direction: the same grid, the same pool, and a series that spans
 /// the grid with a lookback long enough to cover it, so all 10,081 points can be decided. The
