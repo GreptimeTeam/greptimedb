@@ -2283,6 +2283,63 @@ async fn native_metric_discovery_without_a_matching_metric_answers_absent_and_or
     assert_eq!(vec![1.0], numeric_values(&batches, "value"), "{plan:?}");
 }
 
+/// A zero-match discovery selector is a real input even when another selector reads a metric.
+#[tokio::test]
+async fn native_zero_match_discovery_with_real_selector_binds_both_inputs() {
+    for (query, empty_index) in [
+        (r#"{__name__=~"no_such_metric_.+"} or alpha_total"#, 0),
+        (r#"alpha_total or {__name__=~"no_such_metric_.+"}"#, 1),
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+        )
+        .await;
+        let fused = find_fused_series(&plan).expect("both selectors must be planned natively");
+        assert_eq!(fused.children().len(), 2, "{query}: {plan:?}");
+        assert!(
+            matches!(
+                input_locality(fused.tree().root()),
+                InputLocality::SinglePartition
+            ),
+            "{query}: {plan:?}"
+        );
+        assert_eq!(fused.binding().time_index, "timestamp", "{query}: {plan:?}");
+        let columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        for column in ["timestamp", "field_0", "tag_0", METRIC_NAME] {
+            assert!(columns.contains(&column), "{query}: {columns:?}");
+        }
+        assert!(!columns.contains(&"value"), "{query}: {columns:?}");
+
+        fn contains_empty(plan: &LogicalPlan) -> bool {
+            super::native::is_empty_discovered_input(plan)
+                || plan.inputs().iter().any(|child| contains_empty(child))
+        }
+        fn contains_alpha(plan: &LogicalPlan) -> bool {
+            matches!(plan, LogicalPlan::Extension(extension)
+                if extension.node.as_any().downcast_ref::<RawSeriesSource>()
+                    .is_some_and(|source| source.metric_name() == "alpha_total")
+                    || extension.node.as_any().downcast_ref::<FusedSeries>()
+                        .is_some_and(|fused| fused.binding().metric_name.as_deref() == Some("alpha_total")))
+                || plan.inputs().iter().any(|child| contains_alpha(child))
+        }
+        assert!(
+            contains_empty(&fused.children()[empty_index]),
+            "{query}: {plan:?}"
+        );
+        assert!(
+            contains_alpha(&fused.children()[1 - empty_index]),
+            "{query}: {plan:?}"
+        );
+    }
+}
+
 /// Plans `query` with the native fused-series route on or off.
 ///
 /// The table is the one [`build_test_table_provider`] builds — one tag `tag_0`, the millisecond

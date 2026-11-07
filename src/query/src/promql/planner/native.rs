@@ -54,6 +54,7 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::data_type::DataType as _;
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::{FrameContent, FrameLabelMode, SeriesFrameDeclaration};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
@@ -688,14 +689,8 @@ impl PromPlanner {
                         // planner, which has no table to bind and raises `TableNameNotFound`: no
                         // table matching is a result, not a failure to plan.
                         //
-                        // The answer is an empty raw series frame, which is the one input the node
-                        // and every operator above it already accept. A statement with another
-                        // data input beside this selector keeps its existing plan: two inputs
-                        // reach one node under one partition-count contract, and a real scan's
-                        // partitions and an empty frame's single one cannot share it here.
-                        if selectors.len() != 1 {
-                            return Ok(None);
-                        }
+                        // An empty raw series frame is an ordinary input to the node. Multi-input
+                        // placement and partition normalization are decided after compilation.
                         // A `__field__` matcher narrows the field set in a projection the existing
                         // planner builds, and this route declines it for a scan it can read; the
                         // same refusal keeps the empty input from claiming a field layout the
@@ -869,8 +864,27 @@ impl PromPlanner {
         // It does have a frontend placement - each occurrence reads the table through its own raw
         // source and the node matches above every region's contribution - so the tree is admitted
         // on both routes and nothing is refused here.
-        // The first input names the output's time index and, on one table, binds every scan.
-        let Some((_, _, metric, time, tags, _, _)) = prepared.first() else {
+        // An empty selector has no table layout of its own. Use a real input's field layout so
+        // the compiler's left-biased set output names the real field even when empty is first.
+        // Keep the default layout when every selector is empty, as for a single empty selector.
+        if let Some(schema) = prepared
+            .iter()
+            .find(|(scan, ..)| !is_empty_discovered_input(scan))
+            .map(|(_, schema, ..)| Arc::clone(schema))
+        {
+            for input in &mut prepared {
+                if is_empty_discovered_input(&input.0) {
+                    input.0 = empty_discovered_frame(&schema)?;
+                    input.1 = Arc::clone(&schema);
+                }
+            }
+        }
+        // A real input names the output's time index and, on one table, binds every scan.
+        let Some((_, _, metric, time, tags, _, _)) = prepared
+            .iter()
+            .find(|(scan, ..)| !is_empty_discovered_input(scan))
+            .or_else(|| prepared.first())
+        else {
             return Ok(None);
         };
         let (metric, time, tags) = (metric.clone(), time.clone(), tags.clone());
@@ -1081,10 +1095,16 @@ impl PromPlanner {
         // regions and the tree's root is per-partition work: a partitioned table's region reads
         // neither the other scans nor the fragments another region holds, and a whole-vector
         // consumer has no region-local placement. Such a tree runs above the regions, and then each
-        // occurrence reads through its own raw source.
+        // occurrence reads through its own raw source. An empty frame likewise requires sourced
+        // scans: physical planning accepts either all frames or all bare scans, not a mixture.
         let per_source_inputs = cross_table
             || self_contained
-            || (multi_input && (any_partitioned || required_placement));
+            || (multi_input
+                && (any_partitioned
+                    || required_placement
+                    || prepared
+                        .iter()
+                        .any(|(scan, ..)| is_empty_discovered_input(scan))));
         // A segment carries one source's identity. Keeping each occurrence's scan and metadata
         // aligned here lets the cutting step name that source independently of selector count.
         // Read the split-series fact before `prepared` is consumed by the child mapping below.
@@ -1492,17 +1512,21 @@ impl PromPlanner {
 /// explicit, which is the mode a producer names each series in rather than a scan's storage key.
 fn empty_discovered_input(time_index: String) -> Result<PreparedInput> {
     let schema = empty_discovered_series_schema();
+    let input = empty_discovered_frame(&schema)?;
+    // No table stands behind this input, so no region splits it along a partition column.
+    Ok((input, schema, None, time_index, Vec::new(), false, false))
+}
+
+fn empty_discovered_frame(schema: &SeriesSchema) -> Result<LogicalPlan> {
     let frame =
-        raw_series_frame_schema_with_ordering(&schema, &RawLabelSource::Explicit, NATIVE_ORDERING)
+        raw_series_frame_schema_with_ordering(schema, &RawLabelSource::Explicit, NATIVE_ORDERING)
             .context(DataFusionPlanningSnafu)?;
-    let input = LogicalPlan::EmptyRelation(EmptyRelation {
+    Ok(LogicalPlan::EmptyRelation(EmptyRelation {
         produce_one_row: false,
         schema: Arc::new(
             DFSchema::try_from(frame.as_ref().clone()).context(DataFusionPlanningSnafu)?,
         ),
-    });
-    // No table stands behind this input, so no region splits it along a partition column.
-    Ok((input, schema, None, time_index, Vec::new(), false, false))
+    }))
 }
 
 /// The raw series schema of the typed empty input [`empty_discovered_input`] builds.
@@ -1529,8 +1553,16 @@ pub(crate) fn is_empty_discovered_input(plan: &LogicalPlan) -> bool {
     if relation.produce_one_row {
         return false;
     }
+    let Ok(declaration) = SeriesFrameDeclaration::parse(relation.schema.as_arrow()) else {
+        return false;
+    };
+    if declaration.content() != FrameContent::Raw
+        || declaration.labels() != FrameLabelMode::Explicit
+    {
+        return false;
+    }
     let Ok(frame) = raw_series_frame_schema_with_ordering(
-        &empty_discovered_series_schema(),
+        declaration.series(),
         &RawLabelSource::Explicit,
         NATIVE_ORDERING,
     ) else {
