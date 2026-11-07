@@ -1280,11 +1280,16 @@ mod tests {
 
     #[test]
     fn test_ndjson_invalid_utf8_retry_preserves_parse_errors() {
+        let too_deep = format!("{}0{}", "[".repeat(1025), "]".repeat(1025));
         for bad_line in [
             br#"{"escaped":"line\n","broken":}"#.as_slice(),
             b"{\"escaped\":\"line\\n\",\"message\":\"bad\xff\",\"broken\":}".as_slice(),
             br#"{"escaped":"line\n","message":"\uDC00"}"#.as_slice(),
+            br#"{"message":"\uD800"}"#.as_slice(),
+            br#"{"value":1e4294967296}"#.as_slice(),
+            b"{\"value\":123\0}".as_slice(),
             b"{\"message\":\"bad\xe2\x82".as_slice(),
+            too_deep.as_bytes(),
         ] {
             let mut payload = b"{\"message\":\"before\"}\n".to_vec();
             payload.extend_from_slice(bad_line);
@@ -1313,6 +1318,20 @@ mod tests {
                     ));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_ndjson_large_exponents() {
+        let payload = Bytes::from_static(br#"{"zero":0e99999999999,"underflow":1e-4294967295}"#);
+        for ignore_errors in [false, true] {
+            let actual = extract_pipeline_value_by_content_type(
+                NDJSON_CONTENT_TYPE.clone(),
+                payload.clone(),
+                ignore_errors,
+            )
+            .unwrap();
+            assert_eq!(actual, vec![json!({"zero": 0.0, "underflow": 0.0}).into()]);
         }
     }
 
