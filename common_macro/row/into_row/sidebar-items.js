@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["derive_into_row_impl","impl_into_row_method_combined"]};

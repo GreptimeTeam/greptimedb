@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["as_veclit","binlit_as_veclit","parse_veclit_from_strlit","veclit_to_binlit"]};

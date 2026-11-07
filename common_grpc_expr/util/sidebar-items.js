@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_create_table_expr","extract_new_columns","infer_column_datatype"],"struct":["ColumnExpr"]};

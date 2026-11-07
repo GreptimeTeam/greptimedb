@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_index","build_index_impl","build_index_signature","build_series_index"],"struct":["BuildIndexFunction","BuildSeriesIndexFunction"]};

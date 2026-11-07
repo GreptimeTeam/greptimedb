@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLI_TOMBSTONE_PREFIX"],"enum":["DelCommand"],"mod":["key","table"]};

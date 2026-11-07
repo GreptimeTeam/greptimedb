@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["catalog_decoder"],"struct":["CatalogManager","CatalogNameKey","CatalogNameValue"]};

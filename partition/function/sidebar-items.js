@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["hash_long","iceberg_hash_array","is_signed_integer","murmur3_32"],"struct":["IcebergHash","IcebergHashUdf"]};

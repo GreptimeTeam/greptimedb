@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_file_purger","create_local_file_purger","schedule_range_index_deletion","should_enable_gc"],"struct":["LocalFilePurger","NoopFilePurger","ObjectStoreFilePurger"],"trait":["FilePurger"],"type":["FilePurgerRef"]};

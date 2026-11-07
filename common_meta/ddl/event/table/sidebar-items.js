@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TABLE_DDL_PAYLOAD_VERSION"],"enum":["TableDdlEventType","TableDdlPayload"],"fn":["alter_table_kind_name","nullable_table_id"],"struct":["AlterLogicalTablesPayload","AlterTablePayload","CreateLogicalTablesPayload","CreateTablePayload","DropTablePayload","TableDdlEvent","TableDdlLocator","TruncateTablePayload"]};

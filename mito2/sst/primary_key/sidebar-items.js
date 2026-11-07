@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["append_suffix","encode_default","same_pk_column"],"struct":["PrimaryKeyRangeMapper"]};

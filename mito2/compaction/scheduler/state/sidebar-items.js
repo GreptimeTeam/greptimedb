@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CompactionPhase","CompactionTrigger"],"struct":["ActiveCompaction","CompactingFile","CompactingFiles","CompactionExecution","CompactionState","CompactionStatus","CompactionTaskState","DdlExecution","PendingCompaction"],"type":["CompactionStateRef"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["columns_taxonomy","concat_modified_batches","transform_logical_batches_to_physical"],"struct":["RecordBatchWithTsIdx","TableBatch"]};

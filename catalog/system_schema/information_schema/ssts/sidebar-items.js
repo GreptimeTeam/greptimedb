@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["inspect_plan","inspect_request","projected_schema"],"struct":["InformationSchemaSstsIndexMeta","InformationSchemaSstsManifest","InformationSchemaSstsStorage"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["collect_from_entry","filter_known_plugin_options","is_unknown_variant_tag","record_dropped_plugin","take_dropped_plugin_warnings"],"static":["DROPPED_PLUGIN_TAGS"],"struct":["StandaloneFlag"],"trait":["PluginOptionsDeserializer","PluginOptionsSerializer"],"type":["PluginOptionsSerializerRef"]};

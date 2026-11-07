@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_SQL_BYTES","MAX_STATEMENTS"],"fn":["append_results","append_schema_ddl","next_batch","show_create_sql"]};

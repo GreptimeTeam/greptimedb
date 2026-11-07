@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GC_TASK_INTERVAL_SEC","MAX_RETRY_TIMES"],"fn":["cleanup_region_file_artifacts","later_drop_task_with_global_gc","later_drop_task_without_global_gc","remove_region_dir_for_full_drop","remove_region_dir_once","remove_region_with_retry","should_force_remove_region_dir"],"struct":["DropHookPayload"]};

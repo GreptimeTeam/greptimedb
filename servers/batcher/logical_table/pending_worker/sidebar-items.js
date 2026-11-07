@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WorkerCommand"],"fn":["drain_batch","remove_worker_if_same_channel","should_close_worker_on_idle_timeout","start_worker"],"struct":["FlushWaiter","PendingBatch","PendingWorker"]};

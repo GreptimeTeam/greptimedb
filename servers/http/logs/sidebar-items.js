@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_FETCH"],"fn":["apply_default_fetch","logs"]};

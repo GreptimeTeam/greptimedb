@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["files_may_overlap"],"struct":["FileOverlapIndex","OverlapQuery"]};

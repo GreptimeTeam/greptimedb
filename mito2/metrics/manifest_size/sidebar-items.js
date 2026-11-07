@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MANIFEST_SIZE_METRIC_THRESHOLD","MANIFEST_SIZE_METRIC_THRESHOLD_ENV"],"fn":["parse_manifest_size_metric_threshold","remove_region_manifest_size","set_region_manifest_size"],"static":["MANIFEST_SIZE_METRIC_THRESHOLD"],"struct":["MetricState","REGION_MANIFEST_SIZE","RegionManifestSizeMetric"]};

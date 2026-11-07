@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["DropDatabase","DropFlow","DropTable","DropView"]};

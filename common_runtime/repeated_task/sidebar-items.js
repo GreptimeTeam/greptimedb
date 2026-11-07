@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["RepeatedTask","TaskInner"],"trait":["TaskFunction"],"type":["BoxedTaskFunction"]};

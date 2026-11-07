@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Executor"],"fn":["template_query"],"struct":["ElectionMysqlClient","ElectionSqlFactory","ElectionSqlSet","MySqlElection","TransactionWithExecutionTimeout"]};

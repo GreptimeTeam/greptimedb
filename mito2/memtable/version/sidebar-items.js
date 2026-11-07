@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["MemtableVersion","MutableMemtables"],"type":["MemtableVersionRef","MutableMemtablesRef","SmallMemtableVec"]};

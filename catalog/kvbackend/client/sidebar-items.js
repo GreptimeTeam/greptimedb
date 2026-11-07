@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_CACHE_MAX_CAPACITY","DEFAULT_CACHE_TTI","DEFAULT_CACHE_TTL"],"fn":["new_read_only_meta_kv_backend"],"struct":["CachedKvBackend","CachedKvBackendBuilder","MetaKvBackend"],"type":["CacheBackend"]};

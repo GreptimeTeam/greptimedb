@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ScanBatch"],"fn":["spawn_compact_stream"],"struct":["AbortOnDrop","ConvertBatchStream"],"type":["ScanBatchStream"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CATALOG_NAME","DEFAULT_CHARACTER_SET_NAME","DEFAULT_COLLATION_NAME","INIT_CAPACITY","SCHEMA_NAME","SCHEMA_OPTS"],"struct":["InformationSchemaSchemata","InformationSchemaSchemataBuilder"]};

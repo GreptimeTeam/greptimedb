@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PARTITION"],"mod":["client_manager","consumer","log_store","periodic_offset_fetcher","producer","util","worker"],"struct":["EntryImpl","NamespaceImpl"]};

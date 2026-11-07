@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PageEvent"],"fn":["check_file_size","invalid_request","unique_requested_bytes"],"struct":["CachedPage","PageCacheObserver","PageFetchStats","PagedCache"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RangeRead"],"struct":["BufferedAllocation","BufferedBatch","RangeBuffer","RangeCursor","SharedRange"],"type":["NextBatch","SharedBatch"]};

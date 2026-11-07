@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PreFilterMode"],"fn":["refine_primary_key_selection","refine_row_range_selection","row_group_contains_delete"],"struct":["FileRange","FileRangeContext","PartitionFilterContext","RangeBase","TagDecodeState"],"type":["FileRangeContextRef"]};

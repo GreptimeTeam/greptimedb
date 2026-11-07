@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["InspectPlan"],"fn":["chain_inspection_streams","inspection_query_schema"],"struct":["DistributedInformationExtension","DistributedInspectExec"]};

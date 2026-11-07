@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["ensure_success"],"struct":["DeleteRecordsRequest","DeleteRecordsResponse","HttpWalAdmin","HttpWalAdminConfig","RecordOffsetsRequest","RecordOffsetsResponse","TopicOffset"],"trait":["WalAdmin"]};

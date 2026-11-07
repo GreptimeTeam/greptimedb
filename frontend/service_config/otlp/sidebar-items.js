@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TRACE_INGEST_CHUNK_SIZE","MIN_TRACE_AUX_CACHE_SIZE"],"fn":["default_trace_aux_cache_size"],"struct":["OtlpOptions"]};

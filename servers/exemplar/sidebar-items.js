@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["estimated_row_bytes","into_rows","labels","timestamp_from_millis"],"struct":["Exemplar"],"type":["ExemplarRequests"]};

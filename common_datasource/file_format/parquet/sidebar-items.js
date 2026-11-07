@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["stream_to_parquet"],"mod":["packed_reader"],"struct":["DefaultParquetFileReaderFactory","LazyParquetFileReader","ParquetFormat"]};

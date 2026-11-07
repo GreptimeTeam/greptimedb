@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["InitStrategy"],"fn":["init","init_with_retry","latest_get_backoff"],"struct":["CacheContainer"],"type":["Initializer","Invalidator","TokenFilter"]};
