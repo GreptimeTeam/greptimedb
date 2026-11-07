@@ -3725,6 +3725,112 @@ async fn distributed_native_promql_disjoint_regions_do_not_repartition() {
     assert_eq!(control_rows, rows, "{expression}");
 }
 
+/// A zero-match selector and a partitioned metric meet at one frontend set consumer.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_zero_match_or_real() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_zero_match")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE zero_match_phy (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host))
+            PARTITION ON COLUMNS (host) (host < 'm', host >= 'm')
+            ENGINE=metric WITH ('physical_metric_table'='true');
+        CREATE TABLE alpha_total (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host))
+            ENGINE=metric WITH ('on_physical_table'='zero_match_phy');
+        INSERT INTO alpha_total (host, ts, val) VALUES
+            ('a', 0, 1), ('a', 1000, 2), ('a', 2000, 3),
+            ('z', 0, 10), ('z', 1000, 20), ('z', 2000, 30);
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expected = [
+        (0, "a", 1.0),
+        (1000, "a", 2.0),
+        (2000, "a", 3.0),
+        (0, "z", 10.0),
+        (1000, "z", 20.0),
+        (2000, "z", 30.0),
+    ];
+    for (expression, empty_index) in [
+        (r#"{__name__=~"no_such_metric_.+"} or alpha_total"#, 0),
+        (r#"alpha_total or {__name__=~"no_such_metric_.+"}"#, 1),
+    ] {
+        let output = instance
+            .do_promql_query(
+                &PromQuery {
+                    query: expression.to_string(),
+                    start: "0".to_string(),
+                    end: "2".to_string(),
+                    step: "1s".to_string(),
+                    ..PromQuery::default()
+                },
+                native_query_context(true, 2),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.as_ref().expect("frontend physical plan");
+        let fused = find_plan_node(plan, "FusedSeriesExec").expect("frontend set consumer");
+        let display = format!(
+            "{}",
+            datafusion::physical_plan::displayable(fused.as_ref()).one_line()
+        );
+        assert!(display.contains("root Set or"), "{expression}: {display}");
+        let children = fused.children();
+        assert_eq!(children.len(), 2, "{expression}: {display}");
+        assert!(
+            find_plan_node(children[empty_index], "EmptyExec").is_some(),
+            "{expression}: {display}"
+        );
+        let shape = native_plan_shape(children[1 - empty_index]);
+        assert_eq!(shape.regions_per_scan, vec![2], "{expression}: {display}");
+        assert_eq!(
+            fused.output_partitioning().partition_count(),
+            1,
+            "{expression}: {display}"
+        );
+        assert!(
+            children
+                .iter()
+                .all(|child| child.output_partitioning().partition_count() == 1),
+            "{expression}: {display}"
+        );
+
+        let (columns, rows) = native_labelled_rows(output).await;
+        assert_eq!(
+            columns,
+            vec!["__name__", "host", "ts", "val"],
+            "{expression}"
+        );
+        let actual = rows
+            .iter()
+            .map(|(time, labels, value)| {
+                assert_eq!(labels.len(), 2, "{expression}: {labels:?}");
+                assert_eq!(
+                    labels.get("__name__").map(String::as_str),
+                    Some("alpha_total")
+                );
+                (*time, labels.get("host").unwrap().as_str(), *value)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{expression}");
+    }
+}
+
 /// A nameless selector discovers every metric table it matches and reads them as one `Union`.
 /// `UnionExec` reports the frame metadata of its last child, so a time-partitioned metric named
 /// before a host-partitioned one must still be reconciled: otherwise the union claims contiguous
