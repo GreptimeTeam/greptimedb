@@ -526,9 +526,10 @@ impl NodeBuffer {
     fn record(&self) {
         self.metrics.record_reserved_bytes(self.reservation.size());
     }
+}
 
-    /// Returns every byte this node holds to the pool.
-    fn release(&mut self) {
+impl Drop for NodeBuffer {
+    fn drop(&mut self) {
         self.reservation.free();
         self.record();
     }
@@ -1610,7 +1611,7 @@ impl BinaryRuntime {
         self.operands
             .get(side)
             .map(|operand| operand.pending(chunk))
-            .ok_or_else(no_binary)
+            .ok_or_else(invalid_binary_operand)
     }
 
     /// Reports an operand that ended inside a series.
@@ -1631,7 +1632,7 @@ impl BinaryRuntime {
         // number of fields, or fewer samples than its axis places rows. The kernel's own check is
         // run here, before the chunk enters the buffer, and the side is added to what it reports.
         let Some(schema) = self.schemas.get(side) else {
-            return Err(no_binary());
+            return Err(invalid_binary_operand());
         };
         validate_binary_operand(schema.as_ref(), std::slice::from_ref(&chunk.series)).map_err(
             |error| {
@@ -1644,7 +1645,7 @@ impl BinaryRuntime {
         )?;
         let reader = self.reader(side);
         let Some(operand) = self.operands.get_mut(side) else {
-            return Err(no_binary());
+            return Err(invalid_binary_operand());
         };
         operand.retain(chunk, reader)
     }
@@ -2806,6 +2807,7 @@ struct RuntimeNode {
     op: RuntimeOp,
 }
 
+// Each payload precedes its NodeState, so it drops before that node's reservation.
 enum RuntimeOp {
     Input(InputId),
     Scalar,
@@ -2835,7 +2837,7 @@ enum RuntimeOp {
     },
     Instant {
         input: Box<RuntimeNode>,
-        instant: Option<InstantRuntime>,
+        instant: InstantRuntime,
         state: NodeState,
     },
     Merge {
@@ -2845,59 +2847,62 @@ enum RuntimeOp {
     },
     Window {
         input: Box<RuntimeNode>,
+        // `finish` consumes the evaluator; it is taken only during the terminal finish pass.
         window: Option<RangeEvaluator>,
         merge: Option<MergeInput>,
         state: NodeState,
     },
     Map {
         input: Box<RuntimeNode>,
-        map: Option<MapRuntime>,
+        map: MapRuntime,
         state: NodeState,
     },
     ParameterizedMap {
         input: Box<RuntimeNode>,
         parameters: Vec<RuntimeNode>,
-        map: Option<ParameterizedMapRuntime>,
+        map: ParameterizedMapRuntime,
         state: NodeState,
     },
     Timestamp {
         input: Box<RuntimeNode>,
-        schema: Option<Arc<SeriesSchema>>,
+        schema: Arc<SeriesSchema>,
         state: NodeState,
     },
     Binary {
         left: Box<RuntimeNode>,
         right: Box<RuntimeNode>,
-        binary: Option<BinaryRuntime>,
+        binary: BinaryRuntime,
         state: NodeState,
     },
     Broadcast {
         left: Box<RuntimeNode>,
         right: Box<RuntimeNode>,
-        broadcast: Option<BroadcastRuntime>,
+        broadcast: BroadcastRuntime,
         state: NodeState,
     },
     Aggregate {
         input: Box<RuntimeNode>,
-        aggregate: Option<AggregateRuntime>,
+        aggregate: AggregateRuntime,
         state: NodeState,
     },
     Vector {
         input: Box<RuntimeNode>,
-        vector: Option<VectorRuntime>,
+        vector: VectorRuntime,
         state: NodeState,
     },
     ParameterizedTopK {
         input: Box<RuntimeNode>,
-        parameter: Box<RuntimeNode>,
-        vector: Option<VectorRuntime>,
+        // Taken and dropped after its scalar values are installed.
+        parameter: Option<Box<RuntimeNode>>,
+        vector: VectorRuntime,
         state: NodeState,
     },
     ParameterizedHistogram {
         input: Box<RuntimeNode>,
-        parameters: Vec<RuntimeNode>,
+        // Each parameter is taken and dropped after its scalar values are installed.
+        parameters: Vec<Option<RuntimeNode>>,
         literals: Vec<Option<f64>>,
-        vector: Option<VectorRuntime>,
+        vector: VectorRuntime,
         values: Vec<Option<Vec<Option<f64>>>>,
         parameter_bytes: Vec<usize>,
         state: NodeState,
@@ -2905,6 +2910,8 @@ enum RuntimeOp {
 }
 
 /// State shared by the stateful operators.
+///
+/// The queue and emitted history must precede the buffer so they drop before its reservation.
 struct NodeState {
     queued: VecDeque<(NativeChunk, usize)>,
     queued_tables: usize,
@@ -2966,17 +2973,17 @@ struct InputSlot {
     state: NodeState,
 }
 
-/// State for one execution of a bound tree.
-///
-/// The state owns its runtime tree outright: the topology is the one the compiled tree built, and
-/// nothing outside reaches into it, so a descent and the release that follows a failure are both
-/// borrows of this one owner.
+/// State for one execution of a bound tree. The live tree and input slots are dropped together
+/// when the executor finishes or fails; the public state remains available for inspection.
 pub struct NativeExecutionState {
+    live: Option<LiveExecution>,
+}
+
+struct LiveExecution {
     root: RuntimeNode,
     inputs: Vec<InputSlot>,
     /// A constant root waiting for its only pull; operand scalars remain chunkless.
     scalar_root: Option<(Arc<EvalGrid>, f64, NodeState)>,
-    annotations: Option<PromqlAnnotationCollector>,
 }
 
 impl NodeState {
@@ -3137,7 +3144,7 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Instant {
                         input: Box::new(child),
-                        instant: Some(InstantRuntime::try_new(&input_schema, op)?),
+                        instant: InstantRuntime::try_new(&input_schema, op)?,
                         state: {
                             let mut state = NodeState::new(
                                 format!("native.instant at {location}"),
@@ -3239,10 +3246,10 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Map {
                         input: Box::new(child),
-                        map: Some(MapRuntime {
+                        map: MapRuntime {
                             ops: Arc::clone(&op.ops),
                             schema,
-                        }),
+                        },
                         state,
                     },
                     true,
@@ -3296,13 +3303,13 @@ impl RuntimeNode {
                     RuntimeOp::ParameterizedMap {
                         input: Box::new(child),
                         parameters: nodes,
-                        map: Some(ParameterizedMapRuntime {
+                        map: ParameterizedMapRuntime {
                             op: *op,
                             schema,
                             literals,
                             values: vec![None; parameters.len()],
                             parameter_bytes: 0,
-                        }),
+                        },
                         state,
                     },
                     true,
@@ -3329,7 +3336,7 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Timestamp {
                         input: Box::new(child),
-                        schema: Some(schema),
+                        schema,
                         state,
                     },
                     true,
@@ -3381,7 +3388,7 @@ impl RuntimeNode {
                         RuntimeOp::Binary {
                             left: Box::new(left_node),
                             right: Box::new(right_node),
-                            binary: Some(binary),
+                            binary,
                             state: NodeState::new(
                                 format!("native.binary at {location}"),
                                 Arc::clone(&metrics),
@@ -3409,7 +3416,7 @@ impl RuntimeNode {
                             RuntimeOp::Broadcast {
                                 left: Box::new(left_node),
                                 right: Box::new(right_node),
-                                broadcast: Some(broadcast),
+                                broadcast,
                                 state,
                             },
                             shared,
@@ -3459,7 +3466,7 @@ impl RuntimeNode {
                     RuntimeOp::Binary {
                         left: Box::new(left_node),
                         right: Box::new(right_node),
-                        binary: Some(set),
+                        binary: set,
                         state: NodeState::new(
                             format!("native.set at {location}"),
                             Arc::clone(&metrics),
@@ -3510,7 +3517,7 @@ impl RuntimeNode {
                     RuntimeOp::Binary {
                         left: Box::new(base_node),
                         right: Box::new(info_node),
-                        binary: Some(runtime),
+                        binary: runtime,
                         state: NodeState::new(
                             format!("native.info at {location}"),
                             Arc::clone(&metrics),
@@ -3534,11 +3541,7 @@ impl RuntimeNode {
                     Arc::clone(&metrics),
                     pool,
                 );
-                let aggregate = Some(AggregateRuntime::new(
-                    op.clone(),
-                    schema,
-                    &mut state.buffer,
-                )?);
+                let aggregate = AggregateRuntime::new(op.clone(), schema, &mut state.buffer)?;
                 let (child, _) = Self::build(
                     input,
                     pool,
@@ -3595,8 +3598,8 @@ impl RuntimeNode {
                 (
                     RuntimeOp::ParameterizedTopK {
                         input: Box::new(child),
-                        parameter: Box::new(parameter),
-                        vector: Some(vector),
+                        parameter: Some(Box::new(parameter)),
+                        vector,
                         state,
                     },
                     // `topk` keeps whole input series and canonicalises no label set, so a dynamic
@@ -3657,7 +3660,7 @@ impl RuntimeNode {
                         format!("{location}.parameter{index}"),
                         duplicate_evidence.clone(),
                     )?;
-                    built.push(runtime);
+                    built.push(Some(runtime));
                 }
                 (
                     RuntimeOp::ParameterizedHistogram {
@@ -3666,7 +3669,7 @@ impl RuntimeNode {
                         values: vec![None; built.len()],
                         parameters: built,
                         literals,
-                        vector: Some(vector),
+                        vector,
                         state: NodeState::new(
                             format!("native.vector at {location}"),
                             Arc::clone(&metrics),
@@ -3717,7 +3720,7 @@ impl RuntimeNode {
                 (
                     RuntimeOp::Vector {
                         input: Box::new(child),
-                        vector: Some(vector),
+                        vector,
                         state: NodeState::new(
                             format!("native.vector at {location}"),
                             Arc::clone(&metrics),
@@ -3756,14 +3759,18 @@ impl RuntimeNode {
                 input, parameter, ..
             } => {
                 input.register_metrics(&format!("{name}.input"), set, partition);
-                parameter.register_metrics(&format!("{name}.parameter"), set, partition);
+                if let Some(parameter) = parameter {
+                    parameter.register_metrics(&format!("{name}.parameter"), set, partition);
+                }
             }
             RuntimeOp::ParameterizedHistogram {
                 input, parameters, ..
             } => {
                 input.register_metrics(&format!("{name}.input"), set, partition);
                 for (i, parameter) in parameters.iter().enumerate() {
-                    parameter.register_metrics(&format!("{name}.parameter{i}"), set, partition);
+                    if let Some(parameter) = parameter {
+                        parameter.register_metrics(&format!("{name}.parameter{i}"), set, partition);
+                    }
                 }
             }
             RuntimeOp::ParameterizedMap {
@@ -3822,7 +3829,7 @@ impl RuntimeNode {
                     .reservation
                     .size()
                     .saturating_add(input.reserved_bytes()),
-                |n, p| n.saturating_add(p.reserved_bytes()),
+                |n, p| n.saturating_add(p.as_ref().map_or(0, RuntimeNode::reserved_bytes)),
             ),
             RuntimeOp::ParameterizedTopK {
                 input,
@@ -3834,7 +3841,7 @@ impl RuntimeNode {
                 .reservation
                 .size()
                 .saturating_add(input.reserved_bytes())
-                .saturating_add(parameter.reserved_bytes()),
+                .saturating_add(parameter.as_ref().map_or(0, |p| p.reserved_bytes())),
             RuntimeOp::ParameterizedMap {
                 input,
                 parameters,
@@ -3892,18 +3899,14 @@ impl RuntimeNode {
                 broadcast,
                 ..
             } => {
-                if let Some(broadcast) = broadcast {
-                    broadcast.annotations = Some(collector.clone());
-                }
+                broadcast.annotations = Some(collector.clone());
                 left.set_annotations(collector.clone());
                 right.set_annotations(collector);
             }
             RuntimeOp::Aggregate { input, .. } => input.set_annotations(collector),
             RuntimeOp::Timestamp { input, .. } => input.set_annotations(collector),
             RuntimeOp::Vector { input, vector, .. } => {
-                if let Some(vector) = vector {
-                    vector.annotations = Some(collector.clone());
-                }
+                vector.annotations = Some(collector.clone());
                 input.set_annotations(collector);
             }
             // `scalar()` answers a value of its own and records nothing, so only its input needs the
@@ -3916,11 +3919,11 @@ impl RuntimeNode {
                 vector,
                 ..
             } => {
-                if let Some(vector) = vector {
-                    vector.annotations = Some(collector.clone());
-                }
+                vector.annotations = Some(collector.clone());
                 input.set_annotations(collector.clone());
-                parameter.set_annotations(collector);
+                if let Some(parameter) = parameter {
+                    parameter.set_annotations(collector);
+                }
             }
             // The histogram kernel reports a native histogram and classic buckets of one label set
             // through the collector, so the runtime it runs on needs it as well as its children.
@@ -3930,11 +3933,9 @@ impl RuntimeNode {
                 vector,
                 ..
             } => {
-                if let Some(vector) = vector {
-                    vector.annotations = Some(collector.clone());
-                }
+                vector.annotations = Some(collector.clone());
                 input.set_annotations(collector.clone());
-                for parameter in parameters {
+                for parameter in parameters.iter_mut().flatten() {
                     parameter.set_annotations(collector.clone());
                 }
             }
@@ -4125,9 +4126,7 @@ impl RuntimeNode {
                 instant,
                 state,
             } => {
-                let Some(selection) = instant.as_mut() else {
-                    return Err(no_instant());
-                };
+                let selection = instant;
                 // A selection decides a whole series at once, so every chunk before the one that
                 // closes it yields nothing and the selection asks its input again.
                 loop {
@@ -4195,9 +4194,7 @@ impl RuntimeNode {
                 }
             }
             RuntimeOp::Map { input, map, state } => {
-                let Some(operation) = map.as_ref() else {
-                    return Err(no_map());
-                };
+                let operation = map;
                 // An operation that empties every position yields no chunk, and the map asks its
                 // input again rather than reporting a decision it did not make.
                 loop {
@@ -4223,9 +4220,7 @@ impl RuntimeNode {
                 map,
                 state,
             } => {
-                let Some(operation) = map.as_mut() else {
-                    return Err(no_map());
-                };
+                let operation = map;
                 // Every parameter is read whole first, as a broadcast reads its scalar; a constant
                 // one is materialized from its binding.
                 for (index, parameter) in parameters.iter_mut().enumerate() {
@@ -4293,36 +4288,29 @@ impl RuntimeNode {
                 input,
                 schema,
                 state,
-            } => {
-                let schema = schema.as_ref().ok_or_else(|| {
-                    DataFusionError::Execution("timestamp schema was released".into())
-                })?;
-                loop {
-                    let Some(chunk) = input.pull(inputs, inputs_finished)? else {
-                        return Ok(None);
-                    };
-                    let NativeChunk::Evaluated(chunk) = chunk else {
-                        return Err(DataFusionError::Execution(
-                            "timestamp consumes evaluated samples, not raw samples".into(),
-                        ));
-                    };
-                    if let Some(output) = state
-                        .timestamp(schema, chunk)
-                        .map_err(|error| state.context(error))?
-                    {
-                        return Ok(Some(NativeChunk::Evaluated(output)));
-                    }
+            } => loop {
+                let Some(chunk) = input.pull(inputs, inputs_finished)? else {
+                    return Ok(None);
+                };
+                let NativeChunk::Evaluated(chunk) = chunk else {
+                    return Err(DataFusionError::Execution(
+                        "timestamp consumes evaluated samples, not raw samples".into(),
+                    ));
+                };
+                if let Some(output) = state
+                    .timestamp(schema, chunk)
+                    .map_err(|error| state.context(error))?
+                {
+                    return Ok(Some(NativeChunk::Evaluated(output)));
                 }
-            }
+            },
             RuntimeOp::Binary {
                 left,
                 right,
                 binary,
                 state,
             } => {
-                let Some(operation) = binary.as_mut() else {
-                    return Err(no_binary());
-                };
+                let operation = binary;
                 // Both operands are read to the end of what they hand over: before the input ends a
                 // binary node only retains the chunks, because a pair is not decided until both
                 // sides are whole, and after it ends this is the drain that empties the two.
@@ -4355,9 +4343,7 @@ impl RuntimeNode {
                 broadcast,
                 state,
             } => {
-                let Some(operation) = broadcast.as_mut() else {
-                    return Err(no_broadcast());
-                };
+                let operation = broadcast;
                 // A constant is on the node's binding, so only the vector side is pulled. A varying
                 // scalar is read first, whole; then each vector chunk is transformed as it arrives
                 // and handed up, which is what keeps a broadcast over a whole vector from costing
@@ -4405,9 +4391,7 @@ impl RuntimeNode {
                 aggregate,
                 state,
             } => {
-                let Some(fold) = aggregate.as_mut() else {
-                    return Err(no_aggregate());
-                };
+                let fold = aggregate;
                 // What the fold reads is not retained -- a chunk is folded as it arrives and
                 // dropped -- so reading the child dry costs the fold's states and not the input's
                 // bytes. Nothing is answered before the input ends: until then a group's value at a
@@ -4433,10 +4417,13 @@ impl RuntimeNode {
                 vector,
                 state,
             } => {
-                let operation = vector.as_mut().ok_or_else(no_vector)?;
+                let operation = vector;
                 if operation.parameter.is_none() {
                     let mut slot = None;
-                    while let Some(chunk) = parameter.pull(inputs, inputs_finished)? {
+                    let parameter_node = parameter.as_mut().ok_or_else(|| {
+                        DataFusionError::Internal("topk parameter already consumed".into())
+                    })?;
+                    while let Some(chunk) = parameter_node.pull(inputs, inputs_finished)? {
                         state
                             .hold_scalar(&mut operation.parameter_bytes, &mut slot, chunk)
                             .map_err(|error| state.context(error))?;
@@ -4445,7 +4432,7 @@ impl RuntimeNode {
                         // A parameter that folds its own input (a `scalar()` over a selector) has
                         // nothing to hand over until that input ends, so its absence is a reason to
                         // be pulled again rather than a failure.
-                        if !parameter.settled(inputs) {
+                        if !parameter_node.settled(inputs) {
                             return Ok(None);
                         }
                         slot.ok_or_else(|| {
@@ -4490,7 +4477,10 @@ impl RuntimeNode {
                     state
                         .settle_vector(operation)
                         .map_err(|error| state.context(error))?;
-                    parameter.release();
+                    // Finish windows before dropping the consumed subtree; its children may still
+                    // hold charged emitted history or scalar series even after the scalar was read.
+                    parameter_node.finish_windows()?;
+                    *parameter = None;
                 }
                 while let Some(chunk) = input.pull(inputs, inputs_finished)? {
                     state
@@ -4514,7 +4504,7 @@ impl RuntimeNode {
                 parameter_bytes,
                 state,
             } => {
-                let operation = vector.as_mut().ok_or_else(no_vector)?;
+                let operation = vector;
                 for index in 0..parameters.len() {
                     if values[index].is_none() {
                         let mut slot = None;
@@ -4529,12 +4519,15 @@ impl RuntimeNode {
                                 value,
                             )?;
                         } else {
-                            while let Some(chunk) =
-                                parameters[index].pull(inputs, inputs_finished)?
-                            {
+                            let parameter = parameters[index].as_mut().ok_or_else(|| {
+                                DataFusionError::Internal(
+                                    "histogram parameter already consumed".into(),
+                                )
+                            })?;
+                            while let Some(chunk) = parameter.pull(inputs, inputs_finished)? {
                                 state.hold_scalar(&mut parameter_bytes[index], &mut slot, chunk)?;
                             }
-                            if !parameters[index].settled(inputs) {
+                            if !parameter.settled(inputs) {
                                 return Ok(None);
                             }
                         }
@@ -4583,7 +4576,10 @@ impl RuntimeNode {
                             .copied()
                             .fold(0usize, usize::saturating_add);
                         state.settle_vector(operation)?;
-                        parameters[index].release();
+                        if let Some(parameter) = &mut parameters[index] {
+                            parameter.finish_windows()?;
+                        }
+                        parameters[index] = None;
                     }
                 }
                 // Nothing is settled here: what this node holds changes as a parameter is converted
@@ -4613,9 +4609,7 @@ impl RuntimeNode {
                 vector,
                 state,
             } => {
-                let Some(operation) = vector.as_mut() else {
-                    return Err(no_vector());
-                };
+                let operation = vector;
                 // Which samples are kept at a point is not decided until the whole input has
                 // arrived, so the input is read to the end before anything is handed over.
                 while let Some(chunk) = input.pull(inputs, inputs_finished)? {
@@ -4666,11 +4660,10 @@ impl RuntimeNode {
             RuntimeOp::ParameterizedMap {
                 input,
                 parameters,
-                map,
                 state,
+                ..
             } => {
                 state.queued.is_empty()
-                    && map.is_some()
                     && input.settled(inputs)
                     && parameters.iter().all(|parameter| parameter.settled(inputs))
             }
@@ -4682,9 +4675,7 @@ impl RuntimeNode {
             } => {
                 // Parameter nodes are released after their values are installed; `computed`
                 // already implies those values were consumed.
-                state.queued.is_empty()
-                    && vector.as_ref().is_some_and(|v| v.computed)
-                    && input.settled(inputs)
+                state.queued.is_empty() && vector.computed && input.settled(inputs)
             }
             RuntimeOp::ParameterizedTopK {
                 input,
@@ -4694,9 +4685,7 @@ impl RuntimeNode {
             } => {
                 // Parameter nodes are released after their values are installed; `computed`
                 // already implies the parameter was consumed.
-                state.queued.is_empty()
-                    && vector.as_ref().is_some_and(|v| v.computed)
-                    && input.settled(inputs)
+                state.queued.is_empty() && vector.computed && input.settled(inputs)
             }
             RuntimeOp::VectorOf {
                 input,
@@ -4734,20 +4723,12 @@ impl RuntimeNode {
                 input,
                 aggregate,
                 state,
-            } => {
-                state.queued.is_empty()
-                    && aggregate.as_ref().is_some_and(|fold| fold.computed)
-                    && input.settled(inputs)
-            }
+            } => state.queued.is_empty() && aggregate.computed && input.settled(inputs),
             RuntimeOp::Vector {
                 input,
                 vector,
                 state,
-            } => {
-                state.queued.is_empty()
-                    && vector.as_ref().is_some_and(|operation| operation.computed)
-                    && input.settled(inputs)
-            }
+            } => state.queued.is_empty() && vector.computed && input.settled(inputs),
             // A vector match is settled once its kernel ran and both operands are: what one side
             // answers at a point depends on the other side.
             RuntimeOp::Binary {
@@ -4757,23 +4738,15 @@ impl RuntimeNode {
                 state,
             } => {
                 state.queued.is_empty()
-                    && binary.as_ref().is_some_and(|operation| operation.computed)
+                    && binary.computed
                     && left.settled(inputs)
                     && right.settled(inputs)
             }
             // A broadcast owes what its sides have not handed over yet. A constant side is settled
             // from the start.
             RuntimeOp::Broadcast {
-                left,
-                right,
-                broadcast,
-                state,
-            } => {
-                state.queued.is_empty()
-                    && broadcast.is_some()
-                    && left.settled(inputs)
-                    && right.settled(inputs)
-            }
+                left, right, state, ..
+            } => state.queued.is_empty() && left.settled(inputs) && right.settled(inputs),
         }
     }
 
@@ -4807,14 +4780,20 @@ impl RuntimeNode {
                 input, parameters, ..
             } => {
                 let mut flushed = input.flush_ready_merges(inputs)?;
-                for p in parameters {
+                for p in parameters.iter_mut().flatten() {
                     flushed |= p.flush_ready_merges(inputs)?;
                 }
                 Ok(flushed)
             }
             RuntimeOp::ParameterizedTopK {
                 input, parameter, ..
-            } => Ok(input.flush_ready_merges(inputs)? | parameter.flush_ready_merges(inputs)?),
+            } => {
+                let mut flushed = input.flush_ready_merges(inputs)?;
+                if let Some(parameter) = parameter {
+                    flushed |= parameter.flush_ready_merges(inputs)?;
+                }
+                Ok(flushed)
+            }
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 let left_flushed = left.flush_ready_merges(inputs)?;
                 let right_flushed = right.flush_ready_merges(inputs)?;
@@ -4873,10 +4852,19 @@ impl RuntimeNode {
             | RuntimeOp::VectorOf { input, .. } => input.any_merge_pending(),
             RuntimeOp::ParameterizedHistogram {
                 input, parameters, ..
-            } => input.any_merge_pending() || parameters.iter().any(RuntimeNode::any_merge_pending),
+            } => {
+                input.any_merge_pending()
+                    || parameters
+                        .iter()
+                        .flatten()
+                        .any(RuntimeNode::any_merge_pending)
+            }
             RuntimeOp::ParameterizedTopK {
                 input, parameter, ..
-            } => input.any_merge_pending() || parameter.any_merge_pending(),
+            } => {
+                input.any_merge_pending()
+                    || parameter.as_ref().is_some_and(|p| p.any_merge_pending())
+            }
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 left.any_merge_pending() || right.any_merge_pending()
             }
@@ -4925,13 +4913,15 @@ impl RuntimeNode {
                 vector,
                 state,
             } => {
-                if let Some(v) = vector {
-                    v.input
-                        .ensure_closed(Reader::Vector)
-                        .map_err(|e| state.context(e))?;
-                }
+                vector
+                    .input
+                    .ensure_closed(Reader::Vector)
+                    .map_err(|e| state.context(e))?;
                 input.unclosed()?;
-                parameter.unclosed()
+                if let Some(parameter) = parameter {
+                    parameter.unclosed()?;
+                }
+                Ok(())
             }
             RuntimeOp::ParameterizedHistogram {
                 input,
@@ -4940,13 +4930,15 @@ impl RuntimeNode {
                 state,
                 ..
             } => {
-                if let Some(v) = vector {
-                    v.input
-                        .ensure_closed(Reader::Vector)
-                        .map_err(|e| state.context(e))?;
-                }
+                vector
+                    .input
+                    .ensure_closed(Reader::Vector)
+                    .map_err(|e| state.context(e))?;
                 input.unclosed()?;
-                parameters.iter().try_for_each(RuntimeNode::unclosed)
+                parameters
+                    .iter()
+                    .flatten()
+                    .try_for_each(RuntimeNode::unclosed)
             }
             RuntimeOp::Binary {
                 left,
@@ -4954,9 +4946,7 @@ impl RuntimeNode {
                 binary,
                 state,
             } => {
-                if let Some(operation) = binary {
-                    operation.closed().map_err(|error| state.context(error))?;
-                }
+                binary.closed().map_err(|error| state.context(error))?;
                 left.unclosed()?;
                 right.unclosed()
             }
@@ -4969,12 +4959,10 @@ impl RuntimeNode {
                 vector,
                 state,
             } => {
-                if let Some(operation) = vector {
-                    operation
-                        .input
-                        .ensure_closed(Reader::Vector)
-                        .map_err(|error| state.context(error))?;
-                }
+                vector
+                    .input
+                    .ensure_closed(Reader::Vector)
+                    .map_err(|error| state.context(error))?;
                 input.unclosed()
             }
         }
@@ -5009,13 +4997,18 @@ impl RuntimeNode {
             | RuntimeOp::Merge { input, .. } => input.finish_windows(),
             RuntimeOp::ParameterizedTopK {
                 input, parameter, ..
-            } => input.finish_windows().and(parameter.finish_windows()),
+            } => {
+                let first = input.finish_windows();
+                let parameter = parameter.as_mut().map_or(Ok(()), |p| p.finish_windows());
+                first.and(parameter)
+            }
             RuntimeOp::ParameterizedHistogram {
                 input, parameters, ..
             } => {
                 let first = input.finish_windows();
                 parameters
                     .iter_mut()
+                    .flatten()
                     .map(RuntimeNode::finish_windows)
                     .fold(first, Result::and)
             }
@@ -5038,165 +5031,6 @@ impl RuntimeNode {
                     .map_or(Ok(()), RangeEvaluator::finish)
                     .map_err(|error| state.context(error));
                 child.and(own)
-            }
-        }
-    }
-
-    /// Gives back everything this node and its children hold, keeping the topology.
-    ///
-    /// The operation's payload goes first: it is what the reservation was taken for, and dropping
-    /// it after the reservation went back would hand the pool bytes it cannot admit while they are
-    /// still read. A released node keeps its shape — an input keeps its routing slot, a binary both
-    /// of its operands — because what a node is does not change when the bytes it held go back.
-    fn release(&mut self) {
-        match &mut self.op {
-            // A source keeps its queue in the caller-owned slot, which is released beside the tree,
-            // and a scalar holds nothing at all.
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
-            RuntimeOp::EvalTime { state, .. } => state.release(),
-            RuntimeOp::ScalarOf {
-                input,
-                retained,
-                state,
-                ..
-            } => {
-                retained.release();
-                state.release();
-                input.release();
-            }
-            RuntimeOp::ParameterizedMap {
-                input,
-                parameters,
-                map,
-                state,
-            } => {
-                *map = None;
-                state.release();
-                input.release();
-                for parameter in parameters {
-                    parameter.release();
-                }
-            }
-            RuntimeOp::ParameterizedTopK {
-                input,
-                parameter,
-                vector,
-                state,
-            } => {
-                // What the node holds is the input it retained and the values it read the parameter
-                // into, whether or not the kernel ran; both go before the reservation does, as the
-                // ordinary vector branch drops its assembled result.
-                if let Some(mut v) = vector.take() {
-                    v.input.release();
-                }
-                state.release();
-                input.release();
-                parameter.release();
-            }
-            RuntimeOp::ParameterizedHistogram {
-                input,
-                parameters,
-                vector,
-                state,
-                values,
-                ..
-            } => {
-                if let Some(mut v) = vector.take() {
-                    v.input.release();
-                }
-                for parameter in parameters {
-                    parameter.release();
-                }
-                values.clear();
-                state.release();
-                input.release();
-            }
-            RuntimeOp::VectorOf { input, state, .. } => {
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Instant {
-                input,
-                instant,
-                state,
-            } => {
-                *instant = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Merge {
-                input,
-                merge,
-                state,
-            } => {
-                *merge = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Window {
-                input,
-                window,
-                merge,
-                state,
-            } => {
-                *window = None;
-                *merge = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Map { input, map, state } => {
-                *map = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Timestamp {
-                input,
-                schema,
-                state,
-            } => {
-                *schema = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Aggregate {
-                input,
-                aggregate,
-                state,
-            } => {
-                *aggregate = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Vector {
-                input,
-                vector,
-                state,
-            } => {
-                *vector = None;
-                state.release();
-                input.release();
-            }
-            RuntimeOp::Binary {
-                left,
-                right,
-                binary,
-                state,
-            } => {
-                *binary = None;
-                state.release();
-                left.release();
-                right.release();
-            }
-            RuntimeOp::Broadcast {
-                left,
-                right,
-                broadcast,
-                state,
-            } => {
-                *broadcast = None;
-                state.release();
-                left.release();
-                right.release();
             }
         }
     }
@@ -5245,17 +5079,17 @@ impl NativeExecutionState {
             NativeType::AggregateState(_) => {}
         }
         Ok(Self {
-            root,
-            inputs,
-            scalar_root,
-            annotations: None,
+            live: Some(LiveExecution {
+                root,
+                inputs,
+                scalar_root,
+            }),
         })
     }
 
     pub fn set_annotations(&mut self, collector: Option<PromqlAnnotationCollector>) {
-        self.annotations = collector.clone();
-        if let Some(collector) = collector {
-            self.root.set_annotations(collector);
+        if let (Some(live), Some(collector)) = (&mut self.live, collector) {
+            live.root.set_annotations(collector);
         }
     }
 
@@ -5265,39 +5099,39 @@ impl NativeExecutionState {
     /// nodes' own counters and gauges, so a later read of it reports what they recorded and keeps
     /// no topology of this execution alive.
     pub(crate) fn register_metrics(&self, set: &ExecutionPlanMetricsSet, partition: usize) {
-        self.root.register_metrics("root", set, partition);
+        if let Some(live) = &self.live {
+            live.root.register_metrics("root", set, partition);
+        }
     }
 
     /// Returns the runtime input slots bound to `source_index`.
     pub fn input_ids(&self, source_index: usize) -> impl Iterator<Item = InputId> + '_ {
-        self.inputs
+        self.live
             .iter()
+            .flat_map(|live| live.inputs.iter())
             .enumerate()
             .filter(move |(_, slot)| slot.source_index == source_index)
             .map(|(index, _)| InputId::new(index))
     }
 
     pub fn reserved_bytes(&self) -> usize {
-        self.inputs
-            .iter()
-            .map(|slot| slot.state.buffer.reservation.size())
-            .fold(0usize, usize::saturating_add)
-            .saturating_add(self.root.reserved_bytes())
-            .saturating_add(
-                self.scalar_root
-                    .as_ref()
-                    .map_or(0, |(_, _, state)| state.buffer.reservation.size()),
-            )
+        self.live.as_ref().map_or(0, |live| {
+            live.inputs
+                .iter()
+                .map(|slot| slot.state.buffer.reservation.size())
+                .fold(0usize, usize::saturating_add)
+                .saturating_add(live.root.reserved_bytes())
+                .saturating_add(
+                    live.scalar_root
+                        .as_ref()
+                        .map_or(0, |(_, _, state)| state.buffer.reservation.size()),
+                )
+        })
     }
 }
 
-/// What the driver asks of one execution's state.
-///
-/// Every operation borrows the tree this state owns — exclusively to pull, shared to inspect it —
-/// while it works on the nodes below, and gives the borrow back before returning. Nothing else
-/// reaches into the tree, so a failed operation leaves nothing held behind it and the release that
-/// follows a failure borrows the same tree again.
-impl NativeExecutionState {
+/// Pulls and checks the one live tree the execution owns.
+impl LiveExecution {
     /// Pulls the next chunk the root of this state's tree hands over.
     ///
     /// `inputs_finished` is the caller's word that no more source chunks will arrive; it is passed
@@ -5343,54 +5177,9 @@ impl NativeExecutionState {
         self.root.any_merge_pending()
     }
 
-    /// Closes the execution: finishes every window's evaluator and gives everything back.
-    ///
-    /// The evaluators are finished before anything is released, so the first failure is reported
-    /// from the state that caused it. Everything is released whether or not one of them failed:
-    /// the caller reads the error either way, and holding the bytes past it would keep the query's
-    /// memory in use for as long as the executor is alive.
-    fn close(&mut self) -> Result<()> {
-        let finished = self.root.finish_windows();
-        self.root.release();
-        if let Some((_, _, mut state)) = self.scalar_root.take() {
-            state.release();
-        }
-        // The slots are taken rather than only released: what a released slot still holds is its
-        // schema and the grid that schema is addressed on, and a caller that keeps the stopped
-        // executor would otherwise keep the input's schema and materialized timestamps alive past
-        // the execution. The leaf itself stays -- the root keeps its `Input(InputId)` and the
-        // nodes keep their metric handles -- and it holds neither.
-        for mut slot in std::mem::take(&mut self.inputs) {
-            slot.release();
-        }
-        finished
-    }
-
-    /// Gives back everything this execution still holds: its payloads, its slots and the bytes
-    /// they reserved.
-    ///
-    /// The slots are taken here as they are when the execution closes, so the input's schema and
-    /// grid do not outlive it in an executor its caller still holds; a second call finds an empty
-    /// vector and nothing left to take.
-    fn release(&mut self) {
-        self.root.release();
-        if let Some((_, _, mut state)) = self.scalar_root.take() {
-            state.release();
-        }
-        for mut slot in std::mem::take(&mut self.inputs) {
-            slot.release();
-        }
-    }
-}
-
-impl Drop for NativeExecutionState {
-    /// Returns what the execution never gave back itself.
-    ///
-    /// The tree goes with this state, so its payloads would be dropped here in any case; the
-    /// release is what gives the pool their bytes back and leaves the counters reporting what the
-    /// nodes did rather than what they held.
-    fn drop(&mut self) {
-        self.release();
+    /// Finishes every window before dropping the live tree and its reservations.
+    fn close(mut self) -> Result<()> {
+        self.root.finish_windows()
     }
 }
 
@@ -6413,23 +6202,6 @@ impl NodeState {
     fn emitted_bytes(&self) -> usize {
         self.emitted.as_ref().map_or(0, Emitted::bytes)
     }
-
-    /// Returns the shared state this node holds: its queue, its tables and its reservation.
-    ///
-    /// The operation's own payload — the evaluator, the retained operands, the fold — is not this
-    /// state's: it belongs to the node that owns this state, and it is dropped there before this
-    /// runs. Dropping it first is what keeps the reservation from going back to the pool while the
-    /// memory it was taken for is still held.
-    fn release(&mut self) {
-        // The label sets this node handed out and the chunks it queued go first, for the same
-        // reason: their memory is what the reservation below returns.
-        self.emitted = None;
-        self.queued.clear();
-        self.queued.shrink_to_fit();
-        self.queued_tables = 0;
-        // The reservation is returned once, below, for everything this node still held.
-        self.buffer.release();
-    }
 }
 
 impl InputSlot {
@@ -6471,16 +6243,6 @@ impl InputSlot {
             self.state.buffer.metrics.record_completed_series(1);
         }
         Ok(Some(chunk))
-    }
-
-    /// Returns what this input still holds: its open-series flag, its queue and its reservation.
-    ///
-    /// A leaf that holds no chunk holds no series either, so nothing it handed over is still open
-    /// for it: the flag is what closing the execution reads, and it must not survive the state that
-    /// could have kept a series alive.
-    fn release(&mut self) {
-        self.open_source_series = false;
-        self.state.release();
     }
 }
 
@@ -6539,6 +6301,14 @@ impl NativeExecutor {
     /// The state this driver runs.
     pub fn state(&self) -> &NativeExecutionState {
         &self.state
+    }
+
+    fn live(&self) -> Result<&LiveExecution> {
+        self.state.live.as_ref().ok_or_else(no_live_execution)
+    }
+
+    fn live_mut(&mut self) -> Result<&mut LiveExecution> {
+        self.state.live.as_mut().ok_or_else(no_live_execution)
     }
 
     /// Queues one raw source chunk at the input `input` names.
@@ -6639,7 +6409,8 @@ impl NativeExecutor {
         loop {
             // The state's tree is the one this execution was built from, and a pull is asked of its
             // root; the nodes below it read their own children from there.
-            match self.state.pull(self.inputs_finished) {
+            let inputs_finished = self.inputs_finished;
+            match self.live_mut()?.pull(inputs_finished) {
                 Ok(Some(chunk)) => return Ok(Some(chunk)),
                 // Nothing has settled: the stages below decide whether that is a stall or an end.
                 Ok(None) => {}
@@ -6659,7 +6430,7 @@ impl NativeExecutor {
                 // series the caller never closed is still open here and nowhere else. It is
                 // refused before a binary node computes: half a vector is not a vector, so the
                 // kernel must not allocate a workspace to match one.
-                if let Err(error) = self.state.unclosed() {
+                if let Err(error) = self.live()?.unclosed() {
                     self.stop(&error);
                     return Err(error);
                 }
@@ -6671,7 +6442,7 @@ impl NativeExecutor {
             // first is what keeps the two in order: the window produces, the pull that follows
             // carries its output to whoever reads it, and only then can a binary node decide
             // whether both of its operands are complete.
-            match self.state.flush_ready_merges() {
+            match self.live_mut()?.flush_ready_merges() {
                 // A window answered: what it queued is pulled on the next turn, and that pull is
                 // also what carries its answer to a node above it.
                 Ok(true) => continue,
@@ -6681,7 +6452,7 @@ impl NativeExecutor {
                     return Err(error);
                 }
             }
-            if self.state.any_merge_pending() {
+            if self.live()?.any_merge_pending() {
                 // A window still holds collected input, so something below it has not finished:
                 // pulling again is what gives that node its turn.
                 continue;
@@ -6689,7 +6460,8 @@ impl NativeExecutor {
             // Every node has answered everything it can. Closing them is what hands back the
             // reservations they were charged, so pulling to exhaustion leaves the pool as it found
             // it.
-            return match self.state.close() {
+            let live = self.state.live.take().ok_or_else(no_live_execution)?;
+            return match live.close() {
                 Ok(()) => {
                     self.phase = Phase::Finished;
                     Ok(None)
@@ -6766,9 +6538,9 @@ impl NativeExecutor {
         // The id counts the leaves left to right, so an id past the last one names no leaf at all:
         // a caller that miscounted its tree is refused rather than answered from whichever leaf the
         // count happened to reach.
-        let count = self.state.inputs.len();
-        let slot = self
-            .state
+        let live = self.live_mut()?;
+        let count = live.inputs.len();
+        let slot = live
             .inputs
             .get_mut(input.index())
             .ok_or_else(|| no_input(count, input))?;
@@ -6795,7 +6567,7 @@ impl NativeExecutor {
     /// here -- its payload, its queue and its reservation -- so a stopped execution holds nothing
     /// while the caller still owns it.
     fn stop(&mut self, error: &DataFusionError) {
-        self.state.release();
+        self.state.live = None;
         self.phase = Phase::Failed(error.to_string());
     }
 }
@@ -6985,34 +6757,14 @@ fn no_input(inputs: usize, input: InputId) -> DataFusionError {
     ))
 }
 
-/// The error for a node asked to compute without the runtime its kind holds.
-fn no_binary() -> DataFusionError {
-    DataFusionError::Execution("the node holds no binary operation".to_string())
+/// A binary operation was asked to read an operand other than its two inputs.
+fn invalid_binary_operand() -> DataFusionError {
+    DataFusionError::Internal("invalid binary operand index".to_string())
 }
 
-/// The error for an aggregate node whose fold is missing.
-fn no_aggregate() -> DataFusionError {
-    DataFusionError::Execution("the node holds no aggregate".to_string())
-}
-
-/// The error for a node asked to run a vector operation without one.
-fn no_vector() -> DataFusionError {
-    DataFusionError::Execution("the node holds no vector operation".to_string())
-}
-
-/// The error for a node asked to broadcast without the broadcast its kind holds.
-fn no_broadcast() -> DataFusionError {
-    DataFusionError::Execution("the node holds no scalar broadcast".to_string())
-}
-
-/// The error for a node asked to map without the operation its kind holds.
-fn no_map() -> DataFusionError {
-    DataFusionError::Execution("the node holds no map operation".to_string())
-}
-
-/// The error for a node asked to select without the selection its kind holds.
-fn no_instant() -> DataFusionError {
-    DataFusionError::Execution("the node holds no instant selection".to_string())
+/// A running executor must own its live state.
+fn no_live_execution() -> DataFusionError {
+    DataFusionError::Internal("the running native execution has no state".to_string())
 }
 
 /// The error for a node asked to evaluate a window without its evaluator.
