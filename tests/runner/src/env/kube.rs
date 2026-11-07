@@ -84,6 +84,9 @@ impl EnvController for Env {
                 ),
                 database_manager: self.database_manager.clone(),
                 resources_manager: self.resources_manager.clone(),
+                server_addr: self.server_addr.clone(),
+                pg_server_addr: self.pg_server_addr.clone(),
+                mysql_server_addr: self.mysql_server_addr.clone(),
                 delete_namespace_on_stop: self.delete_namespace_on_stop,
             },
 
@@ -101,6 +104,9 @@ pub struct GreptimeDB {
     pub delete_namespace_on_stop: bool,
     pub database_manager: Arc<dyn DatabaseManager>,
     pub resources_manager: Arc<dyn ResourcesManager>,
+    server_addr: String,
+    pg_server_addr: String,
+    mysql_server_addr: String,
 }
 
 impl GreptimeDB {
@@ -134,6 +140,16 @@ impl GreptimeDB {
 
 #[async_trait]
 impl Database for GreptimeDB {
+    async fn before_case(&self) {
+        let mut client = self.client.lock().await;
+        *client = MultiProtocolClient::connect(
+            &self.server_addr,
+            &self.pg_server_addr,
+            &self.mysql_server_addr,
+        )
+        .await;
+    }
+
     async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
         if ctx.context.contains_key("restart") {
             self.database_manager.restart(self).await
