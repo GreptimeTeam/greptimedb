@@ -760,6 +760,7 @@ mod tests {
             "metric{__schema__=\"public\" or __schema__=\"secret\"}",
             "metric{__database__=\"shared_denied\"}",
             "{__name__=~\"metric.*\",__schema__=\"secret\"}",
+            "topk(scalar(metric{__schema__=\"secret\"}), metric)",
         ] {
             checker.0.lock().unwrap().clear();
             let query = Query::parse(expression.into(), "0", "1", "public").unwrap();

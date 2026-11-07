@@ -59,6 +59,13 @@ impl Query {
                 let selector = match expr {
                     Expr::VectorSelector(vs) => vs,
                     Expr::MatrixSelector(ms) => &ms.vs,
+                    Expr::Aggregate(aggregate) => {
+                        // promql-parser 0.10's walker omits aggregation parameters.
+                        if let Some(param) = &aggregate.param {
+                            walk_expr(self, param)?;
+                        }
+                        return Ok(true);
+                    }
                     _ => return Ok(true),
                 };
                 self.selectors.extend(resolve(selector, self.schema)?);
@@ -433,9 +440,49 @@ mod tests {
     }
 
     #[test]
+    fn aggregation_parameter_selectors() {
+        for (expression, expected) in [
+            (
+                "topk(scalar(limit_metric), requests)",
+                vec!["limit_metric", "requests"],
+            ),
+            (
+                "bottomk(scalar(limit_metric), requests)",
+                vec!["limit_metric", "requests"],
+            ),
+            (
+                "quantile(scalar(limit_metric), requests)",
+                vec!["limit_metric", "requests"],
+            ),
+            (
+                "topk(scalar(topk(scalar(inner_limit), limit_metric)), requests)",
+                vec!["inner_limit", "limit_metric", "requests"],
+            ),
+            ("topk(2, requests)", vec!["requests"]),
+            ("count_values(\"kind\", requests)", vec!["requests"]),
+            (
+                "topk(scalar(requests), requests)",
+                vec!["requests", "requests"],
+            ),
+        ] {
+            let query = Query::parse(expression.into(), "0", "1", "public").unwrap();
+            let mut names = query
+                .selectors
+                .iter()
+                .flat_map(|selector| &selector.matchers)
+                .filter(|matcher| matcher.name == METRIC_NAME)
+                .map(|matcher| matcher.value.as_str())
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            assert_eq!(names, expected, "{expression}");
+        }
+    }
+
+    #[test]
     fn range_vectors_and_routing_controls() {
         let query = Query::parse(
-            "rate(requests{__schema__=\"a\"}[5m]) + errors{__database__=\"b\"}".into(),
+            "topk(scalar(sum(rate(requests{__schema__=\"a\"}[5m]))), errors{__database__=\"b\"})"
+                .into(),
             "0",
             "1",
             "public",
@@ -453,6 +500,9 @@ mod tests {
             "up{__schema__=\"\"}",
             "up{__schema__!=\"a\"}",
             "up{__field__=\"x\"}",
+            "topk(scalar(up{__schema__=\"\"}), requests)",
+            "topk(scalar(up{__schema__!=\"a\"}), requests)",
+            "topk(scalar(up{__field__=\"x\"}), requests)",
         ] {
             assert!(Query::parse(query.into(), "0", "1", "public").is_err());
         }

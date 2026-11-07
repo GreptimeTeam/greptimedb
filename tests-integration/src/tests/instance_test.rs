@@ -5577,7 +5577,7 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
     );
 
     let expression = urlencoding::encode(
-        "rate(exemplar_metric{job=\"api\"}[5m]) + retained_exemplar + otlp_exemplar",
+        "topk(scalar(retained_exemplar), rate(exemplar_metric{job=\"api\"}[5m])) + otlp_exemplar",
     );
     let path = format!(
         "/v1/prometheus/api/v1/query_exemplars?query={expression}&start=1720000000.123&end=1720000000.124"
