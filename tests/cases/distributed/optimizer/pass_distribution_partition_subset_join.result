@@ -71,27 +71,25 @@ ORDER BY l.area, r.area;
 | logical_plan  | Sort: l.area ASC NULLS LAST, r.area ASC NULLS LAST                                                                |
 |               |   Projection: l.area, r.area                                                                                      |
 |               |     Inner Join: l.device_id = r.device_id                                                                         |
-|               |       Projection: l.device_id, l.area                                                                             |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                           |
-|               | SubqueryAlias: l                                                                                                  |
-|               |   Filter: pd_sub_l.device_id IS NOT NULL                                                                          |
-|               |     TableScan: pd_sub_l, partial_filters=[pd_sub_l.device_id IS NOT NULL]                                         |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                             |
+|               | Projection: l.device_id, l.area                                                                                   |
+|               |   SubqueryAlias: l                                                                                                |
+|               |     Filter: pd_sub_l.device_id IS NOT NULL                                                                        |
+|               |       TableScan: pd_sub_l, partial_filters=[pd_sub_l.device_id IS NOT NULL]                                       |
 |               | ]]                                                                                                                |
-|               |       Projection: r.device_id, r.area                                                                             |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                           |
-|               | SubqueryAlias: r                                                                                                  |
-|               |   Filter: pd_sub_r.device_id IS NOT NULL                                                                          |
-|               |     TableScan: pd_sub_r, partial_filters=[pd_sub_r.device_id IS NOT NULL]                                         |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                             |
+|               | Projection: r.device_id, r.area                                                                                   |
+|               |   SubqueryAlias: r                                                                                                |
+|               |     Filter: pd_sub_r.device_id IS NOT NULL                                                                        |
+|               |       TableScan: pd_sub_r, partial_filters=[pd_sub_r.device_id IS NOT NULL]                                       |
 |               | ]]                                                                                                                |
 | physical_plan | SortPreservingMergeExec: [area@0 ASC NULLS LAST, area@1 ASC NULLS LAST]                                           |
 |               |   SortExec: expr=[area@0 ASC NULLS LAST, area@1 ASC NULLS LAST], preserve_partitioning=[true]                     |
 |               |     HashJoinExec: mode=Partitioned, join_type=Inner, on=[(device_id@0, device_id@0)], projection=[area@1, area@3] |
 |               |       RepartitionExec: partitioning=Hash([device_id@0],REDACTED_PARTITIONS), input_partitions=REDACTED|
-|               |         ProjectionExec: expr=[device_id@1 as device_id, area@2 as area]                                           |
-|               |           MergeScanExec: peers=[REDACTED_REGION, REDACTED_REGION, REDACTED_REGION, ]         |
+|               |         MergeScanExec: peers=[REDACTED_REGION, REDACTED_REGION, REDACTED_REGION, ]           |
 |               |       RepartitionExec: partitioning=Hash([device_id@0],REDACTED_PARTITIONS), input_partitions=REDACTED|
-|               |         ProjectionExec: expr=[device_id@1 as device_id, area@2 as area]                                           |
-|               |           MergeScanExec: peers=[REDACTED_REGION, REDACTED_REGION, REDACTED_REGION, ]         |
+|               |         MergeScanExec: peers=[REDACTED_REGION, REDACTED_REGION, REDACTED_REGION, ]           |
 |               |                                                                                                                   |
 +---------------+-------------------------------------------------------------------------------------------------------------------+
 
