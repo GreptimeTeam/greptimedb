@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
+mod tests;
+
+use std::collections::HashMap;
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
@@ -23,6 +27,7 @@ use common_base::range_read::{AsyncReadAdapter, Metadata, RangeReader, SizeAware
 use futures::io::BufReader;
 use futures::{AsyncRead, AsyncWrite};
 use snafu::{OptionExt, ResultExt, ensure};
+use tokio::sync::OnceCell;
 
 use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::{
@@ -39,6 +44,8 @@ use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, Stager};
 use crate::puffin_manager::{BlobGuard, DirMetrics, GuardWithMetadata, PuffinReader};
 
 /// `FsPuffinReader` is a `PuffinReader` that provides fs readers for puffin files.
+/// Metadata is retained for this immutable file identity until the reader is dropped.
+/// Replacing file contents requires a new reader and invalidating shared caches.
 pub struct FsPuffinReader<S, F>
 where
     S: Stager + 'static,
@@ -58,6 +65,10 @@ where
 
     /// The puffin file metadata cache.
     puffin_file_metadata_cache: Option<PuffinMetadataCacheRef>,
+
+    /// Successful metadata and key lookup retained for this immutable file handle.
+    /// Failures leave the cell empty so a later operation can retry.
+    metadata: OnceCell<ReaderMetadata>,
 }
 
 impl<S, F> FsPuffinReader<S, F>
@@ -77,6 +88,7 @@ where
             stager,
             puffin_file_accessor,
             puffin_file_metadata_cache,
+            metadata: OnceCell::new(),
         }
     }
 }
@@ -102,8 +114,8 @@ where
 
     async fn blob(&self, key: &str) -> Result<GuardWithMetadata<Self::Blob>> {
         let mut file = self.puffin_reader().await?;
-        let metadata = self.get_puffin_file_metadata(&mut file).await?;
-        let blob_metadata = Self::get_blob_metadata(key, &metadata)?;
+        self.get_puffin_file_metadata(&mut file).await?;
+        let blob_metadata = self.get_blob_metadata(key)?;
         let blob = if blob_metadata.compression_codec.is_none() {
             // If the blob is not compressed, we can directly read it from the puffin file.
             Either::L(RandomReadBlob {
@@ -134,7 +146,7 @@ where
     async fn dir(&self, key: &str) -> Result<(GuardWithMetadata<Self::Dir>, DirMetrics)> {
         let mut file = self.puffin_reader().await?;
         let metadata = self.get_puffin_file_metadata(&mut file).await?;
-        let blob_metadata = Self::get_blob_metadata(key, &metadata)?;
+        let blob_metadata = self.get_blob_metadata(key)?;
         let (dir, metrics) = self
             .stager
             .get_dir(
@@ -169,26 +181,29 @@ where
         &self,
         reader: &mut PuffinFileReader<F::Reader>,
     ) -> Result<Arc<FileMetadata>> {
-        if let Some(cache) = &self.puffin_file_metadata_cache {
-            cache
-                .try_get_with(&self.handle.to_string(), async {
-                    reader.metadata().await.map(Arc::new)
-                })
-                .await
-        } else {
-            reader.metadata().await.map(Arc::new)
-        }
+        let cached = self
+            .metadata
+            .get_or_try_init(|| async {
+                let metadata = if let Some(cache) = &self.puffin_file_metadata_cache {
+                    cache
+                        .try_get_with(&self.handle.to_string(), async {
+                            reader.metadata().await.map(Arc::new)
+                        })
+                        .await?
+                } else {
+                    Arc::new(reader.metadata().await?)
+                };
+                Ok::<_, crate::error::Error>(ReaderMetadata::new(metadata))
+            })
+            .await?;
+        Ok(cached.metadata.clone())
     }
 
-    fn get_blob_metadata(key: &str, metadata: &FileMetadata) -> Result<BlobMetadata> {
-        let blob_metadata = metadata
-            .blobs
-            .iter()
-            .find(|m| m.blob_type == key)
+    fn get_blob_metadata(&self, key: &str) -> Result<BlobMetadata> {
+        self.metadata
+            .get()
             .context(BlobNotFoundSnafu { blob: key })?
-            .clone();
-
-        Ok(blob_metadata)
+            .blob(key)
     }
 
     async fn puffin_reader(&self) -> Result<PuffinFileReader<F::Reader>> {
@@ -370,5 +385,35 @@ where
             Either::L(a) => Ok(Either::L(a.reader().await?)),
             Either::R(b) => Ok(Either::R(b.reader().await?)),
         }
+    }
+}
+
+/// A reader pins one immutable file's metadata and first matching blob for each key.
+/// The metadata and owned lookup keys live until this reader is dropped, independently
+/// of shared-cache eviction. Lookup memory therefore grows with the file's blob count.
+struct ReaderMetadata {
+    metadata: Arc<FileMetadata>,
+    blob_indices: HashMap<String, usize>,
+}
+
+impl ReaderMetadata {
+    fn new(metadata: Arc<FileMetadata>) -> Self {
+        let mut blob_indices = HashMap::with_capacity(metadata.blobs.len());
+        for (index, blob) in metadata.blobs.iter().enumerate() {
+            // Match the previous linear `find` behavior for externally supplied files.
+            blob_indices.entry(blob.blob_type.clone()).or_insert(index);
+        }
+        Self {
+            metadata,
+            blob_indices,
+        }
+    }
+
+    fn blob(&self, key: &str) -> Result<BlobMetadata> {
+        self.blob_indices
+            .get(key)
+            .and_then(|index| self.metadata.blobs.get(*index))
+            .cloned()
+            .context(BlobNotFoundSnafu { blob: key })
     }
 }

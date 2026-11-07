@@ -454,11 +454,13 @@ async fn test_metadata_cache_shared_by_independent_readers() {
 struct FooterGuardAccessor {
     inner: MockFileAccessor,
     blob_end: Arc<std::sync::atomic::AtomicU64>,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 struct FooterGuardReader {
     inner: common_base::range_read::FileReader,
     blob_end: Arc<std::sync::atomic::AtomicU64>,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait::async_trait]
@@ -472,6 +474,7 @@ impl crate::puffin_manager::file_accessor::PuffinFileAccessor for FooterGuardAcc
         Ok(FooterGuardReader {
             inner: self.inner.reader(handle).await?,
             blob_end: self.blob_end.clone(),
+            reads: self.reads.clone(),
         })
     }
 
@@ -487,6 +490,8 @@ impl RangeReader for FooterGuardReader {
     }
 
     async fn read(&self, range: std::ops::Range<u64>) -> std::io::Result<bytes::Bytes> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if range.end > self.blob_end.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(std::io::Error::other(
                 "unexpected footer read after cache warmup",
@@ -521,6 +526,7 @@ async fn test_cached_metadata_used_when_staging_directory() {
     let accessor = Arc::new(FooterGuardAccessor {
         inner: MockFileAccessor::new("cached_directory"),
         blob_end: blob_end.clone(),
+        reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     });
     let manager =
         FsPuffinManager::new(stager.clone(), accessor).with_puffin_metadata_cache(Some(cache));
@@ -547,4 +553,152 @@ async fn test_cached_metadata_used_when_staging_directory() {
     );
     let reader = manager.reader(&file).await.unwrap();
     check_dir(&file, "dir", files, &stager, &reader).await;
+}
+
+#[tokio::test]
+async fn test_cached_metadata_avoids_footer_reads_for_many_blobs() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use prometheus::Opts;
+
+    use crate::puffin_manager::cache::PuffinMetadataCache;
+
+    let bytes = common_cache::metrics::CacheSizeMetrics::new(
+        Opts::new("many_blob_metadata_bytes", "test"),
+        &["type"],
+    )
+    .unwrap();
+    let cache = Arc::new(PuffinMetadataCache::new(1024 * 1024, &bytes));
+    let (_dir, stager) = new_bounded_stager("cached_many_blobs", 1024 * 1024).await;
+    let blob_end = Arc::new(AtomicU64::new(u64::MAX));
+    let accessor = Arc::new(FooterGuardAccessor {
+        inner: MockFileAccessor::new("cached_many_blobs"),
+        blob_end: blob_end.clone(),
+        reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    });
+    let manager = FsPuffinManager::new(stager.clone(), accessor.clone())
+        .with_puffin_metadata_cache(Some(cache));
+    let uncached_manager = FsPuffinManager::new(stager.clone(), accessor);
+    let file = "many_blobs".to_string();
+    let payload = b"identical column sketch payload";
+    let mut writer = manager.writer(&file).await.unwrap();
+    for column in 0..64 {
+        put_blob(&format!("sketch.v1.{column}"), payload, None, &mut writer).await;
+    }
+    writer.finish().await.unwrap();
+    let reader = manager.reader(&file).await.unwrap();
+    let metadata = reader.metadata().await.unwrap();
+    assert_eq!(64, metadata.blobs.len());
+    blob_end.store(
+        metadata
+            .blobs
+            .iter()
+            .map(|blob| u64::try_from(blob.offset + blob.length).unwrap())
+            .max()
+            .unwrap(),
+        Ordering::Relaxed,
+    );
+
+    // Any footer range read now fails, so all 64 lookups must reuse the cache.
+    for column in 0..64 {
+        check_blob(
+            &file,
+            &format!("sketch.v1.{column}"),
+            payload,
+            &stager,
+            &reader,
+            false,
+        )
+        .await;
+    }
+
+    // Same file and payload: removing only the cache must trip the footer guard.
+    let uncached_reader = uncached_manager.reader(&file).await.unwrap();
+    let error = match uncached_reader.blob("sketch.v1.0").await {
+        Ok(_) => panic!("uncached lookup unexpectedly avoided the footer"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:?}").contains("unexpected footer read after cache warmup"));
+}
+
+async fn check_reader_local_metadata_reuse_without_global_cache(blob_count: usize) {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    let (_dir, stager) = new_bounded_stager("reader_local_metadata", 1024 * 1024).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let accessor = Arc::new(FooterGuardAccessor {
+        inner: MockFileAccessor::new("reader_local_metadata"),
+        blob_end: Arc::new(AtomicU64::new(u64::MAX)),
+        reads: reads.clone(),
+    });
+    let manager = FsPuffinManager::new(stager, accessor);
+    let file = "many_blobs".to_string();
+    let mut writer = manager.writer(&file).await.unwrap();
+    for column in 0..blob_count {
+        put_blob(&format!("column.{column}"), b"payload", None, &mut writer).await;
+    }
+    writer.finish().await.unwrap();
+
+    let reader = manager.reader(&file).await.unwrap();
+    let metadata = futures::future::join_all((0..8).map(|_| reader.metadata())).await;
+    let first = metadata[0].as_ref().unwrap();
+    for value in &metadata {
+        assert!(Arc::ptr_eq(first, value.as_ref().unwrap()));
+    }
+    let cold_reads = reads.swap(0, Ordering::Relaxed);
+    assert!(cold_reads > 0);
+
+    // Uncompressed lookup does not read payload: this counts only footer reads.
+    for column in 0..blob_count {
+        reader.blob(&format!("column.{column}")).await.unwrap();
+    }
+    assert_eq!(0, reads.swap(0, Ordering::Relaxed));
+
+    // Same file, keys and disabled global cache; change only reader reuse.
+    for column in 0..blob_count {
+        manager
+            .reader(&file)
+            .await
+            .unwrap()
+            .blob(&format!("column.{column}"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(blob_count * cold_reads, reads.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn test_reader_local_metadata_failure_is_retryable() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    let (_dir, stager) = new_bounded_stager("reader_local_retry", 1024 * 1024).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let blob_end = Arc::new(AtomicU64::new(0));
+    let accessor = Arc::new(FooterGuardAccessor {
+        inner: MockFileAccessor::new("reader_local_retry"),
+        blob_end: blob_end.clone(),
+        reads: reads.clone(),
+    });
+    let manager = FsPuffinManager::new(stager, accessor);
+    let file = "retry".to_string();
+    let mut writer = manager.writer(&file).await.unwrap();
+    put_blob("key", b"payload", None, &mut writer).await;
+    writer.finish().await.unwrap();
+    let reader = manager.reader(&file).await.unwrap();
+    assert!(reader.metadata().await.is_err());
+    blob_end.store(u64::MAX, Ordering::Relaxed);
+    let metadata = reader.metadata().await.unwrap();
+    blob_end.store(0, Ordering::Relaxed);
+    reads.store(0, Ordering::Relaxed);
+    assert!(Arc::ptr_eq(&metadata, &reader.metadata().await.unwrap()));
+    reader.blob("key").await.unwrap();
+    assert!(reader.blob("missing").await.is_err());
+    assert_eq!(0, reads.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn test_reader_local_metadata_reuse_without_global_cache() {
+    for blob_count in [64, 1024] {
+        check_reader_local_metadata_reuse_without_global_cache(blob_count).await;
+    }
 }
