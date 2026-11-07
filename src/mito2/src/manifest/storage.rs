@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use common_datasource::compression::CompressionType;
+use common_error::ext::ErrorExt;
 use common_telemetry::{debug, warn};
 use crc32fast::Hasher;
 use futures::TryStreamExt;
@@ -253,7 +254,7 @@ impl ManifestObjectStore {
     }
 
     /// Returns whether this store publishes deltas by conditional create.
-    pub(crate) fn conditional_publication(&self) -> bool {
+    pub(crate) fn is_conditional_publication(&self) -> bool {
         self.conditional_publication
     }
 
@@ -434,10 +435,10 @@ impl ManifestObjectStore {
         &self,
         version: ManifestVersion,
     ) -> Result<()> {
-        let reason = match self.highest_checkpoint(version).await {
+        let reason = match self.list_highest_checkpoint(version).await {
             Ok(None) => return Ok(()),
             Ok(Some((checkpoint, _))) => format!("covered by checkpoint {checkpoint}"),
-            Err(e) => format!("cannot list the checkpoints: {e}"),
+            Err(e) => format!("cannot list the checkpoints: {}", e.output_msg()),
         };
         ManifestVersionConflictSnafu {
             version,
@@ -445,31 +446,6 @@ impl ManifestObjectStore {
             reason,
         }
         .fail()
-    }
-
-    /// Returns the version and compression of the highest checkpoint at or above `min_version`
-    /// found by LIST.
-    async fn highest_checkpoint(
-        &self,
-        min_version: ManifestVersion,
-    ) -> Result<Option<(ManifestVersion, CompressionType)>> {
-        let mut lister = self
-            .object_store
-            .lister_with(&self.path)
-            .start_after(&list_start_after(&self.path, min_version))
-            .await
-            .context(OpenDalSnafu)?;
-        let mut highest = None;
-        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
-            let file_name = entry.name();
-            if is_checkpoint_file(file_name) {
-                let version = file_version(file_name);
-                if version >= min_version && highest.is_none_or(|(v, _)| v < version) {
-                    highest = Some((version, file_compress_type(file_name)));
-                }
-            }
-        }
-        Ok(highest)
     }
 
     /// Save the checkpoint manifest file.
@@ -488,7 +464,7 @@ impl ManifestObjectStore {
     /// Also applies the checkpoint retention rule to the tracked size.
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let checkpoint = if self.conditional_publication {
-            match self.highest_checkpoint(MIN_VERSION).await {
+            match self.list_highest_checkpoint(MIN_VERSION).await {
                 Ok(Some((version, compress_type))) => {
                     self.checkpoint_storage
                         .load_listed_checkpoint(version, compress_type)
@@ -558,6 +534,31 @@ impl ManifestObjectStore {
     /// Returns the staging storage.
     pub(crate) fn staging_storage(&self) -> &StagingStorage {
         &self.staging_storage
+    }
+
+    /// Returns the version and compression of the highest checkpoint at or above `min_version`
+    /// found by LIST.
+    async fn list_highest_checkpoint(
+        &self,
+        min_version: ManifestVersion,
+    ) -> Result<Option<(ManifestVersion, CompressionType)>> {
+        let mut lister = self
+            .object_store
+            .lister_with(&self.path)
+            .start_after(&list_start_after(&self.path, min_version))
+            .await
+            .context(OpenDalSnafu)?;
+        let mut highest = None;
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            let file_name = entry.name();
+            if is_checkpoint_file(file_name) {
+                let version = file_version(file_name);
+                if version >= min_version && highest.is_none_or(|(v, _)| v < version) {
+                    highest = Some((version, file_compress_type(file_name)));
+                }
+            }
+        }
+        Ok(highest)
     }
 }
 

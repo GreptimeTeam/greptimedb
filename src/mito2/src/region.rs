@@ -1534,7 +1534,7 @@ impl ManifestContext {
             && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading);
         let version = manager
             .update(action_list, is_staging, allow_checkpoint, || {
-                self.leader_lease_expired()
+                self.is_leader_lease_expired()
             })
             .await
             .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
@@ -1549,7 +1549,7 @@ impl ManifestContext {
     }
 
     /// Returns whether the region's Leader deadline has passed. No deadline counts as passed.
-    fn leader_lease_expired(&self) -> bool {
+    fn is_leader_lease_expired(&self) -> bool {
         self.node_lease.now() >= self.leader_deadline.get()
     }
 

@@ -75,7 +75,10 @@ impl RegionMetadataLoader {
         let object_store = get_object_store(&region_options.storage, &self.object_store_manager)?;
         let region_manifest_options =
             RegionManifestOptions::new(&self.config, region_dir, &object_store)
-                .with_write_lease(self.require_write_lease, &region_options.wal_options);
+                .with_conditional_publication(
+                    self.require_write_lease,
+                    &region_options.wal_options,
+                );
         let Some(manifest_manager) =
             RegionManifestManager::open(region_manifest_options, &Default::default()).await?
         else {

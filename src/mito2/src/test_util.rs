@@ -80,6 +80,7 @@ use crate::engine::listener::EventListenerRef;
 use crate::engine::{MITO_ENGINE_NAME, MitoEngine};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::{
     LAST_CHECKPOINT_FILE, delta_file, is_checkpoint_file, is_delta_file,
@@ -93,6 +94,19 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
+
+/// Returns a manifest action list with one empty edit.
+pub(crate) fn nop_action() -> RegionMetaActionList {
+    RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
+        files_to_add: vec![],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+    })])
+}
 
 /// Controls a mock object-store layer that blocks a checkpoint task once.
 #[derive(Clone)]

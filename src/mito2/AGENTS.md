@@ -102,11 +102,12 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Sequence numbers are strictly increasing per region; dedup and snapshot reads
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it.
-- Regions whose writes require a lease and whose WAL is the object store WAL publish manifest
-  deltas by conditional create under a fixed `.json.gz` name and recover from the highest listed
-  checkpoint, because a late old leader and the new holder can race for a version
-  (`manifest/storage.rs`). `ManifestContext::update_locked` verifies commits that return after the
-  Leader deadline (`RegionManifestManager::update`).
+- Regions whose writes require a lease and whose WAL is the object store WAL
+  publish manifest deltas by conditional create under a fixed `.json.gz` name
+  and recover from the highest listed checkpoint, because a late old leader and
+  the new holder can race for a version (`manifest/storage.rs`).
+  `ManifestContext::update_locked` verifies commits that return after the Leader
+  deadline (`RegionManifestManager::update`).
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.

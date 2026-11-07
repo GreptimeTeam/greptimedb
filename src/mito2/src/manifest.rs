@@ -19,4 +19,4 @@ mod checkpointer;
 pub mod manager;
 pub mod storage;
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

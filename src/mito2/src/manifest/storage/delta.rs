@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_datasource::compression::{CompressionType, encode_gzip_stored};
+use common_datasource::compression::{self, CompressionType};
 use common_telemetry::{debug, warn};
 use futures::TryStreamExt;
 use futures::future::try_join_all;
@@ -306,7 +306,7 @@ impl<T: Tracker> DeltaStorage<T> {
         let data = if self.compress_type.is_compressed() {
             CompressionType::Gzip.encode(bytes).await
         } else {
-            encode_gzip_stored(bytes).await
+            compression::encode_gzip_stored(bytes).await
         }
         .context(CompressObjectSnafu {
             compress_type: CompressionType::Gzip,

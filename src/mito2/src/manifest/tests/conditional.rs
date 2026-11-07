@@ -35,9 +35,9 @@ use crate::config::MitoConfig;
 use crate::error::{Error, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::{LAST_CHECKPOINT_FILE, ManifestObjectStore, delta_file, gen_path};
-use crate::manifest::tests::checkpoint::{fail_manifest_delta_reads_layer, nop_action};
-use crate::manifest::tests::utils::basic_region_metadata;
+use crate::manifest::tests::utils::{basic_region_metadata, fail_manifest_delta_reads_layer};
 use crate::sst::FormatType;
+use crate::test_util::nop_action;
 
 fn temp_store() -> (TempDir, ObjectStore) {
     let dir = create_temp_dir("");
@@ -143,7 +143,7 @@ fn test_mode_requires_lease_and_object_store_wal() {
     let (_dir, store) = temp_store();
     let mode = |require_write_lease, wal_options: &WalOptions| {
         RegionManifestOptions::new(&MitoConfig::default(), "region/", &store)
-            .with_write_lease(require_write_lease, wal_options)
+            .with_conditional_publication(require_write_lease, wal_options)
             .conditional_publication
     };
     let object_store_wal = WalOptions::ObjectStore(ObjectStoreWalOptions::new("wal".to_string()));
@@ -180,9 +180,13 @@ async fn test_list_error_during_verification_conflicts(
     let store = store.layer(failing_list_layer(kind));
     let mut manager = create_manager(options(&store, CompressionType::Gzip, 1, true)).await;
 
-    let result = manager.update(nop_action(), false, true, || true).await;
+    let error = manager
+        .update(nop_action(), false, true, || true)
+        .await
+        .unwrap_err();
 
-    assert_conflict(&result.unwrap_err());
+    assert_conflict(&error);
+    assert!(error.to_string().contains("mock list failure"), "{error}");
     assert_eq!(0, manager.last_version());
     assert_eq!(0, manager.manifest().manifest_version);
     assert!(store.exists(&delta_key(1)).await.unwrap());

@@ -43,11 +43,10 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::manifest::storage::{delta_file, gen_path, manifest_dir};
-use crate::manifest::tests::checkpoint::nop_action;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
-    CheckpointTaskBlocker, CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows,
-    reopen_region, rows_schema,
+    CheckpointTaskBlocker, CreateRequestBuilder, TestEnv, build_rows, flush_region, nop_action,
+    put_rows, reopen_region, rows_schema,
 };
 use crate::wal::EntryId;
 
@@ -422,8 +421,10 @@ async fn create_leased_region(
 
 async fn count_ssts(store: &ObjectStore, region_dir: &str) -> usize {
     let entries = store.list(region_dir).await.unwrap();
-    let is_sst = |name: &str| name.ends_with(".parquet");
-    entries.iter().filter(|e| is_sst(e.name())).count()
+    entries
+        .iter()
+        .filter(|e| e.name().ends_with(".parquet"))
+        .count()
 }
 
 #[rstest]

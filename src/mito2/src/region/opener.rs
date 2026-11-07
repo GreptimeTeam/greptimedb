@@ -391,7 +391,7 @@ impl RegionOpener {
         // Create a manifest manager for this region and writes regions to the manifest file.
         let mut region_manifest_options =
             RegionManifestOptions::new(config, &region_dir, &object_store)
-                .with_write_lease(self.node_lease.is_enabled(), &options.wal_options);
+                .with_conditional_publication(self.node_lease.is_enabled(), &options.wal_options);
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager
@@ -521,7 +521,10 @@ impl RegionOpener {
         let object_storage = get_object_store(&region_options.storage, &self.object_store_manager)?;
         let mut region_manifest_options =
             RegionManifestOptions::new(config, &self.region_dir(), &object_storage)
-                .with_write_lease(self.node_lease.is_enabled(), &region_options.wal_options);
+                .with_conditional_publication(
+                    self.node_lease.is_enabled(),
+                    &region_options.wal_options,
+                );
         // Set manifest cache if available
         region_manifest_options.manifest_cache = self
             .cache_manager

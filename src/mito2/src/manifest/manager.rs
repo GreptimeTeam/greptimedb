@@ -58,7 +58,7 @@ pub struct RegionManifestOptions {
     pub manifest_cache: Option<ManifestCache>,
     /// Whether two writers can race for a version, so that deltas are published by conditional
     /// create under a fixed name and recovery starts from the highest listed checkpoint.
-    pub conditional_publication: bool,
+    pub(crate) conditional_publication: bool,
 }
 
 impl RegionManifestOptions {
@@ -81,7 +81,7 @@ impl RegionManifestOptions {
 
     /// Enables conditional publication for a region whose writes require a lease and whose WAL is
     /// the object store WAL. Other regions keep the default.
-    pub(crate) fn with_write_lease(
+    pub(crate) fn with_conditional_publication(
         mut self,
         require_write_lease: bool,
         wal_options: &WalOptions,
@@ -598,7 +598,7 @@ impl RegionManifestManager {
             }
         );
 
-        let conditional = self.store.conditional_publication();
+        let conditional = self.store.is_conditional_publication();
         let version = if conditional {
             self.last_version() + 1
         } else {
