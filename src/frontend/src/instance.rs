@@ -30,7 +30,7 @@ pub mod prom_store;
 mod promql;
 mod region_query;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock, atomic};
@@ -87,7 +87,7 @@ use servers::prometheus_handler::{
     ParsedPromQuery, PrometheusHandler, resolve_schema_from_matchers,
 };
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::{Channel, QueryContextRef};
+use session::context::{Channel, QueryContext, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::ast::ObjectNamePartExt;
@@ -1065,6 +1065,22 @@ impl Instance {
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
+    fn hint_defaults(&self) -> server_error::Result<HashMap<String, String>> {
+        let context = self
+            .query_engine
+            .engine_context(QueryContext::arc())
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)?;
+        let mut defaults = query::query_engine::options::effective_query_options(&context)
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)?;
+        defaults.insert(
+            table::requests::AUTO_CREATE_TABLE_KEY.to_string(),
+            self.inserter.auto_create_table_enabled().to_string(),
+        );
+        Ok(defaults)
+    }
+
     fn supports_metric_batch_ddl(&self) -> bool {
         true
     }
@@ -2967,6 +2983,47 @@ mod tests {
         .try_build()
         .await
         .context(BuildFrontendSnafu)
+    }
+
+    #[tokio::test]
+    async fn test_hint_defaults() -> TestResult<()> {
+        use session::query_options;
+
+        let mut instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+        // A configured zero resolves to the engine's positive CPU-based default.
+        assert!(
+            instance.hint_defaults().unwrap()[query_options::QUERY_PARALLELISM]
+                .parse::<usize>()
+                .unwrap()
+                > 0
+        );
+        for distributed in [false, true] {
+            instance.query_engine = query::query_engine::QueryEngineFactory::new(
+                catalog::memory::new_memory_catalog_manager().unwrap(),
+                None,
+                None,
+                None,
+                None,
+                distributed,
+                query::options::QueryOptions {
+                    parallelism: 7,
+                    allow_query_fallback: true,
+                    ..Default::default()
+                },
+            )
+            .query_engine();
+            let defaults = instance.hint_defaults().unwrap();
+            assert_eq!(defaults[query_options::QUERY_PARALLELISM], "7");
+            assert_eq!(defaults[query_options::QUERY_ALLOW_QUERY_FALLBACK], "true");
+            assert_eq!(
+                defaults[query::query_engine::options::FILTER_NULL_JOIN_KEYS],
+                distributed.to_string()
+            );
+            assert_eq!(defaults[table::requests::AUTO_CREATE_TABLE_KEY], "true");
+        }
+        Ok(())
     }
 
     async fn execute_one_sql(

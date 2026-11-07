@@ -36,15 +36,23 @@ pub const RESERVED_EXTENSION_KEYS: [&str; 5] = [
     READ_PREFERENCE_EXTENSION_KEY,
 ];
 
+pub const AUTO_CREATE_TABLE_HEADER: &str = "x-greptime-hint-auto_create_table";
+pub const TTL_HEADER: &str = "x-greptime-hint-ttl";
+pub const APPEND_MODE_HEADER: &str = "x-greptime-hint-append_mode";
+pub const MERGE_MODE_HEADER: &str = "x-greptime-hint-merge_mode";
+pub const PHYSICAL_TABLE_HEADER: &str = "x-greptime-hint-physical_table";
+pub const SKIP_WAL_HEADER: &str = "x-greptime-hint-skip_wal";
+pub const READ_PREFERENCE_HEADER: &str = "x-greptime-hint-read_preference";
+
 /// Deprecated, use `HINTS_KEY` instead.
 pub const HINT_KEYS: [&str; 7] = [
-    "x-greptime-hint-auto_create_table",
-    "x-greptime-hint-ttl",
-    "x-greptime-hint-append_mode",
-    "x-greptime-hint-merge_mode",
-    "x-greptime-hint-physical_table",
-    "x-greptime-hint-skip_wal",
-    "x-greptime-hint-read_preference",
+    AUTO_CREATE_TABLE_HEADER,
+    TTL_HEADER,
+    APPEND_MODE_HEADER,
+    MERGE_MODE_HEADER,
+    PHYSICAL_TABLE_HEADER,
+    SKIP_WAL_HEADER,
+    READ_PREFERENCE_HEADER,
 ];
 
 pub fn is_reserved_extension_key(key: &str) -> bool {

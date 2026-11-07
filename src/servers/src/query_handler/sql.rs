@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -33,6 +34,12 @@ pub const MAX_LOGICAL_TABLE_DDL_STATEMENTS: usize = 128;
 
 #[async_trait]
 pub trait SqlQueryHandler {
+    /// Returns known server defaults without request or session overrides.
+    /// Missing entries leave context-dependent defaults unavailable.
+    fn hint_defaults(&self) -> Result<HashMap<String, String>> {
+        Ok(HashMap::new())
+    }
+
     /// Whether this handler implements the bounded logical-table DDL operation.
     fn supports_metric_batch_ddl(&self) -> bool {
         false
