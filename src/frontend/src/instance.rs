@@ -62,6 +62,7 @@ use common_recordbatch::RecordBatchStreamWrapper;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
+use common_time::timestamp::TimeUnit;
 use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
@@ -129,6 +130,9 @@ pub struct Instance {
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
+    /// Time index unit for physical metric tables created by auto table creation
+    /// through the frontend instance (e.g., batched logical-table flushes).
+    auto_create_physical_table_timestamp_unit: TimeUnit,
     trace_ingest_chunk_size: usize,
     trace_aux_cache: otlp::TraceAuxCache,
     trace_aux_limiter: Option<RequestLimiter>,

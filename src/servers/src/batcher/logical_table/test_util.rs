@@ -32,6 +32,7 @@ use common_meta::node_manager::{
 };
 use common_meta::test_util::MockDatanodeManager;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
 use operator::test_util::{create_partition_rule_manager, prepare_mocked_backend};
@@ -110,6 +111,7 @@ pub(crate) async fn submission_batcher(
         mock_table_flownode_cache(1, vec![]).await,
         true,
         Arc::new(UnexpectedSchemaAlterer),
+        TimeUnit::Millisecond,
         Duration::from_secs(1),
         2,
         1,

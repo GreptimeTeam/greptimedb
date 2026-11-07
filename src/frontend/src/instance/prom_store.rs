@@ -787,7 +787,9 @@ impl Instance {
         let default_schema = vec![
             api::v1::ColumnSchema {
                 column_name: common_query::prelude::greptime_timestamp().to_string(),
-                datatype: api::v1::ColumnDataType::TimestampMillisecond as i32,
+                datatype: api::helper::timestamp_datatype(
+                    self.auto_create_physical_table_timestamp_unit,
+                ) as i32,
                 semantic_type: api::v1::SemanticType::Timestamp as i32,
                 datatype_extension: None,
                 options: None,

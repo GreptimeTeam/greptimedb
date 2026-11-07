@@ -108,6 +108,10 @@ pub struct LogicalTablePendingRowsBatcher {
     worker_channel_capacity: usize,
     prom_store_with_metric_engine: bool,
     schema_alterer: PendingRowsSchemaAltererRef,
+    /// Time index unit the schema alterer uses when auto-creating a missing
+    /// physical metric table; keeps the batcher's logical-create alignment
+    /// consistent with the created physical table.
+    auto_create_physical_table_timestamp_unit: TimeUnit,
     pending_rows_batch_sync: bool,
     shutdown: broadcast::Sender<()>,
 }
@@ -123,6 +127,7 @@ impl LogicalTablePendingRowsBatcher {
         table_flownode_set_cache: TableFlownodeSetCacheRef,
         prom_store_with_metric_engine: bool,
         schema_alterer: PendingRowsSchemaAltererRef,
+        auto_create_physical_table_timestamp_unit: TimeUnit,
         flush_interval: Duration,
         max_batch_rows: usize,
         max_concurrent_flushes: usize,
@@ -163,6 +168,7 @@ impl LogicalTablePendingRowsBatcher {
             flow_notification_tx,
             prom_store_with_metric_engine,
             schema_alterer,
+            auto_create_physical_table_timestamp_unit,
             flush_limiter,
             request_limiter,
             worker_channel_capacity,
@@ -184,8 +190,8 @@ impl LogicalTablePendingRowsBatcher {
     }
 
     /// Returns the physical metric table's time index unit resolved from
-    /// `ctx`, defaulting to millisecond when the table does not exist yet
-    /// (the schema alterer auto-creates it as millisecond).
+    /// `ctx`, falling back to the configured auto-create unit when the table
+    /// does not exist yet (the schema alterer auto-creates it with that unit).
     async fn physical_time_index_unit_or_default(&self, ctx: &QueryContextRef) -> TimeUnit {
         let key = batch_key_from_ctx(ctx);
         let Ok(Some(table)) = self
@@ -193,7 +199,7 @@ impl LogicalTablePendingRowsBatcher {
             .table(&key.catalog, &key.schema, &key.physical_table, None)
             .await
         else {
-            return TimeUnit::Millisecond;
+            return self.auto_create_physical_table_timestamp_unit;
         };
         table
             .table_info()

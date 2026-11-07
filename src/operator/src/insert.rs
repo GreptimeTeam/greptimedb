@@ -120,6 +120,11 @@ pub struct Inserter {
     /// When `false`, missing tables are never auto-created regardless of the
     /// per-request `auto_create_table` hint. When `true`, the hint still applies.
     auto_create_table: bool,
+    /// Time index unit for physical metric tables created by auto table creation.
+    /// New logical tables created under such a physical table inherit its unit,
+    /// so all metric-engine ingestion paths write timestamps in this unit.
+    /// Defaults to milliseconds for compatibility.
+    auto_create_physical_table_timestamp_unit: TimeUnit,
     pending_rows_batcher: Option<Arc<dyn PendingRowsBatcher>>,
     /// Rows handed to detached flow mirror tasks that have not finished yet.
     /// Bounds how much row data in-flight mirror writes may keep alive, see
@@ -342,9 +347,16 @@ impl Inserter {
             node_manager,
             table_flownode_set_cache,
             auto_create_table,
+            auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             pending_rows_batcher: None,
             mirror_pending_rows: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Sets the time index unit for auto-created physical metric tables.
+    pub fn with_auto_create_physical_table_timestamp_unit(mut self, unit: TimeUnit) -> Self {
+        self.auto_create_physical_table_timestamp_unit = unit;
+        self
     }
 
     /// Installs the shared dispatcher used by direct writes and batch flushes.
@@ -1753,7 +1765,9 @@ impl Inserter {
         let default_schema = vec![
             ColumnSchema {
                 column_name: greptime_timestamp().to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as _,
+                datatype: api::helper::timestamp_datatype(
+                    self.auto_create_physical_table_timestamp_unit,
+                ) as _,
                 semantic_type: SemanticType::Timestamp as _,
                 datatype_extension: None,
                 options: None,
