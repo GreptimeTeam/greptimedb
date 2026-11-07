@@ -42,7 +42,7 @@ use query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
+use session::context::{MetricDiscoveryScope, QueryContext};
 use sql::ast::{Ident, ObjectName, ObjectNamePart};
 use sql::statements::create::CreateView;
 use sql::statements::statement::Statement as SqlStatement;
@@ -6048,6 +6048,92 @@ async fn native_promql_discovery_names_each_metric_it_reads() {
         ],
         "each row reports its own metric's name and samples: {rows:?}"
     );
+}
+
+/// Both sides of `or` are planned natively when discovery finds no authorized metric.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_zero_match_or_real_tql() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_zero_match_or_real_tql",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"
+        CREATE TABLE zero_match_phy (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (host))
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE alpha_total (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (host))
+            ENGINE=metric WITH ("on_physical_table" = "zero_match_phy");
+        INSERT INTO alpha_total (host, ts, val) VALUES
+            ('a', 0, 1), ('a', 1000, 2), ('a', 2000, 3),
+            ('b', 0, 10), ('b', 1000, 20), ('b', 2000, 30);
+        ADMIN FLUSH_TABLE('zero_match_phy');
+        "#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expected = [
+        (0, "a", 1.0),
+        (1000, "a", 2.0),
+        (2000, "a", 3.0),
+        (0, "b", 10.0),
+        (1000, "b", 20.0),
+        (2000, "b", 30.0),
+    ];
+    for (query, empty_index) in [
+        (r#"{__name__=~"no_such_metric_.+"} or alpha_total"#, 0),
+        (r#"alpha_total or {__name__=~"no_such_metric_.+"}"#, 1),
+    ] {
+        // TQL does not prepare discovery scope itself; provide the same authorized scope that
+        // the Prometheus handler would provide, without comparing to the unsupported legacy path.
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "alpha_total".to_string(),
+        )]));
+        let sql = format!("TQL EVAL (0, 2, '1s', '1s') {query}");
+        observer.clear();
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let (columns, rows) = native_labelled_rows(output).await;
+        assert_eq!(columns, vec!["__name__", "host", "ts", "val"], "{query}");
+        let actual = rows
+            .iter()
+            .map(|(time, labels, value)| {
+                assert_eq!(labels.len(), 2, "{query}: {labels:?}");
+                assert_eq!(
+                    labels.get("__name__").map(String::as_str),
+                    Some("alpha_total")
+                );
+                (*time, labels.get("host").unwrap().as_str(), *value)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{query}");
+
+        let fused = observer.two_input_fused();
+        let children = fused.children();
+        assert!(
+            find_plan_node(children[empty_index], "EmptyExec").is_some(),
+            "{query}: {fused:?}"
+        );
+        assert_eq!(fused.output_partitioning().partition_count(), 1, "{query}");
+        assert!(
+            children
+                .iter()
+                .all(|child| child.output_partitioning().partition_count() == 1),
+            "{query}: {fused:?}"
+        );
+        assert_eq!(observed_series_scans(&observer).len(), 1, "{query}");
+    }
 }
 
 /// `promql` evaluated at one instant through the Prometheus handler, which is the path that
