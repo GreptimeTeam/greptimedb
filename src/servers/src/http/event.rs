@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::io::BufRead;
@@ -878,10 +879,23 @@ impl EventPayloadResolver<'_> {
     fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<VrlValue>> {
         match self.inner {
             EventPayloadResolverInner::Json | EventPayloadResolverInner::JsonStream => {
-                transform_ndjson_array_factory(
-                    Deserializer::from_slice(&payload).into_iter(),
+                // Detect parse failures even when ignore_errors would discard them.
+                let mut saw_parse_error = false;
+                let result = transform_ndjson_array_factory(
+                    Deserializer::from_slice(&payload)
+                        .into_iter()
+                        .inspect(|item| saw_parse_error |= item.is_err()),
                     ignore_errors,
-                )
+                );
+                if saw_parse_error && let Cow::Owned(text) = String::from_utf8_lossy(&payload) {
+                    // Release partially parsed records before retrying the entire payload.
+                    drop(result);
+                    return transform_ndjson_array_factory(
+                        Deserializer::from_str(&text).into_iter(),
+                        ignore_errors,
+                    );
+                }
+                result
             }
             EventPayloadResolverInner::Ndjson => {
                 let mut result = Vec::with_capacity(1000);
@@ -1131,6 +1145,90 @@ mod tests {
         .unwrap();
         assert_eq!(via_json, via_stream);
         assert_eq!(via_stream.len(), 2);
+    }
+
+    #[test]
+    fn test_json_invalid_utf8_retry() {
+        let expected = vec![
+            json!({"message": "before"}).into(),
+            json!({"message": "bad\u{fffd}\u{fffd}\u{fffd}\u{7f}\u{7f}"}).into(),
+            json!({"message": "after"}).into(),
+        ];
+
+        for payload in [
+            b"[{\"message\":\"before\"},{\"message\":\"bad\xc1\x89\xc8\x7f\x7f\"},{\"message\":\"after\"}]".as_slice(),
+            b"{\"message\":\"before\"}\n{\"message\":\"bad\xc1\x89\xc8\x7f\x7f\"}\n{\"message\":\"after\"}".as_slice(),
+        ] {
+            for content_type in [ContentType::json(), JSON_STREAM_CONTENT_TYPE.clone()] {
+                for ignore_errors in [false, true] {
+                    let actual = extract_pipeline_value_by_content_type(
+                        content_type.clone(),
+                        Bytes::from_static(payload),
+                        ignore_errors,
+                    )
+                    .unwrap();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_invalid_utf8_retry_preserves_parse_errors() {
+        let cases = [
+            (
+                br#"{"message":"before"}{"message":"\uD800"}{"message":"after"}"#.as_slice(),
+                vec![json!({"message": "before"}).into()],
+            ),
+            (
+                b"{\"message\":\"before\"}{\"message\":\"bad\xff\"}{\"broken\":}".as_slice(),
+                vec![
+                    json!({"message": "before"}).into(),
+                    json!({"message": "bad\u{fffd}"}).into(),
+                ],
+            ),
+        ];
+
+        for (payload, expected) in cases {
+            for content_type in [ContentType::json(), JSON_STREAM_CONTENT_TYPE.clone()] {
+                for ignore_errors in [false, true] {
+                    let result = extract_pipeline_value_by_content_type(
+                        content_type.clone(),
+                        Bytes::from_static(payload),
+                        ignore_errors,
+                    );
+                    if ignore_errors {
+                        assert_eq!(result.unwrap(), expected);
+                    } else {
+                        assert!(matches!(result, Err(Error::ParseJson { .. })));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_invalid_utf8_retry_preserves_ignored_items() {
+        let payload = Bytes::from_static(b"0{\"message\":\"bad\xff\"}false{\"message\":\"after\"}");
+        for content_type in [ContentType::json(), JSON_STREAM_CONTENT_TYPE.clone()] {
+            let result = extract_pipeline_value_by_content_type(
+                content_type.clone(),
+                payload.clone(),
+                false,
+            );
+            assert!(matches!(result, Err(Error::InvalidParameter { .. })));
+
+            let actual =
+                extract_pipeline_value_by_content_type(content_type, payload.clone(), true)
+                    .unwrap();
+            assert_eq!(
+                actual,
+                vec![
+                    json!({"message": "bad\u{fffd}"}).into(),
+                    json!({"message": "after"}).into(),
+                ],
+            );
+        }
     }
 
     #[test]
