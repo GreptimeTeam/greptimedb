@@ -278,6 +278,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid {algorithm} option: {reason}"))]
+    InvalidSketchOption {
+        algorithm: &'static str,
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid skipping index option: {}", msg))]
     InvalidSkippingIndexOption {
         msg: String,
@@ -368,6 +376,7 @@ impl ErrorExt for Error {
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
             | InvalidSkippingIndexOption { .. }
+            | InvalidSketchOption { .. }
             | InvalidCompressionOption { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }

@@ -43,6 +43,8 @@ pub(crate) struct MemoryLimits {
     pub(crate) batch: usize,
     pub(crate) group: usize,
     pub(crate) index: usize,
+    /// Reuses index allocation only when the optional working set fits admission.
+    pub(crate) optional_index: Option<usize>,
     pub(crate) writer: SstWriteLimits,
     pub(crate) estimated: u64,
 }
@@ -60,6 +62,7 @@ impl MemoryLimits {
             batch,
             group: plan.memory_limit / 16,
             index: plan.memory_limit / (64 * plan.targets.len()),
+            optional_index: None,
             writer: SstWriteLimits {
                 // Parquet 59 preallocates a 1 MiB bit writer for each of the
                 // timestamp/sequence delta encoders. Dictionary interner tables
@@ -78,6 +81,7 @@ impl MemoryLimits {
         plan: &MultiRegionCompactionPlan,
         context: &MultiRegionCompactionContext,
         footers: &[Arc<ParquetMetaData>],
+        optional_targets: usize,
     ) -> Result<()> {
         self.check_upload_minimum(context)?;
         let mut extra_delta = 0;
@@ -105,7 +109,10 @@ impl MemoryLimits {
                 ),
             }
         );
-        self.estimated = bytes;
+        // Optional indexes must not turn an admitted data compaction into a
+        // resource failure. Reserve all resident target states together or skip.
+        (self.optional_index, self.estimated) =
+            admit_optional_indexes(bytes, plan.memory_limit, self.index, optional_targets);
         Ok(())
     }
 
@@ -218,4 +225,38 @@ fn reader_bytes(footer: &ParquetMetaData) -> u64 {
         .max()
         .unwrap_or(0);
     pages.saturating_add(footer.memory_size() as u64)
+}
+
+/// Twice the retained budget estimates state plus finish scratch, not allocator RSS.
+fn admit_optional_indexes(
+    base: u64,
+    budget: usize,
+    index: usize,
+    targets: usize,
+) -> (Option<usize>, u64) {
+    let with_optional_indexes = base.saturating_add(
+        (index as u64)
+            .saturating_mul(2)
+            .saturating_mul(targets as u64),
+    );
+    if targets > 0 && index > 0 && with_optional_indexes <= budget as u64 {
+        (Some(index), with_optional_indexes)
+    } else {
+        (None, base)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admit_optional_indexes;
+
+    #[test]
+    fn optional_indexes_do_not_reject_admitted_data() {
+        // Both target writers are resident. Insufficient extra room leaves the
+        // already-admitted data budget unchanged and explicitly disables optional indexes.
+        assert_eq!(admit_optional_indexes(900, 1000, 30, 2), (None, 900));
+        assert_eq!(admit_optional_indexes(880, 1000, 30, 2), (Some(30), 1000));
+        assert_eq!(admit_optional_indexes(900, 1000, 30, 0), (None, 900));
+        assert_eq!(admit_optional_indexes(900, 1000, 0, 2), (None, 900));
+    }
 }

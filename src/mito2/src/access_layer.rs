@@ -44,8 +44,10 @@ use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::FlatSource;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
+use crate::sst::index::build::IndexBuildInputs;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
+use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -377,6 +379,10 @@ impl AccessLayer {
         metrics: &mut Metrics,
         context: Option<crate::sst::parquet::writer::SstWriteContext>,
     ) -> Result<SstInfoArray> {
+        let mut request = request;
+        if let Some(provider) = &mut request.index_build_inputs {
+            provider.can_merge_inputs &= write_opts.max_file_size.is_none();
+        }
         let limits = context.as_ref().map(|context| context.limits);
         let guard = context.map(|context| context.guard);
         let op_type = request.op_type;
@@ -419,15 +425,18 @@ impl AccessLayer {
                 self.puffin_manager_factory.clone()
             };
             let indexer_builder = IndexerBuilderImpl {
+                index_build_inputs: request.index_build_inputs,
                 build_type: request.op_type.into(),
                 metadata: request.metadata.clone(),
                 puffin_manager: puffin_factory.build(store, path_provider.clone()),
                 write_cache_enabled: false,
                 intermediate_manager: self.intermediate_manager.clone(),
                 index_options: request.index_options,
-                inverted_index_config: request.inverted_index_config,
-                fulltext_index_config: request.fulltext_index_config,
-                bloom_filter_index_config: request.bloom_filter_index_config,
+                registry: Arc::new(IndexRegistry::new(
+                    request.inverted_index_config,
+                    request.fulltext_index_config,
+                    request.bloom_filter_index_config,
+                )),
             };
             // We disable write cache on file system but we still use atomic write.
             // TODO(yingwen): If we support other non-fs stores without the write cache, then
@@ -647,6 +656,8 @@ pub enum OperationType {
 
 /// Contents to build a SST.
 pub struct SstWriteRequest {
+    /// Optional preplanned index work and physical input files.
+    pub index_build_inputs: Option<IndexBuildInputs>,
     pub op_type: OperationType,
     pub metadata: RegionMetadataRef,
     pub source: FlatSource,
@@ -683,15 +694,18 @@ impl EncodedSstIndexBuildParams {
         intermediate_manager: IntermediateManager,
     ) -> IndexerBuilderImpl {
         IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: OperationType::Flush.into(),
             metadata: self.metadata,
             puffin_manager,
             write_cache_enabled,
             intermediate_manager,
             index_options: self.index_options,
-            inverted_index_config: self.inverted_index_config,
-            fulltext_index_config: self.fulltext_index_config,
-            bloom_filter_index_config: self.bloom_filter_index_config,
+            registry: Arc::new(IndexRegistry::new(
+                self.inverted_index_config,
+                self.fulltext_index_config,
+                self.bloom_filter_index_config,
+            )),
         }
     }
 }
@@ -1000,6 +1014,7 @@ mod tests {
             access_layer
                 .write_sst(
                     SstWriteRequest {
+                        index_build_inputs: None,
                         op_type,
                         metadata,
                         source: new_flat_source_from_record_batches(vec![

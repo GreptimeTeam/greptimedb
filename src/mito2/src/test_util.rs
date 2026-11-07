@@ -365,6 +365,7 @@ pub struct TestEnv {
     kv_backend: KvBackendRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     object_store_mock_layer: Option<MockLayer>,
+    object_store_override: Option<ObjectStore>,
 }
 
 impl TestEnv {
@@ -402,6 +403,7 @@ impl TestEnv {
             kv_backend,
             partition_expr_fetcher: noop_partition_expr_fetcher(),
             object_store_mock_layer: None,
+            object_store_override: None,
         }
     }
 
@@ -414,6 +416,13 @@ impl TestEnv {
     /// Overwrites the original `log_store_factory`.
     pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
+        self
+    }
+
+    /// Uses a supplied default store, for example Memory to exercise object-store GC
+    /// in release integration tests. The configured mock layer is still applied.
+    pub fn with_object_store(mut self, object_store: ObjectStore) -> Self {
+        self.object_store_override = Some(object_store);
         self
     }
 
@@ -790,11 +799,15 @@ impl TestEnv {
         let data_path = data_home.join("data").as_path().display().to_string();
         let builder = Fs::default().root(&data_path);
 
+        let object_store = self
+            .object_store_override
+            .clone()
+            .unwrap_or_else(|| ObjectStore::new(builder).unwrap());
         let object_store = if let Some(mock_layer) = self.object_store_mock_layer.as_ref() {
             debug!("create object store with mock layer");
-            ObjectStore::new(builder).unwrap().layer(mock_layer.clone())
+            object_store.layer(mock_layer.clone())
         } else {
-            ObjectStore::new(builder).unwrap()
+            object_store
         };
         ObjectStoreManager::new("default", object_store)
     }

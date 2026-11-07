@@ -15,6 +15,7 @@
 mod column_schema;
 pub mod constraint;
 pub mod ext;
+mod sketch_options;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,6 +41,9 @@ pub use crate::schema::column_schema::{
     SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType, TIME_INDEX_KEY,
 };
 pub use crate::schema::constraint::ColumnDefaultConstraint;
+pub use crate::schema::sketch_options::{
+    HLL_KEY, HllOptions, KLL_KEY, KllOptions, MG_KEY, MgOptions,
+};
 
 /// Key used to store version number of the schema in metadata.
 pub const VERSION_KEY: &str = "greptime:version";

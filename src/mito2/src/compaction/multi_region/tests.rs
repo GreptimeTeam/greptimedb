@@ -273,6 +273,7 @@ impl Fixture {
         });
         (
             MultiRegionCompactionContext {
+                index_kind_provider: None,
                 access_layer: self.layer.clone(),
                 cache: Arc::new(CacheManager::default()),
                 config: self.config.clone(),
@@ -447,6 +448,7 @@ fn write_request(
     format: FormatType,
 ) -> SstWriteRequest {
     SstWriteRequest {
+        index_build_inputs: None,
         op_type: OperationType::Flush,
         metadata,
         source,
@@ -2326,6 +2328,7 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
         &context,
         &limits,
         plan.max_output_file_size,
+        Arc::default(),
     )
     .write(source)
     .await
@@ -2453,4 +2456,76 @@ async fn test_invalid_plan_is_rejected_before_creating_outputs(
         "expected `{reason}`, got {error:?}"
     );
     assert!(protection.files.lock().unwrap().is_empty());
+}
+
+#[derive(Debug)]
+struct InvalidOptionalIndexHandler;
+
+impl crate::sst::index::handler::IndexKindProvider for InvalidOptionalIndexHandler {
+    fn handlers(&self) -> Vec<Arc<dyn crate::sst::index::handler::IndexKindHandler>> {
+        vec![Arc::new(Self)]
+    }
+}
+
+impl crate::sst::index::handler::IndexKindHandler for InvalidOptionalIndexHandler {
+    fn kinds(&self) -> &[crate::sst::index::kind::IndexKind] {
+        &[crate::sst::index::kind::IndexKind::Extension(
+            crate::sst::index::kind::ExtensionIndexKind::Hll,
+        )]
+    }
+
+    fn plan(
+        &self,
+        context: &crate::sst::index::handler::PlanContext<'_>,
+    ) -> std::result::Result<
+        Option<Arc<dyn crate::sst::index::handler::PlannedIndex>>,
+        common_error::ext::BoxedError,
+    > {
+        assert!(
+            context.metadata.column_metadatas[0]
+                .column_schema
+                .hll_options()
+                .is_err()
+        );
+        Err(common_error::ext::BoxedError::new(
+            crate::error::InvalidConfigSnafu {
+                reason: "invalid optional index configuration",
+            }
+            .build(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn test_invalid_optional_index_options_do_not_block_routed_compaction() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    for invalid_value in ["missing-column", "bad-capacity"] {
+        let mut plan = fixture.plan(2);
+        for target in plan.targets.values_mut() {
+            Arc::make_mut(&mut target.metadata).column_metadatas[0]
+                .column_schema
+                .mut_metadata()
+                .insert(datatypes::schema::HLL_KEY.into(), invalid_value.into());
+        }
+        let (mut context, _) = fixture.context(None);
+        context.index_kind_provider = Some(Arc::new(InvalidOptionalIndexHandler));
+        let output = compact_regions(plan, context).await.unwrap();
+        assert_eq!(output.stats.source_rows, output.stats.output_rows);
+        assert!(output.stats.output_rows > 0);
+        assert!(
+            output
+                .files
+                .values()
+                .flatten()
+                .all(|file| file
+                    .indexes
+                    .iter()
+                    .all(|index| index.created_indexes.iter().all(|kind| !matches!(
+                        kind,
+                        crate::sst::file::IndexType::Hll
+                            | crate::sst::file::IndexType::Kll
+                            | crate::sst::file::IndexType::Mg
+                    ))))
+        );
+    }
 }

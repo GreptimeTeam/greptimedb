@@ -14,14 +14,18 @@
 
 //! Handling create request.
 
+use std::sync::Arc;
+
 use common_telemetry::info;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
 use store_api::region_request::{AffectedRows, RegionCreateRequest};
 use store_api::storage::RegionId;
 
-use crate::error::Result;
+use crate::error::{InvalidConfigSnafu, Result};
 use crate::region::opener::{RegionOpener, check_recovered_region};
+use crate::sst::index::handler::IndexKindProviderRef;
+use crate::sst::index::registry::IndexRegistry;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::worker::RegionWorkerLoop;
@@ -57,6 +61,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Create a MitoRegion from the RegionMetadata.
         let requirements = request.requirements;
+        let registry = IndexRegistry::new(
+            self.config.inverted_index.clone(),
+            self.config.fulltext_index.clone(),
+            self.config.bloom_filter_index.clone(),
+        )
+        .with_provider(self.plugins.get::<IndexKindProviderRef>())
+        .map_err(|err| {
+            InvalidConfigSnafu {
+                reason: err.to_string(),
+            }
+            .build()
+        })?;
         let opener = RegionOpener::new(
             region_id,
             &request.table_dir,
@@ -75,7 +91,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .cache(Some(self.cache_manager.clone()))
         .series_index_store(self.series_index_store.clone())
         .series_index_purger(self.series_index_purger.clone())
-        .hook(self.plugins.get());
+        .hook(self.plugins.get())
+        .with_index_registry(Arc::new(registry));
 
         opener.ensure_region_requirements(requirements)?;
 

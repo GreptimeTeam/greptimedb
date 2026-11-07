@@ -13,32 +13,32 @@
 // limitations under the License.
 
 pub(crate) mod bloom_filter;
+pub mod build;
 mod column;
 #[cfg(test)]
 mod column_test;
 pub(crate) mod fulltext_index;
+pub mod handler;
 mod indexer;
 pub mod intermediate;
 pub(crate) mod inverted_index;
+pub mod kind;
 mod primary_key;
 pub mod puffin_manager;
+pub mod registry;
 #[cfg(test)]
 mod sparse_test;
-mod statistics;
+pub mod statistics;
 pub(crate) mod store;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use arrow_schema::extension::ExtensionType;
-use bloom_filter::creator::BloomFilterIndexer;
 use bytes::Bytes;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::extension::json::Json2ExtensionType;
 use index::target::IndexTarget;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use object_store::ObjectStore;
@@ -58,7 +58,8 @@ use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
-use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+#[cfg(test)]
+use crate::config::{BloomFilterConfig, InvertedIndexConfig};
 use crate::error::{
     BuildIndexAsyncSnafu, Error, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
     RegionTruncatedSnafu, Result,
@@ -77,18 +78,20 @@ use crate::request::{
     WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{
-    ColumnIndexMetadata, FileHandle, IndexType, IndexTypes, RegionFileId, RegionIndexId,
-};
+use crate::sst::file::{ColumnIndexMetadata, FileHandle, IndexType, RegionFileId, RegionIndexId};
 use crate::sst::file_purger::FilePurgerRef;
+#[cfg(feature = "testing")]
+use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
+#[cfg(test)]
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
-use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
+#[cfg(feature = "testing")]
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::parquet::SstInfo;
 use crate::worker::WorkerListener;
 
-pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
+pub(crate) const TYPE_SKETCH_INDEX: &str = "sketch";
+const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
 pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 
@@ -157,72 +160,70 @@ pub(crate) fn trigger_index_background_download(
     }
 }
 
-/// Output of the index creation.
+/// One index successfully written into the enclosing Puffin file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedEntry {
+    /// Column covered by the index, or a file-level index without a column descriptor.
+    pub column_id: Option<ColumnId>,
+    /// Registered index identity.
+    pub kind: crate::sst::index::kind::IndexKind,
+    /// Fulltext bloom version published in column metadata. Extension format
+    /// versions belong to their Puffin blob properties and are not published here.
+    pub format_version: u32,
+}
+
+/// Output published only after the enclosing Puffin file finishes.
 #[derive(Debug, Clone, Default)]
 pub struct IndexOutput {
     /// Size of the file.
     pub file_size: u64,
     /// Index version.
     pub version: u64,
-    /// Inverted index output.
-    pub inverted_index: InvertedIndexOutput,
-    /// Fulltext index output.
-    pub fulltext_index: FulltextIndexOutput,
-    /// Columns of `fulltext_index` that use the bloom backend.
-    pub fulltext_bloom_columns: Vec<ColumnId>,
-    /// Bloom filter output.
-    pub bloom_filter: BloomFilterOutput,
+    /// Successfully written column indexes.
+    pub entries: Vec<CompletedEntry>,
 }
 
 impl IndexOutput {
     pub fn build_available_indexes(&self) -> SmallVec<[IndexType; 4]> {
-        let mut indexes = SmallVec::new();
-        if self.inverted_index.is_available() {
-            indexes.push(IndexType::InvertedIndex);
-        }
-        if self.fulltext_index.is_available() {
-            indexes.push(IndexType::FulltextIndex);
-        }
-        if self.bloom_filter.is_available() {
-            indexes.push(IndexType::BloomFilterIndex);
-        }
-        indexes
+        // Preserve the established order independently of handler registration.
+        [
+            IndexType::InvertedIndex,
+            IndexType::FulltextIndex,
+            IndexType::BloomFilterIndex,
+            IndexType::Hll,
+            IndexType::Kll,
+            IndexType::Mg,
+        ]
+        .into_iter()
+        .filter(|kind| {
+            self.entries
+                .iter()
+                .any(|entry| entry.kind.index_type() == *kind)
+        })
+        .collect()
     }
 
     pub fn build_indexes(&self) -> Vec<ColumnIndexMetadata> {
-        let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
-
-        if self.inverted_index.is_available() {
-            for &col in &self.inverted_index.columns {
-                map.entry(col).or_default().push(IndexType::InvertedIndex);
+        let mut map: HashMap<ColumnId, ColumnIndexMetadata> = HashMap::new();
+        for kind in self.build_available_indexes() {
+            for entry in self
+                .entries
+                .iter()
+                .filter(|entry| entry.kind.index_type() == kind)
+            {
+                let Some(column_id) = entry.column_id else {
+                    continue;
+                };
+                let metadata = map.entry(column_id).or_default();
+                metadata.column_id = column_id;
+                metadata.created_indexes.push(kind);
+                if kind == IndexType::FulltextIndex {
+                    metadata.fulltext_bloom_version =
+                        u8::try_from(entry.format_version).unwrap_or_default();
+                }
             }
         }
-        if self.fulltext_index.is_available() {
-            for &col in &self.fulltext_index.columns {
-                map.entry(col).or_default().push(IndexType::FulltextIndex);
-            }
-        }
-        if self.bloom_filter.is_available() {
-            for &col in &self.bloom_filter.columns {
-                map.entry(col)
-                    .or_default()
-                    .push(IndexType::BloomFilterIndex);
-            }
-        }
-
-        map.into_iter()
-            .map(|(column_id, created_indexes)| ColumnIndexMetadata {
-                column_id,
-                fulltext_bloom_version: if self.fulltext_index.is_available()
-                    && self.fulltext_bloom_columns.contains(&column_id)
-                {
-                    FULLTEXT_BLOOM_VERSION
-                } else {
-                    0
-                },
-                created_indexes,
-            })
-            .collect::<Vec<_>>()
+        map.into_values().collect()
     }
 }
 
@@ -250,24 +251,18 @@ pub type FulltextIndexOutput = IndexBaseOutput;
 /// Output of the bloom filter creation.
 pub type BloomFilterOutput = IndexBaseOutput;
 
-/// The index creator that hides the error handling details.
+/// Executes planned creators through the existing Puffin lifecycle.
 #[derive(Default)]
 pub struct Indexer {
     file_id: FileId,
-    /// The logical region used for metadata and intermediate index files.
     region_id: RegionId,
-    /// The region that owns the physical SST and Puffin files.
     physical_region_id: RegionId,
     index_version: u64,
     puffin_manager: Option<SstPuffinManager>,
     write_cache_enabled: bool,
-    inverted_indexer: Option<InvertedIndexer>,
-    last_mem_inverted_index: usize,
-    fulltext_indexer: Option<FulltextIndexer>,
-    last_mem_fulltext_index: usize,
-    bloom_filter_indexer: Option<BloomFilterIndexer>,
-    last_mem_bloom_filter: usize,
-    /// Present only when the active creators together need every Dense PK field.
+    creators: Vec<ActiveIndex>,
+    /// Shared retained-memory ceiling for all injected creators.
+    extension_memory_limit: Option<usize>,
     dense_pk_decoder: Option<DensePrimaryKeyCodec>,
     intermediate_manager: Option<IntermediateManager>,
 }
@@ -275,9 +270,29 @@ pub struct Indexer {
 impl Indexer {
     /// Returns true if no index creator is active.
     pub(crate) fn is_empty(&self) -> bool {
-        self.inverted_indexer.is_none()
-            && self.fulltext_indexer.is_none()
-            && self.bloom_filter_indexer.is_none()
+        self.creators.is_empty()
+    }
+
+    #[cfg(test)]
+    fn has_kind(&self, kind: kind::IndexKind) -> bool {
+        self.creators
+            .iter()
+            .any(|active| active.kinds.contains(&kind))
+    }
+
+    fn push_creator(
+        &mut self,
+        kinds: Vec<kind::IndexKind>,
+        creator: Box<dyn handler::IndexCreator>,
+        memory_limit: Option<usize>,
+        label: &'static str,
+    ) {
+        self.creators.push(ActiveIndex {
+            kinds,
+            creator,
+            memory_limit,
+            memory: IndexMemoryUsage { label, bytes: 0 },
+        });
     }
 
     /// Wraps real creators for update-only benchmarks without a Puffin output.
@@ -289,16 +304,28 @@ impl Indexer {
     ) -> Self {
         let mut indexer = Self {
             region_id: metadata.region_id,
-            inverted_indexer,
-            bloom_filter_indexer,
             ..Default::default()
         };
+        if let Some(creator) = inverted_indexer {
+            indexer.push_creator(
+                vec![kind::IndexKind::Builtin(IndexType::InvertedIndex)],
+                Box::new(creator),
+                None,
+                TYPE_INVERTED_INDEX,
+            );
+        }
+        if let Some(creator) = bloom_filter_indexer {
+            indexer.push_creator(
+                vec![kind::IndexKind::Builtin(IndexType::BloomFilterIndex)],
+                Box::new(creator),
+                None,
+                TYPE_BLOOM_FILTER_INDEX,
+            );
+        }
         indexer.prepare_dense_pk_decoder(metadata);
         indexer
     }
 
-    /// Computes demand once from active creators. Field columns and duplicate
-    /// requests across creators cannot turn a partial PK projection into a full one.
     fn prepare_dense_pk_decoder(&mut self, metadata: &RegionMetadataRef) {
         if metadata.primary_key_encoding != PrimaryKeyEncoding::Dense
             || metadata.primary_key.is_empty()
@@ -306,16 +333,12 @@ impl Indexer {
             return;
         }
         let requested: HashSet<_> = self
-            .inverted_indexer
+            .creators
             .iter()
-            .flat_map(|indexer| indexer.indexed_targets())
-            .chain(
-                self.bloom_filter_indexer
-                    .iter()
-                    .flat_map(|indexer| indexer.indexed_targets()),
-            )
+            .filter(|active| active.creator.needs_dense_pk())
+            .flat_map(|active| active.creator.indexed_targets())
             .filter_map(|target| match target {
-                IndexTarget::ColumnId(id) => Some(*id),
+                IndexTarget::ColumnId(id) => Some(id),
                 IndexTarget::JsonPath(_) => None,
             })
             .collect();
@@ -324,7 +347,6 @@ impl Indexer {
         }
     }
 
-    /// Called before any creator consumes the batch, so the full decode is shared.
     fn prepare_primary_key(&self, batch: &mut Batch) -> Result<()> {
         if let Some(codec) = &self.dense_pk_decoder {
             batch.ensure_dense_pk_decoded(codec)?;
@@ -332,24 +354,23 @@ impl Indexer {
         Ok(())
     }
 
-    /// Updates the index with the given batch.
+    /// Updates all active creators using the borrowed batch.
     pub async fn update(&mut self, batch: &mut Batch) {
         self.do_update(batch).await;
-
+        self.enforce_memory_limits().await;
         self.flush_mem_metrics();
     }
 
-    /// Updates the index with the given flat format RecordBatch.
+    /// Updates all active creators using the borrowed flat batch.
     pub async fn update_flat(&mut self, batch: &RecordBatch) {
         self.do_update_flat(batch).await;
-
+        self.enforce_memory_limits().await;
         self.flush_mem_metrics();
     }
 
     /// Finalizes the index creation.
     pub async fn finish(&mut self) -> IndexOutput {
         let output = self.do_finish().await;
-
         self.flush_mem_metrics();
         output
     }
@@ -357,37 +378,77 @@ impl Indexer {
     /// Aborts the index creation.
     pub async fn abort(&mut self) {
         self.do_abort().await;
-
         self.flush_mem_metrics();
     }
 
+    async fn enforce_memory_limits(&mut self) {
+        let mut position = 0;
+        let mut extension_bytes = 0usize;
+        while position < self.creators.len() {
+            let active = &self.creators[position];
+            if active.memory_limit.is_none()
+                && (active.is_builtin() || self.extension_memory_limit.is_none())
+            {
+                position += 1;
+                continue;
+            }
+            let bytes = active.creator.memory_usage();
+            let retained = extension_bytes.saturating_add(bytes);
+            let exceeds_shared_limit = !active.is_builtin()
+                && self
+                    .extension_memory_limit
+                    .is_some_and(|limit| retained > limit);
+            if exceeds_shared_limit || active.memory_limit.is_some_and(|limit| bytes > limit) {
+                warn!(
+                    "Discarding index exceeding memory budget, region_id: {}, file_id: {}, kinds: {:?}",
+                    self.region_id, self.file_id, active.kinds
+                );
+                self.abort_creator(position).await;
+            } else {
+                if !active.is_builtin() {
+                    extension_bytes = retained;
+                }
+                position += 1;
+            }
+        }
+    }
+
     fn flush_mem_metrics(&mut self) {
-        let inverted_mem = self
-            .inverted_indexer
-            .as_ref()
-            .map_or(0, |creator| creator.memory_usage());
-        INDEX_CREATE_MEMORY_USAGE
-            .with_label_values(&[TYPE_INVERTED_INDEX])
-            .add(inverted_mem as i64 - self.last_mem_inverted_index as i64);
-        self.last_mem_inverted_index = inverted_mem;
+        for active in &mut self.creators {
+            let bytes = active.creator.memory_usage();
+            INDEX_CREATE_MEMORY_USAGE
+                .with_label_values(&[active.memory.label])
+                .add(bytes as i64 - active.memory.bytes as i64);
+            active.memory.bytes = bytes;
+        }
+    }
+}
 
-        let fulltext_mem = self
-            .fulltext_indexer
-            .as_ref()
-            .map_or(0, |creator| creator.memory_usage());
-        INDEX_CREATE_MEMORY_USAGE
-            .with_label_values(&[TYPE_FULLTEXT_INDEX])
-            .add(fulltext_mem as i64 - self.last_mem_fulltext_index as i64);
-        self.last_mem_fulltext_index = fulltext_mem;
+/// One handler's active creator and its shared memory accounting.
+struct ActiveIndex {
+    kinds: Vec<kind::IndexKind>,
+    creator: Box<dyn handler::IndexCreator>,
+    memory_limit: Option<usize>,
+    memory: IndexMemoryUsage,
+}
 
-        let bloom_filter_mem = self
-            .bloom_filter_indexer
-            .as_ref()
-            .map_or(0, |creator| creator.memory_usage());
+impl ActiveIndex {
+    fn is_builtin(&self) -> bool {
+        self.kinds.iter().all(|kind| kind.is_builtin())
+    }
+}
+
+/// Releases each creator's gauge contribution on completion or cancellation.
+struct IndexMemoryUsage {
+    label: &'static str,
+    bytes: usize,
+}
+
+impl Drop for IndexMemoryUsage {
+    fn drop(&mut self) {
         INDEX_CREATE_MEMORY_USAGE
-            .with_label_values(&[TYPE_BLOOM_FILTER_INDEX])
-            .add(bloom_filter_mem as i64 - self.last_mem_bloom_filter as i64);
-        self.last_mem_bloom_filter = bloom_filter_mem;
+            .with_label_values(&[self.label])
+            .sub(self.bytes as i64);
     }
 }
 
@@ -403,15 +464,14 @@ pub trait IndexerBuilder {
 }
 #[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
+    pub(crate) index_build_inputs: Option<build::IndexBuildInputs>,
+    pub(crate) registry: registry::IndexRegistryRef,
     pub(crate) build_type: IndexBuildType,
     pub(crate) metadata: RegionMetadataRef,
     pub(crate) puffin_manager: SstPuffinManager,
     pub(crate) write_cache_enabled: bool,
     pub(crate) intermediate_manager: IntermediateManager,
     pub(crate) index_options: IndexOptions,
-    pub(crate) inverted_index_config: InvertedIndexConfig,
-    pub(crate) fulltext_index_config: FulltextIndexConfig,
-    pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
 
 #[async_trait::async_trait]
@@ -432,10 +492,90 @@ impl IndexerBuilder for IndexerBuilderImpl {
             ..Default::default()
         };
 
-        indexer.inverted_indexer =
-            self.build_inverted_indexer(region_file_id.file_id(), row_group_size);
-        indexer.fulltext_indexer = self.build_fulltext_indexer(region_file_id.file_id()).await;
-        indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(region_file_id.file_id());
+        let plan = if let Some(inputs) = &self.index_build_inputs {
+            inputs.plan.clone()
+        } else {
+            let context = handler::PlanContext {
+                metadata: &self.metadata,
+                index_options: &self.index_options,
+                build_type: self.build_type.clone(),
+                existing_indexes: &[],
+            };
+            match self.registry.plan(&context) {
+                Ok(plan) => Arc::new(plan),
+                Err(err) => {
+                    warn!(err; "Failed to plan indexes, region_id: {}", self.metadata.region_id);
+                    return Indexer::default();
+                }
+            }
+        };
+        let mut context = handler::BuildContext {
+            metadata: &self.metadata,
+            output: RegionIndexId::new(region_file_id, index_version),
+            puffin_manager: &self.puffin_manager,
+            intermediate_manager: &self.intermediate_manager,
+            inputs: self
+                .index_build_inputs
+                .as_ref()
+                .map_or(&[], |inputs| &inputs.inputs),
+            input_puffin_manager: self
+                .index_build_inputs
+                .as_ref()
+                .map_or(&self.puffin_manager, |inputs| &inputs.input_puffin_manager),
+            can_merge_inputs: self
+                .index_build_inputs
+                .as_ref()
+                .is_some_and(|inputs| inputs.can_merge_inputs),
+            memory_limit: self
+                .index_build_inputs
+                .as_ref()
+                .and_then(|inputs| inputs.memory_limit),
+            row_group_size,
+        };
+        indexer.extension_memory_limit = context.memory_limit;
+        for planned in plan.planned() {
+            let builtin = planned.kinds().iter().all(|kind| kind.is_builtin());
+            // Optional creators share the operation allocation. Pass only the
+            // remaining retained budget before allowing another creator to build.
+            context.memory_limit = if builtin {
+                indexer.extension_memory_limit
+            } else {
+                let remaining = indexer.extension_memory_limit.map(|limit| {
+                    let retained = indexer
+                        .creators
+                        .iter()
+                        .filter(|active| !active.is_builtin())
+                        .fold(0usize, |bytes, active| {
+                            bytes.saturating_add(active.creator.memory_usage())
+                        });
+                    limit.saturating_sub(retained)
+                });
+                remaining.into_iter().chain(planned.memory_limit()).min()
+            };
+            match planned.build(&context).await {
+                Ok(Some(creator)) => {
+                    let label = if builtin {
+                        planned.kinds()[0].as_str()
+                    } else {
+                        TYPE_SKETCH_INDEX
+                    };
+                    let limit = if builtin { None } else { context.memory_limit };
+                    indexer.push_creator(planned.kinds().to_vec(), creator, limit, label);
+                    if !builtin {
+                        indexer.enforce_memory_limits().await;
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    if planned.kinds().iter().all(|kind| kind.is_builtin())
+                        && cfg!(any(test, feature = "test"))
+                    {
+                        panic!("Failed to create index: {err:?}");
+                    }
+                    warn!(err; "Failed to create index, region_id: {}, kinds: {:?}", self.metadata.region_id, planned.kinds());
+                }
+            }
+        }
         indexer.prepare_dense_pk_decoder(&self.metadata);
         indexer.intermediate_manager = Some(self.intermediate_manager.clone());
 
@@ -523,223 +663,6 @@ pub(crate) async fn build_index_from_parquet_bytes(
     indexer.finish().await
 }
 
-impl IndexerBuilderImpl {
-    fn build_inverted_indexer(
-        &self,
-        file_id: FileId,
-        row_group_size: Option<usize>,
-    ) -> Option<InvertedIndexer> {
-        let create = match self.build_type {
-            IndexBuildType::Flush => self.inverted_index_config.create_on_flush.auto(),
-            IndexBuildType::Compact => self.inverted_index_config.create_on_compaction.auto(),
-            _ => true,
-        };
-
-        if !create {
-            debug!(
-                "Skip creating inverted index due to config, region_id: {}, file_id: {}",
-                self.metadata.region_id, file_id,
-            );
-            return None;
-        }
-
-        let indexed_column_ids = self.metadata.inverted_indexed_column_ids(
-            self.index_options.inverted_index.ignore_column_ids.iter(),
-        );
-        let mut index_targets: Vec<_> = indexed_column_ids
-            .into_iter()
-            .map(IndexTarget::ColumnId)
-            .collect();
-        index_targets.extend(self.collect_json_inverted_index_targets());
-
-        if index_targets.is_empty() {
-            debug!(
-                "No columns to be indexed, skip creating inverted index, region_id: {}, file_id: {}",
-                self.metadata.region_id, file_id,
-            );
-            return None;
-        }
-
-        let Some(mut segment_row_count) =
-            NonZeroUsize::new(self.index_options.inverted_index.segment_row_count)
-        else {
-            warn!(
-                "Segment row count is 0, skip creating index, region_id: {}, file_id: {}",
-                self.metadata.region_id, file_id,
-            );
-            return None;
-        };
-
-        // if segment row count not aligned with row group size, adjust it to be aligned.
-        if let Some(row_group_size) = row_group_size.and_then(NonZeroUsize::new)
-            && row_group_size.get() % segment_row_count.get() != 0
-        {
-            segment_row_count = row_group_size;
-        }
-
-        let indexer = InvertedIndexer::new(
-            file_id,
-            &self.metadata,
-            self.intermediate_manager.clone(),
-            self.inverted_index_config.mem_threshold_on_create(),
-            segment_row_count,
-            index_targets,
-        );
-
-        Some(indexer)
-    }
-
-    /// Collects inverted index targets for JSON type hints with indexing enabled.
-    ///
-    /// Only flush and compaction builds collect these targets; manual and schema-change
-    /// rebuilds return no JSON targets.
-    fn collect_json_inverted_index_targets(&self) -> Vec<IndexTarget> {
-        // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
-        if !matches!(
-            self.build_type,
-            IndexBuildType::Flush | IndexBuildType::Compact
-        ) {
-            return Vec::new();
-        }
-
-        let mut index_targets = Vec::new();
-        for col in &self.metadata.column_metadatas {
-            if !col.column_schema.data_type.is_json2() {
-                continue;
-            }
-            let Ok(Some(extension)) = col.column_schema.extension_type::<Json2ExtensionType>()
-            else {
-                continue;
-            };
-            for hint in extension.metadata().json_settings().type_hints() {
-                if !hint.inverted_index {
-                    continue;
-                }
-                // JSON hints may also describe containers through non-SQL ingestion.
-                if !(hint.data_type.is_numeric()
-                    || hint.data_type.is_boolean()
-                    || hint.data_type.is_string())
-                {
-                    continue;
-                }
-                match IndexTarget::new_json_path(col.column_id, hint.path.clone()) {
-                    Ok(target) => index_targets.push(target),
-                    Err(err) => warn!(err; "Skipping invalid JSON inverted index target"),
-                }
-            }
-        }
-
-        index_targets
-    }
-
-    async fn build_fulltext_indexer(&self, file_id: FileId) -> Option<FulltextIndexer> {
-        let create = match self.build_type {
-            IndexBuildType::Flush => self.fulltext_index_config.create_on_flush.auto(),
-            IndexBuildType::Compact => self.fulltext_index_config.create_on_compaction.auto(),
-            _ => true,
-        };
-
-        if !create {
-            debug!(
-                "Skip creating full-text index due to config, region_id: {}, file_id: {}",
-                self.metadata.region_id, file_id,
-            );
-            return None;
-        }
-
-        let mem_limit = self.fulltext_index_config.mem_threshold_on_create();
-        let creator = FulltextIndexer::new(
-            &self.metadata.region_id,
-            &file_id,
-            &self.intermediate_manager,
-            &self.metadata,
-            self.fulltext_index_config.compress,
-            mem_limit,
-            self.build_type.clone(),
-        )
-        .await;
-
-        let err = match creator {
-            Ok(creator) => {
-                if creator.is_none() {
-                    debug!(
-                        "Skip creating full-text index due to no columns require indexing, region_id: {}, file_id: {}",
-                        self.metadata.region_id, file_id,
-                    );
-                }
-                return creator;
-            }
-            Err(err) => err,
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to create full-text indexer, region_id: {}, file_id: {}, err: {:?}",
-                self.metadata.region_id, file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to create full-text indexer, region_id: {}, file_id: {}",
-                self.metadata.region_id, file_id,
-            );
-        }
-
-        None
-    }
-
-    fn build_bloom_filter_indexer(&self, file_id: FileId) -> Option<BloomFilterIndexer> {
-        let create = match self.build_type {
-            IndexBuildType::Flush => self.bloom_filter_index_config.create_on_flush.auto(),
-            IndexBuildType::Compact => self.bloom_filter_index_config.create_on_compaction.auto(),
-            _ => true,
-        };
-
-        if !create {
-            debug!(
-                "Skip creating bloom filter due to config, region_id: {}, file_id: {}",
-                self.metadata.region_id, file_id,
-            );
-            return None;
-        }
-
-        let mem_limit = self.bloom_filter_index_config.mem_threshold_on_create();
-        let indexer = BloomFilterIndexer::new(
-            file_id,
-            &self.metadata,
-            self.intermediate_manager.clone(),
-            mem_limit,
-            self.build_type.clone(),
-        );
-
-        let err = match indexer {
-            Ok(indexer) => {
-                if indexer.is_none() {
-                    debug!(
-                        "Skip creating bloom filter due to no columns require indexing, region_id: {}, file_id: {}",
-                        self.metadata.region_id, file_id,
-                    );
-                }
-                return indexer;
-            }
-            Err(err) => err,
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to create bloom filter, region_id: {}, file_id: {}, err: {:?}",
-                self.metadata.region_id, file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to create bloom filter, region_id: {}, file_id: {}",
-                self.metadata.region_id, file_id,
-            );
-        }
-
-        None
-    }
-}
-
 /// Type of an index build task.
 #[derive(Debug, Clone, IntoStaticStr, PartialEq)]
 pub enum IndexBuildType {
@@ -824,7 +747,7 @@ pub struct IndexBuildTask {
     pub file_purger: FilePurgerRef,
     /// When write cache is enabled, the indexer builder should be built from the write cache.
     /// Otherwise, it should be built from the access layer.
-    pub indexer_builder: Arc<dyn IndexerBuilder + Send + Sync>,
+    pub(crate) indexer_builder: Arc<IndexerBuilderImpl>,
     /// Request sender to notify the region worker.
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
     /// Senders of callers waiting for this build. Coalesced tasks and
@@ -990,11 +913,14 @@ impl IndexBuildTask {
         {
             return Ok(report);
         }
-        let new_index_version = self
-            .source
-            .file_meta
-            .index_version()
-            .map_or(0, |version| version + 1);
+        // Metadata-only removal leaves no current index, but its version still reserves
+        // every older path until GC finishes. Never reuse those paths on a later build.
+        let file_meta = &self.source.file_meta;
+        let new_index_version = if file_meta.index_version > 0 || file_meta.exists_index() {
+            file_meta.index_version + 1
+        } else {
+            0
+        };
         let (mut indexer, index_output) =
             match self.create_index(region_file_id, new_index_version).await? {
                 ControlFlow::Continue(created) => created,
@@ -1047,17 +973,46 @@ impl IndexBuildTask {
                 .await,
             );
         };
+        let context = handler::PlanContext {
+            metadata: &self.target_region_metadata,
+            index_options: &self.index_options,
+            build_type: self.reason.clone(),
+            existing_indexes: &current_file_meta.indexes,
+        };
+        let plan = match self.indexer_builder.registry.plan(&context) {
+            Ok(plan) => Arc::new(plan),
+            Err(err) => {
+                warn!(err; "Failed to refresh index plan, region_id: {}", self.region_id);
+                return ControlFlow::Break(
+                    self.abort_and_notify(region_file_id, "Failed to plan index rebuild")
+                        .await,
+                );
+            }
+        };
+        let currency = handler::CurrencyContext {
+            metadata: &self.target_region_metadata,
+            index_options: &self.index_options,
+            build_type: self.reason.clone(),
+        };
         if self.reason == IndexBuildType::Manual
             && current_file_meta.is_index_consistent_with_region(
                 &self.target_region_metadata.column_metadatas,
                 &self.index_options,
             )
+            && plan.is_current(&current_file_meta, &currency)
         {
             return ControlFlow::Break(
                 self.abort_and_notify(region_file_id, "Index is already up to date")
                     .await,
             );
         }
+        let current_file = FileHandle::new(current_file_meta.clone(), self.file_purger.clone());
+        let builder = Arc::make_mut(&mut self.indexer_builder);
+        if let Some(inputs) = &mut builder.index_build_inputs {
+            inputs.plan = plan;
+            inputs.inputs = vec![current_file.clone()].into();
+        }
+        self.file = current_file;
         self.source.file_meta = current_file_meta;
         ControlFlow::Continue(())
     }
@@ -1088,9 +1043,14 @@ impl IndexBuildTask {
             .indexer_builder
             .build(region_file_id, new_index_version, row_group_size)
             .await;
-        // The build type or index options may leave nothing to build. Return before reading
-        // any row; an empty indexer finishes with no output, which publishes nothing.
+        // The build type or index options may leave nothing to build. Avoid scanning rows
+        // when only removing disabled sketch metadata, or when no work is required.
         if indexer.is_empty() {
+            // Explicitly disabling the last sketches still needs a manifest publication.
+            // A provider failure or a file with ordinary indexes must not take this path.
+            if self.can_remove_all_indexes() {
+                return Ok(ControlFlow::Continue((indexer, IndexOutput::default())));
+            }
             return Ok(ControlFlow::Break(self.aborted("No index to build")));
         }
 
@@ -1116,6 +1076,36 @@ impl IndexBuildTask {
             return Ok(ControlFlow::Break(self.aborted("No index was created")));
         }
         Ok(ControlFlow::Continue((indexer, index_output)))
+    }
+
+    /// Allows metadata-only publication only for an explicit successful removal plan.
+    fn can_remove_all_indexes(&self) -> bool {
+        let file = &self.source.file_meta;
+        let Some(inputs) = &self.indexer_builder.index_build_inputs else {
+            return false;
+        };
+        if !file.exists_index() || inputs.plan.entries().next().is_some() {
+            return false;
+        }
+        // Only explicitly owned empty plans authorize removal. Absent or failed
+        // handlers cannot clear existing metadata.
+        file.available_indexes
+            .iter()
+            .chain(
+                file.indexes
+                    .iter()
+                    .flat_map(|column| &column.created_indexes),
+            )
+            .all(|index_type| {
+                matches!(index_type, IndexType::Hll | IndexType::Kll | IndexType::Mg)
+                    && inputs.plan.planned().iter().any(|plan| {
+                        plan.entries().is_empty()
+                            && plan
+                                .kinds()
+                                .iter()
+                                .any(|kind| kind.index_type() == *index_type)
+                    })
+            })
     }
 
     /// Uploads the index files and commits them to the manifest.
@@ -1213,6 +1203,9 @@ impl IndexBuildTask {
         index_file_id: FileId,
         index_version: u64,
     ) -> Result<()> {
+        if output.file_size == 0 {
+            return Ok(());
+        }
         if let Some(write_cache) = &self.write_cache {
             let file_id = self.source.file_meta.file_id;
             let region_id = self.source.file_meta.region_id;
@@ -1852,6 +1845,7 @@ mod tests {
         let mut index_config = MitoConfig::default().index;
         index_config.build_mode = build_mode;
         let write_request = SstWriteRequest {
+            index_build_inputs: None,
             op_type: OperationType::Flush,
             metadata: metadata.clone(),
             source,
@@ -1893,7 +1887,7 @@ mod tests {
     async fn mock_indexer_builder(
         metadata: RegionMetadataRef,
         env: &SchedulerEnv,
-    ) -> Arc<dyn IndexerBuilder + Send + Sync> {
+    ) -> Arc<IndexerBuilderImpl> {
         let (dir, factory) = PuffinManagerFactory::new_for_test_async("mock_indexer_builder").await;
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
         let puffin_manager = factory.build(
@@ -1904,16 +1898,681 @@ mod tests {
             ),
         );
         Arc::new(IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata,
             puffin_manager,
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_index_config: BloomFilterConfig::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig::default(),
+                BloomFilterConfig::default(),
+            )),
         })
+    }
+
+    #[derive(Debug, Default, Clone)]
+    struct TestProvider {
+        build_calls: Arc<std::sync::atomic::AtomicUsize>,
+        kind: Option<kind::ExtensionIndexKind>,
+        received_limits: Arc<std::sync::Mutex<Vec<Option<usize>>>>,
+        hard_limit: Option<usize>,
+    }
+
+    impl handler::IndexKindProvider for TestProvider {
+        fn handlers(&self) -> Vec<Arc<dyn handler::IndexKindHandler>> {
+            vec![Arc::new(self.clone())]
+        }
+    }
+
+    impl handler::IndexKindHandler for TestProvider {
+        fn kinds(&self) -> &[kind::IndexKind] {
+            match self.kind {
+                Some(kind::ExtensionIndexKind::Kll) => {
+                    &[kind::IndexKind::Extension(kind::ExtensionIndexKind::Kll)]
+                }
+                _ => &[kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll)],
+            }
+        }
+        fn plan(
+            &self,
+            context: &handler::PlanContext<'_>,
+        ) -> std::result::Result<
+            Option<Arc<dyn handler::PlannedIndex>>,
+            common_error::ext::BoxedError,
+        > {
+            if context.build_type == IndexBuildType::Flush {
+                return Ok(None);
+            }
+            Ok(Some(Arc::new(self.clone())))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl handler::PlannedIndex for TestProvider {
+        fn kinds(&self) -> &[kind::IndexKind] {
+            handler::IndexKindHandler::kinds(self)
+        }
+        fn entries(&self) -> &[handler::PlanEntry] {
+            match self.kind {
+                Some(kind::ExtensionIndexKind::Kll) => &[handler::PlanEntry {
+                    column_id: 0,
+                    kind: kind::IndexKind::Extension(kind::ExtensionIndexKind::Kll),
+                    format_version: 2,
+                }],
+                _ => &[handler::PlanEntry {
+                    column_id: 0,
+                    kind: kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll),
+                    format_version: 2,
+                }],
+            }
+        }
+        fn is_current(
+            &self,
+            _: &crate::sst::file::FileMeta,
+            _: &handler::CurrencyContext<'_>,
+        ) -> bool {
+            false
+        }
+
+        fn memory_limit(&self) -> Option<usize> {
+            self.hard_limit
+        }
+
+        async fn build(
+            &self,
+            context: &handler::BuildContext<'_>,
+        ) -> std::result::Result<
+            Option<Box<dyn handler::IndexCreator>>,
+            common_error::ext::BoxedError,
+        > {
+            self.build_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.received_limits
+                .lock()
+                .unwrap()
+                .push(context.memory_limit);
+            Ok(Some(Box::new(TestCreator)))
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestCreator;
+
+    #[async_trait::async_trait]
+    impl handler::IndexCreator for TestCreator {
+        async fn update(
+            &mut self,
+            _batch: &mut Batch,
+        ) -> std::result::Result<(), common_error::ext::BoxedError> {
+            Ok(())
+        }
+
+        async fn update_flat(
+            &mut self,
+            _batch: &RecordBatch,
+        ) -> std::result::Result<(), common_error::ext::BoxedError> {
+            Ok(())
+        }
+
+        async fn finish(
+            &mut self,
+            _writer: &mut puffin_manager::SstPuffinWriter,
+        ) -> std::result::Result<Vec<CompletedEntry>, common_error::ext::BoxedError> {
+            Ok(Vec::new())
+        }
+
+        async fn abort(&mut self) -> std::result::Result<(), common_error::ext::BoxedError> {
+            Ok(())
+        }
+
+        fn memory_usage(&self) -> usize {
+            17
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ProviderFailure {
+        None,
+        Create,
+        Update,
+        UpdateFlat,
+        Finish,
+        Close,
+    }
+
+    #[derive(Debug, Clone)]
+    struct FailingProvider(ProviderFailure);
+
+    fn provider_test_error() -> common_error::ext::BoxedError {
+        common_error::ext::BoxedError::new(common_error::ext::PlainError::new(
+            "injected provider failure".into(),
+            common_error::status_code::StatusCode::Internal,
+        ))
+    }
+
+    impl handler::IndexKindProvider for FailingProvider {
+        fn handlers(&self) -> Vec<Arc<dyn handler::IndexKindHandler>> {
+            vec![Arc::new(self.clone())]
+        }
+    }
+
+    impl handler::IndexKindHandler for FailingProvider {
+        fn kinds(&self) -> &[kind::IndexKind] {
+            &[kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll)]
+        }
+        fn plan(
+            &self,
+            context: &handler::PlanContext<'_>,
+        ) -> std::result::Result<
+            Option<Arc<dyn handler::PlannedIndex>>,
+            common_error::ext::BoxedError,
+        > {
+            if context.build_type == IndexBuildType::Flush {
+                return Ok(None);
+            }
+            Ok(Some(Arc::new(self.clone())))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl handler::PlannedIndex for FailingProvider {
+        fn kinds(&self) -> &[kind::IndexKind] {
+            handler::IndexKindHandler::kinds(self)
+        }
+        fn entries(&self) -> &[handler::PlanEntry] {
+            &[handler::PlanEntry {
+                column_id: 0,
+                kind: kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll),
+                format_version: 2,
+            }]
+        }
+        fn is_current(
+            &self,
+            _: &crate::sst::file::FileMeta,
+            _: &handler::CurrencyContext<'_>,
+        ) -> bool {
+            false
+        }
+
+        async fn build(
+            &self,
+            _context: &handler::BuildContext<'_>,
+        ) -> std::result::Result<
+            Option<Box<dyn handler::IndexCreator>>,
+            common_error::ext::BoxedError,
+        > {
+            if self.0 == ProviderFailure::Create {
+                return Err(provider_test_error());
+            }
+            Ok(Some(Box::new(FailingCreator(self.0))))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingCreator(ProviderFailure);
+
+    #[async_trait::async_trait]
+    impl handler::IndexCreator for FailingCreator {
+        async fn update(
+            &mut self,
+            _batch: &mut Batch,
+        ) -> std::result::Result<(), common_error::ext::BoxedError> {
+            if self.0 == ProviderFailure::Update {
+                Err(provider_test_error())
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn update_flat(
+            &mut self,
+            _batch: &RecordBatch,
+        ) -> std::result::Result<(), common_error::ext::BoxedError> {
+            if self.0 == ProviderFailure::UpdateFlat {
+                Err(provider_test_error())
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn finish(
+            &mut self,
+            writer: &mut puffin_manager::SstPuffinWriter,
+        ) -> std::result::Result<Vec<CompletedEntry>, common_error::ext::BoxedError> {
+            use puffin::puffin_manager::PuffinWriter;
+
+            writer
+                .put_blob(
+                    "test-sketch",
+                    futures::io::Cursor::new(vec![1_u8, 2, 3]),
+                    puffin::puffin_manager::PutOptions::default(),
+                    Default::default(),
+                )
+                .await
+                .map_err(common_error::ext::BoxedError::new)?;
+            if self.0 == ProviderFailure::Finish {
+                // Fail after writing to exercise partially written artifact handling.
+                return Err(provider_test_error());
+            }
+            Ok(vec![CompletedEntry {
+                column_id: Some(0),
+                kind: kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll),
+                format_version: 2,
+            }])
+        }
+
+        async fn abort(&mut self) -> std::result::Result<(), common_error::ext::BoxedError> {
+            Ok(())
+        }
+
+        fn memory_usage(&self) -> usize {
+            17
+        }
+    }
+
+    struct FailingIndexClose {
+        inner: object_store::layers::mock::Writer,
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl object_store::layers::mock::Write for FailingIndexClose {
+        async fn write(
+            &mut self,
+            bytes: object_store::layers::mock::Buffer,
+        ) -> object_store::layers::mock::Result<()> {
+            self.inner.write(bytes).await
+        }
+
+        async fn close(
+            &mut self,
+        ) -> object_store::layers::mock::Result<object_store::layers::mock::Metadata> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(object_store::layers::mock::Error::new(
+                object_store::layers::mock::ErrorKind::Unexpected,
+                "injected Puffin close failure",
+            ))
+        }
+
+        async fn abort(&mut self) -> object_store::layers::mock::Result<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_provider_failures_do_not_publish_sketch_descriptors() {
+        for failure in [
+            ProviderFailure::None,
+            ProviderFailure::Create,
+            ProviderFailure::Update,
+            ProviderFailure::UpdateFlat,
+            ProviderFailure::Finish,
+            ProviderFailure::Close,
+        ] {
+            let (dir, factory) = PuffinManagerFactory::new_for_test_async("provider_failure").await;
+            let close_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let store = if failure == ProviderFailure::Close {
+                let attempts = close_attempts.clone();
+                let layer = object_store::layers::mock::MockLayerBuilder::default()
+                    .writer_factory(Arc::new(move |_, _, inner| {
+                        Box::new(FailingIndexClose {
+                            inner,
+                            attempts: attempts.clone(),
+                        })
+                    }))
+                    .build()
+                    .unwrap();
+                mock_object_store().layer(layer)
+            } else {
+                mock_object_store()
+            };
+            let manager = factory.build(
+                store,
+                crate::access_layer::RegionFilePathFactory::new(
+                    "provider-test/".into(),
+                    store_api::region_request::PathType::Bare,
+                ),
+            );
+            let builder = IndexerBuilderImpl {
+                index_build_inputs: None,
+                build_type: IndexBuildType::Compact,
+                metadata: mock_region_metadata(MetaConfig {
+                    with_inverted: false,
+                    with_fulltext: false,
+                    with_skipping_bloom: false,
+                }),
+                puffin_manager: manager,
+                write_cache_enabled: false,
+                intermediate_manager: mock_intm_mgr(dir.path().to_string_lossy()).await,
+                index_options: IndexOptions::default(),
+                registry: Arc::new(
+                    registry::IndexRegistry::new(
+                        InvertedIndexConfig::default(),
+                        FulltextIndexConfig::default(),
+                        BloomFilterConfig::default(),
+                    )
+                    .with_provider(Some(Arc::new(FailingProvider(failure))))
+                    .unwrap(),
+                ),
+            };
+            let mut indexer = builder.build(random_region_file_id(), 0, Some(1024)).await;
+            if failure == ProviderFailure::Update {
+                let mut batch = crate::read::BatchBuilder::with_required_columns(
+                    Vec::new(),
+                    Arc::new(datatypes::vectors::TimestampMillisecondVector::from_vec(
+                        vec![0],
+                    )),
+                    Arc::new(datatypes::vectors::UInt64Vector::from_vec(vec![0])),
+                    Arc::new(datatypes::vectors::UInt8Vector::from_vec(vec![0])),
+                )
+                .build()
+                .unwrap();
+                indexer.update(&mut batch).await;
+            } else {
+                indexer
+                    .update_flat(&new_record_batch_by_range(&["a", "b"], 0, 1))
+                    .await;
+            }
+            let output = indexer.finish().await;
+            if failure == ProviderFailure::None {
+                assert_eq!(
+                    output
+                        .entries
+                        .iter()
+                        .filter(|entry| !entry.kind.is_builtin())
+                        .count(),
+                    1
+                );
+                assert!(output.file_size > 0);
+                assert!(output.build_indexes().iter().any(|index| {
+                    index.created_indexes.iter().any(|kind| {
+                        matches!(
+                            kind,
+                            crate::sst::file::IndexType::Hll
+                                | crate::sst::file::IndexType::Kll
+                                | crate::sst::file::IndexType::Mg
+                        )
+                    })
+                }));
+            } else {
+                assert!(
+                    output.entries.iter().all(|entry| entry.kind.is_builtin()),
+                    "{failure:?}"
+                );
+                assert!(output.build_indexes().is_empty(), "{failure:?}");
+                assert_eq!(output.file_size, 0, "{failure:?}");
+            }
+            assert!(indexer.creators.is_empty());
+            assert_eq!(
+                close_attempts.load(std::sync::atomic::Ordering::Relaxed),
+                usize::from(failure == ProviderFailure::Close)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_provider_compaction_only_and_per_output() {
+        let (dir, factory) = PuffinManagerFactory::new_for_test_async("provider_scope").await;
+        let provider = Arc::new(TestProvider {
+            hard_limit: Some(17),
+            ..Default::default()
+        });
+        let mut builder = IndexerBuilderImpl {
+            index_build_inputs: None,
+            build_type: IndexBuildType::Flush,
+            metadata: mock_region_metadata(MetaConfig {
+                with_inverted: false,
+                with_fulltext: false,
+                with_skipping_bloom: false,
+            }),
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
+            intermediate_manager: mock_intm_mgr(dir.path().to_string_lossy()).await,
+            index_options: IndexOptions::default(),
+            registry: Arc::new(
+                registry::IndexRegistry::new(
+                    InvertedIndexConfig::default(),
+                    FulltextIndexConfig::default(),
+                    BloomFilterConfig::default(),
+                )
+                .with_provider(Some(provider.clone()))
+                .unwrap(),
+            ),
+        };
+        let flush = builder.build(random_region_file_id(), 0, Some(1024)).await;
+        assert!(flush.creators.is_empty());
+        assert_eq!(
+            provider
+                .build_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        builder.build_type = IndexBuildType::Compact;
+        let mut first = builder.build(random_region_file_id(), 0, Some(1024)).await;
+        let mut second = builder.build(random_region_file_id(), 0, Some(1024)).await;
+        assert_eq!(
+            provider
+                .build_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert!(!first.is_empty());
+        assert!(!second.is_empty());
+        // Deferring the built-in indexes must retain the sketch creator.
+        first.disable_builtin_indexes().await;
+        assert!(!first.creators.is_empty());
+        assert_eq!(first.creators[0].memory.bytes, 17);
+        first.abort().await;
+        assert!(first.creators.is_empty());
+        assert!(!second.creators.is_empty());
+        second.abort().await;
+
+        // Reject a creator at preparation when its retained state already exceeds
+        // the caller's allocation; equality is allowed.
+        let plan = builder
+            .registry
+            .plan(&handler::PlanContext {
+                metadata: &builder.metadata,
+                index_options: &builder.index_options,
+                build_type: builder.build_type.clone(),
+                existing_indexes: &[],
+            })
+            .unwrap();
+        builder.index_build_inputs = Some(build::IndexBuildInputs {
+            plan: Arc::new(plan),
+            inputs: Arc::from([]),
+            input_puffin_manager: builder.puffin_manager.clone(),
+            can_merge_inputs: false,
+            memory_limit: Some(16),
+        });
+        let rejected = builder.build(random_region_file_id(), 0, Some(1024)).await;
+        assert!(rejected.is_empty());
+        builder.index_build_inputs.as_mut().unwrap().memory_limit = Some(17);
+        let mut bounded = builder.build(random_region_file_id(), 0, Some(1024)).await;
+        assert!(!bounded.creators.is_empty());
+        bounded.creators[0].memory_limit = Some(16);
+        bounded.enforce_memory_limits().await;
+        bounded.flush_mem_metrics();
+        assert!(bounded.creators.is_empty());
+
+        // A larger operation allocation must not relax the handler's ceiling.
+        builder.index_build_inputs.as_mut().unwrap().memory_limit = Some(34);
+        let mut bounded = builder.build(random_region_file_id(), 0, Some(1024)).await;
+        assert_eq!(bounded.creators[0].memory_limit, Some(17));
+        bounded.abort().await;
+    }
+
+    #[tokio::test]
+    async fn test_builder_passes_remaining_extension_budget() {
+        let (dir, factory) = PuffinManagerFactory::new_for_test_async("build_budget").await;
+        for (operation_limit, ceiling, expected, retained) in [
+            (Some(30), None, vec![Some(30), Some(13)], 1),
+            (Some(17), None, vec![Some(17), Some(0)], 1),
+            (Some(30), Some(20), vec![Some(20), Some(13)], 1),
+            (Some(40), Some(20), vec![Some(20), Some(20)], 2),
+            (Some(16), None, vec![Some(16), Some(16)], 0),
+            (None, None, vec![None, None], 2),
+            (None, Some(17), vec![Some(17), Some(17)], 2),
+        ] {
+            let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut registry = registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig::default(),
+                BloomFilterConfig::default(),
+            );
+            for kind in [kind::ExtensionIndexKind::Hll, kind::ExtensionIndexKind::Kll] {
+                registry
+                    .register(Arc::new(TestProvider {
+                        kind: Some(kind),
+                        received_limits: observed.clone(),
+                        hard_limit: ceiling,
+                        ..Default::default()
+                    }))
+                    .unwrap();
+            }
+            let mut builder = IndexerBuilderImpl {
+                index_build_inputs: None,
+                build_type: IndexBuildType::Compact,
+                metadata: mock_region_metadata(MetaConfig {
+                    with_inverted: false,
+                    with_fulltext: false,
+                    with_skipping_bloom: false,
+                }),
+                puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+                write_cache_enabled: false,
+                intermediate_manager: mock_intm_mgr(dir.path().to_string_lossy()).await,
+                index_options: IndexOptions::default(),
+                registry: Arc::new(registry),
+            };
+            let plan = builder
+                .registry
+                .plan(&handler::PlanContext {
+                    metadata: &builder.metadata,
+                    index_options: &builder.index_options,
+                    build_type: builder.build_type.clone(),
+                    existing_indexes: &[],
+                })
+                .unwrap();
+            builder.index_build_inputs = Some(build::IndexBuildInputs {
+                plan: Arc::new(plan),
+                inputs: Arc::from([]),
+                input_puffin_manager: builder.puffin_manager.clone(),
+                can_merge_inputs: false,
+                memory_limit: operation_limit,
+            });
+            let mut indexer = builder.build(random_region_file_id(), 0, Some(1024)).await;
+            assert_eq!(*observed.lock().unwrap(), expected);
+            assert_eq!(indexer.creators.len(), retained);
+            indexer.abort().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_extension_creators_share_memory_budget() {
+        for (limit, expected_extensions) in [(34, 2), (33, 1), (16, 0)] {
+            let mut indexer = Indexer {
+                extension_memory_limit: Some(limit),
+                ..Default::default()
+            };
+            // Built-in state uses its own spill budget and does not consume the
+            // optional extension allocation. Each test creator retains 17 bytes.
+            indexer.push_creator(
+                vec![kind::IndexKind::Builtin(IndexType::InvertedIndex)],
+                Box::new(TestCreator),
+                None,
+                TYPE_INVERTED_INDEX,
+            );
+            for kind in [kind::ExtensionIndexKind::Hll, kind::ExtensionIndexKind::Kll] {
+                indexer.push_creator(
+                    vec![kind::IndexKind::Extension(kind)],
+                    Box::new(TestCreator),
+                    Some(34),
+                    TYPE_SKETCH_INDEX,
+                );
+            }
+            indexer.enforce_memory_limits().await;
+            assert_eq!(indexer.creators.len(), 1 + expected_extensions);
+            assert!(indexer.creators[0].is_builtin());
+        }
+    }
+
+    #[test]
+    fn test_file_level_completion_preserves_json_only_index() {
+        let output = IndexOutput {
+            entries: vec![CompletedEntry {
+                column_id: None,
+                kind: kind::IndexKind::Builtin(IndexType::InvertedIndex),
+                format_version: 0,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            output.build_available_indexes().as_slice(),
+            &[IndexType::InvertedIndex]
+        );
+        assert!(output.build_indexes().is_empty());
+    }
+
+    #[test]
+    fn test_completed_entries_preserve_builtin_metadata() {
+        use crate::sst::index::kind::IndexKind;
+
+        // Deliberately reverse creator order: the published builtin order is contractual.
+        let output = IndexOutput {
+            entries: vec![
+                CompletedEntry {
+                    column_id: Some(2),
+                    kind: IndexKind::Builtin(IndexType::BloomFilterIndex),
+                    format_version: 0,
+                },
+                CompletedEntry {
+                    column_id: Some(2),
+                    kind: IndexKind::Builtin(IndexType::FulltextIndex),
+                    format_version: u32::from(FULLTEXT_BLOOM_VERSION),
+                },
+                CompletedEntry {
+                    column_id: Some(2),
+                    kind: IndexKind::Builtin(IndexType::InvertedIndex),
+                    format_version: 0,
+                },
+                CompletedEntry {
+                    column_id: Some(3),
+                    kind: IndexKind::Builtin(IndexType::FulltextIndex),
+                    format_version: 0,
+                },
+            ],
+            ..Default::default()
+        };
+        let expected_kinds = vec![
+            IndexType::InvertedIndex,
+            IndexType::FulltextIndex,
+            IndexType::BloomFilterIndex,
+        ];
+        assert_eq!(
+            output.build_available_indexes().as_slice(),
+            expected_kinds.as_slice()
+        );
+        let mut actual = output.build_indexes();
+        actual.sort_by_key(|column| column.column_id);
+        assert_eq!(
+            actual,
+            vec![
+                ColumnIndexMetadata {
+                    column_id: 2,
+                    created_indexes: expected_kinds.into(),
+                    fulltext_bloom_version: FULLTEXT_BLOOM_VERSION,
+                },
+                ColumnIndexMetadata {
+                    column_id: 3,
+                    created_indexes: vec![IndexType::FulltextIndex].into(),
+                    fulltext_bloom_version: 0,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1928,22 +2587,25 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_index_config: BloomFilterConfig::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig::default(),
+                BloomFilterConfig::default(),
+            )),
         }
         .build(random_region_file_id(), 0, Some(1024))
         .await;
 
-        assert!(indexer.inverted_indexer.is_some());
-        assert!(indexer.fulltext_indexer.is_some());
-        assert!(indexer.bloom_filter_indexer.is_some());
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::InvertedIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::FulltextIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::BloomFilterIndex)));
     }
 
     #[tokio::test]
@@ -1958,67 +2620,76 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig {
-                create_on_flush: Mode::Disable,
-                ..Default::default()
-            },
-            fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_index_config: BloomFilterConfig::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig {
+                    create_on_flush: Mode::Disable,
+                    ..Default::default()
+                },
+                FulltextIndexConfig::default(),
+                BloomFilterConfig::default(),
+            )),
         }
         .build(random_region_file_id(), 0, Some(1024))
         .await;
 
-        assert!(indexer.inverted_indexer.is_none());
-        assert!(indexer.fulltext_indexer.is_some());
-        assert!(indexer.bloom_filter_indexer.is_some());
+        assert!(!indexer.has_kind(kind::IndexKind::Builtin(IndexType::InvertedIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::FulltextIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::BloomFilterIndex)));
 
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Compact,
             metadata: metadata.clone(),
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig {
-                create_on_compaction: Mode::Disable,
-                ..Default::default()
-            },
-            bloom_filter_index_config: BloomFilterConfig::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig {
+                    create_on_compaction: Mode::Disable,
+                    ..Default::default()
+                },
+                BloomFilterConfig::default(),
+            )),
         }
         .build(random_region_file_id(), 0, Some(1024))
         .await;
 
-        assert!(indexer.inverted_indexer.is_some());
-        assert!(indexer.fulltext_indexer.is_none());
-        assert!(indexer.bloom_filter_indexer.is_some());
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::InvertedIndex)));
+        assert!(!indexer.has_kind(kind::IndexKind::Builtin(IndexType::FulltextIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::BloomFilterIndex)));
 
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Compact,
             metadata,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_index_config: BloomFilterConfig {
-                create_on_compaction: Mode::Disable,
-                ..Default::default()
-            },
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig::default(),
+                BloomFilterConfig {
+                    create_on_compaction: Mode::Disable,
+                    ..Default::default()
+                },
+            )),
         }
         .build(random_region_file_id(), 0, Some(1024))
         .await;
 
-        assert!(indexer.inverted_indexer.is_some());
-        assert!(indexer.fulltext_indexer.is_some());
-        assert!(indexer.bloom_filter_indexer.is_none());
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::InvertedIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::FulltextIndex)));
+        assert!(!indexer.has_kind(kind::IndexKind::Builtin(IndexType::BloomFilterIndex)));
     }
 
     #[tokio::test]
@@ -2033,22 +2704,25 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_index_config: BloomFilterConfig::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig::default(),
+                BloomFilterConfig::default(),
+            )),
         }
         .build(random_region_file_id(), 0, Some(1024))
         .await;
 
-        assert!(indexer.inverted_indexer.is_none());
-        assert!(indexer.fulltext_indexer.is_some());
-        assert!(indexer.bloom_filter_indexer.is_some());
+        assert!(!indexer.has_kind(kind::IndexKind::Builtin(IndexType::InvertedIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::FulltextIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::BloomFilterIndex)));
 
         let metadata = mock_region_metadata(MetaConfig {
             with_inverted: true,
@@ -2056,22 +2730,25 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_index_config: BloomFilterConfig::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig::default(),
+                BloomFilterConfig::default(),
+            )),
         }
         .build(random_region_file_id(), 0, Some(1024))
         .await;
 
-        assert!(indexer.inverted_indexer.is_some());
-        assert!(indexer.fulltext_indexer.is_none());
-        assert!(indexer.bloom_filter_indexer.is_some());
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::InvertedIndex)));
+        assert!(!indexer.has_kind(kind::IndexKind::Builtin(IndexType::FulltextIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::BloomFilterIndex)));
 
         let metadata = mock_region_metadata(MetaConfig {
             with_inverted: true,
@@ -2079,22 +2756,25 @@ mod tests {
             with_skipping_bloom: false,
         });
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_index_config: BloomFilterConfig::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig::default(),
+                BloomFilterConfig::default(),
+            )),
         }
         .build(random_region_file_id(), 0, Some(1024))
         .await;
 
-        assert!(indexer.inverted_indexer.is_some());
-        assert!(indexer.fulltext_indexer.is_some());
-        assert!(indexer.bloom_filter_indexer.is_none());
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::InvertedIndex)));
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::FulltextIndex)));
+        assert!(!indexer.has_kind(kind::IndexKind::Builtin(IndexType::BloomFilterIndex)));
     }
 
     #[tokio::test]
@@ -2109,20 +2789,23 @@ mod tests {
             with_skipping_bloom: true,
         });
         let indexer = IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_index_config: BloomFilterConfig::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig::default(),
+                BloomFilterConfig::default(),
+            )),
         }
         .build(random_region_file_id(), 0, Some(0))
         .await;
 
-        assert!(indexer.inverted_indexer.is_some());
+        assert!(indexer.has_kind(kind::IndexKind::Builtin(IndexType::InvertedIndex)));
     }
 
     #[tokio::test]
@@ -2216,6 +2899,11 @@ mod tests {
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
             available_indexes: smallvec![IndexType::InvertedIndex],
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 2,
+                created_indexes: smallvec::smallvec![crate::sst::file::IndexType::Hll],
+                ..Default::default()
+            }],
             // Old manifests may publish an index without recording its size.
             index_file_size: 0,
             index_version: 0,
@@ -2272,6 +2960,18 @@ mod tests {
                 assert!(updated_meta.index_file_size > 0);
                 assert_eq!(updated_meta.file_id, file_meta.file_id);
                 assert_eq!(updated_meta.index_version, 1);
+                // A new ordinary-index Puffin must not advertise the old sketch blobs.
+                assert!(
+                    updated_meta
+                        .indexes
+                        .iter()
+                        .all(|index| index.created_indexes.iter().all(|kind| !matches!(
+                            kind,
+                            crate::sst::file::IndexType::Hll
+                                | crate::sst::file::IndexType::Kll
+                                | crate::sst::file::IndexType::Mg
+                        )))
+                );
                 let field_0_index = updated_meta
                     .indexes
                     .iter()
@@ -2407,6 +3107,68 @@ mod tests {
 
     #[tokio::test]
     async fn test_index_build_task_no_index() {
+        for remove_sketches in [false, true] {
+            check_empty_index_build(remove_sketches).await;
+        }
+    }
+
+    #[derive(Debug)]
+    struct RemoveTestIndex;
+
+    impl handler::IndexKindHandler for RemoveTestIndex {
+        fn kinds(&self) -> &[kind::IndexKind] {
+            &[kind::IndexKind::Extension(kind::ExtensionIndexKind::Hll)]
+        }
+
+        fn plan(
+            &self,
+            context: &handler::PlanContext<'_>,
+        ) -> std::result::Result<
+            Option<Arc<dyn handler::PlannedIndex>>,
+            common_error::ext::BoxedError,
+        > {
+            Ok(context
+                .existing_indexes
+                .iter()
+                .any(|column| {
+                    column
+                        .created_indexes
+                        .contains(&crate::sst::file::IndexType::Hll)
+                })
+                .then(|| Arc::new(Self) as Arc<dyn handler::PlannedIndex>))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl handler::PlannedIndex for RemoveTestIndex {
+        fn kinds(&self) -> &[kind::IndexKind] {
+            handler::IndexKindHandler::kinds(self)
+        }
+
+        fn entries(&self) -> &[handler::PlanEntry] {
+            &[]
+        }
+
+        async fn build(
+            &self,
+            _: &handler::BuildContext<'_>,
+        ) -> std::result::Result<
+            Option<Box<dyn handler::IndexCreator>>,
+            common_error::ext::BoxedError,
+        > {
+            Ok(None)
+        }
+
+        fn is_current(&self, file: &FileMeta, _: &handler::CurrencyContext<'_>) -> bool {
+            !file.indexes.iter().any(|column| {
+                column
+                    .created_indexes
+                    .contains(&crate::sst::file::IndexType::Hll)
+            })
+        }
+    }
+
+    async fn check_empty_index_build(remove_sketches: bool) {
         let env = SchedulerEnv::new().await;
         let mut scheduler = env.mock_index_build_scheduler(4);
         let mut metadata = sst_region_metadata();
@@ -2420,7 +3182,7 @@ mod tests {
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
         let sst_info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
-        let file_meta = FileMeta {
+        let mut file_meta = FileMeta {
             region_id,
             file_id: sst_info.file_id,
             file_size: sst_info.file_size,
@@ -2430,13 +3192,48 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        if remove_sketches {
+            file_meta
+                .indexes
+                .push(crate::sst::file::ColumnIndexMetadata {
+                    column_id: metadata.column_metadatas[0].column_id,
+                    created_indexes: smallvec::smallvec![crate::sst::file::IndexType::Hll],
+                    fulltext_bloom_version: 0,
+                });
+            file_meta.index_file_size = 123;
+        }
         seed_manifest_file(&manifest_ctx, &file_meta).await;
         let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
         let version_control =
             mock_version_control(metadata.clone(), file_purger.clone(), files).await;
-        let indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
-
+        let mut indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
         let file = FileHandle::new(file_meta.clone(), file_purger.clone());
+        if remove_sketches {
+            // Removal is explicit plugin work, not the absence of a creator.
+            // Install the handler too: prepare_source replans against the current manifest.
+            let builder = Arc::make_mut(&mut indexer_builder);
+            Arc::make_mut(&mut builder.registry)
+                .register(Arc::new(RemoveTestIndex))
+                .unwrap();
+            let plan = builder
+                .registry
+                .plan(&handler::PlanContext {
+                    metadata: &metadata,
+                    index_options: &builder.index_options,
+                    build_type: IndexBuildType::Flush,
+                    existing_indexes: &file_meta.indexes,
+                })
+                .unwrap();
+            assert!(!plan.is_empty());
+            assert!(plan.entries().next().is_none());
+            builder.index_build_inputs = Some(build::IndexBuildInputs {
+                plan: Arc::new(plan),
+                inputs: vec![file.clone()].into(),
+                input_puffin_manager: builder.puffin_manager.clone(),
+                can_merge_inputs: false,
+                memory_limit: None,
+            });
+        }
 
         // Create mock task.
         let (tx, mut rx) = mpsc::channel(4);
@@ -2452,7 +3249,7 @@ mod tests {
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
             listener: WorkerListener::default(),
-            manifest_ctx,
+            manifest_ctx: manifest_ctx.clone(),
             write_cache: None,
             cache_manager: None,
             file_purger,
@@ -2462,7 +3259,74 @@ mod tests {
             result_senders: vec![result_tx],
         };
 
-        scheduler.schedule_build(&version_control, task).await;
+        if remove_sketches {
+            assert!(task.can_remove_all_indexes());
+            for column_level in [false, true] {
+                let mut mixed = task.clone();
+                if column_level {
+                    mixed.source.file_meta.indexes[0]
+                        .created_indexes
+                        .push(IndexType::InvertedIndex);
+                } else {
+                    mixed
+                        .source
+                        .file_meta
+                        .available_indexes
+                        .push(IndexType::InvertedIndex);
+                }
+                assert!(!mixed.can_remove_all_indexes());
+            }
+        }
+
+        scheduler
+            .schedule_build(&version_control, task.clone())
+            .await;
+
+        if remove_sketches {
+            let finished = recv_index_build_finished(&mut rx).await;
+            assert!(finished.file_meta.indexes.is_empty());
+            assert!(finished.file_meta.available_indexes.is_empty());
+            assert_eq!(finished.file_meta.index_file_size, 0);
+            assert_eq!(finished.file_meta.index_version, 1);
+            assert!(
+                manifest_ctx.manifest().await.files[&file_meta.file_id]
+                    .indexes
+                    .is_empty()
+            );
+            // Reconstruct the file from persisted metadata as reopening does, then enable
+            // an ordinary index. Its new Puffin must not reuse the historical version 0.
+            let persisted = serde_json::to_vec(&finished.file_meta).unwrap();
+            let reopened: FileMeta = serde_json::from_slice(&persisted).unwrap();
+            assert!(!reopened.exists_index());
+            let target_metadata = Arc::new(sst_region_metadata());
+            let reopened_version = mock_version_control(
+                target_metadata.clone(),
+                task.file_purger.clone(),
+                HashMap::from([(reopened.file_id, reopened.clone())]),
+            )
+            .await;
+            let (tx, mut rx) = mpsc::channel(4);
+            let mut rebuild = task;
+            rebuild.file = FileHandle::new(reopened.clone(), rebuild.file_purger.clone());
+            rebuild.source.file_meta = reopened;
+            rebuild.target_region_metadata = target_metadata.clone();
+            rebuild.indexer_builder = mock_indexer_builder(target_metadata, &env).await;
+            rebuild.request_sender = tx;
+            let mut reopened_scheduler = env.mock_index_build_scheduler(4);
+            reopened_scheduler
+                .schedule_build(&reopened_version, rebuild)
+                .await;
+            let rebuilt = recv_index_build_finished(&mut rx).await;
+            assert!(rebuilt.file_meta.exists_index());
+            assert_eq!(rebuilt.file_meta.index_version, 2);
+            let path = location::index_file_path(
+                env.access_layer.table_dir(),
+                RegionIndexId::new(RegionFileId::new(region_id, file_meta.file_id), 2),
+                env.access_layer.path_type(),
+            );
+            assert!(env.access_layer.object_store().exists(&path).await.unwrap());
+            return;
+        }
 
         // No index needs to be built, so the SST is not read.
         assert!(matches!(
@@ -2509,15 +3373,18 @@ mod tests {
         );
         // Indexer builder built from write cache.
         let indexer_builder = Arc::new(IndexerBuilderImpl {
+            index_build_inputs: None,
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             puffin_manager: write_cache.build_puffin_manager().clone(),
             write_cache_enabled: true,
             intermediate_manager: write_cache.intermediate_manager().clone(),
             index_options: IndexOptions::default(),
-            inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_index_config: BloomFilterConfig::default(),
+            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                InvertedIndexConfig::default(),
+                FulltextIndexConfig::default(),
+                BloomFilterConfig::default(),
+            )),
         });
 
         let sst_info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;

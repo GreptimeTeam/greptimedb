@@ -38,13 +38,13 @@ use crate::sst::index::store::{self, InstrumentedStore};
 type InstrumentedRangeReader = store::InstrumentedRangeReader<'static>;
 type InstrumentedAsyncWrite = store::InstrumentedAsyncWrite<'static, FuturesAsyncWriter>;
 
-pub(crate) type SstPuffinManager =
+pub type SstPuffinManager =
     FsPuffinManager<Arc<BoundedStager<RegionIndexId>>, ObjectStorePuffinFileAccessor>;
-pub(crate) type SstPuffinReader = <SstPuffinManager as PuffinManager>::Reader;
-pub(crate) type SstPuffinWriter = <SstPuffinManager as PuffinManager>::Writer;
-pub(crate) type SstPuffinBlob = <SstPuffinReader as PuffinReader>::Blob;
-pub(crate) type SstPuffinDir = <SstPuffinReader as PuffinReader>::Dir;
-pub(crate) type BlobReader = <SstPuffinBlob as BlobGuard>::Reader;
+pub type SstPuffinReader = <SstPuffinManager as PuffinManager>::Reader;
+pub type SstPuffinWriter = <SstPuffinManager as PuffinManager>::Writer;
+pub type SstPuffinBlob = <SstPuffinReader as PuffinReader>::Blob;
+pub type SstPuffinDir = <SstPuffinReader as PuffinReader>::Dir;
+pub type BlobReader = <SstPuffinBlob as BlobGuard>::Reader;
 
 const STAGING_DIR: &str = "staging";
 
@@ -87,7 +87,7 @@ impl PuffinManagerFactory {
         self
     }
 
-    pub(crate) fn build(
+    pub fn build(
         &self,
         store: ObjectStore,
         path_provider: impl FilePathProvider + 'static,
@@ -130,20 +130,23 @@ impl PuffinManagerFactory {
 
 /// A `PuffinFileAccessor` implementation that uses an object store as the underlying storage.
 #[derive(Clone)]
-pub(crate) struct ObjectStorePuffinFileAccessor {
+pub struct ObjectStorePuffinFileAccessor {
     object_store: InstrumentedStore,
     path_provider: Arc<dyn FilePathProvider>,
 }
 
 impl ObjectStorePuffinFileAccessor {
-    pub fn new(object_store: InstrumentedStore, path_provider: Arc<dyn FilePathProvider>) -> Self {
+    pub(crate) fn new(
+        object_store: InstrumentedStore,
+        path_provider: Arc<dyn FilePathProvider>,
+    ) -> Self {
         Self {
             object_store,
             path_provider,
         }
     }
 
-    pub fn store(&self) -> &InstrumentedStore {
+    pub(crate) fn store(&self) -> &InstrumentedStore {
         &self.object_store
     }
 }
