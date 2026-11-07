@@ -131,6 +131,7 @@ type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
 /// Candidate assignment senders for output partitions.
 type CandidateSenderList = Vec<Option<mpsc::UnboundedSender<Result<SeriesReaderInput>>>>;
 
+#[derive(Clone)]
 struct RawScanPreparation {
     schema: Arc<SeriesSchema>,
     fields: Vec<(usize, ConcreteDataType)>,
@@ -277,7 +278,7 @@ impl SeriesScan {
     /// Returns whether raw series come from the columnar prepared source.
     ///
     /// Derived only from the pinned series index version and every configured partition range, so
-    /// preflight, the ordering guarantee, the partition reader and scanner-wide preparation agree.
+    /// preflight, the partition reader and scanner-wide preparation agree.
     /// `false` means the stored sources are read by the ordinary scan.
     fn uses_prepared_columnar(&self) -> Result<bool, BoxedError> {
         if !self.uses_columnar() {
@@ -291,17 +292,6 @@ impl SeriesScan {
             .copied()
             .collect::<Vec<_>>();
         prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)
-    }
-
-    /// Returns the raw ordering guarantee for a scan whose columnar readiness is already known.
-    fn raw_ordering(&self, prepared_columnar: bool) -> SeriesOrdering {
-        if prepared_columnar {
-            return SeriesOrdering::KeyThenTime;
-        }
-        match self.mode {
-            SeriesScanMode::Legacy => SeriesOrdering::KeyThenTime,
-            SeriesScanMode::TwoPhase => SeriesOrdering::KeyThenTime,
-        }
     }
 
     /// Prepares the raw scan and reports whether its data comes from the columnar prepared source.
@@ -509,6 +499,49 @@ impl SeriesScan {
             },
             prepared_columnar,
         )))
+    }
+
+    /// Starts scanner-wide preparation from the preflight already performed by the caller.
+    fn prepare_series_with_raw(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        label_source: &RawLabelSource,
+        preparation: Result<Option<(RawScanPreparation, bool)>, BoxedError>,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
+    > {
+        let state = self.prepared.clone();
+        let stream_ctx = self.stream_ctx.clone();
+        let ranges = self
+            .properties
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let labels = label_source.clone();
+        let metrics = new_partition_metrics(
+            &self.stream_ctx,
+            ctx.explain_verbose,
+            metrics_set,
+            0,
+            &self.metrics_list,
+        );
+        Box::pin(async move {
+            let Some((preparation, prepared_columnar)) = preparation? else {
+                return Ok(None);
+            };
+            if !prepared_columnar {
+                // Known unsupported coverage: the caller keeps the ordinary scan instead.
+                return Ok(None);
+            }
+            state
+                .prepare(stream_ctx, ranges, labels, preparation, metrics)
+                .await
+                .map(Some)
+        })
     }
 
     fn supports_two_phase(input: &ScanInput) -> bool {
@@ -896,14 +929,8 @@ impl RegionScanner for SeriesScan {
     }
 
     fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
-        // The reader is chosen from the selected fields as well as the stored artifacts, so the
-        // guarantee follows the reader: a histogram selection is read by the ordinary scan even
-        // where the columnar artifacts are ready.
-        self.uses_prepared_columnar()
-            .map(|prepared_columnar| {
-                self.raw_ordering(prepared_columnar && self.columnar_fields_supported())
-            })
-            .map_err(BoxedError::new)
+        // Both prepared-columnar and ordinary (legacy or two-phase) scans guarantee key/time order.
+        Ok(SeriesOrdering::KeyThenTime)
     }
 
     fn raw_series_schema(
@@ -946,9 +973,18 @@ impl RegionScanner for SeriesScan {
                     .build(),
                 ));
             }
-            let explicit_labels = self.raw_series_has_explicit_labels(label_source)?;
-            let future = self.prepare_series(ctx, metrics_set, label_source);
-            let schema = preparation.schema;
+            // Preflight needs the declaration before the stream is polled, while preparation
+            // needs the original field indices and predicates to derive its own merge schema.
+            let explicit_labels =
+                prepared::sample_merge_schema(&self.stream_ctx, &mut preparation.clone())
+                    .map_err(BoxedError::new)?
+                    .is_some();
+            let schema = preparation.schema.clone();
+            let preparation = self
+                .check_scan_limit()
+                .map_err(BoxedError::new)
+                .map(|_| Some((preparation, prepared_columnar)));
+            let future = self.prepare_series_with_raw(ctx, metrics_set, label_source, preparation);
             let labels = label_source.clone();
             let stream = async_stream::try_stream! {
                 let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
@@ -961,7 +997,7 @@ impl RegionScanner for SeriesScan {
             return Ok(Some(raw::from_stream(
                 schema,
                 labels,
-                self.raw_ordering(prepared_columnar),
+                SeriesOrdering::KeyThenTime,
                 explicit_labels,
                 Box::pin(stream),
             )));
@@ -978,7 +1014,6 @@ impl RegionScanner for SeriesScan {
         let batches = self
             .scan_batch_in_partition(ctx, partition, metrics.clone(), metrics_set)
             .map_err(BoxedError::new)?;
-        let ordering = self.raw_ordering(prepared_columnar);
         Ok(Some(raw::make_stream(
             batches,
             preparation.schema,
@@ -986,7 +1021,7 @@ impl RegionScanner for SeriesScan {
             preparation.fields,
             metrics,
             preparation.predicates,
-            ordering,
+            SeriesOrdering::KeyThenTime,
         )))
     }
 
@@ -1006,36 +1041,7 @@ impl RegionScanner for SeriesScan {
             .check_scan_limit()
             .map_err(BoxedError::new)
             .and_then(|_| self.prepare_raw_scan(label_source));
-        let state = self.prepared.clone();
-        let stream_ctx = self.stream_ctx.clone();
-        let ranges = self
-            .properties
-            .partitions
-            .iter()
-            .flatten()
-            .copied()
-            .collect();
-        let labels = label_source.clone();
-        let metrics = new_partition_metrics(
-            &self.stream_ctx,
-            ctx.explain_verbose,
-            metrics_set,
-            0,
-            &self.metrics_list,
-        );
-        Box::pin(async move {
-            let Some((preparation, prepared_columnar)) = preparation? else {
-                return Ok(None);
-            };
-            if !prepared_columnar {
-                // Known unsupported coverage: the caller keeps the ordinary scan instead.
-                return Ok(None);
-            }
-            state
-                .prepare(stream_ctx, ranges, labels, preparation, metrics)
-                .await
-                .map(Some)
-        })
+        self.prepare_series_with_raw(ctx, metrics_set, label_source, preparation)
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
