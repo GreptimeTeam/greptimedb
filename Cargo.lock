@@ -7583,7 +7583,7 @@ dependencies = [
 [[package]]
 name = "jsonb"
 version = "0.5.6"
-source = "git+https://github.com/GreptimeTeam/jsonb?rev=dd1e2341e3df35e9de38959328caa7628e81b6b1#dd1e2341e3df35e9de38959328caa7628e81b6b1"
+source = "git+https://github.com/GreptimeTeam/jsonb?rev=9bf386abee62d33e7b472d3367ed96e2f4cf1dd5#9bf386abee62d33e7b472d3367ed96e2f4cf1dd5"
 dependencies = [
  "byteorder",
  "ethnum",
