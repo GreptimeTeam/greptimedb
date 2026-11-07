@@ -76,8 +76,11 @@ use crate::sst::FormatType;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::index::IndexBuildType;
+use crate::sst::index::handler::PlanContext;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::IndexRegistryRef;
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
@@ -147,6 +150,7 @@ pub type PartitionExprFetcherRef = Arc<dyn PartitionExprFetcher + Send + Sync>;
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
+    index_registry: Option<IndexRegistryRef>,
     region_id: RegionId,
     metadata_builder: Option<RegionMetadataBuilder>,
     memtable_builder_provider: MemtableBuilderProvider,
@@ -188,6 +192,7 @@ impl RegionOpener {
         partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> RegionOpener {
         RegionOpener {
+            index_registry: None,
             region_id,
             metadata_builder: None,
             memtable_builder_provider,
@@ -210,6 +215,12 @@ impl RegionOpener {
             series_index_store: None,
             series_index_purger: None,
         }
+    }
+
+    /// Sets the registry used to validate new-region index options.
+    pub(crate) fn with_index_registry(mut self, registry: IndexRegistryRef) -> Self {
+        self.index_registry = Some(registry);
+        self
     }
 
     /// Sets the store for companion range indexes.
@@ -379,6 +390,23 @@ impl RegionOpener {
         };
         ensure_json2_uses_flat_format(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
+        // Validate explicit new-region configuration before creating its manifest.
+        // Recovery and later compactions tolerate stale optional sketch settings.
+        if let Some(registry) = &self.index_registry {
+            registry
+                .validate(&PlanContext {
+                    metadata: &metadata,
+                    index_options: &options.index_options,
+                    build_type: IndexBuildType::Flush,
+                    existing_indexes: &[],
+                })
+                .map_err(|err| {
+                    crate::error::InvalidRegionOptionsSnafu {
+                        reason: err.to_string(),
+                    }
+                    .build()
+                })?;
+        }
         // The region's WAL history starts in this log store, so reopening
         // the region on it passes the history check without any entry. It is
         // recorded before the manifest exists: a log store that gave up its

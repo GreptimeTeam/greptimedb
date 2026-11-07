@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,10 +54,14 @@ use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
-use crate::sst::file::{FileHandle, FileMeta, UncommittedSsts};
+use crate::sst::file::{FileHandle, FileMeta, RegionFileId, UncommittedSsts};
 use crate::sst::file_purger::LocalFilePurger;
+use crate::sst::index::IndexBuildType;
+use crate::sst::index::build::IndexBuildInputs;
+use crate::sst::index::handler::{IndexKindProviderRef, PlanContext};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::registry::{IndexBuildPlan, IndexRegistry};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
@@ -143,10 +148,34 @@ pub struct CompactionContext {
     pub(crate) access_layer: AccessLayerRef,
     manifest_ctx: Arc<ManifestContext>,
     plugins: Plugins,
+    index_plan: Arc<IndexBuildPlan>,
+    existing_index_inputs: Option<Arc<HashSet<RegionFileId>>>,
 }
 
 impl From<&CompactionRegion> for CompactionContext {
     fn from(region: &CompactionRegion) -> Self {
+        let registry = IndexRegistry::new(
+            region.engine_config.inverted_index.clone(),
+            region.engine_config.fulltext_index.clone(),
+            region.engine_config.bloom_filter_index.clone(),
+        );
+        let registry = registry
+            .clone()
+            .with_provider(region.plugins.get::<IndexKindProviderRef>())
+            .unwrap_or_else(|err| {
+                warn!(err; "Failed to register optional index handlers");
+                registry
+            });
+        let index_plan = Arc::new(
+            registry
+                .plan(&PlanContext {
+                    metadata: &region.region_metadata,
+                    index_options: &region.current_version.options.index_options,
+                    build_type: IndexBuildType::Compact,
+                    existing_indexes: &[],
+                })
+                .unwrap_or_default(),
+        );
         Self {
             region_id: region.region_id,
             region_options: region.region_options.clone(),
@@ -157,6 +186,8 @@ impl From<&CompactionRegion> for CompactionContext {
             access_layer: region.access_layer.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             plugins: region.plugins.clone(),
+            index_plan,
+            existing_index_inputs: None,
         }
     }
 }
@@ -390,6 +421,41 @@ impl CompactionRegion {
 }
 
 impl CompactionContext {
+    /// Checks each physical input once before output tasks begin. Missing inputs
+    /// disable imported summaries without changing the reader's tolerant behavior.
+    async fn prepare_index_inputs<'a>(&mut self, inputs: impl Iterator<Item = &'a FileHandle>) {
+        if !self.index_plan.needs_input_reuse()
+            || self
+                .region_metadata
+                .partition_expr
+                .as_deref()
+                .is_some_and(|expr| !expr.is_empty())
+        {
+            return;
+        }
+        let mut seen = HashSet::new();
+        let mut existing = HashSet::new();
+        for input in inputs {
+            let id = input.file_id();
+            if !seen.insert(id) {
+                continue;
+            }
+            let path = crate::sst::location::sst_file_path(
+                self.access_layer.table_dir(),
+                id,
+                self.access_layer.path_type(),
+            );
+            if matches!(
+                self.access_layer.object_store().exists(&path).await,
+                Ok(true)
+            ) {
+                existing.insert(id);
+            }
+        }
+        // FileHandles protect ordinary purge; external object-store deletion can race.
+        self.existing_index_inputs = Some(Arc::new(existing));
+    }
+
     /// Reports this unit's output metadata before publishing its manifest edit.
     pub(crate) async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
         let Some(hook) = self.plugins.get::<RegionHookRef>() else {
@@ -627,6 +693,38 @@ impl SstMerger for DefaultSstMerger {
             merge_mode,
             read_parallelism: write_opts.encode_parallelism,
         };
+        // A region filter, rollover or time slice requires output-scoped accumulation.
+        let no_region_filter = context
+            .region_metadata
+            .partition_expr
+            .as_deref()
+            .is_none_or(str::is_empty);
+        let can_merge_inputs = write_opts.max_file_size.is_none()
+            && output.output_time_range.is_none()
+            && no_region_filter
+            && context
+                .existing_index_inputs
+                .as_ref()
+                .is_some_and(|existing| {
+                    output
+                        .inputs
+                        .iter()
+                        .all(|input| existing.contains(&input.file_id()))
+                });
+        let index_build_inputs = Some(IndexBuildInputs {
+            plan: context.index_plan.clone(),
+            memory_limit: None,
+            inputs: if context.index_plan.needs_input_reuse() {
+                output.inputs.clone().into()
+            } else {
+                Arc::from([])
+            },
+            input_puffin_manager: context
+                .access_layer
+                .build_puffin_manager()
+                .with_puffin_metadata_cache(context.cache_manager.puffin_metadata_cache().cloned()),
+            can_merge_inputs,
+        });
         let source = spawn_merge(builder.build_flat_sst_reader().await?);
 
         let mut metrics = Metrics::new(WriteType::Compaction);
@@ -635,7 +733,7 @@ impl SstMerger for DefaultSstMerger {
             .access_layer
             .write_sst(
                 SstWriteRequest {
-                    index_build_inputs: None,
+                    index_build_inputs,
                     op_type: OperationType::Compact,
                     metadata: region_metadata.clone(),
                     source,
@@ -773,6 +871,15 @@ impl<M: SstMerger> DefaultCompactor<M> {
         context: &CompactionContext,
         unit: &CompactionUnit,
     ) -> Result<MergeOutput> {
+        let mut context = context.clone();
+        if unit.max_file_size.is_none()
+            && unit
+                .outputs
+                .iter()
+                .any(|output| output.output_time_range.is_none())
+        {
+            context.prepare_index_inputs(unit.inputs.iter()).await;
+        }
         let mut result = MergeOutput {
             files_to_remove: unit.inputs.iter().map(|f| f.meta_ref().clone()).collect(),
             compaction_time_window: Some(unit.time_window_size),
@@ -831,7 +938,18 @@ where
         let internal_parallelism = compaction_region.max_parallelism.max(1);
         let compaction_time_window = picker_output.time_window_size;
         let region_id = compaction_region.region_id;
-        let context = CompactionContext::from(compaction_region);
+        let mut context = CompactionContext::from(compaction_region);
+        if picker_output.max_file_size.is_none() {
+            context
+                .prepare_index_inputs(
+                    picker_output
+                        .outputs
+                        .iter()
+                        .filter(|output| output.output_time_range.is_none())
+                        .flat_map(|output| output.inputs.iter()),
+                )
+                .await;
+        }
 
         // Build tasks along with their input file metas so we can track which
         // inputs correspond to each task.
@@ -992,6 +1110,114 @@ mod tests {
 
     fn new_file_handle(meta: FileMeta) -> FileHandle {
         FileHandle::new(meta, Arc::new(NoopFilePurger))
+    }
+
+    #[derive(Debug)]
+    struct InputReusePlan;
+
+    impl crate::sst::index::handler::IndexKindHandler for InputReusePlan {
+        fn kinds(&self) -> &[crate::sst::index::kind::IndexKind] {
+            &[crate::sst::index::kind::IndexKind::Extension(
+                crate::sst::index::kind::ExtensionIndexKind::Hll,
+            )]
+        }
+
+        fn plan(
+            &self,
+            _context: &PlanContext<'_>,
+        ) -> std::result::Result<
+            Option<Arc<dyn crate::sst::index::handler::PlannedIndex>>,
+            common_error::ext::BoxedError,
+        > {
+            Ok(Some(Arc::new(Self)))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sst::index::handler::PlannedIndex for InputReusePlan {
+        fn kinds(&self) -> &[crate::sst::index::kind::IndexKind] {
+            crate::sst::index::handler::IndexKindHandler::kinds(self)
+        }
+
+        fn entries(&self) -> &[crate::sst::index::handler::PlanEntry] {
+            &[]
+        }
+
+        fn needs_input_reuse(&self) -> bool {
+            true
+        }
+
+        async fn build(
+            &self,
+            _context: &crate::sst::index::handler::BuildContext<'_>,
+        ) -> std::result::Result<
+            Option<Box<dyn crate::sst::index::handler::IndexCreator>>,
+            common_error::ext::BoxedError,
+        > {
+            Ok(None)
+        }
+
+        fn is_current(
+            &self,
+            _file: &FileMeta,
+            _context: &crate::sst::index::handler::CurrencyContext<'_>,
+        ) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn test_index_input_preparation_tracks_physical_files() {
+        let mut region = new_test_compaction_region().await;
+        Arc::make_mut(&mut region.region_metadata).column_metadatas[0]
+            .column_schema
+            .set_inverted_index(true);
+        let mut context = CompactionContext::from(&region);
+        assert!(context.existing_index_inputs.is_none());
+        // Builtin plans do not probe physical inputs solely for optional reuse.
+        context.prepare_index_inputs(std::iter::empty()).await;
+        assert!(context.existing_index_inputs.is_none());
+        let mut registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+        registry.register(Arc::new(InputReusePlan)).unwrap();
+        context.index_plan = Arc::new(
+            registry
+                .plan(&PlanContext {
+                    metadata: &context.region_metadata,
+                    index_options: &context.version_options.index_options,
+                    build_type: IndexBuildType::Compact,
+                    existing_indexes: &[],
+                })
+                .unwrap(),
+        );
+        let present = new_file_handle(dummy_file_meta());
+        let missing = new_file_handle(dummy_file_meta());
+        let path = crate::sst::location::sst_file_path(
+            context.access_layer.table_dir(),
+            present.file_id(),
+            context.access_layer.path_type(),
+        );
+        context
+            .access_layer
+            .object_store()
+            .write(&path, vec![1])
+            .await
+            .unwrap();
+        // Duplicate references are checked as one physical input. Only successfully
+        // probed files can contribute imported summaries to an output.
+        context
+            .prepare_index_inputs([&present, &missing, &present].into_iter())
+            .await;
+        assert_eq!(
+            context.existing_index_inputs.as_deref(),
+            Some(&HashSet::from([present.file_id()]))
+        );
+        let prepared = context.clone();
+        assert!(Arc::ptr_eq(
+            context.existing_index_inputs.as_ref().unwrap(),
+            prepared.existing_index_inputs.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(&context.index_plan, &prepared.index_plan));
     }
 
     #[test]
@@ -1370,6 +1596,8 @@ mod tests {
             access_layer: region.access_layer.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             plugins: Plugins::new(),
+            index_plan: Arc::default(),
+            existing_index_inputs: None,
         };
         region
             .access_layer

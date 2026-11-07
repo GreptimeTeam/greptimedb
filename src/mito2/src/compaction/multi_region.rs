@@ -41,6 +41,7 @@ use crate::config::MitoConfig;
 use crate::error::{InvalidMultiRegionCompactionSnafu, Result};
 use crate::region::options::RegionOptions;
 use crate::sst::file::{FileMeta, RegionFileId};
+use crate::sst::index::handler::IndexKindProviderRef;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::writer::SstWriteGuard;
 
@@ -78,6 +79,8 @@ pub struct MultiRegionCompactionPlan {
 
 /// Shared storage services and attempt-owned output resources.
 pub struct MultiRegionCompactionContext {
+    /// Optional enterprise index implementation. Each routed output builds its own state.
+    pub index_kind_provider: Option<IndexKindProviderRef>,
     pub access_layer: AccessLayerRef,
     pub cache: CacheManagerRef,
     pub config: Arc<MitoConfig>,

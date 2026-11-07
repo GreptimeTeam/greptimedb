@@ -14,6 +14,9 @@
 
 //! Handles index build requests.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -34,6 +37,9 @@ use crate::region::options::IndexOptions;
 use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
 use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
+use crate::sst::index::build::IndexBuildInputs;
+use crate::sst::index::handler::{CurrencyContext, IndexKindProviderRef, PlanContext};
+use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
     cleanup_stale_index_caches,
@@ -73,15 +79,34 @@ impl<S> RegionWorkerLoop<S> {
             access_layer.intermediate_manager().clone()
         };
 
+        let registry = self.index_registry();
+        let plan = Arc::new(
+            registry
+                .plan(&PlanContext {
+                    metadata: &snapshot.metadata,
+                    index_options: &snapshot.index_options,
+                    build_type: build_type.clone(),
+                    existing_indexes: &file_meta.indexes,
+                })
+                .unwrap_or_default(),
+        );
+        let index_build_inputs = Some(IndexBuildInputs {
+            plan,
+            inputs: vec![FileHandle::new(file_meta.clone(), file.file_purger())].into(),
+            input_puffin_manager: access_layer.build_puffin_manager(),
+            can_merge_inputs: snapshot
+                .metadata
+                .partition_expr
+                .as_deref()
+                .is_none_or(str::is_empty)
+                && file_meta.region_id == region.region_id,
+            memory_limit: None,
+        });
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
+            index_build_inputs,
             build_type: build_type.clone(),
             metadata: snapshot.metadata.clone(),
-            index_build_inputs: None,
-            registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
-                self.config.inverted_index.clone(),
-                self.config.fulltext_index.clone(),
-                self.config.bloom_filter_index.clone(),
-            )),
+            registry: registry.clone(),
             index_options: snapshot.index_options.clone(),
             intermediate_manager,
             puffin_manager,
@@ -219,6 +244,7 @@ impl<S> RegionWorkerLoop<S> {
             file_meta.cloned()
         };
 
+        let registry = self.index_registry();
         let build_tasks = if request.file_metas.is_empty() {
             // If no specific files are provided, find files whose index is inconsistent with the region metadata.
             // Check the version rather than the manifest: a publication committed
@@ -227,9 +253,11 @@ impl<S> RegionWorkerLoop<S> {
             all_files
                 .values()
                 .filter(|file| {
-                    !file.meta_ref().is_index_consistent_with_region(
-                        &snapshot.metadata.column_metadatas,
-                        &snapshot.index_options,
+                    index_needs_rebuild(
+                        &registry,
+                        &snapshot,
+                        file.meta_ref(),
+                        request.build_type.clone(),
                     )
                 })
                 .filter_map(|file| {
@@ -444,4 +472,44 @@ impl<S> RegionWorkerLoop<S> {
         self.index_build_scheduler
             .on_task_stopped(region_id, request.file_id);
     }
+    fn index_registry(&self) -> IndexRegistryRef {
+        let builtin = IndexRegistry::new(
+            self.config.inverted_index.clone(),
+            self.config.fulltext_index.clone(),
+            self.config.bloom_filter_index.clone(),
+        );
+        Arc::new(
+            builtin
+                .clone()
+                .with_provider(self.plugins.get::<IndexKindProviderRef>())
+                .unwrap_or_else(|err| {
+                    warn!(err; "Failed to register optional index handlers");
+                    builtin
+                }),
+        )
+    }
+}
+
+fn index_needs_rebuild(
+    registry: &IndexRegistry,
+    snapshot: &IndexBuildSnapshot,
+    file: &FileMeta,
+    build_type: IndexBuildType,
+) -> bool {
+    let plan = registry
+        .plan(&PlanContext {
+            metadata: &snapshot.metadata,
+            index_options: &snapshot.index_options,
+            build_type: build_type.clone(),
+            existing_indexes: &file.indexes,
+        })
+        .unwrap_or_default();
+    !plan.is_current(
+        file,
+        &CurrencyContext {
+            metadata: &snapshot.metadata,
+            index_options: &snapshot.index_options,
+            build_type,
+        },
+    )
 }

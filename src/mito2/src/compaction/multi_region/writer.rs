@@ -25,6 +25,8 @@ use crate::error::{ComputeArrowSnafu, Result};
 use crate::read::FlatSource;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
+use crate::sst::index::build::IndexBuildInputs;
+use crate::sst::index::registry::IndexBuildPlan;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::{SstInfo, WriteOptions};
@@ -33,6 +35,7 @@ pub(crate) struct TargetWriter<'a> {
     target: &'a MultiRegionTarget,
     context: &'a MultiRegionCompactionContext,
     limits: &'a MemoryLimits,
+    index_plans: Arc<IndexBuildPlan>,
     max_file_size: usize,
     sequence: Option<NonZeroU64>,
     preserve_row_sequence: bool,
@@ -44,6 +47,7 @@ impl<'a> TargetWriter<'a> {
         context: &'a MultiRegionCompactionContext,
         limits: &'a MemoryLimits,
         max_file_size: usize,
+        index_plans: Arc<IndexBuildPlan>,
     ) -> Self {
         let sequence = crate::sst::file::known_max_input_sequence(target.inputs.values());
         let preserve_row_sequence = target.options.preserve_row_sequence
@@ -55,6 +59,7 @@ impl<'a> TargetWriter<'a> {
             target,
             context,
             limits,
+            index_plans,
             max_file_size,
             sequence,
             preserve_row_sequence,
@@ -104,8 +109,16 @@ impl<'a> TargetWriter<'a> {
         let mut bloom = config.bloom_filter_index.clone();
         bloom.mem_threshold_on_create = self.index_threshold(bloom.mem_threshold_on_create());
         let source = output_projection(self.target, source, self.context.cancellation.clone())?;
+        let index_build_inputs = Some(IndexBuildInputs {
+            plan: self.index_plans.clone(),
+            input_puffin_manager: self.context.access_layer.build_puffin_manager(),
+            // Routing and file rollover change coverage. Consume only actual output rows.
+            inputs: Arc::from([]),
+            can_merge_inputs: false,
+            memory_limit: self.limits.optional_index,
+        });
         Ok(SstWriteRequest {
-            index_build_inputs: None,
+            index_build_inputs,
             op_type: OperationType::Compact,
             metadata: self.target.metadata.clone(),
             source,

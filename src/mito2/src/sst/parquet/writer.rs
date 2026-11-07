@@ -55,7 +55,7 @@ use crate::error::{
 };
 use crate::read::FlatSource;
 use crate::sst::file::RegionFileId;
-use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
+use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{
     FlatWriteFormat, primary_key_column_index, time_index_column_index,
 };
@@ -424,18 +424,7 @@ where
 
             // Finish indexer and writer.
             // safety: writer and index can only be both present or not.
-            let mut index_output = IndexOutput::default();
-            match self.index_config.build_mode {
-                IndexBuildMode::Sync => {
-                    index_output = self.current_indexer.as_mut().unwrap().finish().await;
-                }
-                IndexBuildMode::Async => {
-                    debug!(
-                        "Index for file {} will be built asynchronously later",
-                        self.current_file
-                    );
-                }
-            }
+            let index_output = self.current_indexer.as_mut().unwrap().finish().await;
             current_writer.flush().await.context(WriteParquetSnafu)?;
 
             let parquet_metadata = current_writer.close().await.context(WriteParquetSnafu)?;
@@ -632,16 +621,15 @@ where
             self.metrics.write_batch += start.elapsed();
 
             stats.update_flat(batch)?;
-            if matches!(self.index_config.build_mode, IndexBuildMode::Sync) {
-                let start = Instant::now();
-                // safety: self.current_indexer must be set when first batch has been written.
-                self.current_indexer
-                    .as_mut()
-                    .unwrap()
-                    .update_flat(batch)
-                    .await;
-                self.metrics.update_index += start.elapsed();
-            }
+            let start = Instant::now();
+            // The indexer exists once the first batch has been written. In async
+            // mode it contains only the compaction extension, if one is enabled.
+            self.current_indexer
+                .as_mut()
+                .unwrap()
+                .update_flat(batch)
+                .await;
+            self.metrics.update_index += start.elapsed();
             Ok(())
         }
         .await;
@@ -746,7 +734,7 @@ where
             };
             self.writer = Some(arrow_writer);
 
-            let indexer = self
+            let mut indexer = self
                 .indexer_builder
                 .build(
                     RegionFileId::new(self.metadata.region_id, self.current_file),
@@ -754,6 +742,9 @@ where
                     Some(opts.row_group_size),
                 )
                 .await;
+            if matches!(self.index_config.build_mode, IndexBuildMode::Async) {
+                indexer.disable_builtin_indexes().await;
+            }
             self.current_indexer = Some(indexer);
 
             // safety: self.writer is assigned above

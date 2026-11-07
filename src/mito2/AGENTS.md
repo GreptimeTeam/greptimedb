@@ -76,6 +76,11 @@ There is no second task registry or completed-task history. See
 - **Manifest format** (`manifest/action.rs`): affects crash recovery and
   follower replay. Keep it backward compatible.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
+- **Compaction index extensions** (`sst/index/handler.rs`, `sst/index/registry.rs`): enterprise providers use
+  the existing borrowed-batch and Puffin writer lifecycle. Publish column-level sketch descriptors
+  only after successful file finish; index rebuilds maintain existing sketches
+  through the provider before replacing the Puffin version. Multi-output or filtered compaction builds from
+  output rows rather than reusing whole-input summaries.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may

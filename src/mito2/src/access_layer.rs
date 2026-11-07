@@ -379,6 +379,10 @@ impl AccessLayer {
         metrics: &mut Metrics,
         context: Option<crate::sst::parquet::writer::SstWriteContext>,
     ) -> Result<SstInfoArray> {
+        let mut request = request;
+        if let Some(provider) = &mut request.index_build_inputs {
+            provider.can_merge_inputs &= write_opts.max_file_size.is_none();
+        }
         let limits = context.as_ref().map(|context| context.limits);
         let guard = context.map(|context| context.guard);
         let op_type = request.op_type;
