@@ -1133,7 +1133,18 @@ pub async fn setup_mysql_server_with_user_provider(
     }
 
     let instance = setup_standalone_instance_with_plugins(name, store_type, plugins).await;
+    let mysql_server =
+        setup_mysql_server_for_frontend_instance(instance.fe_instance().clone(), user_provider)
+            .await;
 
+    (instance.guard, Arc::new(mysql_server))
+}
+
+/// Builds and starts a MySQL server on an existing frontend instance.
+pub async fn setup_mysql_server_for_frontend_instance(
+    fe_instance_ref: Arc<Instance>,
+    user_provider: Option<UserProviderRef>,
+) -> Box<dyn Server> {
     let runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("mysql-runtime")
@@ -1142,7 +1153,6 @@ pub async fn setup_mysql_server_with_user_provider(
 
     let fe_mysql_addr = format!("127.0.0.1:{}", ports::get_port());
 
-    let fe_instance_ref = instance.fe_instance().clone();
     let opts = MysqlOptions {
         addr: fe_mysql_addr.clone(),
         ..Default::default()
@@ -1168,7 +1178,7 @@ pub async fn setup_mysql_server_with_user_provider(
         .await
         .unwrap();
 
-    (instance.guard, Arc::new(mysql_server))
+    mysql_server
 }
 
 pub async fn setup_pg_server(
@@ -1234,7 +1244,17 @@ pub async fn setup_pg_server_with_user_provider(
     user_provider: Option<UserProviderRef>,
 ) -> (TestGuard, Arc<Box<dyn Server>>) {
     let instance = setup_standalone_instance(name, store_type).await;
+    let pg_server =
+        setup_pg_server_for_frontend_instance(instance.fe_instance().clone(), user_provider).await;
 
+    (instance.guard, Arc::new(pg_server))
+}
+
+/// Builds and starts a Postgres server on an existing frontend instance.
+pub async fn setup_pg_server_for_frontend_instance(
+    fe_instance_ref: Arc<Instance>,
+    user_provider: Option<UserProviderRef>,
+) -> Box<dyn Server> {
     let runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("pg-runtime")
@@ -1243,7 +1263,6 @@ pub async fn setup_pg_server_with_user_provider(
 
     let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
 
-    let fe_instance_ref = instance.fe_instance().clone();
     let opts = PostgresOptions {
         addr: fe_pg_addr.clone(),
         ..Default::default()
@@ -1273,7 +1292,7 @@ pub async fn setup_pg_server_with_user_provider(
         .await
         .unwrap();
 
-    (instance.guard, Arc::new(pg_server))
+    pg_server
 }
 
 /// Sets up a standalone instance with both a Prometheus remote-write HTTP app
