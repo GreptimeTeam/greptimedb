@@ -13,10 +13,15 @@
 // limitations under the License.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use api::v1::SemanticType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use object_store::layers::mock::{
+    BytesRange, Error as MockError, ErrorKind, MockLayer, MockLayerBuilder, Result as MockResult,
+    RpRead, oio,
+};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::storage::RegionId;
 
@@ -49,6 +54,22 @@ pub fn basic_region_metadata() -> RegionMetadata {
         })
         .primary_key(vec![36]);
     builder.build().unwrap()
+}
+
+/// Returns a layer that fails reads of manifest deltas with `NotFound` and leaves other reads
+/// untouched.
+pub(crate) fn fail_manifest_delta_reads_layer() -> MockLayer {
+    MockLayerBuilder::default()
+        .reader_factory(Arc::new(|path, _args, inner| {
+            let file_name = path.rsplit('/').next().unwrap_or(path);
+            if crate::manifest::storage::is_delta_file(file_name) {
+                Box::new(oio::StreamReader::new(NotFoundReader))
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap()
 }
 
 /// Measures stored delta and checkpoint bytes independently of the size tracker.
@@ -102,4 +123,15 @@ pub async fn manifest_recovery_usage(path: impl AsRef<Path>) -> u64 {
         }
     }
     total
+}
+
+struct NotFoundReader;
+
+impl oio::StreamRead for NotFoundReader {
+    async fn open(&self, _: BytesRange) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        Err(MockError::new(
+            ErrorKind::NotFound,
+            "mock listed manifest delta not found",
+        ))
+    }
 }

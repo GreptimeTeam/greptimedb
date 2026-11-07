@@ -2225,6 +2225,8 @@ async fn add_manifest_scan_region(
         .update(
             RegionMetaActionList::new(vec![RegionMetaAction::Edit(edit)]),
             false,
+            true,
+            || false,
         )
         .await
         .unwrap();

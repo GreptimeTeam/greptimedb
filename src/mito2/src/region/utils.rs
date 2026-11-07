@@ -39,14 +39,20 @@ use crate::sst::location;
 pub struct RegionMetadataLoader {
     config: Arc<MitoConfig>,
     object_store_manager: ObjectStoreManagerRef,
+    require_write_lease: bool,
 }
 
 impl RegionMetadataLoader {
     /// Creates a new `RegionMetadataLoader`.
-    pub fn new(config: Arc<MitoConfig>, object_store_manager: ObjectStoreManagerRef) -> Self {
+    pub fn new(
+        config: Arc<MitoConfig>,
+        object_store_manager: ObjectStoreManagerRef,
+        require_write_lease: bool,
+    ) -> Self {
         Self {
             config,
             object_store_manager,
+            require_write_lease,
         }
     }
 
@@ -56,9 +62,7 @@ impl RegionMetadataLoader {
         region_dir: &str,
         region_options: &RegionOptions,
     ) -> Result<Option<RegionMetadataRef>> {
-        let manifest = self
-            .load_manifest(region_dir, &region_options.storage)
-            .await?;
+        let manifest = self.load_manifest(region_dir, region_options).await?;
         Ok(manifest.map(|m| m.metadata.clone()))
     }
 
@@ -66,11 +70,15 @@ impl RegionMetadataLoader {
     pub async fn load_manifest(
         &self,
         region_dir: &str,
-        storage: &Option<String>,
+        region_options: &RegionOptions,
     ) -> Result<Option<Arc<RegionManifest>>> {
-        let object_store = get_object_store(storage, &self.object_store_manager)?;
+        let object_store = get_object_store(&region_options.storage, &self.object_store_manager)?;
         let region_manifest_options =
-            RegionManifestOptions::new(&self.config, region_dir, &object_store);
+            RegionManifestOptions::new(&self.config, region_dir, &object_store)
+                .with_conditional_publication(
+                    self.require_write_lease,
+                    &region_options.wal_options,
+                );
         let Some(manifest_manager) =
             RegionManifestManager::open(region_manifest_options, &Default::default()).await?
         else {
