@@ -32,6 +32,7 @@ use crate::error::{
 use crate::extension::json::Json2ExtensionType;
 use crate::schema::TYPE_KEY;
 use crate::schema::constraint::ColumnDefaultConstraint;
+use crate::schema::sketch_options::{HLL_KEY, HllOptions, KLL_KEY, KllOptions, MG_KEY, MgOptions};
 use crate::value::Value;
 use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::{MutableVector, VectorRef};
@@ -433,6 +434,90 @@ impl ColumnSchema {
 
     pub fn unset_skipping_options(&mut self) -> Result<()> {
         self.metadata.remove(SKIPPING_INDEX_KEY);
+        Ok(())
+    }
+
+    /// Retrieves independently enabled HLL options, validating stored parameters.
+    pub fn hll_options(&self) -> Result<Option<HllOptions>> {
+        self.metadata
+            .get(HLL_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    /// Enables HLL with validated options.
+    pub fn with_hll_options(mut self, options: HllOptions) -> Result<Self> {
+        self.set_hll_options(&options)?;
+        Ok(self)
+    }
+
+    /// Sets HLL options without modifying other algorithm metadata.
+    pub fn set_hll_options(&mut self, options: &HllOptions) -> Result<()> {
+        options.validate()?;
+        let json = serde_json::to_string(options).context(error::SerializeSnafu)?;
+        self.metadata.insert(HLL_KEY.to_string(), json);
+        Ok(())
+    }
+
+    /// Removes only HLL options.
+    pub fn unset_hll_options(&mut self) -> Result<()> {
+        self.metadata.remove(HLL_KEY);
+        Ok(())
+    }
+
+    /// Retrieves independently enabled KLL options, validating stored parameters.
+    pub fn kll_options(&self) -> Result<Option<KllOptions>> {
+        self.metadata
+            .get(KLL_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    /// Enables KLL with validated options.
+    pub fn with_kll_options(mut self, options: KllOptions) -> Result<Self> {
+        self.set_kll_options(&options)?;
+        Ok(self)
+    }
+
+    /// Sets KLL options without modifying other algorithm metadata.
+    pub fn set_kll_options(&mut self, options: &KllOptions) -> Result<()> {
+        options.validate()?;
+        let json = serde_json::to_string(options).context(error::SerializeSnafu)?;
+        self.metadata.insert(KLL_KEY.to_string(), json);
+        Ok(())
+    }
+
+    /// Removes only KLL options.
+    pub fn unset_kll_options(&mut self) -> Result<()> {
+        self.metadata.remove(KLL_KEY);
+        Ok(())
+    }
+
+    /// Retrieves independently enabled MG options, validating stored parameters.
+    pub fn mg_options(&self) -> Result<Option<MgOptions>> {
+        self.metadata
+            .get(MG_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    /// Enables MG with validated options.
+    pub fn with_mg_options(mut self, options: MgOptions) -> Result<Self> {
+        self.set_mg_options(&options)?;
+        Ok(self)
+    }
+
+    /// Sets MG options without modifying other algorithm metadata.
+    pub fn set_mg_options(&mut self, options: &MgOptions) -> Result<()> {
+        options.validate()?;
+        let json = serde_json::to_string(options).context(error::SerializeSnafu)?;
+        self.metadata.insert(MG_KEY.to_string(), json);
+        Ok(())
+    }
+
+    /// Removes only MG options.
+    pub fn unset_mg_options(&mut self) -> Result<()> {
+        self.metadata.remove(MG_KEY);
         Ok(())
     }
 

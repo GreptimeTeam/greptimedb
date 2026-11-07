@@ -24,7 +24,7 @@ mod primary_key;
 pub mod puffin_manager;
 #[cfg(test)]
 mod sparse_test;
-mod statistics;
+pub mod statistics;
 pub(crate) mod store;
 
 use std::cmp::Ordering;

@@ -505,56 +505,74 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_purge_with_index() {
-        let env = PurgeTestEnv::new().await;
-        let object_store = env.layer.object_store();
-        let sst_file_id = env.file_id;
-        let path = env.sst_path();
-        let index_path = env.index_path(0);
-        object_store
-            .write(&index_path, vec![0; 4096])
-            .await
-            .unwrap();
+        for sketch_only in [false, true] {
+            let env = PurgeTestEnv::new().await;
+            let object_store = env.layer.object_store();
+            let sst_file_id = env.file_id;
+            let path = env.sst_path();
+            let index_path = env.index_path(0);
+            object_store
+                .write(&index_path, vec![0; 4096])
+                .await
+                .unwrap();
 
-        let scheduler = &env.scheduler;
-        let file_purger = Arc::new(LocalFilePurger::new(
-            scheduler.clone(),
-            env.layer.clone(),
-            None,
-        ));
+            let scheduler = &env.scheduler;
+            let file_purger = Arc::new(LocalFilePurger::new(
+                scheduler.clone(),
+                env.layer.clone(),
+                None,
+            ));
 
-        {
-            let handle = FileHandle::new(
-                FileMeta {
-                    region_id: sst_file_id.region_id(),
-                    file_id: sst_file_id.file_id(),
-                    time_range: FileTimeRange::default(),
-                    level: 0,
-                    file_size: 4096,
-                    max_row_group_uncompressed_size: 4096,
-                    available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
-                    indexes: vec![ColumnIndexMetadata {
-                        column_id: 0,
-                        created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            {
+                let handle = FileHandle::new(
+                    FileMeta {
+                        region_id: sst_file_id.region_id(),
+                        file_id: sst_file_id.file_id(),
+                        time_range: FileTimeRange::default(),
+                        level: 0,
+                        file_size: 4096,
+                        max_row_group_uncompressed_size: 4096,
+                        available_indexes: if sketch_only {
+                            SmallVec::new()
+                        } else {
+                            SmallVec::from_iter([IndexType::InvertedIndex])
+                        },
+                        indexes: vec![ColumnIndexMetadata {
+                            column_id: 0,
+                            created_indexes: if sketch_only {
+                                SmallVec::from_iter([IndexType::Hll])
+                            } else {
+                                SmallVec::from_iter([IndexType::InvertedIndex])
+                            },
+                            ..Default::default()
+                        }],
+                        index_file_size: 4096,
+                        index_version: 0,
+                        num_rows: 1024,
+                        num_row_groups: 1,
+                        sequence: NonZeroU64::new(4096),
+                        partition_expr: None,
+                        num_series: 0,
                         ..Default::default()
-                    }],
-                    index_file_size: 4096,
-                    index_version: 0,
-                    num_rows: 1024,
-                    num_row_groups: 1,
-                    sequence: NonZeroU64::new(4096),
-                    partition_expr: None,
-                    num_series: 0,
-                    ..Default::default()
-                },
-                file_purger,
-            );
-            // mark file as deleted and drop the handle, we expect the sst file and the index file are deleted.
-            handle.mark_deleted();
+                    },
+                    file_purger,
+                );
+                assert!(handle.meta_ref().exists_index());
+                assert_eq!(handle.meta_ref().available_indexes.is_empty(), sketch_only);
+                assert_eq!(
+                    handle.meta_ref().indexes[0]
+                        .created_indexes
+                        .contains(&IndexType::Hll),
+                    sketch_only
+                );
+                // mark file as deleted and drop the handle, we expect the sst file and the index file are deleted.
+                handle.mark_deleted();
+            }
+
+            scheduler.stop(true).await.unwrap();
+
+            assert!(!object_store.exists(&path).await.unwrap());
+            assert!(!object_store.exists(&index_path).await.unwrap());
         }
-
-        scheduler.stop(true).await.unwrap();
-
-        assert!(!object_store.exists(&path).await.unwrap());
-        assert!(!object_store.exists(&index_path).await.unwrap());
     }
 }
