@@ -29,6 +29,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
+use common_meta::key::table_name::TableNameKey;
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
@@ -1017,6 +1018,34 @@ impl BatchingEngine {
         self.runtime.read().await.tasks.contains_key(&flow_id)
     }
 
+    pub(crate) async fn source_table_ids(&self, flow_id: FlowId) -> Result<Vec<TableId>, Error> {
+        let source_table_names = {
+            let runtime = self.runtime.read().await;
+            let task = runtime
+                .tasks
+                .get(&flow_id)
+                .context(FlowNotFoundSnafu { id: flow_id })?;
+            task.config.source_table_names.clone()
+        };
+
+        let mut source_table_ids = Vec::with_capacity(source_table_names.len());
+        for name in &source_table_names {
+            let table_id = self
+                .table_meta
+                .table_name_manager()
+                .get(TableNameKey::new(&name[0], &name[1], &name[2]))
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .with_context(|| UnexpectedSnafu {
+                    reason: format!("Failed to get table id for table: {}", name.join(".")),
+                })?
+                .table_id();
+            source_table_ids.push(table_id);
+        }
+        Ok(source_table_ids)
+    }
+
     async fn rollback_flow_runtime_if_current(&self, flow_id: FlowId, task: &BatchingTask) {
         let (removed_task, removed_shutdown_tx) = {
             let mut runtime = self.runtime.write().await;
@@ -1725,6 +1754,37 @@ GROUP BY l.number, time_window
     }
 
     #[tokio::test]
+    async fn test_source_table_ids_requires_registered_task_and_all_metadata() {
+        let engine = new_test_engine().await;
+        assert!(matches!(
+            engine.source_table_ids(9001).await,
+            Err(Error::FlowNotFound { .. })
+        ));
+
+        let mut table_info = new_test_table_info_with_name(1, "numbers_with_ts");
+        table_info.catalog_name = "greptime".to_string();
+        table_info.schema_name = "public".to_string();
+        engine
+            .table_meta
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let (mut task, shutdown_tx) = new_test_task_for_source(9002, "numbers_with_ts", None).await;
+        Arc::make_mut(&mut task.config).source_table_names.insert([
+            "greptime".to_string(),
+            "public".to_string(),
+            "missing_source".to_string(),
+        ]);
+        engine.runtime.write().await.insert(9002, task, shutdown_tx);
+        assert!(engine.source_table_ids(9002).await.is_err());
+    }
+
+    #[tokio::test]
     async fn test_handle_mark_dirty_time_window_with_time_ranges() {
         let engine = new_test_engine().await;
 
@@ -1960,6 +2020,126 @@ GROUP BY l.number, time_window
             .await
             .expect("aborted task should be dropped")
             .expect("drop notifier should fire");
+    }
+
+    #[tokio::test]
+    async fn test_flow_check_task_routing_map_orphan() {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let batching_engine = Arc::new(new_test_engine().await);
+        let (task, shutdown_tx) = new_test_task(9422).await;
+        let drop_rx = install_abort_observed_handle(&task).await;
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .insert(9422, task, shutdown_tx);
+
+        let streaming_engine = Arc::new(crate::adapter::StreamingEngine::new(
+            None,
+            batching_engine.query_engine.clone(),
+            batching_engine.table_meta.clone(),
+            batching_engine.frontend_client.clone(),
+        ));
+        let dual_engine = Arc::new(crate::adapter::flownode_impl::FlowDualEngine::new(
+            streaming_engine,
+            batching_engine.clone(),
+            batching_engine.flow_metadata_manager.clone(),
+            batching_engine.catalog_manager.clone(),
+            common_base::Plugins::new(),
+        ));
+        dual_engine
+            .start_flow_consistent_check_task()
+            .await
+            .unwrap();
+
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            while !dual_engine.is_recover_done() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("flow recovery should finish");
+
+        tokio::time::timeout(
+            TEST_TIMEOUT,
+            crate::engine::FlowEngine::remove_flow(dual_engine.as_ref(), 9422),
+        )
+        .await
+        .expect("removing a batching orphan must not await the checker itself")
+        .expect("orphan flow removal should succeed");
+
+        tokio::time::timeout(TEST_TIMEOUT, drop_rx)
+            .await
+            .expect("removed orphan task should stop")
+            .expect("task drop notifier should fire");
+        assert!(!batching_engine.flow_exist_inner(9422).await);
+
+        let (checker_orphan, checker_shutdown_tx) = new_test_task(9423).await;
+        let checker_drop_rx = install_abort_observed_handle(&checker_orphan).await;
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .insert(9423, checker_orphan, checker_shutdown_tx);
+        tokio::time::timeout(TEST_TIMEOUT, dual_engine.reconcile_flows_from_metadata())
+            .await
+            .expect("metadata reconciliation should not await its own checker")
+            .expect("orphan reconciliation should succeed");
+        tokio::time::timeout(TEST_TIMEOUT, checker_drop_rx)
+            .await
+            .expect("checker cleanup should stop the orphan task")
+            .expect("task drop notifier should fire");
+        assert!(!batching_engine.flow_exist_inner(9423).await);
+
+        let (detached_orphan, detached_shutdown_tx) = new_test_task(9425).await;
+        let detached_drop_rx = install_abort_observed_handle(&detached_orphan).await;
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .insert(9425, detached_orphan, detached_shutdown_tx);
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .shutdown_txs
+            .remove(&9425);
+        let detach_error = tokio::time::timeout(
+            TEST_TIMEOUT,
+            crate::engine::FlowEngine::remove_flow(dual_engine.as_ref(), 9425),
+        )
+        .await
+        .expect("DROP after detach should return an error, not wait on its checker")
+        .expect_err("missing shutdown sender should be reported");
+        assert!(matches!(detach_error, Error::Unexpected { .. }));
+        tokio::time::timeout(TEST_TIMEOUT, detached_drop_rx)
+            .await
+            .expect("detached task should still be stopped")
+            .expect("task drop notifier should fire");
+        assert!(!batching_engine.flow_exist_inner(9425).await);
+
+        for flow_id in [9422, 9425] {
+            tokio::time::timeout(
+                TEST_TIMEOUT,
+                crate::engine::FlowEngine::remove_flow(dual_engine.as_ref(), flow_id),
+            )
+            .await
+            .expect("repeated orphan removal should return")
+            .expect("repeated removal should be idempotent");
+        }
+        let flush = tokio::time::timeout(
+            TEST_TIMEOUT,
+            crate::engine::FlowEngine::flush_flow(dual_engine.as_ref(), 9422),
+        )
+        .await
+        .expect("flush after removal should return");
+        assert_eq!(flush.unwrap(), 0);
+
+        tokio::time::timeout(TEST_TIMEOUT, dual_engine.stop_flow_consistent_check_task())
+            .await
+            .expect("checker shutdown should return")
+            .expect("checker shutdown should succeed");
     }
 
     #[tokio::test]
