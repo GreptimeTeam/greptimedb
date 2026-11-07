@@ -2606,7 +2606,7 @@ async fn interleaved_constructors_accept_without_polling() {
 /// The unpack stream rejects a batch whose schema differs from the stream's declared schema,
 /// including drift in metadata the codec itself does not interpret and an empty batch that
 /// carries the drift; the reserved layout metadata is rejected as well. Since the current layout is
-/// `v2`, the drift case rewrites the layout to `v1`: any value other than this revision's is refused,
+/// `v1`, the drift case rewrites the layout to `v2`: any value other than this revision's is refused,
 /// so a stale or a future spelling cannot be decoded under the current columns.
 #[tokio::test]
 async fn unpack_rejects_unrelated_metadata_drift_and_empty_schema_changes() {
@@ -2626,9 +2626,9 @@ async fn unpack_rejects_unrelated_metadata_drift_and_empty_schema_changes() {
 
     let mut unrelated = base.metadata().clone();
     unrelated.insert("app.unrelated".into(), "x".into());
-    // The current layout is `v2`, so a frame that still declares `v1` is the drift here.
+    // The current layout is `v1`, so a frame that declares `v2` is the drift here.
     let mut reserved = base.metadata().clone();
-    reserved.insert("greptime.series.layout".into(), "v1".into());
+    reserved.insert("greptime.series.layout".into(), "v2".into());
     let mut renamed = base.metadata().clone();
     renamed.insert("app.renamed".into(), "y".into());
     let mut different_ordering = base.metadata().clone();
@@ -2696,7 +2696,7 @@ fn raw_series_ordering_metadata_fixture() {
     }
 
     let cases: Vec<Case> = serde_json::from_str(include_str!(
-        "../../../../../tests/compatibility/wire/raw_series_ordering/v2_metadata.json"
+        "../../../../../tests/compatibility/wire/raw_series_ordering/v1_metadata.json"
     ))
     .unwrap();
     for case in cases {
@@ -3286,11 +3286,11 @@ async fn unpack_reports_the_ordering_the_frame_declares() {
 
 /// Reserved layout metadata this revision does not write is rejected instead of being read as the
 /// current layout, so a frame cannot be decoded under a contract it did not declare. The current
-/// layout is `v2`; a `v1` frame and every unknown value are refused alike.
+/// layout is `v1`; a `v2` frame and every unknown value are refused alike.
 #[tokio::test]
 async fn unpack_rejects_unknown_layout_metadata() {
     let cases = [
-        ("greptime.series.layout", "v1"),
+        ("greptime.series.layout", "v2"),
         ("greptime.series.layout", "v3"),
         ("greptime.series.content", "series"),
         ("greptime.series.time", "timestamps_v2"),

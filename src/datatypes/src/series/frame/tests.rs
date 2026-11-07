@@ -582,7 +582,7 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
         .into(),
     );
     let mut expected_key_metadata = std::collections::HashMap::new();
-    expected_key_metadata.insert("greptime.series.layout".to_string(), "v2".to_string());
+    expected_key_metadata.insert("greptime.series.layout".to_string(), "v1".to_string());
     expected_key_metadata.insert("greptime.series.content".to_string(), "raw".to_string());
     expected_key_metadata.insert("greptime.series.labels".to_string(), "key".to_string());
     expected_key_metadata.insert("greptime.series.time".to_string(), "timestamps".to_string());
@@ -2061,9 +2061,9 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
         let mut metadata = valid.schema().metadata().clone();
         match metadata_case {
             "wrong_layout" => {
-                // `v2` is the only layout this revision reads, so the previously unreadable `v1`
-                // is what a wrong layout is spelled as now.
-                metadata.insert("greptime.series.layout".to_string(), "v1".to_string());
+                // `v1` is the only layout this revision reads, so `v2` is what a wrong layout is
+                // spelled as now.
+                metadata.insert("greptime.series.layout".to_string(), "v2".to_string());
             }
             "wrong_labels" => {
                 metadata.insert("greptime.series.labels".to_string(), "explicit".to_string());
@@ -3390,7 +3390,7 @@ fn cross_chunk_rows_coalesce_into_one_multirow_batch() {
         ["read_key", "is_last", "time", "fields"]
     );
     for (key, value) in [
-        ("greptime.series.layout", "v2"),
+        ("greptime.series.layout", "v1"),
         ("greptime.series.content", "raw"),
         ("greptime.series.labels", "key"),
         ("greptime.series.time", "timestamps"),
@@ -4039,8 +4039,8 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
 
     // Reserved metadata and evolved fields are rejected, including by a zero-row batch.
     for (key, value) in [
-        // `v2` is the layout this decoder expects, so the unreadable `v1` is the wrong one.
-        ("greptime.series.layout", "v1"),
+        // `v1` is the layout this decoder expects, so `v2` is the wrong one.
+        ("greptime.series.layout", "v2"),
         ("greptime.series.content", "evaluated"),
         ("greptime.series.labels", "explicit"),
         ("greptime.series.time", "grid"),
@@ -4229,7 +4229,7 @@ fn schema_with_metadata(metadata: Vec<(String, String)>) -> Schema {
 /// The five metadata entries every raw v2 frame declares, with the given label mode.
 fn base_metadata(labels: &str) -> Vec<(String, String)> {
     [
-        ("greptime.series.layout", "v2"),
+        ("greptime.series.layout", "v1"),
         ("greptime.series.content", "raw"),
         ("greptime.series.labels", labels),
         ("greptime.series.time", "timestamps"),
@@ -4305,7 +4305,7 @@ fn raw_series_label_decode_metadata_fixture() {
     }
 
     let cases: Vec<Case> = serde_json::from_str(include_str!(
-        "../../../../../tests/compatibility/wire/raw_series_label_decode/v2_metadata.json"
+        "../../../../../tests/compatibility/wire/raw_series_label_decode/v1_metadata.json"
     ))
     .unwrap();
     for case in cases {
