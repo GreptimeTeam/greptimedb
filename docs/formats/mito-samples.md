@@ -475,3 +475,61 @@ A prepared scan uses a grouped artifact only when all of its sources belong to
 that scan's assignment or were excluded solely by its time filter. Partial coverage
 or a stale source set selects the
 ordinary SST path until reconciliation supplies complete valid coverage.
+
+## Prepared mixed-source reads
+
+Prepared metric reads pin the data version and artifact catalog. Series discovery
+and sample replacement are independent: a series artifact can supply labels while
+samples come from Parquet, and a samples artifact can be used with labels discovered
+from encoded SST keys. Memtables remain part of the pinned query.
+
+Sample replacement requires complete coverage of each assigned source. A partial
+row-group assignment, an incomplete daily group, or a required column absent from
+a samples artifact keeps the source SST on the Parquet path. Invalidating one day
+of a grouped replacement sends the affected source group back to Parquet, avoiding
+overlap between native and authoritative sample rows. Unrelated added fields do
+not invalidate a query's projected samples. Source fields requiring defaults or
+schema conversions use the ordinary SST compatibility reader, so an absent field
+with a configured default is not silently replaced with null.
+
+The eligible Parquet path retains encoded sparse primary keys rather than
+materializing label columns. It projects required fields, timestamps, sequences,
+and operation types; the adapter resolves identity per dictionary key and feeds
+the existing merge and deduplication pipeline. Label/value disjunctions and
+partition transformations requiring labels in sample batches use the ordinary
+reader. Public prepared-series interfaces and sample field-type support are
+unchanged.
+
+Projected row groups are reused before per-request series selection in a
+query-local cache with a 64 MiB retention ceiling. Reservations use the scan memory
+pool and remain attached to retained groups. Concurrent loads are serialized;
+locks are released before yielding. Groups exceeding the ceiling or available
+reservation stream without admission. Evicted or oversized groups can be reread.
+The cache is not a spill store and does not promise a single Parquet read under
+memory pressure.
+
+### Measuring mixed reads
+
+Run the ignored `bench_mixed_prepared_reads` test in isolation to compare the
+ordinary reader with prepared reads over 64 series and 2,050 samples split
+between native artifacts and an uncovered SST:
+
+```shell
+cargo test -p mito2 bench_mixed_prepared_reads -- --ignored --nocapture
+```
+
+The benchmark checks identical output and reports preparation separately from
+first-pass, reused-cache, and batched sample-read latency. The first two prepared
+passes request individual series; the batched pass requests all series together.
+The ordinary reader always performs a whole scan. These are different access
+patterns, so the per-series timings are not a direct throughput comparison.
+“Cold” denotes the first query-local projected-cache pass, not a flushed OS or
+object-store cache.
+
+Counters distinguish decoded keys, materialized tag arrays and their buffer
+sizes, allocated identity-key indices, projected-cache hits/misses, and fetched
+Parquet page bytes. Field buffers are shared by the compatible adapter; buffer
+sizes are not an allocator-wide count of copied bytes. Peak memory is the scan
+pool's tracked reservations, not process RSS; ordinary-reader allocations that
+do not use this pool are not represented by that peak. Run without concurrent
+builds or workloads for useful latency comparisons.

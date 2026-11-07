@@ -516,7 +516,7 @@ async fn prepared_sources_share_discovery_and_read_independently() {
 }
 
 #[tokio::test]
-async fn two_phase_raw_fallback_preserves_key_then_time_order() {
+async fn two_phase_prepared_sst_read_preserves_key_then_time_order() {
     let (_env, engine, region) = fixture_with(true).await;
     for round in 0..3 {
         for tsid in 0..4 {
@@ -562,7 +562,7 @@ async fn two_phase_raw_fallback_preserves_key_then_time_order() {
             .prepare_series(&ctx, &metrics, &binding)
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     let ranges = scanner
         .properties()
@@ -624,7 +624,7 @@ async fn two_phase_raw_fallback_preserves_key_then_time_order() {
 #[case::legacy(false)]
 #[case::two_phase(true)]
 #[tokio::test]
-async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v2: bool) {
+async fn native_scan_reads_mixed_sources_without_complete_artifacts(#[case] v2: bool) {
     let (_env, engine, region) = fixture_with(v2).await;
     let request = ScanRequest {
         distribution: Some(TimeSeriesDistribution::PerSeries),
@@ -655,13 +655,13 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
         )
         .await
     );
-    // Known unready coverage selects the ordinary scan instead of a prepared source.
+    // Uncovered SSTs are read by the prepared source.
     assert!(
         raw_scanner
             .prepare_series(&ctx, &metrics, &binding)
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
 
     build(&engine, &region).await;
@@ -742,8 +742,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
         samples(&unpacked.try_collect::<Vec<_>>().await.unwrap())
     );
 
-    // An assigned memtable is known unready, so the raw path keeps the ordinary scan and must
-    // still return the new row.
+    // The prepared source also reads new rows from an assigned memtable.
     write(&engine, &region, 0, 3000, Some(4.0)).await;
     let raw_scanner = engine
         .handle_query(region.region_id, request)
@@ -760,7 +759,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
             .prepare_series(&ctx, &metrics, &binding)
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     assert_eq!(
         vec![(1000, 1.0), (2000, 1.0), (3000, 4.0)],
@@ -877,10 +876,14 @@ async fn manual_build_covers_unknown_sequences_without_a_compaction_window() {
 }
 
 #[rstest::rstest]
-#[case::field(SemanticType::Field)]
-#[case::tag(SemanticType::Tag)]
+#[case::field(SemanticType::Field, false)]
+#[case::tag(SemanticType::Tag, false)]
+#[case::field_default(SemanticType::Field, true)]
 #[tokio::test]
-async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType) {
+async fn schema_changes_allow_added_labels_and_rebuild_fields(
+    #[case] semantic_type: SemanticType,
+    #[case] with_default: bool,
+) {
     use store_api::metadata::ColumnMetadata;
     use store_api::region_request::{AddColumn, AlterKind, RegionAlterRequest};
 
@@ -931,7 +934,13 @@ async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType
                         column_metadata: ColumnMetadata {
                             column_schema: datatypes::schema::ColumnSchema::new(
                                 "added", data_type, true,
-                            ),
+                            )
+                            .with_default_constraint(with_default.then(|| {
+                                datatypes::schema::ColumnDefaultConstraint::Value(Value::Float64(
+                                    7.0.into(),
+                                ))
+                            }))
+                            .unwrap(),
                             semantic_type,
                             column_id: 4,
                         },
@@ -942,27 +951,125 @@ async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType
         )
         .await
         .unwrap();
-    // Even a projection containing only the original fields must reject stale sidecars.
-    let scan = query();
-    let error = scan
+    {
+        let scan = query();
+        let source = scan
+            .prepare_series(
+                &QueryScanContext::default(),
+                &ExecutionPlanMetricsSet::new(),
+                &labels(scan.metadata()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let actual = rows(
+            &source
+                .read_series(0..source.num_series())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+        );
+        assert_eq!(expected, actual);
+        assert!(Arc::ptr_eq(&original, &region.series_index_version()));
+        if semantic_type == SemanticType::Tag {
+            // Old native labels and keys written under the new schema must agree
+            // on an absent label before predicates and identity conflict checks.
+            write(&engine, &region, 0, 3000, Some(3.0)).await;
+            flush_region(&engine, region.region_id, None).await;
+            for (predicate, count) in [
+                (col("added").is_null(), 3),
+                (col("added").is_null().or(col("added").eq(lit(""))), 3),
+                (col("added").eq(lit("present")), 0),
+            ] {
+                let mut outputs = Vec::new();
+                for format in [SelectedFormat::Legacy, SelectedFormat::Columnar] {
+                    let mut input = scan_input(
+                        &region,
+                        store.clone(),
+                        format,
+                        (0..region.version().metadata.column_metadatas.len()).collect(),
+                    );
+                    input.predicate = PredicateGroup::new(
+                        &region.version().metadata,
+                        std::slice::from_ref(&predicate),
+                    )
+                    .unwrap();
+                    let scan = SeriesScan::new(input, false);
+                    let mut binding = labels(scan.metadata());
+                    if let RawLabelSource::PrimaryKey { logical_tags, .. } = &mut binding {
+                        let mut tags = logical_tags.to_vec();
+                        tags.push(BoundTag {
+                            column_id: 4,
+                            name: Arc::from("added"),
+                        });
+                        *logical_tags = tags.into();
+                    }
+                    let chunks = scan
+                        .scan_series_partition(
+                            &QueryScanContext::default(),
+                            &ExecutionPlanMetricsSet::new(),
+                            0,
+                            &binding,
+                        )
+                        .unwrap()
+                        .unwrap()
+                        .try_collect::<Vec<_>>()
+                        .await
+                        .unwrap();
+                    outputs.push(rows(&chunks));
+                    if format == SelectedFormat::Columnar {
+                        let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
+                        assert!(!prepared.samples.is_empty());
+                        assert!(!prepared.plan.sample_files.is_empty());
+                    }
+                }
+                assert_eq!(outputs[0], outputs[1]);
+                assert_eq!(outputs[1].len(), count);
+            }
+            engine.stop().await.unwrap();
+            return;
+        }
+    }
+    // A query requiring the added field reads the source SSTs without rebuilding.
+    let scan = scanner_with_projection(
+        &region,
+        store.clone(),
+        SelectedFormat::Columnar,
+        (0..region.version().metadata.column_metadatas.len()).collect(),
+    );
+    let source = scan
         .prepare_series(
             &QueryScanContext::default(),
             &ExecutionPlanMetricsSet::new(),
             &labels(scan.metadata()),
         )
         .await
-        .err()
+        .unwrap()
         .unwrap();
-    assert!(
-        error
-            .output_msg()
-            .contains(if semantic_type == SemanticType::Field {
-                "missing scan fields"
-            } else {
-                "missing scan tags"
-            }),
-        "{error}"
-    );
+    let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    assert!(prepared.samples.is_empty());
+    assert!(!prepared.plan.sample_files.is_empty());
+    let chunks = source
+        .read_series(0..source.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(!chunks.is_empty());
+    if with_default {
+        for chunk in &chunks {
+            for row in 0..chunk.time.len() {
+                assert!(matches!(
+                    chunk.fields.get(1).unwrap().sample(row),
+                    SampleRef::Float(7.0)
+                ));
+            }
+        }
+        engine.stop().await.unwrap();
+        return;
+    }
+
     let (purger, _receiver) = series_index_channel(store.clone());
     let error = reconcile_series_indexes_with_mode(
         0,
@@ -1126,6 +1233,8 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let source = ColumnarPreparedSource {
+        plan: source.plan.clone(),
+        projected_groups: source.projected_groups.clone(),
         context: source.context.clone(),
         labels: source.labels.clone(),
         raw: source.raw.clone(),
@@ -1357,7 +1466,13 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
     };
     let mut context = make_context();
     let ranges = context.partition_ranges();
-    // Complete columnar coverage is the only ready answer.
+    // Preflight and preparation retain the same immutable source selection.
+    let preparation = Preparation::default();
+    let first = preparation.source_plan(&context, &ranges).unwrap();
+    assert!(preparation.validate_inputs(&context, &ranges).unwrap());
+    let second = preparation.source_plan(&context, &ranges).unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    // Complete columnar coverage is supported without opening artifact data.
     assert!(validate_inputs(&context, &ranges).unwrap());
     context.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
         index: context.input.num_files(),
@@ -1402,7 +1517,24 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
         row_group_index: -1,
     }]
     .into();
-    assert!(!validate_inputs(&partial, &ranges[..1]).unwrap());
+    assert!(validate_inputs(&partial, &ranges[..1]).unwrap());
+
+    // A valid partial row-group assignment retains its source SST instead of
+    // attempting to replace the entire file with a grouped sample artifact.
+    let mut partial_rows = make_context();
+    let mut meta = partial_rows.input.files[0].meta_ref().clone();
+    meta.num_row_groups = 2;
+    partial_rows.input.files[0] = FileHandle::new(meta, Arc::new(NoopFilePurger));
+    partial_rows.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
+        index: 0,
+        row_group_index: 0,
+    }]
+    .into();
+    let plan = collect_inputs(&partial_rows, &ranges[..1]).unwrap();
+    assert!(plan.supported);
+    assert!(plan.sample_files.contains(&0));
+    assert!(plan.discovery_files.contains(&0));
+    assert_eq!(plan.file_groups[&0], HashSet::from([0]));
 
     // A catalog can outlive a source generation until reconciliation runs.
     let mut stale = make_context();
@@ -1430,16 +1562,48 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
         series_indexes: index.version.series_indexes.clone(),
         ..Default::default()
     });
-    assert!(!validate_inputs(&stale, &ranges).unwrap());
+    assert!(validate_inputs(&stale, &ranges).unwrap());
 
-    // Missing columnar samples are a not-ready answer, not an error.
+    // Overlapping generations must not contribute the same source rows twice.
+    let mut overlapping = make_context();
+    let index = overlapping.input.series_index.as_mut().unwrap();
+    let mut samples = index.version.samples.clone();
+    let duplicate = samples.values().next().unwrap().clone();
+    samples.insert(FileId::random(), duplicate);
+    index.version = Arc::new(SeriesIndexVersion {
+        samples,
+        series_indexes: index.version.series_indexes.clone(),
+        ..Default::default()
+    });
+    let plan = collect_inputs(&overlapping, &ranges).unwrap();
+    assert!(!plan.sample_files.is_empty());
+    assert!(plan.samples.is_empty());
+
+    // Missing columnar samples select the prepared SST path.
     let mut context = make_context();
     let index = context.input.series_index.as_mut().unwrap();
     index.version = Arc::new(SeriesIndexVersion {
         series_indexes: index.version.series_indexes.clone(),
         ..Default::default()
     });
-    assert!(!validate_inputs(&context, &ranges).unwrap());
+    assert!(validate_inputs(&context, &ranges).unwrap());
+    let plan = collect_inputs(&context, &ranges).unwrap();
+    assert!(plan.discovery_files.is_empty());
+    assert_eq!(plan.sample_files.len(), context.input.num_files());
+    assert!(plan.samples.is_empty());
+
+    // Samples remain independently eligible when native discovery is unavailable.
+    let mut samples_only = make_context();
+    let index = samples_only.input.series_index.as_mut().unwrap();
+    index.version = Arc::new(SeriesIndexVersion {
+        samples: index.version.samples.clone(),
+        ..Default::default()
+    });
+    let plan = collect_inputs(&samples_only, &ranges).unwrap();
+    assert_eq!(plan.discovery_files.len(), samples_only.input.num_files());
+    assert!(plan.sample_files.is_empty());
+    assert!(!plan.samples.is_empty());
+
     // Invalid assignments remain errors even when sample coverage is incomplete.
     let mut invalid = ranges.clone();
     invalid.push(PartitionRange {
@@ -1473,7 +1637,8 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
 
     let scan = SeriesScan::new(context.input, false);
     let binding = labels(scan.metadata());
-    // The raw path stays available for the ordinary scan and preparation is skipped.
+    assert!(reads.lock().unwrap().is_empty());
+    // Missing samples use the SST path while retaining native discovery.
     assert!(scan.raw_series_schema(&binding).unwrap().is_some());
     assert!(
         scan.prepare_series(
@@ -1483,9 +1648,8 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
         )
         .await
         .unwrap()
-        .is_none()
+        .is_some()
     );
-    assert!(reads.lock().unwrap().is_empty());
     engine.stop().await.unwrap();
 }
 
@@ -2158,19 +2322,465 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
                 .await
                 .unwrap();
             if format == SelectedFormat::Columnar {
-                let prepared = scanner
-                    .prepared
-                    .source
-                    .get()
-                    .expect("columnar source must be prepared");
-                assert_eq!(
-                    identity_only,
-                    prepared.as_ref().unwrap().sample_schema.is_some()
-                );
+                let prepared = scanner.prepared.source.get();
+                assert_eq!(identity_only, prepared.is_some());
+                if let Some(prepared) = prepared {
+                    assert!(prepared.as_ref().unwrap().sample_schema.is_some());
+                }
             }
             results.push(rows(&chunks));
         }
         assert_eq!(results[0], results[1]);
+    }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_samples_discover_labels_from_uncovered_ssts() {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    let mut outputs = Vec::new();
+    for native_discovery in [true, false] {
+        let mut input = scan_input(
+            &region,
+            region.series_index_store.clone().unwrap(),
+            SelectedFormat::Columnar,
+            (0..region.version().metadata.column_metadatas.len()).collect(),
+        );
+        if !native_discovery {
+            let index = input.series_index.as_mut().unwrap();
+            index.version = Arc::new(crate::series_index::SeriesIndexVersion {
+                samples: index.version.samples.clone(),
+                ..Default::default()
+            });
+        }
+        let scan = SeriesScan::new(input, false);
+        let source = scan
+            .prepare_series(
+                &QueryScanContext::default(),
+                &ExecutionPlanMetricsSet::new(),
+                &labels(scan.metadata()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        outputs.push(rows(
+            &source
+                .read_series(0..source.num_series())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+        ));
+    }
+    assert!(!outputs[0].is_empty());
+    assert_eq!(outputs[0], outputs[1]);
+    engine.stop().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::cached(64 * 1024 * 1024)]
+#[case::streaming(1)]
+#[tokio::test]
+async fn projected_groups_reuse_across_series_and_stream_under_pressure(#[case] limit: usize) {
+    let (_env, engine, region) = fixture().await;
+    write(&engine, &region, 1, 4000, Some(2.0)).await;
+    write(&engine, &region, 2, 4000, Some(3.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    let scan = scanner(&region, region.series_index_store.clone().unwrap());
+    let source = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(scan.metadata()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = rows(
+        &source
+            .read_series(0..source.num_series())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap(),
+    );
+    let original = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    let cache = Arc::new(ProjectedRowGroups {
+        limit,
+        entries: Default::default(),
+        readers: Default::default(),
+    });
+    let source = ColumnarPreparedSource {
+        plan: original.plan.clone(),
+        context: original.context.clone(),
+        projected_groups: cache.clone(),
+        labels: original.labels.clone(),
+        raw: original.raw.clone(),
+        sample_schema: original.sample_schema.clone(),
+        candidates: original.candidates.clone(),
+        samples: original.samples.clone(),
+        metrics: original.metrics.clone(),
+        reservation: original.reservation.clone(),
+    };
+    let pool = source.context.input.scan_memory_pool.clone();
+    let baseline = pool.reserved();
+    let (left, right) = tokio::join!(
+        source
+            .read_series(0..source.num_series())
+            .unwrap()
+            .try_collect::<Vec<_>>(),
+        source
+            .read_series(0..source.num_series())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+    );
+    assert_eq!(rows(&left.unwrap()), expected);
+    assert_eq!(rows(&right.unwrap()), expected);
+    let mut actual = Vec::new();
+    let mut first_groups: Option<ProjectedGroupEntries> = None;
+    for ordinal in 0..source.num_series() {
+        actual.extend(rows(
+            &source
+                .read_series(ordinal..ordinal + 1)
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+        ));
+        let entries = cache.entries.lock().await;
+        assert!(entries.iter().map(|(_, group)| group.bytes).sum::<usize>() <= limit);
+        for (_, group) in entries.iter() {
+            for batch in &group.batches {
+                assert!(
+                    batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .all(|field| !field.name().starts_with("tag_"))
+                );
+                assert!(batch.column_by_name("__primary_key").is_some());
+            }
+        }
+        if limit == 1 {
+            assert!(entries.is_empty());
+        } else if let Some(first) = &first_groups {
+            for (key, group) in entries.iter() {
+                let old = first.iter().find(|(old_key, _)| old_key == key).unwrap();
+                assert!(Arc::ptr_eq(&old.1, group));
+            }
+        } else {
+            first_groups = Some(entries.clone());
+        }
+    }
+    assert_eq!(expected, actual);
+    assert!(cache.entries.try_lock().is_ok());
+    assert!(pool.reserved() <= baseline + limit);
+    drop(first_groups);
+    cache.entries.lock().await.clear();
+    assert_eq!(pool.reserved(), baseline);
+    // Cancellation releases the load lock and transient scan reservations.
+    let mut cancelled = source.read_series(0..source.num_series()).unwrap();
+    let _ = cancelled.try_next().await.unwrap();
+    drop(cancelled);
+    cache.entries.lock().await.clear();
+    assert_eq!(pool.reserved(), baseline);
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn mixed_source_snapshot_survives_flush_and_artifact_publication() {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    // Replace a native timestamp in Parquet and delete another in the memtable.
+    write(&engine, &region, 0, 2000, Some(2.0)).await;
+    write(&engine, &region, 0, 3000, Some(3.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    write(&engine, &region, 0, 1000, None).await;
+    write(&engine, &region, 0, 4000, Some(4.0)).await;
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    let scan = engine
+        .handle_query(region.region_id, request.clone())
+        .await
+        .unwrap();
+    let source = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(scan.metadata()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    // Advance the live version after preparation but before reading any samples.
+    write(&engine, &region, 0, 5000, Some(5.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Compact(store_api::region_request::RegionCompactRequest {
+                options: api::v1::region::compact_request::Options::StrictWindow(
+                    api::v1::region::StrictWindow {
+                        window_seconds: 3600,
+                    },
+                ),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    let chunks = source
+        .read_series(0..source.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        samples(&chunks),
+        vec![(2000, 2.0), (3000, 3.0), (4000, 4.0)]
+    );
+    let current = engine
+        .handle_query(region.region_id, request)
+        .await
+        .unwrap();
+    let current = current
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(current.metadata()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let chunks = current
+        .read_series(0..current.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        samples(&chunks),
+        vec![(2000, 2.0), (3000, 3.0), (4000, 4.0), (5000, 5.0)]
+    );
+    engine.stop().await.unwrap();
+}
+
+#[derive(Debug, Default)]
+struct PeakPool {
+    current: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+}
+
+impl std::fmt::Display for PeakPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("benchmark peak pool")
+    }
+}
+
+impl datafusion::execution::memory_pool::MemoryPool for PeakPool {
+    fn name(&self) -> &str {
+        "benchmark peak pool"
+    }
+    fn grow(&self, _: &MemoryReservation, additional: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let current = self.current.fetch_add(additional, Relaxed) + additional;
+        self.peak.fetch_max(current, Relaxed);
+    }
+    fn shrink(&self, _: &MemoryReservation, size: usize) {
+        self.current
+            .fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn try_grow(
+        &self,
+        reservation: &MemoryReservation,
+        additional: usize,
+    ) -> datafusion_common::Result<()> {
+        self.grow(reservation, additional);
+        Ok(())
+    }
+    fn reserved(&self) -> usize {
+        self.current.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn memory_limit(&self) -> datafusion::execution::memory_pool::MemoryLimit {
+        datafusion::execution::memory_pool::MemoryLimit::Infinite
+    }
+}
+
+/// Reproducible local comparison; run alone so process-global counters are isolated.
+#[tokio::test]
+#[ignore = "manual mixed prepared-read performance measurement"]
+#[allow(clippy::print_stdout)] // Reports measurements from an explicitly invoked benchmark.
+async fn bench_mixed_prepared_reads() {
+    let (_env, engine, region) = fixture().await;
+    for tsid in 0..64 {
+        for timestamp in 0..16 {
+            write(
+                &engine,
+                &region,
+                tsid,
+                10_000 + timestamp,
+                Some(tsid as f64 + 1.0),
+            )
+            .await;
+        }
+    }
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    for tsid in 0..64 {
+        for timestamp in 0..16 {
+            write(
+                &engine,
+                &region,
+                tsid,
+                20_000 + timestamp,
+                Some(tsid as f64 + 1.0),
+            )
+            .await;
+        }
+    }
+    flush_region(&engine, region.region_id, None).await;
+    let store = region.series_index_store.clone().unwrap();
+    let mut expected = None;
+    for format in [SelectedFormat::Legacy, SelectedFormat::Columnar] {
+        let pool = Arc::new(PeakPool::default());
+        let make_scanner = || {
+            let mut input = scan_input(
+                &region,
+                store.clone(),
+                format,
+                (0..region.version().metadata.column_metadatas.len()).collect(),
+            );
+            input.scan_memory_pool = pool.clone();
+            SeriesScan::new(input, false)
+        };
+        let scanner = make_scanner();
+        let binding = labels(scanner.metadata());
+        let started = Instant::now();
+        let prepared = scanner
+            .prepare_series(
+                &QueryScanContext::default(),
+                &ExecutionPlanMetricsSet::new(),
+                &binding,
+            )
+            .await
+            .unwrap();
+        println!(
+            "mixed_bench format={format:?} preparation_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        for temperature in ["cold", "warm", "batched"] {
+            let names = [
+                "flat_keys_decoded",
+                "flat_tag_arrays",
+                "sample_dictionary_keys_decoded",
+                "sample_tag_arrays_materialized",
+                "projected_group_cache_hits",
+                "projected_group_cache_misses",
+            ];
+            let before = names.map(|name| {
+                crate::metrics::COLUMNAR_READ_COUNT
+                    .with_label_values(&[name])
+                    .get()
+            });
+            let byte_names = [
+                "parquet_store_fetched",
+                "flat_tag_array_buffers",
+                "projected_group_parquet_store",
+                "projected_group_retained",
+                "sample_identity_keys_allocated",
+            ];
+            let byte_before = byte_names.map(|name| {
+                crate::metrics::COLUMNAR_READ_BYTES
+                    .with_label_values(&[name])
+                    .get()
+            });
+            pool.peak.store(
+                pool.current.load(std::sync::atomic::Ordering::Relaxed),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let started = Instant::now();
+            let mut actual = Vec::new();
+            if let Some(source) = &prepared {
+                let ranges = if temperature == "batched" {
+                    std::iter::once(0..source.num_series()).collect::<Vec<_>>()
+                } else {
+                    (0..source.num_series())
+                        .map(|ordinal| ordinal..ordinal + 1)
+                        .collect()
+                };
+                for range in ranges {
+                    actual.extend(rows(
+                        &source
+                            .read_series(range)
+                            .unwrap()
+                            .try_collect::<Vec<_>>()
+                            .await
+                            .unwrap(),
+                    ));
+                }
+            } else {
+                // Ordinary reads consume the whole scan rather than issuing one read per TSID.
+                let scanner = make_scanner();
+                actual = rows(
+                    &scanner
+                        .scan_series_partition(
+                            &QueryScanContext::default(),
+                            &ExecutionPlanMetricsSet::new(),
+                            0,
+                            &binding,
+                        )
+                        .unwrap()
+                        .unwrap()
+                        .try_collect::<Vec<_>>()
+                        .await
+                        .unwrap(),
+                );
+            }
+            let elapsed = started.elapsed();
+            if let Some(expected) = &expected {
+                assert_eq!(expected, &actual);
+            } else {
+                expected = Some(actual.clone());
+            }
+            println!(
+                "mixed_bench format={format:?} phase={temperature} rows={} elapsed_ms={:.3}",
+                actual.len(),
+                elapsed.as_secs_f64() * 1000.0
+            );
+            for (name, before) in names.into_iter().zip(before) {
+                println!(
+                    "  {name}={}",
+                    crate::metrics::COLUMNAR_READ_COUNT
+                        .with_label_values(&[name])
+                        .get()
+                        - before
+                );
+            }
+            for (name, before) in byte_names.into_iter().zip(byte_before) {
+                println!(
+                    "  {name}={}",
+                    crate::metrics::COLUMNAR_READ_BYTES
+                        .with_label_values(&[name])
+                        .get()
+                        - before
+                );
+            }
+            println!(
+                "  peak_scan_reserved_bytes={}",
+                pool.peak.load(std::sync::atomic::Ordering::Relaxed)
+            );
+            if let Some(source) = scanner.prepared.source.get() {
+                let source = source.as_ref().unwrap();
+                println!(
+                    "  scan_reserved_bytes={}",
+                    source.context.input.scan_memory_pool.reserved()
+                );
+            }
+        }
     }
     engine.stop().await.unwrap();
 }
@@ -2256,16 +2866,22 @@ async fn overlapping_buckets_reject_conflicting_physical_tags(#[case] mixed: boo
         // The conflict is in an unbound physical tag, which must still be checked.
         *logical_tags = logical_tags[..1].to_vec().into();
     }
-    let error = scan
+    let result = scan
         .prepare_series(
             &QueryScanContext::default(),
             &ExecutionPlanMetricsSet::new(),
             &binding,
         )
-        .await
-        .err()
-        .expect("conflicting physical tags must fail preparation");
-    assert!(error.output_msg().contains("conflicting labels"), "{error}");
+        .await;
+    if mixed {
+        // Mixed tag/value residuals belong to the ordinary reader on this branch.
+        assert!(result.unwrap().is_none());
+    } else {
+        let error = result
+            .err()
+            .expect("conflicting physical tags must fail preparation");
+        assert!(error.output_msg().contains("conflicting labels"), "{error}");
+    }
     engine.stop().await.unwrap();
 }
 
@@ -2341,6 +2957,11 @@ async fn visibility_fast_path_preserves_buffers_and_partial_filtering() {
                     visible.then_some(seq)
                 })
                 .collect::<Vec<_>>();
+            if !nulls && snapshot.is_none() && bounds.is_none() {
+                let untrusted = filter_source_visibility(batch.clone(), &context, false).unwrap();
+                assert!(Arc::ptr_eq(batch.column(0), untrusted.column(0)));
+                assert!(Arc::ptr_eq(batch.column(1), untrusted.column(1)));
+            }
             let filtered = filter_visibility(batch.clone(), &context).unwrap();
             let actual = filtered
                 .column(1)

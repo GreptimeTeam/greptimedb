@@ -756,6 +756,11 @@ pub fn decode_primary_keys(
         prev_key = Some(current_key);
     }
 
+    #[cfg(test)]
+    crate::metrics::COLUMNAR_READ_COUNT
+        .with_label_values(&["flat_keys_decoded"])
+        .inc_by(distinct_keys.len() as u64);
+
     let inner = match codec.encoding() {
         PrimaryKeyEncoding::Sparse => DecodedKeysInner::Sparse {
             values: pk_values_array.clone(),
@@ -1106,6 +1111,21 @@ impl FlatConvertFormat {
                 )?;
                 decoded_columns.push(tag_column);
             }
+        }
+
+        #[cfg(test)]
+        {
+            crate::metrics::COLUMNAR_READ_COUNT
+                .with_label_values(&["flat_tag_arrays"])
+                .inc_by(decoded_columns.len() as u64);
+            crate::metrics::COLUMNAR_READ_BYTES
+                .with_label_values(&["flat_tag_array_buffers"])
+                .inc_by(
+                    decoded_columns
+                        .iter()
+                        .map(|array| array.get_array_memory_size() as u64)
+                        .sum(),
+                );
         }
 
         // Builds new columns: decoded tag columns first, then original columns

@@ -28,7 +28,6 @@ use futures::stream::BoxStream;
 use object_store::ObjectStore;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::FileId;
-use store_api::storage::consts::ReservedColumnId;
 
 use crate::error::{InvalidRecordBatchSnafu, Result};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, SamplesFileHandle};
@@ -190,26 +189,49 @@ pub(crate) fn validate_sample_schema(schema: &SchemaRef, metadata: &RegionMetada
     Ok(())
 }
 
-/// Checks whether a series index contains exactly the current non-reserved tags.
+/// Validates only the sample columns required by a query.
+///
+/// Build-time validation remains stricter: a reusable build must include all
+/// current fields, whereas a query may read an older artifact's projection.
+pub(crate) fn validate_sample_projection(
+    schema: &SchemaRef,
+    metadata: &RegionMetadata,
+    required: impl IntoIterator<Item = u32>,
+) -> Result<()> {
+    for id in required {
+        let column = metadata
+            .column_by_id(id)
+            .ok_or_else(|| invalid("required sample column absent from scan schema"))?;
+        let field = schema
+            .fields()
+            .iter()
+            .find(|field| field_id(field).ok() == Some(id))
+            .ok_or_else(|| invalid("required sample column absent from artifact"))?;
+        if column.semantic_type == SemanticType::Tag
+            || column.column_schema.name != *field.name()
+            || column.column_schema.data_type.as_arrow_type() != *field.data_type()
+        {
+            return Err(invalid("incompatible required sample column"));
+        }
+    }
+    Ok(())
+}
+
+/// Checks stored labels against the current schema, allowing newly added labels.
+///
+/// Readers normalize absent labels to null before evaluating predicates.
 pub(crate) fn validate_series_schema(schema: &SchemaRef, metadata: &RegionMetadata) -> Result<()> {
-    let mut ids = HashSet::new();
     for field in schema.fields().iter().skip(3) {
         let id = field_id(field)?;
         let column = metadata
             .column_by_id(id)
             .ok_or_else(|| invalid("series tag absent from scan schema"))?;
-        if column.semantic_type != SemanticType::Tag || column.column_schema.name != *field.name() {
+        if column.semantic_type != SemanticType::Tag
+            || column.column_schema.name != *field.name()
+            || column.column_schema.data_type.as_arrow_type() != *field.data_type()
+        {
             return Err(invalid("series tag schema changed; rebuild series indexes"));
         }
-        ids.insert(id);
-    }
-    if metadata
-        .primary_key_columns()
-        .any(|c| !ReservedColumnId::is_reserved(c.column_id) && !ids.contains(&c.column_id))
-    {
-        return Err(invalid(
-            "series index is missing scan tags; rebuild series indexes",
-        ));
     }
     Ok(())
 }
@@ -226,12 +248,13 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType, Schema};
     use datatypes::prelude::DataType as _;
     use store_api::codec::PrimaryKeyEncoding;
+    use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
     use crate::test_util::sst_util::sst_region_metadata_with_encoding;
 
     #[test]
-    fn schema_compatibility_requires_current_columns() {
+    fn schema_compatibility_allows_added_labels() {
         let metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
         for tags in [false, true] {
             let mut fields = vec![
@@ -272,7 +295,7 @@ mod tests {
             let index = if tags { 3 } else { 2 };
             let mut missing = fields.clone();
             missing.remove(index);
-            assert!(validate(missing).is_err());
+            assert_eq!(validate(missing).is_ok(), tags);
             let mut renamed = fields.clone();
             renamed[index] = renamed[index].clone().with_name("renamed");
             assert!(validate(renamed).is_err());

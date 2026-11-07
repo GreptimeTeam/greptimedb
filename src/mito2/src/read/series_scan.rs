@@ -283,6 +283,10 @@ impl SeriesScan {
         if !self.uses_columnar() {
             return Ok(false);
         }
+        #[cfg(feature = "enterprise")]
+        if !self.stream_ctx.input.extension_ranges().is_empty() {
+            return Ok(false);
+        }
         let ranges = self
             .properties
             .partitions
@@ -290,7 +294,9 @@ impl SeriesScan {
             .flatten()
             .copied()
             .collect::<Vec<_>>();
-        prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)
+        self.prepared
+            .validate_inputs(&self.stream_ctx, &ranges)
+            .map_err(BoxedError::new)
     }
 
     /// Returns the raw ordering guarantee for a scan whose columnar readiness is already known.
@@ -441,8 +447,8 @@ impl SeriesScan {
             );
             return Ok(None);
         }
-        // Structural eligibility errors still reject the raw path; ordinary scans cover sources
-        // without columnar artifacts, so missing coverage is not an error here.
+        // Structural eligibility errors still reject the raw path. The prepared source
+        // reads uncovered SSTs and memtables alongside eligible native artifacts.
         let prepared_columnar = self.uses_prepared_columnar()? && columnar_fields_supported;
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
@@ -966,8 +972,7 @@ impl RegionScanner for SeriesScan {
                 Box::pin(stream),
             )));
         }
-        // Stored sources without columnar artifacts (memtables, unindexed SSTs) are read by the
-        // ordinary scan, so the raw path stays available.
+        // Unsupported prepared shapes retain the ordinary raw scan.
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,
@@ -1028,7 +1033,7 @@ impl RegionScanner for SeriesScan {
                 return Ok(None);
             };
             if !prepared_columnar {
-                // Known unsupported coverage: the caller keeps the ordinary scan instead.
+                // Unsupported schema or predicate shape: retain the ordinary scan.
                 return Ok(None);
             }
             state

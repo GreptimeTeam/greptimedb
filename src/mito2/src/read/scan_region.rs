@@ -1052,6 +1052,14 @@ pub(crate) struct ScanInputBuilder {
 }
 
 impl ScanInput {
+    /// Creates an SST reader against this scan's pinned access layer.
+    pub(crate) fn sst_reader(
+        &self,
+        file: FileHandle,
+    ) -> crate::sst::parquet::reader::ParquetReaderBuilder {
+        self.access_layer.read_sst(file)
+    }
+
     /// Creates a new [ScanInputBuilder].
     #[must_use]
     pub(crate) fn builder(
