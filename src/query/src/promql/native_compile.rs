@@ -31,6 +31,7 @@
 //!   <histogram function>(<expression>)             e.g. histogram_count(x)
 //!   <sort>(<expression>[, <string>]*)              e.g. sort_desc(x), sort_by_label(x, "job")
 //!   absent(<expression>)                           e.g. absent(x{job="a"})
+//!   absent_over_time(<matrix>)                     e.g. absent_over_time(x{job="a"}[5m])
 //!   <histogram>(<constant>+, <expression>)         e.g. histogram_quantile(0.9, rate(x[5m]))
 //!   <label function>(<expression>, <string>*)       e.g. label_replace(x, "a", "$1", "b", "(.*)")
 //!   <expression> <operator> <scalar>               e.g. x * 100, x > bool time()
@@ -265,8 +266,9 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
                          `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
                          them, as in `topk(3, x) by(job)` and `count_values(\"v\", x)`; a \
-                         sort, `absent` or `histogram_quantile` / `histogram_fraction` over any of \
-                         them (`sort_desc(x)`, `absent(x{job=\"a\"})`, \
+                         sort, `absent`, `absent_over_time` or `histogram_quantile` / \
+                         `histogram_fraction` over any of them (`sort_desc(x)`, \
+                         `absent(x{job=\"a\"})`, `absent_over_time(x{job=\"a\"}[5m])`, \
                          `histogram_quantile(0.9, rate(x[5m]))`); a range function's own \
                          constants sit where that function takes them, before \
                          the matrix for `quantile_over_time(0.9, x[5m])` and after it for \
@@ -1315,6 +1317,11 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     if call.func.name == "info" {
         return info_call(context, &call.args.args);
     }
+    // `absent_over_time` reads a matrix where `absent` reads a vector, so it cannot ride the vector
+    // path below: the operation it binds is `absent`'s own, over a presence read of the window.
+    if call.func.name == ABSENT_OVER_TIME {
+        return absent_over_time_call(context, &call.args.args);
+    }
     let Call { func, args } = call;
     if let Some(node) = scalar_call(context, func.name, &args.args)? {
         return Ok(node);
@@ -1637,6 +1644,71 @@ fn parameterized_histogram_call(
     }))
 }
 
+/// The PromQL name of `absent_over_time`, which is not a range function here: it reads a matrix but
+/// answers with `absent`'s vector operation rather than with one value per series.
+const ABSENT_OVER_TIME: &str = "absent_over_time";
+
+/// The range function `absent_over_time` folds a window with, to learn whether a series has a sample
+/// in it.
+///
+/// `absent` answers at every point its input holds no series at, so the matrix has to become one
+/// series per series holding a sample: a range function at all, rather than a value no series
+/// states. Which range function is therefore a question of which points a window reports, and
+/// `present_over_time` and `last_over_time` report the same ones — a window with at least one
+/// sample. The name is what separates them: `present_over_time` drops the metric name, and a
+/// selector written without one is discovered as one source per metric, so two metrics carrying the
+/// same ordinary labels would arrive at the fold as one label set. The window refuses two values of
+/// one label set at one point, because everything above it reads them as one series: the query
+/// would fail where Prometheus answers with the empty vector. Keeping the name keeps those two
+/// series apart, and `absent` reads presence alone, so the value this fold computes is not part of
+/// the answer.
+const PRESENCE_FOLD: RangeFunction = RangeFunction::LastOverTime;
+
+/// Binds `absent_over_time(m[d])` into `absent`'s own vector operation, over a presence read of the
+/// window.
+///
+/// Both halves are `absent`'s: the labels come from the matrix selector's matchers exactly as
+/// `absent` derives them from a vector selector's, and the operation tests whether its input holds
+/// a series at each grid point. What differs is only where that input comes from — a matrix folds a
+/// window rather than selecting an instant — which is why the call is bound here and not by
+/// [`vector_call`]: `absent_over_time` reads a matrix, and nothing in it is a vector expression the
+/// recursion could compile.
+///
+/// The existing plan answers this call per series with a UDF, which needs a metric name to read a
+/// table from; a selector written without one names its metrics only by the labels that pick them,
+/// which is exactly the shape `absent_over_time` is asked for when nothing matches.
+fn absent_over_time_call(context: &Context, arguments: &[Box<PromExpr>]) -> Result<NativeNode> {
+    let [matrix] = arguments else {
+        return Err(not_implemented(&format!(
+            "a call to `{ABSENT_OVER_TIME}` with {} argument(s), where it takes one matrix",
+            arguments.len()
+        )));
+    };
+    let labels = absent_labels_of(matrix)?;
+    let input = match unparen(matrix) {
+        PromExpr::MatrixSelector(MatrixSelector { vs, range }) => {
+            window_selection(context, PRESENCE_FOLD, vs, range)?
+        }
+        PromExpr::Subquery(subquery) => {
+            subquery_window(context, ABSENT_OVER_TIME, PRESENCE_FOLD, subquery)?
+        }
+        other => {
+            return Err(not_implemented(&format!(
+                "a call to `{ABSENT_OVER_TIME}` whose matrix is `{other}`, where it has to be a \
+                 range selector like `x[5m]` or a subquery like `x[5m:1m]`"
+            )));
+        }
+    };
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(input),
+            op: BoundVectorOp::Absent { labels },
+        },
+        output,
+    })
+}
+
 /// The vector operation a sort, `absent` or a classic histogram function binds, and the vector it reads,
 /// or `None` when `name` is none of them.
 fn vector_op<'a>(
@@ -1715,22 +1787,30 @@ fn vector_op<'a>(
     Ok(Some((BoundVectorOp::Sort(order), vector)))
 }
 
-/// The labels `absent(expr)` answers with, as Prometheus `createLabelsForAbsentFunction` derives
-/// them: from the matchers of a vector selector, and none for any other expression.
+/// The labels `absent(expr)` and `absent_over_time(m[d])` answer with, as Prometheus
+/// `createLabelsForAbsentFunction` derives them: from the matchers of a vector or range selector,
+/// and none for any other expression.
+///
+/// Both selectors carry the same matchers, and Prometheus derives the labels from them the same way
+/// in either position, so the range selector of `absent_over_time` reads exactly as the vector
+/// selector of `absent` does.
 ///
 /// `__field__`, `__schema__` and `__database__` choose what is read rather than match a label, so
 /// they are not labels of the answer, as in the existing planner.
 fn absent_labels_of(expr: &PromExpr) -> Result<SeriesLabels> {
-    let PromExpr::VectorSelector(selector) = unparen(expr) else {
-        return absent_labels(&[]);
+    let (selector, alternatives) = match unparen(expr) {
+        PromExpr::VectorSelector(selector) => (&selector.matchers, &selector.matchers.or_matchers),
+        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
+            (&vs.matchers, &vs.matchers.or_matchers)
+        }
+        _ => return absent_labels(&[]),
     };
-    if !selector.matchers.or_matchers.is_empty() {
+    if !alternatives.is_empty() {
         return Err(not_implemented(&format!(
-            "`absent` over `{selector}`, whose matchers are alternatives"
+            "`absent` or `absent_over_time` over `{expr}`, whose matchers are alternatives"
         )));
     }
     let matchers = selector
-        .matchers
         .matchers
         .iter()
         .filter(|matcher| {
