@@ -1657,8 +1657,16 @@ impl PrometheusHandler for Instance {
     async fn do_query_parsed(
         &self,
         query: ParsedPromQuery,
-        query_ctx: QueryContextRef,
+        mut query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        // Every Prometheus response is built from this method's result: the HTTP instant and range
+        // queries and the gRPC gateway all call it. Such a response names each row of a set operator
+        // after the side it came from, so the plan carries that name in a declared column; no other
+        // caller asks for it, which is why the request says so rather than the statement.
+        Arc::make_mut(&mut query_ctx).set_extension(
+            query::promql::planner::PROMETHEUS_RESPONSE_EXTENSION_KEY,
+            "true",
+        );
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();

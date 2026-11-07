@@ -533,9 +533,14 @@ impl PromPlanner {
             };
             // Bind only input tags: this data-free tree has no input, and its tags belong to its
             // output schema.
-            let Some(output_tags) = native_output_tags(tree.root(), &[]) else {
+            let Some(output_tags) = native_output_tags(
+                tree.root(),
+                &[],
+                declares_metric_name_column(self.table_provider.query_ctx()),
+            ) else {
                 return Ok(None);
             };
+
             let Some(values) = native_root_fields(tree.root()) else {
                 return Ok(None);
             };
@@ -742,8 +747,13 @@ impl PromPlanner {
                             return Ok(None);
                         };
                         // The expression names no metric, so each source reports its own: the tag is
-                        // what tells two metrics with equal ordinary labels apart.
-                        if !tags.iter().any(|tag| tag == METRIC_NAME) {
+                        // what tells two metrics with equal ordinary labels apart. Only a result
+                        // served as a Prometheus response reads that name per row, so only a request
+                        // for one reports the tag; every other caller reports the statement's own
+                        // columns.
+                        if declares_metric_name_column(self.table_provider.query_ctx())
+                            && !tags.iter().any(|tag| tag == METRIC_NAME)
+                        {
                             tags.push(METRIC_NAME.to_string());
                         }
                         let fields = schema
@@ -1296,9 +1306,13 @@ impl PromPlanner {
                 if root_kind != FieldKind::Float {
                     return Ok(None);
                 }
-                let Some(output_schema) =
-                    Self::fused_root_schema(&tree, &source_tags, &time, root_kind)
-                else {
+                let Some(output_schema) = Self::fused_root_schema(
+                    &tree,
+                    &source_tags,
+                    &time,
+                    root_kind,
+                    declares_metric_name_column(self.table_provider.query_ctx()),
+                ) else {
                     return Ok(None);
                 };
                 let Some(rawinput) = children.into_iter().next() else {
@@ -1349,6 +1363,7 @@ impl PromPlanner {
                 // a column that is not a tag. An unpartitioned table's scans are whole in one
                 // region, so its cuts keep the bare-scan form.
                 self_contained || any_split_series || (per_source_inputs && any_partitioned),
+                declares_metric_name_column(self.table_provider.query_ctx()),
             ))
             .await?;
             if let Some(plan) = plan {
@@ -1369,7 +1384,11 @@ impl PromPlanner {
         let output_tags = match &tree.root().output {
             // A scalar has no labels, and its value is named as a bare literal's is.
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => match native_output_tags(tree.root(), &source_tags) {
+            NativeType::Samples(_) => match native_output_tags(
+                tree.root(),
+                &source_tags,
+                declares_metric_name_column(self.table_provider.query_ctx()),
+            ) {
                 Some(output_tags) => output_tags,
                 None => return Ok(None),
             },
@@ -1433,10 +1452,11 @@ impl PromPlanner {
         source_tags: &[Vec<String>],
         time: &str,
         root_kind: FieldKind,
+        report_name: bool,
     ) -> Option<DFSchemaRef> {
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => native_output_tags(tree.root(), source_tags)?,
+            NativeType::Samples(_) => native_output_tags(tree.root(), source_tags, report_name)?,
             NativeType::AggregateState(_) => return None,
         };
         let root_fields = native_root_fields(tree.root())?;
@@ -2141,7 +2161,7 @@ fn build_evaluated_segment(
         )?;
         return Some((plan, tags));
     }
-    let output_tags = native_output_tags(tree.root(), &local_tags)?;
+    let output_tags = native_output_tags(tree.root(), &local_tags, false)?;
     if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None).is_err()
     {
         return None;
@@ -2195,7 +2215,7 @@ fn build_inner_segment(
         .map(|&index| per_source.get(index).map(|(_, _, tags)| tags.clone()))
         .collect::<Option<Vec<_>>>()?;
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
-    let output_tags = native_output_tags(tree.root(), &source_tags)?;
+    let output_tags = native_output_tags(tree.root(), &source_tags, false)?;
     let (inputs, metric, time_index, tags) = if let [index] = sources.as_slice() {
         let (metric, time_index, tags) = per_source.get(*index)?;
         (scans, metric.clone(), time_index.clone(), tags.clone())
@@ -2278,6 +2298,7 @@ async fn segment_tree(
     canonical_segmentation: bool,
     root_kind: FieldKind,
     remote_raw_boundary: bool,
+    report_name: bool,
 ) -> Result<Option<LogicalPlan>> {
     if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
         return Ok(None);
@@ -2349,6 +2370,7 @@ async fn segment_tree(
                     canonical_segmentation,
                     root_kind,
                     remote_raw_boundary,
+                    report_name,
                 ))
                 .await?;
                 match plan {
@@ -2467,9 +2489,13 @@ async fn segment_tree(
     }
     let output_schema = match format {
         FusedOutputFormat::PlainRows => {
-            let Some(schema) =
-                PromPlanner::fused_root_schema(&parent, &child_tags, time_index, root_kind)
-            else {
+            let Some(schema) = PromPlanner::fused_root_schema(
+                &parent,
+                &child_tags,
+                time_index,
+                root_kind,
+                report_name,
+            ) else {
                 return Ok(None);
             };
             schema
@@ -2828,13 +2854,23 @@ fn without_metric_name(tags: Vec<String>) -> Vec<String> {
 /// labels this walk does not derive - a whole-vector operation or a label rewrite, which renames the
 /// labels below it - so a tree holding one reports no label set here. Such a tree is declined rather
 /// than borrowing output names from the legacy planner.
-fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
+/// Whether the request asks for the per-row metric name column; see
+/// [`crate::promql::planner::PROMETHEUS_RESPONSE_EXTENSION_KEY`].
+fn declares_metric_name_column(query_ctx: &QueryContextRef) -> bool {
+    crate::promql::planner::prometheus_response_requested(query_ctx)
+}
+
+fn native_output_tags(
+    node: &NativeNode,
+    source_tags: &[Vec<String>],
+    report_name: bool,
+) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Aggregate { input, op } => {
             if matches!(&op.group, Grouping::By(names) if names.is_empty()) {
                 return Some(Vec::new());
             }
-            let tags = native_output_tags(input, source_tags)?;
+            let tags = native_output_tags(input, source_tags, report_name)?;
             Some(match &op.group {
                 Grouping::By(names) => tags
                     .into_iter()
@@ -2857,29 +2893,31 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
         // discovery input arrives carrying `__name__` and these arms are what decides it does not
         // survive.
         NativeExpr::Instant { input, op } => {
-            let tags = native_output_tags(input, source_tags)?;
+            let tags = native_output_tags(input, source_tags, report_name)?;
             Some(match op.value {
                 InstantValue::Timestamp => without_metric_name(tags),
                 InstantValue::Sample | InstantValue::InfoTimestamp => tags,
             })
         }
         NativeExpr::Window { input, op } => {
-            let tags = native_output_tags(input, source_tags)?;
+            let tags = native_output_tags(input, source_tags, report_name)?;
             Some(if op.function.drops_metric_name() {
                 without_metric_name(tags)
             } else {
                 tags
             })
         }
-        NativeExpr::Timestamp { input } => {
-            Some(without_metric_name(native_output_tags(input, source_tags)?))
-        }
+        NativeExpr::Timestamp { input } => Some(without_metric_name(native_output_tags(
+            input,
+            source_tags,
+            report_name,
+        )?)),
         // A label rewrite changes the label set itself: `label_replace` and `label_join` write their
         // destination label, so the input's labels are not the output's. A map of math alone keeps
         // them, minus the metric name its kernel drops.
         NativeExpr::Map { input, op } => {
             if op.ops.iter().any(|op| matches!(op, MapOp::Label(_))) {
-                let mut tags = native_output_tags(input, source_tags)?;
+                let mut tags = native_output_tags(input, source_tags, report_name)?;
                 for operation in op.ops.iter() {
                     if let MapOp::Label(rewrite) = operation {
                         let destination = rewrite.destination();
@@ -2892,7 +2930,7 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                 }
                 return Some(tags);
             }
-            let tags = native_output_tags(input, source_tags)?;
+            let tags = native_output_tags(input, source_tags, report_name)?;
             // A math kernel drops the name; a histogram kernel drops only the name, keeping the type
             // and unit.
             Some(
@@ -2909,36 +2947,44 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
         }
         // Its parameters are scalars, which carry no labels, so what the node reports are its
         // input's labels.
-        NativeExpr::ParameterizedMap { input, .. } => {
-            Some(without_metric_name(native_output_tags(input, source_tags)?))
-        }
+        NativeExpr::ParameterizedMap { input, .. } => Some(without_metric_name(
+            native_output_tags(input, source_tags, report_name)?,
+        )),
         // `scalar()` reports one value and no labels, like the scalar it produces.
         NativeExpr::ScalarOf { .. } => Some(Vec::new()),
         // Ranking keeps each selected series' own labels, and its parameter is a scalar.
-        NativeExpr::ParameterizedTopK { input, .. } => native_output_tags(input, source_tags),
+        NativeExpr::ParameterizedTopK { input, .. } => {
+            native_output_tags(input, source_tags, report_name)
+        }
         // A parameterized histogram function drops the bucket bound and the metadata labels, as its
         // bound counterpart does; its parameters are scalars and carry no labels.
-        NativeExpr::ParameterizedHistogram { input, .. } => native_output_tags(input, source_tags)
-            .map(|tags| {
+        NativeExpr::ParameterizedHistogram { input, .. } => {
+            native_output_tags(input, source_tags, report_name).map(|tags| {
                 tags.into_iter()
                     .filter(|tag| {
                         tag != "le" && tag != "__name__" && tag != "__type__" && tag != "__unit__"
                     })
                     .collect()
-            }),
+            })
+        }
         NativeExpr::Vector { input, op } => match op {
             BoundVectorOp::TopK { .. }
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
-            | BoundVectorOp::Sort(_) => native_output_tags(input, source_tags),
+            | BoundVectorOp::Sort(_) => native_output_tags(input, source_tags, report_name),
             // Keep in sync with promql::grid_series::METADATA_LABELS, which is crate-private.
-            BoundVectorOp::Histogram(_) => native_output_tags(input, source_tags).map(|tags| {
-                tags.into_iter()
-                    .filter(|tag| {
-                        tag != "le" && tag != "__name__" && tag != "__type__" && tag != "__unit__"
-                    })
-                    .collect()
-            }),
+            BoundVectorOp::Histogram(_) => {
+                native_output_tags(input, source_tags, report_name).map(|tags| {
+                    tags.into_iter()
+                        .filter(|tag| {
+                            tag != "le"
+                                && tag != "__name__"
+                                && tag != "__type__"
+                                && tag != "__unit__"
+                        })
+                        .collect()
+                })
+            }
             BoundVectorOp::Absent { labels } => Some(
                 labels
                     .tags()
@@ -2947,7 +2993,7 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                     .collect(),
             ),
             BoundVectorOp::CountValues { label, group } => {
-                let mut tags = native_output_tags(input, source_tags)?;
+                let mut tags = native_output_tags(input, source_tags, report_name)?;
                 if !tags.contains(&label.to_string()) {
                     tags.push(label.to_string());
                 }
@@ -2973,7 +3019,7 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
         },
         // The merge already assembled one series per canonical label set, so its labels are the
         // labels its input reported.
-        NativeExpr::Merge { input } => native_output_tags(input, source_tags),
+        NativeExpr::Merge { input } => native_output_tags(input, source_tags, report_name),
         // A filtering comparison reports the samples of the side it keeps, so the name survives it.
         // Every other binary operation computes new values, and `bool` reports the comparison's
         // outcome rather than either operand's samples, so both drop the name.
@@ -2984,8 +3030,8 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
         } => {
             let keeps_name = keeps_metric_name(matching);
             let tags = match (&left.output, &right.output) {
-                (NativeType::Scalar(_), _) => native_output_tags(right, source_tags)?,
-                (_, NativeType::Scalar(_)) => native_output_tags(left, source_tags)?,
+                (NativeType::Scalar(_), _) => native_output_tags(right, source_tags, report_name)?,
+                (_, NativeType::Scalar(_)) => native_output_tags(left, source_tags, report_name)?,
                 _ => {
                     let kept = |tags: Vec<String>| -> Vec<String> {
                         match &matching.labels {
@@ -3003,8 +3049,8 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                                 .collect(),
                         }
                     };
-                    let left_tags = native_output_tags(left, source_tags)?;
-                    let right_tags = native_output_tags(right, source_tags)?;
+                    let left_tags = native_output_tags(left, source_tags, report_name)?;
+                    let right_tags = native_output_tags(right, source_tags, report_name)?;
                     // A group takes the many side's labels as they are, because its result keeps
                     // one series per series of that side: `group_left` reports the left side's
                     // labels, `group_right` the right side's. `group_left(...)`/`group_right(...)`
@@ -3032,7 +3078,7 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                     // A filled left side takes an unmatched right series' matching labels, so
                     // those results carry the right side's tags.
                     if matching.fill.lhs.is_some() {
-                        for tag in kept(native_output_tags(right, source_tags)?) {
+                        for tag in kept(native_output_tags(right, source_tags, report_name)?) {
                             if !tags.contains(&tag) {
                                 tags.push(tag);
                             }
@@ -3048,9 +3094,9 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
             })
         }
         NativeExpr::Set { left, right, op } => {
-            let mut tags = native_output_tags(left, source_tags)?;
+            let mut tags = native_output_tags(left, source_tags, report_name)?;
             if op.op == SetOp::Or {
-                for tag in native_output_tags(right, source_tags)? {
+                for tag in native_output_tags(right, source_tags, report_name)? {
                     if !tags.contains(&tag) {
                         tags.push(tag);
                     }
@@ -3058,7 +3104,7 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
                 // `or` reports the series of both sides, and each row keeps the name of the side it
                 // came from. The runtime already answers that name for every series it reports, so
                 // the column it is read from is the one the tags name.
-                if !tags.iter().any(|tag| tag == METRIC_NAME) {
+                if report_name && !tags.iter().any(|tag| tag == METRIC_NAME) {
                     tags.push(METRIC_NAME.to_string());
                 }
             }
@@ -3071,8 +3117,8 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
             info,
             selector,
         } => {
-            let mut tags = native_output_tags(base, source_tags)?;
-            for tag in native_output_tags(info, source_tags)? {
+            let mut tags = native_output_tags(base, source_tags, report_name)?;
+            for tag in native_output_tags(info, source_tags, report_name)? {
                 let copied = selector.data_labels.is_empty()
                     || selector
                         .data_labels
@@ -3705,15 +3751,18 @@ mod tests {
         let on = compiled_test_tree("x + on(host) x");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            native_output_tags(on.root(), &sources)
+            native_output_tags(on.root(), &sources, true)
         );
         let ignoring = compiled_test_tree("x + x");
         assert_eq!(
             Some(tags.clone()),
-            native_output_tags(ignoring.root(), &sources)
+            native_output_tags(ignoring.root(), &sources, true)
         );
         let empty_on = compiled_test_tree("x + on() x");
-        assert_eq!(Some(vec![]), native_output_tags(empty_on.root(), &sources));
+        assert_eq!(
+            Some(vec![]),
+            native_output_tags(empty_on.root(), &sources, false)
+        );
         assert_eq!(Some(vec![]), fused_output_tags(empty_on.root(), &sources));
 
         // Two tables with different tags: the left side's labels pass through a wrapper and a
@@ -3725,12 +3774,12 @@ mod tests {
         let wrapped = compiled_test_tree("100 * (1 - x / on(host) y)");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            native_output_tags(wrapped.root(), &sources)
+            native_output_tags(wrapped.root(), &sources, true)
         );
         let and = compiled_test_tree("x and on(host) y");
         assert_eq!(
             Some(sources[0].clone()),
-            native_output_tags(and.root(), &sources)
+            native_output_tags(and.root(), &sources, true)
         );
         let or = compiled_test_tree("x or y");
         // `or` reports the series of both sides, so it reports each row's own name as well.
@@ -3741,7 +3790,7 @@ mod tests {
                 "zone".to_string(),
                 "__name__".to_string()
             ]),
-            native_output_tags(or.root(), &sources)
+            native_output_tags(or.root(), &sources, true)
         );
         // An unmatched right series answers with its own matching labels under a left fill.
         let fill = compiled_test_tree("x + fill_left(0) y");
@@ -3751,12 +3800,12 @@ mod tests {
                 "kind".to_string(),
                 "zone".to_string()
             ]),
-            native_output_tags(fill.root(), &sources)
+            native_output_tags(fill.root(), &sources, true)
         );
         let fill_on = compiled_test_tree("x + on(host) fill(0) y");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            native_output_tags(fill_on.root(), &sources)
+            native_output_tags(fill_on.root(), &sources, true)
         );
         // Group modifiers retain the many-side labels and copy declared labels from the one side.
         let group_sources = [
@@ -3791,7 +3840,7 @@ mod tests {
                 .map(String::from)
                 .collect()
             ),
-            native_output_tags(group_left.root(), &group_sources)
+            native_output_tags(group_left.root(), &group_sources, true)
         );
         let group_right =
             compiled_test_tree("x * on(cluster, namespace, pod) group_right(container) y");
@@ -3809,7 +3858,7 @@ mod tests {
                 .map(String::from)
                 .collect()
             ),
-            native_output_tags(group_right.root(), &group_sources)
+            native_output_tags(group_right.root(), &group_sources, true)
         );
         for query in [
             "x * on() group_left(workload) y",
@@ -3829,7 +3878,10 @@ mod tests {
                 ]
             };
             let expected = Some(expected.into_iter().map(String::from).collect());
-            assert_eq!(expected, native_output_tags(tree.root(), &group_sources));
+            assert_eq!(
+                expected,
+                native_output_tags(tree.root(), &group_sources, false)
+            );
             assert_eq!(expected, fused_output_tags(tree.root(), &group_sources));
         }
         // An outer match narrows the labels the inner one already narrowed.
@@ -3849,7 +3901,7 @@ mod tests {
         ] {
             assert_eq!(
                 Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
-                native_output_tags(compiled_test_tree(query).root(), &sources),
+                native_output_tags(compiled_test_tree(query).root(), &sources, true),
                 "{query}"
             );
         }
@@ -3865,7 +3917,7 @@ mod tests {
             let aggregate = compiled_test_tree(query);
             assert_eq!(
                 Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
-                native_output_tags(aggregate.root(), &sources),
+                native_output_tags(aggregate.root(), &sources, true),
                 "{query}"
             );
         }
@@ -3881,14 +3933,14 @@ mod tests {
         ] {
             assert_eq!(
                 Some(vec!["hostname".to_string()]),
-                native_output_tags(compiled_test_tree(query).root(), &hostname_source),
+                native_output_tags(compiled_test_tree(query).root(), &hostname_source, true),
                 "{query}"
             );
         }
         let absent = compiled_test_tree("absent(x{host=\"a\", job=\"b\"})");
         assert_eq!(
             Some(vec!["host".to_string(), "job".to_string()]),
-            native_output_tags(absent.root(), &sources)
+            native_output_tags(absent.root(), &sources, true)
         );
         // A per-point `k` keeps the input's labels too: it selects the same series the bound form
         // selects, so it reports the same set. Its parameter reads a source of its own, so this tree
@@ -3897,7 +3949,8 @@ mod tests {
             Some(vec!["hostname".to_string()]),
             native_output_tags(
                 compiled_test_tree("topk(scalar(x), sum by (hostname) (rate(x[5m])))").root(),
-                &[vec!["hostname".to_string()], vec!["hostname".to_string()]]
+                &[vec!["hostname".to_string()], vec!["hostname".to_string()]],
+                false
             ),
             "a per-point k reports its input's labels"
         );
@@ -3905,19 +3958,19 @@ mod tests {
             compiled_test_tree("count_values by (host) (\"sample\", sum by (host) (x))");
         assert_eq!(
             Some(vec!["host".to_string(), "sample".to_string()]),
-            native_output_tags(count_values.root(), &sources)
+            native_output_tags(count_values.root(), &sources, true)
         );
         // A destination already present in the grouping is reported once, not duplicated.
         let count_values = compiled_test_tree("count_values by (host) (\"host\", x)");
         assert_eq!(
             Some(vec!["host".to_string()]),
-            native_output_tags(count_values.root(), &sources)
+            native_output_tags(count_values.root(), &sources, false)
         );
         // Selecting some series keeps each one's own labels, whatever the grouping was.
         let topk = compiled_test_tree("topk(1, x)");
         assert_eq!(
             Some(sources[0].clone()),
-            native_output_tags(topk.root(), &sources),
+            native_output_tags(topk.root(), &sources, true),
             "topk keeps the labels of the series it selects"
         );
         for query in [
@@ -3932,7 +3985,7 @@ mod tests {
                         .map(String::from)
                         .collect()
                 ),
-                native_output_tags(rewrite.root(), &sources),
+                native_output_tags(rewrite.root(), &sources, true),
                 "{query}"
             );
         }
@@ -3971,7 +4024,7 @@ mod tests {
         let tree = compiled_test_tree("x * on(pod) group_left(container) y");
         assert_eq!(
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
-            native_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources, true)
         );
     }
 
@@ -3986,20 +4039,20 @@ mod tests {
         let sum = compiled_test_tree("sum without (instance) (x)");
         assert_eq!(
             Some(vec!["job".to_string()]),
-            native_output_tags(sum.root(), &sources)
+            native_output_tags(sum.root(), &sources, true)
         );
 
         let count_values = compiled_test_tree("count_values without (instance) (\"sample\", x)");
         assert_eq!(
             Some(vec!["job".to_string(), "sample".to_string()]),
-            native_output_tags(count_values.root(), &sources)
+            native_output_tags(count_values.root(), &sources, true)
         );
 
         let count_values =
             compiled_test_tree("count_values without (sample, instance) (\"sample\", x)");
         assert_eq!(
             Some(vec!["job".to_string()]),
-            native_output_tags(count_values.root(), &sources)
+            native_output_tags(count_values.root(), &sources, false)
         );
     }
 
@@ -4012,7 +4065,7 @@ mod tests {
         let tree = compiled_test_tree("x * on(pod) group_right(container) y");
         assert_eq!(
             Some(vec!["pod".into(), "workload".into(), "container".into()]),
-            native_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources, true)
         );
     }
 
@@ -4034,7 +4087,7 @@ mod tests {
             };
             assert_eq!(1, schema.fields.len(), "{query}");
             assert_eq!("v0", schema.fields[0].name.as_ref(), "{query}");
-            let tags = native_output_tags(tree.root(), &sources).unwrap();
+            let tags = native_output_tags(tree.root(), &sources, true).unwrap();
             assert_eq!(
                 vec!["host", "zone"],
                 tags.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -4091,7 +4144,7 @@ mod tests {
         let tree = compiled_test_tree("histogram_quantile(0.9, x)");
         assert_eq!(
             Some(vec!["job".to_string()]),
-            native_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources, true)
         );
     }
 
@@ -4102,7 +4155,7 @@ mod tests {
         let tree = compiled_test_tree("abs(x) * 2");
         assert_eq!(
             Some(vec!["host".to_string(), "kind".to_string()]),
-            native_output_tags(tree.root(), &sources)
+            native_output_tags(tree.root(), &sources, true)
         );
     }
 
