@@ -23,19 +23,9 @@ use hyper::HeaderMap;
 use serde_json::Value;
 
 pub mod constants {
-    // New HTTP headers would better distinguish use cases among:
-    // * GreptimeDB
-    // * GreptimeCloud
-    // * ...
-    //
-    // And thus trying to use:
-    // * x-greptime-db-xxx
-    // * x-greptime-cloud-xxx
-    //
-    // ... accordingly
-    //
-    // Most of the headers are for GreptimeDB and thus using `x-greptime-db-` as prefix.
-    // Only use `x-greptime-cloud` when it's intentionally used by GreptimeCloud.
+    // Public request hints use x-greptime-hints and the shared hint registry.
+    // Dedicated headers below retain their existing spelling for compatibility;
+    // transport controls (authentication, database, timeout) are separate.
 
     // LEGACY HEADERS - KEEP IT UNMODIFIED
     pub const GREPTIME_DB_HEADER_FORMAT: &str = "x-greptime-format";

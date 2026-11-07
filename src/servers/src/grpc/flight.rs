@@ -46,7 +46,6 @@ use query::metrics::terminal_recordbatch_metrics_from_plan_if_requested;
 use query::options::FlowQueryExtensions;
 use session::context::{Channel, QueryContextRef};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
-use table::requests::AUTO_CREATE_TABLE_KEY;
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -57,9 +56,11 @@ pub use crate::grpc::flight::stream::{
     FlightRecordBatchSource, FlightRecordBatchStream, FlightRecordBatchStreamInput,
 };
 use crate::grpc::greptime_handler::{
-    GreptimeRequestHandler, create_query_context, get_request_type,
+    GreptimeRequestHandler, create_query_context_for_protocol, get_request_type,
+    protocol_for_request,
 };
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
+use crate::hints::protocol::Protocol;
 use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::request_memory_metrics::RequestMemoryMetrics;
 use crate::{error, hint_headers};
@@ -198,7 +199,6 @@ impl FlightCraft for GreptimeRequestHandler {
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
         let mut hints = hint_headers::extract_hints(request.metadata());
-        hints = hint_headers::validate_public_hints(hints)?;
         hints.extend(extract_flow_extensions(request.metadata())?);
         let snapshot_seqs = extract_snapshot_seqs(request.metadata())?;
         let channel = request
@@ -210,8 +210,18 @@ impl FlightCraft for GreptimeRequestHandler {
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
-        let query_ctx =
-            create_query_context(channel, request.header.as_ref(), hints, snapshot_seqs)?;
+        let protocol = request
+            .request
+            .as_ref()
+            .map(protocol_for_request)
+            .unwrap_or(Protocol::Other);
+        let query_ctx = create_query_context_for_protocol(
+            channel,
+            request.header.as_ref(),
+            hints,
+            snapshot_seqs,
+            protocol,
+        )?;
         // Validate flow hint syntax at the transport boundary before dispatching the request.
         // This does not authorize or execute anything; `handle_request()` below still performs
         // the normal frontend handling and auth checks before query execution.
@@ -256,14 +266,11 @@ impl FlightCraft for GreptimeRequestHandler {
 
         let limiter = extensions.get::<ServerMemoryLimiter>().cloned();
 
-        let mut query_ctx =
-            context_auth::create_query_context_from_grpc_metadata(&headers, &extensions)?;
-        // Bulk streams use the same schema-on-write switch as row inserts.
-        for (key, value) in hint_headers::extract_hints(&headers) {
-            if key == AUTO_CREATE_TABLE_KEY {
-                Arc::make_mut(&mut query_ctx).set_extension(key, value);
-            }
-        }
+        let query_ctx = context_auth::create_query_context_from_grpc_metadata_for_protocol(
+            &headers,
+            &extensions,
+            Protocol::BulkInsert,
+        )?;
         context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
 
         const MAX_PENDING_RESPONSES: usize = 32;
@@ -646,6 +653,7 @@ fn output_to_flight_record_batch_source(
 
 #[cfg(test)]
 mod tests {
+    use crate::grpc::greptime_handler::create_query_context;
     use query::options::{
         FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_RETURN_REGION_SEQ,
         FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, FlowIncrementalMode,

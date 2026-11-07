@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod hint_catalog;
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Display;
@@ -59,6 +61,7 @@ use crate::elasticsearch;
 use crate::error::{
     AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
 };
+use crate::hints::protocol::Protocol;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::otlp::OtlpState;
 use crate::http::prom_store::PromStoreState;
@@ -119,8 +122,6 @@ pub(crate) use timeout::DynamicTimeoutLayer;
 mod client_ip;
 use crate::prom_remote_write::validation::PromValidationMode;
 mod hints;
-mod read_preference;
-mod skip_wal;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
@@ -874,7 +875,12 @@ impl HttpServerBuilder {
 
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
-            router: self.router.merge(router),
+            router: self
+                .router
+                .merge(router.layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                ))),
             ..self
         }
     }
@@ -1098,11 +1104,7 @@ impl HttpServer {
                         self.logical_batching_protocols.clone(),
                     )))
                     .layer(middleware::from_fn(hints::extract_hints))
-                    .layer(middleware::from_fn(client_ip::log_error_with_client_ip))
-                    .layer(middleware::from_fn(
-                        read_preference::extract_read_preference,
-                    ))
-                    .layer(middleware::from_fn(skip_wal::extract_skip_wal)),
+                    .layer(middleware::from_fn(client_ip::log_error_with_client_ip)),
             );
 
         // Debug handlers are part of the complete router; the API listener hides
@@ -1191,6 +1193,10 @@ impl HttpServer {
                 BatchingProtocol::Loki,
                 set_http_write_batching,
             ))
+            .layer(middleware::from_fn_with_state(
+                Protocol::Loki,
+                hints::apply_protocol_hints,
+            ))
             .with_state(log_state)
     }
 
@@ -1233,6 +1239,10 @@ impl HttpServer {
             .layer(middleware::from_fn_with_state(
                 BatchingProtocol::Splunk,
                 set_http_write_batching,
+            ))
+            .layer(middleware::from_fn_with_state(
+                Protocol::Splunk,
+                hints::apply_protocol_hints,
             ))
             .with_state(log_state)
     }
@@ -1321,6 +1331,10 @@ impl HttpServer {
                 BatchingProtocol::Elasticsearch,
                 set_http_write_batching,
             ))
+            .layer(middleware::from_fn_with_state(
+                Protocol::Elasticsearch,
+                hints::apply_protocol_hints,
+            ))
             .with_state(log_state)
     }
 
@@ -1330,20 +1344,41 @@ impl HttpServer {
         memory_limiter: ServerMemoryLimiter,
     ) -> Router<S> {
         Router::new()
-            .route("/logs", routing::post(event::log_ingester))
             .route(
-                "/pipelines/{pipeline_name}",
-                routing::get(event::query_pipeline),
+                "/logs",
+                routing::post(event::log_ingester).layer(middleware::from_fn_with_state(
+                    Protocol::Logs,
+                    hints::apply_protocol_hints,
+                )),
             )
             .route(
                 "/pipelines/{pipeline_name}",
-                routing::post(event::add_pipeline),
+                routing::get(event::query_pipeline).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
             )
             .route(
                 "/pipelines/{pipeline_name}",
-                routing::delete(event::delete_pipeline),
+                routing::post(event::add_pipeline).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
             )
-            .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
+            .route(
+                "/pipelines/{pipeline_name}",
+                routing::delete(event::delete_pipeline).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
+            )
+            .route(
+                "/pipelines/dryrun",
+                routing::post(event::pipeline_dryrun).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
+            )
             .layer(middleware::from_fn_with_state(
                 memory_limiter,
                 memory_limit::decoded_body_accounting_middleware,
@@ -1361,24 +1396,48 @@ impl HttpServer {
 
     fn route_pipelines<S>(log_state: LogState, memory_limiter: ServerMemoryLimiter) -> Router<S> {
         Router::new()
-            .route("/ingest", routing::post(event::log_ingester))
+            .route(
+                "/ingest",
+                routing::post(event::log_ingester).layer(middleware::from_fn_with_state(
+                    Protocol::Logs,
+                    hints::apply_protocol_hints,
+                )),
+            )
             .route(
                 "/pipelines/{pipeline_name}",
-                routing::get(event::query_pipeline),
+                routing::get(event::query_pipeline).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
             )
             .route(
                 "/pipelines/{pipeline_name}/ddl",
-                routing::get(event::query_pipeline_ddl),
+                routing::get(event::query_pipeline_ddl).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
             )
             .route(
                 "/pipelines/{pipeline_name}",
-                routing::post(event::add_pipeline),
+                routing::post(event::add_pipeline).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
             )
             .route(
                 "/pipelines/{pipeline_name}",
-                routing::delete(event::delete_pipeline),
+                routing::delete(event::delete_pipeline).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
             )
-            .route("/pipelines/_dryrun", routing::post(event::pipeline_dryrun))
+            .route(
+                "/pipelines/_dryrun",
+                routing::post(event::pipeline_dryrun).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
+            )
             .layer(middleware::from_fn_with_state(
                 memory_limiter,
                 memory_limit::decoded_body_accounting_middleware,
@@ -1397,6 +1456,13 @@ impl HttpServer {
     fn route_sql<S>(api_state: ApiState, batch_body_limit: usize) -> Router<S> {
         Router::new()
             .route(
+                "/hints",
+                routing::get(hint_catalog::list_hints).layer(middleware::from_fn_with_state(
+                    Protocol::Other,
+                    hints::apply_protocol_hints,
+                )),
+            )
+            .route(
                 "/capabilities",
                 routing::get(|State(state): State<ApiState>| async move {
                     let mut capabilities =
@@ -1410,32 +1476,55 @@ impl HttpServer {
             .route(
                 "/ddl/logical-tables",
                 routing::post(handler::create_logical_tables)
-                    .layer(DefaultBodyLimit::max(batch_body_limit)),
+                    .layer(DefaultBodyLimit::max(batch_body_limit))
+                    .layer(middleware::from_fn_with_state(
+                        Protocol::Sql,
+                        hints::apply_protocol_hints,
+                    )),
             )
             .route(
                 "/sql",
-                routing::get(handler::sql).post(handler::sql).layer(
-                    middleware::from_fn_with_state(
+                routing::get(handler::sql)
+                    .post(handler::sql)
+                    .layer(middleware::from_fn_with_state(
                         BatchingProtocol::HttpSql,
                         set_http_write_batching,
-                    ),
-                ),
+                    ))
+                    .layer(middleware::from_fn_with_state(
+                        Protocol::Sql,
+                        hints::apply_protocol_hints,
+                    )),
             )
             .route(
                 "/sql/parse",
-                routing::get(handler::sql_parse).post(handler::sql_parse),
+                routing::get(handler::sql_parse)
+                    .post(handler::sql_parse)
+                    .layer(middleware::from_fn_with_state(
+                        Protocol::Other,
+                        hints::apply_protocol_hints,
+                    )),
             )
             .route(
                 "/sql/format",
-                routing::get(handler::sql_format).post(handler::sql_format),
+                routing::get(handler::sql_format)
+                    .post(handler::sql_format)
+                    .layer(middleware::from_fn_with_state(
+                        Protocol::Other,
+                        hints::apply_protocol_hints,
+                    )),
             )
             .route(
                 "/promql",
-                routing::get(handler::promql).post(handler::promql),
+                routing::get(handler::promql).post(handler::promql).layer(
+                    middleware::from_fn_with_state(Protocol::Promql, hints::apply_protocol_hints),
+                ),
             )
             .route(
                 "/sql/analyze/stream",
-                routing::post(handler::sql_analyze_stream),
+                routing::post(handler::sql_analyze_stream).layer(middleware::from_fn_with_state(
+                    Protocol::Sql,
+                    hints::apply_protocol_hints,
+                )),
             )
             .with_state(api_state)
     }
@@ -1443,6 +1532,10 @@ impl HttpServer {
     fn route_logs<S>(log_handler: LogQueryHandlerRef) -> Router<S> {
         Router::new()
             .route("/logs", routing::get(logs::logs).post(logs::logs))
+            .layer(middleware::from_fn_with_state(
+                Protocol::LogQuery,
+                hints::apply_protocol_hints,
+            ))
             .with_state(log_handler)
     }
 
@@ -1467,6 +1560,10 @@ impl HttpServer {
                 routing::get(label_values_query),
             )
             .layer(ServiceBuilder::new().layer(CompressionLayer::new()))
+            .layer(middleware::from_fn_with_state(
+                Protocol::Promql,
+                hints::apply_protocol_hints,
+            ))
             .with_state(prometheus_handler)
     }
 
@@ -1476,7 +1573,10 @@ impl HttpServer {
     /// [read]: https://prometheus.io/docs/prometheus/latest/querying/remote_read_api/
     /// [write]: https://prometheus.io/docs/concepts/remote_write_spec/
     fn route_prom<S>(state: PromStoreState) -> Router<S> {
-        let write = routing::post(prom_store::remote_write);
+        let write = routing::post(prom_store::remote_write).layer(middleware::from_fn_with_state(
+            Protocol::PrometheusRemoteWrite,
+            hints::apply_protocol_hints,
+        ));
         let write = if state.prom_store_with_metric_engine {
             write
         } else {
@@ -1486,7 +1586,13 @@ impl HttpServer {
             ))
         };
         Router::new()
-            .route("/read", routing::post(prom_store::remote_read))
+            .route(
+                "/read",
+                routing::post(prom_store::remote_read).layer(middleware::from_fn_with_state(
+                    Protocol::PrometheusRemoteRead,
+                    hints::apply_protocol_hints,
+                )),
+            )
             .route("/write", write)
             .with_state(state)
     }
@@ -1512,6 +1618,10 @@ impl HttpServer {
                 BatchingProtocol::Influxdb,
                 set_http_write_batching,
             ))
+            .layer(middleware::from_fn_with_state(
+                Protocol::Influxdb,
+                hints::apply_protocol_hints,
+            ))
             .with_state(influxdb_handler)
     }
 
@@ -1522,6 +1632,10 @@ impl HttpServer {
                 BatchingProtocol::Opentsdb,
                 set_http_write_batching,
             ))
+            .layer(middleware::from_fn_with_state(
+                Protocol::Opentsdb,
+                hints::apply_protocol_hints,
+            ))
             .with_state(opentsdb_handler)
     }
 
@@ -1531,9 +1645,27 @@ impl HttpServer {
         memory_limiter: ServerMemoryLimiter,
     ) -> Router<S> {
         Router::new()
-            .route("/v1/metrics", routing::post(otlp::metrics))
-            .route("/v1/traces", routing::post(otlp::traces))
-            .route("/v1/logs", routing::post(otlp::logs))
+            .route(
+                "/v1/metrics",
+                routing::post(otlp::metrics).layer(middleware::from_fn_with_state(
+                    Protocol::OtlpMetrics,
+                    hints::apply_protocol_hints,
+                )),
+            )
+            .route(
+                "/v1/traces",
+                routing::post(otlp::traces).layer(middleware::from_fn_with_state(
+                    Protocol::OtlpTraces,
+                    hints::apply_protocol_hints,
+                )),
+            )
+            .route(
+                "/v1/logs",
+                routing::post(otlp::logs).layer(middleware::from_fn_with_state(
+                    Protocol::OtlpLogs,
+                    hints::apply_protocol_hints,
+                )),
+            )
             .layer(middleware::from_fn_with_state(
                 memory_limiter,
                 memory_limit::decoded_body_accounting_middleware,
@@ -1594,6 +1726,10 @@ impl HttpServer {
                 "/api/v3/traces/{trace_id}",
                 routing::get(jaeger::v3::handle_get_trace),
             )
+            .layer(middleware::from_fn_with_state(
+                Protocol::Jaeger,
+                hints::apply_protocol_hints,
+            ))
             .with_state(handler)
     }
 
@@ -1770,7 +1906,12 @@ mod test {
 
     #[async_trait]
     impl SqlQueryHandler for DummyInstance {
-        async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+        async fn do_query(&self, query: &str, context: QueryContextRef) -> Vec<Result<Output>> {
+            if query == "SELECT 'hint_context'" {
+                return vec![Ok(Output::new_with_affected_rows(usize::from(
+                    context.skip_wal(),
+                )))];
+            }
             unimplemented!()
         }
 
@@ -1823,6 +1964,40 @@ mod test {
             .route("/test/timeout", get(forever))
             .route("/v1/prometheus/write", post(forever));
         server.build(app).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_http_sql_handler_receives_wal_hint() {
+        use crate::hints::compatibility::INSERT_SKIP_WAL_HEADER;
+        use crate::http::header::constants::GREPTIME_INSERT_SKIP_WAL_HEADER_NAME;
+        use session::hints;
+
+        let (tx, _rx) = mpsc::channel(1);
+        let client = TestClient::new(make_test_app(tx)).await;
+        for (headers, expected) in [
+            (vec![], 0),
+            (vec![(hints::HINTS_KEY, "insert_skip_wal=true")], 1),
+            (vec![(INSERT_SKIP_WAL_HEADER, "true")], 1),
+            (vec![(GREPTIME_INSERT_SKIP_WAL_HEADER_NAME, "true")], 1),
+            (
+                vec![
+                    (hints::HINTS_KEY, "insert_skip_wal=invalid"),
+                    (GREPTIME_INSERT_SKIP_WAL_HEADER_NAME, "false"),
+                ],
+                0,
+            ),
+        ] {
+            let mut request = client.get("/v1/sql?sql=SELECT%20%27hint_context%27");
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            let response = request.send().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.json::<serde_json::Value>().await["output"][0]["affectedrows"],
+                expected
+            );
+        }
     }
 
     fn make_split_builder() -> HttpServerBuilder {
