@@ -54,8 +54,8 @@ use common_query::native_histogram::{
 use common_query::promql_annotations::PromqlAnnotationCollector;
 use common_query::series_frame::{
     SendableEvaluatedSeriesStream, SendableStateSeriesStream, ensure_frame_matches_label_source,
-    pack_aggregate_state, pack_evaluated_series, series_frame_ordering, unpack_aggregate_state,
-    unpack_evaluated_series, unpack_raw_series,
+    frame_schema_with, pack_aggregate_state, pack_evaluated_series, series_frame_ordering,
+    unpack_aggregate_state, unpack_evaluated_series, unpack_raw_series,
 };
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::ScalarBuffer;
@@ -292,12 +292,15 @@ fn output_frame_schema(
 }
 
 fn series_frame_output_schema(schema: &SeriesSchema) -> DataFusionResult<SchemaRef> {
-    let stream =
-        pack_evaluated_series(Box::pin(futures::stream::empty()), Arc::new(schema.clone()))
-            .map_err(|error| {
-                DataFusionError::Plan(format!("FusedSeries cannot declare frame schema: {error}"))
-            })?;
-    Ok(stream.schema())
+    frame_schema_with(
+        schema,
+        FrameLabelMode::Explicit,
+        None,
+        SeriesOrdering::Contiguous,
+    )
+    .map_err(|error| {
+        DataFusionError::Plan(format!("FusedSeries cannot declare frame schema: {error}"))
+    })
 }
 
 /// The logical plan of one node that runs a compiled native tree.
