@@ -1145,20 +1145,6 @@ impl PromPlanner {
             })
             .collect::<std::result::Result<Vec<_>, DataFusionError>>()
             .context(DataFusionPlanningSnafu)?;
-        // Admission and placement are separate: `independent_scan_pair` admits nested native
-        // matches, while the physical locality classification decides whether their inputs need
-        // gathering or segmentation.
-        // A label rewrite can give two series one label set, which every consumer that answers a
-        // whole label set has to see as one series. The pass puts a [`NativeExpr::Merge`] where that
-        // matters and nowhere else, so a tree with no collapsing rewrite keeps every partition.
-        let tree = match promql::native::canonicalize::merge_label_rewrites(
-            &compiled.tree,
-            &source_tags,
-        ) {
-            Ok(tree) => tree,
-            Err(_) => return Ok(None),
-        };
-        let root = tree.root();
         // A canonical boundary routes each label set to one owner above its own producer, and a
         // region-local producer only sees the partitions of the region it runs in. A table split
         // along a partition column is planned region by region, so each region would answer a
@@ -2082,9 +2068,8 @@ fn build_evaluated_segment(
     }
     let mut inputs = Vec::with_capacity(sources.len());
     let mut local_tags = Vec::with_capacity(sources.len());
-    let source_fields =
-        tree_source_fields(&NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?)
-            .ok()?;
+    let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
+    let source_fields = tree_source_fields(&tree).ok()?;
     for (local_index, &index) in sources.iter().enumerate() {
         let child = children.get(index)?.clone();
         let input = find_input_node(node, index)?;
@@ -2122,7 +2107,6 @@ fn build_evaluated_segment(
             local_tags.push(tags.clone());
         }
     }
-    let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
     // A canonical merge is not a segment: it is the middle of a boundary whose two frame nodes and
     // router are what answer one series per label set across partitions, so it is built as that
     // boundary and read as a frame.
