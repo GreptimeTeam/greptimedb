@@ -2254,7 +2254,8 @@ impl BroadcastRuntime {
     /// Whether the operation rewrites the label set of what it hands out.
     ///
     /// Arithmetic and a `bool` comparison drop the metric name, so two input series can become one
-    /// label set under this node and what it hands out is recorded in an [`Emitted`] table. A
+    /// label set under this node, and what it hands out is recorded in an [`Emitted`] table unless
+    /// its vector side already checked that identity -- [`elides_emitted_table`] decides that. A
     /// filtering comparison keeps the label set it read, so it keeps none. The answer is read off
     /// [`Self::op`] rather than stored beside it, so an operation and its label policy cannot
     /// disagree.
@@ -3397,12 +3398,16 @@ impl RuntimeNode {
                             } else {
                                 right_shared
                             };
+                        let vector = if broadcast.vector_left { left } else { right };
                         let mut state = NodeState::new(
                             format!("native.binary at {location}"),
                             Arc::clone(&metrics),
                             pool,
                         );
-                        if broadcast.drops_labels() {
+                        // Only an operation that rewrites the label set is where two input series
+                        // can become one, and only one that makes an identity its vector side has
+                        // not already checked needs a table of its own.
+                        if broadcast.drops_labels() && !elides_emitted_table(&broadcast, vector) {
                             state.emitted = Some(Emitted::default());
                         }
                         (
@@ -5669,9 +5674,10 @@ impl NodeState {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
             // Only an operation that rewrites the label set is where two input series can become
-            // one, and only that one keeps the table `track` records into. A filtering comparison
-            // keeps the label set it read, so recording it would refuse two input series that
-            // share it without this node having made them share it.
+            // one, and only that one keeps the table `track` records into -- a broadcast whose
+            // vector side already checked the identity keeps none, and `track` records nothing for
+            // it. A filtering comparison keeps the label set it read, so recording that one would
+            // refuse two input series that share it without this node having made them share it.
             if broadcast.drops_labels() {
                 self.track(output)?;
             }
@@ -7119,6 +7125,22 @@ fn broadcast_runtime(
         scalar_bytes: 0,
         annotations: None,
     })
+}
+
+/// Whether the [`Emitted`] table `broadcast` would keep only repeats the one its vector side keeps.
+///
+/// Literal arithmetic leaves missing samples missing and floats at their positions; a histogram is
+/// either retained at its position or dropped. Its output occupancy is therefore a subset of the
+/// window's. A name-dropping [`NativeExpr::Window`] already removed the metadata labels, and the
+/// second drop removes only empty-valued labels that [`label_set`] ignores. The canonical identity
+/// is unchanged, so arithmetic cannot create a collision the window did not already refuse.
+fn elides_emitted_table(broadcast: &BroadcastRuntime, vector: &NativeNode) -> bool {
+    matches!(broadcast.scalar, BroadcastScalar::Literal(_))
+        && matches!(broadcast.op, BroadcastOp::Arithmetic(_))
+        && matches!(
+            &vector.expr,
+            NativeExpr::Window { op, .. } if op.function.drops_metric_name()
+        )
 }
 
 /// The operation a binary node's `matching` describes.
