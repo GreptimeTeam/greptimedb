@@ -101,6 +101,8 @@ pub struct QueryEngineState {
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
     experimental_native_promql: bool,
+    /// Whether this engine plans distributed statements.
+    with_dist_planner: bool,
     /// Whether this engine's regions are reached in process, which is what lets a region take a
     /// `LogicalPlan` instead of Substrait bytes.
     in_process_region_transport: bool,
@@ -338,6 +340,7 @@ impl QueryEngineState {
             extension_rules,
             plugins,
             experimental_native_promql: options.experimental_native_promql,
+            with_dist_planner,
             in_process_region_transport,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -489,6 +492,11 @@ impl QueryEngineState {
 
     pub(crate) fn experimental_native_promql(&self) -> bool {
         self.experimental_native_promql
+    }
+
+    /// Whether this engine plans distributed statements.
+    pub(crate) fn with_dist_planner(&self) -> bool {
+        self.with_dist_planner
     }
 
     /// Whether a region read is served in this process, so a region can take a `LogicalPlan`.

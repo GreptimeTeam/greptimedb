@@ -1779,6 +1779,64 @@ fn canonical_producer_node() -> FusedSeries {
 }
 
 #[test]
+fn fused_series_canonical_producer_exec_tracks_physical_routing() {
+    let canonical = canonical_producer_node();
+    let ordinary = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        canonical.tree().clone(),
+        canonical.binding().clone(),
+        vec![input_plan(frame_schema())],
+        canonical.schema().clone(),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let input = || {
+        (
+            memory_exec_with(frame_schema(), vec![]),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )
+    };
+    let router = canonical.to_execution_plan(vec![input()]).unwrap();
+    let producer = router.children()[0];
+    let ordinary_exec = ordinary.to_execution_plan(vec![input()]).unwrap();
+    let rebuilt = Arc::clone(producer)
+        .replace_children(
+            vec![Arc::clone(producer.children()[0])],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .unwrap();
+
+    assert!(router.downcast_ref::<SeriesRepartitionExec>().is_some());
+    assert!(
+        producer
+            .downcast_ref::<super::FusedSeriesExec>()
+            .unwrap()
+            .canonical_producer
+    );
+    assert!(
+        !ordinary_exec
+            .downcast_ref::<super::FusedSeriesExec>()
+            .unwrap()
+            .canonical_producer
+    );
+    assert!(
+        rebuilt
+            .downcast_ref::<super::FusedSeriesExec>()
+            .unwrap()
+            .canonical_producer
+    );
+
+    #[cfg(feature = "test-utils")]
+    {
+        assert!(!super::is_canonical_producer_exec(router.as_ref()));
+        assert!(super::is_canonical_producer_exec(producer.as_ref()));
+        assert!(!super::is_canonical_producer_exec(ordinary_exec.as_ref()));
+        assert!(super::is_canonical_producer_exec(rebuilt.as_ref()));
+    }
+}
+
+#[test]
 fn fused_series_encoding_preserves_state_and_canonical_producer() {
     // A state-exporting producer encodes like any other node: serialization is the node's own
     // capability, not a decision about where it may run.
