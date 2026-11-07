@@ -425,10 +425,45 @@ jobs:
     needs: [github-script-tests, scope]
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      affected-targets: ${{ steps.selection.outcome == 'success' && steps.selection.outputs.affected-targets || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Checkout trusted fuzz selection policy
+        if: github.event_name == 'pull_request'
+        id: selection-policy
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .fuzz-selection-base
+          sparse-checkout: |
+            .github/scripts/select-fuzz-targets.py
+            .github/scripts/fuzz-target-rules.toml
+            tests-fuzz/Cargo.toml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Select affected fuzz targets
+        if: github.event_name == 'pull_request' && steps.selection-policy.outcome == 'success'
+        id: selection
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FUZZ_CANDIDATE_MANIFEST: ${{ github.workspace }}/tests-fuzz/Cargo.toml
+          FUZZ_FORCE_ALL: ${{ vars.CI_SCOPE_FORCE_ALL }}
+        run: |
+          policy=.fuzz-selection-base/.github/scripts/select-fuzz-targets.py
+          if [[ -f "${policy}" ]]; then
+            python3 "${policy}" plan
+          else
+            echo '::notice::No selection policy on PR base; running all fuzz targets'
+          fi
       - uses: taiki-e/install-action@v2
         with:
           tool: protoc@3.23.4
@@ -594,6 +629,7 @@ jobs:
         with:
           targets: ${{ matrix.group.targets }}
           group: ${{ matrix.group.id }}
+          affected-targets: ${{ needs.prepare-fuzz-targets.outputs.affected-targets }}
           max-total-time: 120
           fail-fast: 'true'
           prebuilt-binaries-dir: ${{ runner.temp }}/greptime-fuzz-binaries
@@ -654,6 +690,7 @@ jobs:
         with:
           targets: unstable_fuzz_create_table_standalone
           group: unstable-fuzz-create-table
+          affected-targets: ${{ needs.prepare-fuzz-targets.outputs.affected-targets }}
           max-total-time: 120
           unstable: 'true'
           fail-fast: 'true'
@@ -944,6 +981,7 @@ jobs:
         with:
           targets: ${{ matrix.group.targets }}
           group: ${{ matrix.group.id }}
+          affected-targets: ${{ needs.prepare-fuzz-targets.outputs.affected-targets }}
           max-total-time: ${{ matrix.mode.kafkaWalHelper && 600 || 120 }}
           fail-fast: 'true'
           collect-cluster-artifacts: 'true'
@@ -1114,6 +1152,7 @@ jobs:
         with:
           targets: ${{ matrix.group.targets }}
           group: ${{ matrix.group.id }}
+          affected-targets: ${{ needs.prepare-fuzz-targets.outputs.affected-targets }}
           max-total-time: 120
           fail-fast: 'true'
           collect-cluster-artifacts: 'true'
