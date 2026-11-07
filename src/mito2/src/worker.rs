@@ -29,6 +29,8 @@ mod handle_manifest;
 mod handle_open;
 mod handle_rebuild_index;
 mod handle_remap;
+#[cfg(feature = "enterprise")]
+mod handle_shared_sst;
 mod handle_truncate;
 mod handle_write;
 
@@ -1317,11 +1319,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 WorkerRequest::BulkInserts(_) => unreachable!("bulk inserts are buffered"),
                 WorkerRequest::Background { region_id, notify } => {
-                    if matches!(
+                    let restores_edit_state = matches!(
                         &notify,
                         BackgroundNotify::RegionEdit(edit_result)
                             if edit_result.update_region_state
-                    ) {
+                    );
+                    #[cfg(feature = "enterprise")]
+                    let restores_edit_state =
+                        restores_edit_state || matches!(&notify, BackgroundNotify::SharedSst(_));
+                    if restores_edit_state {
                         // Region state must be Editing when reach here.
                         // This call only moves write/bulk write request into stall queue. When region edit result
                         // is processed inside handle_background_notify and region state is switched back to Writable,
@@ -1351,6 +1357,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request);
                 }
+                #[cfg(feature = "enterprise")]
+                WorkerRequest::SharedSst(request) => self.handle_shared_sst(*request),
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
@@ -1527,6 +1535,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::EnterStaging(req) => self.handle_enter_staging_result(req).await,
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
+            #[cfg(feature = "enterprise")]
+            BackgroundNotify::SharedSst(result) => self.handle_shared_sst_finished(*result).await,
             BackgroundNotify::CopyRegionFromFinished(req) => {
                 self.handle_copy_region_from_finished(req)
             }

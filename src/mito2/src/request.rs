@@ -799,6 +799,10 @@ pub(crate) enum WorkerRequest {
     /// Use [RegionEdit] to edit a region directly.
     EditRegion(RegionEditRequest),
 
+    /// Conditional enterprise shared-file registration or replacement.
+    #[cfg(feature = "enterprise")]
+    SharedSst(Box<crate::engine::shared_sst::SharedSstRequest>),
+
     /// Keep the manifest of a region up to date.
     SyncRegion(RegionSyncRequest),
 
@@ -1129,6 +1133,9 @@ pub(crate) enum BackgroundNotify {
     RegionChange(RegionChangeResult),
     /// Region edit result.
     RegionEdit(RegionEditResult),
+
+    #[cfg(feature = "enterprise")]
+    SharedSst(Box<crate::engine::shared_sst::SharedSstFinished>),
     /// Enter staging result.
     EnterStaging(EnterStagingResult),
     /// Copy region result.

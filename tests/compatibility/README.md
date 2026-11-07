@@ -23,6 +23,13 @@ including exact integer counts, custom bounds, and NaN payloads:
 cargo nextest run -p servers -E 'test(native_histogram_remote_read_wire_fixture)'
 ```
 
+## Shared SST manifest fixtures
+
+The [shared SST level fixtures](manifest/shared_sst/README.md) check historical
+L0/L1 decoding, the new shared level, and rejection of unsupported levels. The
+owning `mito2` tests also cover conditional registration/Apply across restart;
+these internal enterprise APIs are not exposed through SQLness.
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of

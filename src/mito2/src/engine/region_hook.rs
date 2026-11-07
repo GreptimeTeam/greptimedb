@@ -71,6 +71,11 @@
 //!   The intermediate staging `RegionEdit` is written to the staging directory and does not
 //!   fire the hook — its file list is included in the promote notification.
 //!
+//! Enterprise shared-SST Apply uses `on_shared_sst_files_verified` instead of
+//! `on_sst_files_written`: the target loads real footers but cannot reconstruct
+//! remote index-creator statistics. It then fires `on_manifest_updated` through
+//! the same manifest write funnel, before acknowledging the worker-visible edit.
+//!
 //! The following paths do **not** trigger any hook:
 //! - Follower region sync / catchup (manifest read-only; followers don't author changes)
 //! - GC / checkpoint / remap (internal bookkeeping, not logical state changes)
@@ -295,6 +300,23 @@ pub trait RegionHook: Send + Sync + Debug {
         region_id: RegionId,
         region_metadata: &RegionMetadataRef,
         files: &[SstFileInfo<'_>],
+    ) {
+        let _ = (region_id, region_metadata, files);
+    }
+
+    /// Observes shared compaction outputs verified from actual SST footers.
+    ///
+    /// Runs on the target before its manifest edit, outside the manifest lock.
+    /// Unlike `SstInfo`, this payload does not claim to contain index-creator
+    /// statistics that are unavailable after remote execution. Extensions using
+    /// table compaction should implement this callback as well as the ordinary
+    /// SST-write callback.
+    #[cfg(feature = "enterprise")]
+    async fn on_shared_sst_files_verified(
+        &self,
+        region_id: RegionId,
+        region_metadata: &RegionMetadataRef,
+        files: &[crate::engine::shared_sst::VerifiedSharedSst<'_>],
     ) {
         let _ = (region_id, region_metadata, files);
     }

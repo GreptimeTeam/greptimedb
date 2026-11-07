@@ -17,6 +17,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | Module | Path | Purpose |
 | --- | --- | --- |
 | `engine` | `src/mito2/src/engine.rs` | `MitoEngine` (the `RegionEngine` impl) and request dispatch |
+| `engine/shared_sst` | `src/mito2/src/engine/shared_sst.rs` | Enterprise single-region conditional shared-file registration/Apply; worker-owned publication, no table scheduler |
 | `worker` | `src/mito2/src/worker.rs`, `src/mito2/src/worker/` | Per-region worker loop; write/alter/flush handlers |
 | `region` | `src/mito2/src/region.rs`, `src/mito2/src/region/version.rs` | `MitoRegion` state and copy-on-write `VersionControl` snapshots |
 | `request` | `src/mito2/src/request.rs` | `WriteRequest`/`RegionRequest` types and result channels |
@@ -95,6 +96,15 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 `TestEnv` in `test_util.rs` spins up an engine over an in-process object store.
 
 ## Gotchas
+
+- `LEVEL_SHARED` is query-visible but not an ordinary picker/TTL input. It
+  still participates in LastNonNull dependencies and prevents unsafe tombstone
+  expiration. Single-region purgers must not physically delete shared sources.
+- Shared registration retries retain their captured manifest-version fence;
+  never refresh it after an ambiguous result. Conditional Apply returns
+  `InputsGone` without reinstalling outputs; table-wide recovery and actual
+  input/output protection remain caller responsibilities. See
+  `engine/shared_sst.rs` and `tests/compatibility/manifest/shared_sst/README.md`.
 
 - Parquet row groups have uniform row counts except for the final group
   (`sst/parquet/row_selection.rs`). Memory-pressure flushing must not create

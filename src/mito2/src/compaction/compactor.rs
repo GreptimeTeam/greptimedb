@@ -596,6 +596,17 @@ impl SstMerger for DefaultSstMerger {
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = context.region_id;
+        snafu::ensure!(
+            output
+                .inputs
+                .iter()
+                .all(|file| file.level() < crate::sst::file::LEVEL_SHARED)
+                && output.output_level < crate::sst::file::LEVEL_SHARED,
+            crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: "Region compaction cannot rewrite shared SSTs",
+            }
+        );
         let index_options = context.version_options.index_options.clone();
         let append_mode = context.version_options.append_mode;
         let merge_mode = context.version_options.merge_mode();
@@ -827,6 +838,16 @@ where
         compaction_region: &CompactionRegion,
         mut picker_output: PickerOutput,
     ) -> Result<MergeOutput> {
+        snafu::ensure!(
+            picker_output
+                .expired_ssts
+                .iter()
+                .all(|file| file.level() < crate::sst::file::LEVEL_SHARED),
+            crate::error::InvalidRequestSnafu {
+                region_id: compaction_region.region_id,
+                reason: "Region compaction cannot expire shared SSTs",
+            }
+        );
         let internal_parallelism = compaction_region.max_parallelism.max(1);
         let compaction_time_window = picker_output.time_window_size;
         let region_id = compaction_region.region_id;

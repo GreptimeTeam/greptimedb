@@ -27,7 +27,7 @@ use crate::compaction::window::WindowedCompactionPicker;
 use crate::compaction::{CompactionOutput, SerializedCompactionOutput};
 use crate::error::Result;
 use crate::region::options::{CompactionOptions, MergeMode, RegionOptions};
-use crate::sst::file::{FileHandle, FileMeta};
+use crate::sst::file::{FileHandle, FileMeta, LEVEL_SHARED, overlaps};
 use crate::sst::file_purger::FilePurger;
 use crate::sst::version::LevelMeta;
 
@@ -189,6 +189,16 @@ pub(super) fn get_expired_ssts(
     levels
         .iter()
         .flat_map(|l| l.get_expired_files(&now, &ttl).into_iter())
+        // Expiring a tombstone while an overlapping shared source remains
+        // query-visible can resurrect its old value. The table path owns that
+        // dependency; retain the ordinary SST until the shared source is gone.
+        .filter(|expired| {
+            !levels
+                .iter()
+                .filter(|level| level.level == LEVEL_SHARED)
+                .flat_map(LevelMeta::files)
+                .any(|shared| overlaps(&expired.time_range(), &shared.time_range()))
+        })
         .collect()
 }
 
@@ -199,6 +209,81 @@ mod tests {
     use super::*;
     use crate::compaction::test_util::new_file_handle;
     use crate::test_util::new_noop_file_purger;
+
+    #[tokio::test]
+    async fn shared_inputs_are_not_picked_but_still_block_last_non_null_folding() {
+        use crate::compaction::test_util::compaction_region_with_ssts;
+
+        for strict_window in [false, true] {
+            for merge_mode in [MergeMode::LastRow, MergeMode::LastNonNull] {
+                let mut files: Vec<_> = (0..4)
+                    .map(|_| {
+                        new_file_handle(FileId::random(), 0, 1000, 0)
+                            .meta_ref()
+                            .clone()
+                    })
+                    .collect();
+                files.push(
+                    new_file_handle(FileId::random(), 0, 1000, LEVEL_SHARED)
+                        .meta_ref()
+                        .clone(),
+                );
+                let mut region =
+                    compaction_region_with_ssts(files, std::time::Duration::from_secs(3600)).await;
+                region.ttl = None;
+                region.region_options.merge_mode = Some(merge_mode);
+                region.current_version.options = region.region_options.clone();
+                let options = if strict_window {
+                    compact_request::Options::StrictWindow(Default::default())
+                } else {
+                    compact_request::Options::Regular(Default::default())
+                };
+                let picked = new_picker(&options, &region.region_options, None, None, true)
+                    .pick(&region)
+                    .await
+                    .unwrap();
+                let outputs = picked.map(|p| p.outputs).unwrap_or_default();
+                if merge_mode == MergeMode::LastNonNull {
+                    assert!(outputs.is_empty(), "cannot fold across a shared dependency");
+                } else {
+                    assert!(!outputs.is_empty(), "ordinary files remain eligible");
+                    assert!(outputs.iter().all(|output| !output.filter_deleted));
+                    assert!(
+                        outputs
+                            .iter()
+                            .flat_map(|output| &output.inputs)
+                            .all(|file| file.level() != LEVEL_SHARED)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ttl_retains_shared_sources_and_overlapping_tombstone_files() {
+        let mut levels = [
+            LevelMeta::new(0),
+            LevelMeta::new(1),
+            LevelMeta::new(LEVEL_SHARED),
+        ];
+        let shared = new_file_handle(FileId::random(), 0, 1000, LEVEL_SHARED);
+        let overlapping = new_file_handle(FileId::random(), 500, 1500, 1);
+        let independent = new_file_handle(FileId::random(), 2000, 3000, 0);
+        for file in [&shared, &overlapping, &independent] {
+            levels[file.level() as usize]
+                .files
+                .insert(file.meta_ref().file_id, file.clone());
+        }
+        let expired = get_expired_ssts(
+            &levels,
+            Some(std::time::Duration::from_secs(1).into()),
+            Timestamp::new_second(100),
+        );
+        assert_eq!(
+            vec![independent.file_id()],
+            expired.iter().map(FileHandle::file_id).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn test_picker_output_serialization() {

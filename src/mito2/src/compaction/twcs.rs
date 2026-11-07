@@ -98,6 +98,7 @@ pub(crate) struct TwcsCandidates {
     primary_key_mapper: Arc<PrimaryKeyRangeMapper>,
     region_id: RegionId,
     append_mode: bool,
+    has_shared_files: bool,
     max_output_file_size: Option<u64>,
 }
 
@@ -114,6 +115,7 @@ impl TwcsCandidates {
                     let WindowCandidate { window, pick } = candidate;
                     let files = &self.windows[&window];
                     let filter_deleted = !self.append_mode
+                        && !self.has_shared_files
                         && !window_has_overlap(files, &self.windows)
                         && !selected_overlaps_unselected(
                             &pick.inputs,
@@ -377,6 +379,7 @@ impl TwcsPicker {
             primary_key_mapper,
             region_id,
             append_mode: self.append_mode,
+            has_shared_files: false,
             max_output_file_size: self.max_output_file_size,
         })
     }
@@ -1112,6 +1115,11 @@ impl TwcsPicker {
         let picker = self.clone();
         let compaction_region = compaction_region.clone();
         let primary_key_mapper = compaction_region.current_version.ssts.primary_key_mapper();
+        let has_shared_files = compaction_region.current_version.ssts.levels()
+            [crate::sst::file::LEVEL_SHARED as usize]
+            .files()
+            .next()
+            .is_some();
         let window_mapper = primary_key_mapper.clone();
         let (expired_ssts, time_window_size, active_window, windows) =
             common_runtime::spawn_blocking_compact(move || {
@@ -1147,6 +1155,7 @@ impl TwcsPicker {
                 let windows = assign_to_windows(
                     levels
                         .iter()
+                        .filter(|level| level.level != crate::sst::file::LEVEL_SHARED)
                         .flat_map(LevelMeta::files)
                         .filter(|file| !expired_file_ids.contains(&file.file_id())),
                     time_window_size,
@@ -1173,19 +1182,24 @@ impl TwcsPicker {
             .await
             .context(JoinSnafu)?;
 
-        self.build_candidates(
-            region_id,
-            windows,
-            WindowOutputContext {
-                all_candidates,
-                expired_ssts,
-                active_window,
-                time_window_size: Some(time_window_size),
-                max_outputs,
-                primary_key_mapper,
-            },
-        )
-        .await
+        let mut candidates = self
+            .build_candidates(
+                region_id,
+                windows,
+                WindowOutputContext {
+                    all_candidates,
+                    expired_ssts,
+                    active_window,
+                    time_window_size: Some(time_window_size),
+                    max_outputs,
+                    primary_key_mapper,
+                },
+            )
+            .await?;
+        // Shared files remain query-visible and can contain versions shadowed by
+        // tombstones in these outputs. They are not ordinary merge candidates.
+        candidates.has_shared_files = has_shared_files;
+        Ok(candidates)
     }
 }
 

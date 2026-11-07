@@ -310,6 +310,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return RegionEditDispatch::Rejected;
         };
 
+        if request
+            .edit
+            .files_to_add
+            .iter()
+            .chain(&request.edit.files_to_remove)
+            .any(|file| {
+                file.level >= crate::sst::file::LEVEL_SHARED
+                    || region.version_control.current().version.ssts.levels()
+                        [crate::sst::file::LEVEL_SHARED as usize]
+                        .files
+                        .contains_key(&file.file_id)
+            })
+        {
+            request.waiters.reply_with(|| {
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Shared SSTs require the conditional shared-file API",
+                }
+                .fail()
+            });
+            return RegionEditDispatch::Rejected;
+        }
+
         if !region.is_writable() || self.flush_scheduler.has_pending_alter(region_id) {
             if matches!(
                 region.state(),
