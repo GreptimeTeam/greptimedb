@@ -171,6 +171,10 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
+    fn is_transport_unavailable(&self) -> bool {
+        self.is_connection_error()
+    }
+
     fn status_code(&self) -> StatusCode {
         match self {
             Error::PartialRegion { response } => response
@@ -300,5 +304,24 @@ impl Error {
             retry_hint: status.retry_hint.parse().unwrap_or(RetryHint::NonRetryable),
         }
         .build())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_inspection_transport_classification() {
+        for (code, unavailable) in [
+            (Code::Unavailable, true),
+            (Code::Internal, false),
+            (Code::PermissionDenied, false),
+        ] {
+            let error: Error = tonic::Status::new(code, "test").into();
+            assert_eq!(error.is_transport_unavailable(), unavailable);
+            let boxed = BoxedError::new(error);
+            assert_eq!(boxed.is_transport_unavailable(), unavailable);
+        }
     }
 }

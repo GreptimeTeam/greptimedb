@@ -1,0 +1,83 @@
+-- Partial inspection is opt-in and session-scoped on both SQL protocols.
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.allow_partial_inspection_results;
+
++----------------------------------------+
+| query.allow_partial_inspection_results |
++----------------------------------------+
+| false                                  |
++----------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.allow_partial_inspection_results = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.allow_partial_inspection_results;
+
++----------------------------------------+
+| query.allow_partial_inspection_results |
++----------------------------------------+
+| true                                   |
++----------------------------------------+
+
+-- The PostgreSQL connection has independent defaults.
+-- SQLNESS PROTOCOL POSTGRES
+SHOW VARIABLES query.allow_partial_inspection_results;
+
++----------------------------------------+
+| query.allow_partial_inspection_results |
++----------------------------------------+
+| false                                  |
++----------------------------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.allow_partial_inspection_results = true;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW VARIABLES query.allow_partial_inspection_results;
+
++----------------------------------------+
+| query.allow_partial_inspection_results |
++----------------------------------------+
+| true                                   |
++----------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.allow_partial_inspection_results = 'invalid';
+
+Failed to execute query, err: MySqlError { ERROR 1210 (HY000): (InvalidArguments): Invalid value for parameter "query.allow_partial_inspection_results": invalid
+Hint: Expected true or false }
+
+-- Invalid input must preserve the previous value.
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.allow_partial_inspection_results;
+
++----------------------------------------+
+| query.allow_partial_inspection_results |
++----------------------------------------+
+| true                                   |
++----------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.allow_partial_inspection_results = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.allow_partial_inspection_results = false;
+
+Affected Rows: 0
+

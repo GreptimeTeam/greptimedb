@@ -42,6 +42,8 @@ pub mod constants {
     pub const GREPTIME_DB_HEADER_TIMEOUT: &str = "x-greptime-timeout";
     pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
     pub const GREPTIME_DB_HEADER_METRICS: &str = "x-greptime-metrics";
+    /// JSON array of query warning messages.
+    pub const GREPTIME_DB_HEADER_WARNINGS: &str = "x-greptime-warnings";
     pub const GREPTIME_DB_HEADER_NAME: &str = "x-greptime-db-name";
     pub const GREPTIME_DB_HEADER_READ_PREFERENCE: &str = "x-greptime-read-preference";
     pub const GREPTIME_INSERT_SKIP_WAL_HEADER_NAME: &str = "x-greptime-insert-skip-wal";

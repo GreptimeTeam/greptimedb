@@ -169,3 +169,43 @@ async fn test_query_validate() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn test_partial_inspection_show_option() {
+    let catalog = catalog::memory::new_memory_catalog_manager().unwrap();
+    let engine = QueryEngineFactory::new(
+        catalog,
+        None,
+        None,
+        None,
+        None,
+        false,
+        QueryOptionsNew::default(),
+    )
+    .query_engine();
+    let ctx = QueryContext::arc();
+    let name = session::query_options::ALLOW_PARTIAL_INSPECTION_RESULTS;
+    for value in [None, Some("true"), Some("false")] {
+        if let Some(value) = value {
+            ctx.configuration_parameter()
+                .set_query_option(name, value)
+                .unwrap();
+        }
+        let stmt = sql::statements::show::ShowVariables {
+            variable: sql::ast::ObjectName::from(vec![
+                sql::ast::Ident::new("query"),
+                sql::ast::Ident::new("allow_partial_inspection_results"),
+            ]),
+        };
+        let output = crate::sql::show_query_option(stmt, ctx.clone(), engine.as_ref())
+            .unwrap()
+            .unwrap();
+        let OutputData::RecordBatches(batches) = output.data else {
+            panic!("expected SHOW records")
+        };
+        assert_eq!(
+            datatypes::arrow_array::string_array_value(batches.iter().next().unwrap().column(0), 0),
+            value.unwrap_or("false")
+        );
+    }
+}

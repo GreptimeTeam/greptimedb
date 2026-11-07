@@ -264,6 +264,9 @@ impl From<QueryContext> for api::v1::QueryContext {
         let explain = mutable_query_context_data.read().unwrap().explain_options;
         let mutable_inner = mutable_inner.read().unwrap();
         let mut extensions = extensions;
+        // Inspection fault tolerance is frontend-only. Older datanodes reject
+        // unknown query options, including on ordinary scans in this session.
+        extensions.remove(crate::query_options::ALLOW_PARTIAL_INSPECTION_RESULTS);
         extensions.remove(READ_PREFERENCE_EXTENSION_KEY);
         if mutable_inner.read_preference != ReadPreference::Leader {
             extensions.insert(
@@ -637,6 +640,12 @@ impl QueryContext {
         self.channel = channel;
     }
 
+    /// Whether this query permits unavailable datanodes to be omitted from inspection results.
+    pub fn allow_partial_inspection_results(&self) -> bool {
+        self.extension(crate::query_options::ALLOW_PARTIAL_INSPECTION_RESULTS)
+            .is_some_and(|value| value == "true")
+    }
+
     pub fn warning(&self) -> Option<String> {
         self.mutable_query_context_data
             .read()
@@ -950,6 +959,44 @@ mod test {
     use crate::context::{Channel, *};
 
     #[test]
+    fn test_partial_inspection_option_snapshot() {
+        let key = crate::query_options::ALLOW_PARTIAL_INSPECTION_RESULTS;
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(
+            !ctx.query_option_snapshot()
+                .unwrap()
+                .allow_partial_inspection_results()
+        );
+        ctx.configuration_parameter()
+            .set_query_option(key, "true")
+            .unwrap();
+        let snapshot = ctx.query_option_snapshot().unwrap();
+        assert!(snapshot.allow_partial_inspection_results());
+        ctx.set_extension(key, "false");
+        assert!(
+            !ctx.query_option_snapshot()
+                .unwrap()
+                .allow_partial_inspection_results()
+        );
+        ctx.configuration_parameter()
+            .set_query_option(key, "false")
+            .unwrap();
+        assert!(snapshot.allow_partial_inspection_results());
+        let wire: api::v1::QueryContext = snapshot.into();
+        assert!(!wire.extensions.contains_key(key));
+        assert!(
+            !QueryContext::try_from(wire)
+                .unwrap()
+                .allow_partial_inspection_results()
+        );
+        assert!(
+            ctx.configuration_parameter()
+                .set_query_option(key, "yes")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn test_query_parallelism_wire_accepts_legacy_value() {
         let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
         context.set_extension("query_parallelism", "2048");
@@ -1200,6 +1247,7 @@ mod test {
         );
 
         let restored = QueryContext::try_from(legacy).unwrap();
+        assert!(!restored.allow_partial_inspection_results());
         assert_eq!(restored.read_preference(), ReadPreference::Leader);
         assert_eq!(restored.current_catalog(), "c1");
         assert_eq!(restored.current_schema(), "s1");
