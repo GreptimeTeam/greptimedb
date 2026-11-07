@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -24,7 +25,7 @@ use servers::http::result::error_result::ErrorResponse;
 use crate::key::NodeSchedulingRole;
 use crate::metasrv::Metasrv;
 use crate::procedure::drain_datanode::{
-    DEFAULT_PARALLELISM, DrainDatanodeProcedureTask, DrainDatanodeStrategy,
+    DEFAULT_DRAIN_TIMEOUT, DEFAULT_PARALLELISM, DrainDatanodeProcedureTask, DrainDatanodeStrategy,
 };
 use crate::service::admin::util;
 
@@ -32,6 +33,45 @@ use crate::service::admin::util;
 pub(crate) struct DrainDatanodeRequest {
     node_id: u64,
     target_node_id: Option<u64>,
+    /// Concurrent region budget; defaults to [`DEFAULT_PARALLELISM`].
+    #[serde(default = "default_parallelism")]
+    parallelism: usize,
+    /// Failure handling; defaults to [`DrainDatanodeStrategy::TryAll`].
+    #[serde(default)]
+    strategy: DrainStrategy,
+    /// Whole-drain budget; defaults to [`DEFAULT_DRAIN_TIMEOUT`].
+    #[serde(default = "default_timeout", with = "humantime_serde")]
+    timeout: Duration,
+}
+
+/// HTTP strategy names follow the admin API's snake_case convention.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DrainStrategy {
+    FailFast,
+    #[default]
+    TryAll,
+}
+
+impl From<DrainStrategy> for DrainDatanodeStrategy {
+    fn from(strategy: DrainStrategy) -> Self {
+        match strategy {
+            DrainStrategy::FailFast => Self::FailFast,
+            DrainStrategy::TryAll => Self::TryAll,
+        }
+    }
+}
+
+impl From<DrainDatanodeRequest> for DrainDatanodeProcedureTask {
+    fn from(request: DrainDatanodeRequest) -> Self {
+        Self {
+            node_id: request.node_id,
+            target_node_id: request.target_node_id,
+            parallelism: request.parallelism,
+            strategy: request.strategy.into(),
+            timeout: Some(request.timeout),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +90,14 @@ pub(crate) struct DatanodeSchedulingResponse {
     schedulable: bool,
 }
 
+fn default_parallelism() -> usize {
+    DEFAULT_PARALLELISM
+}
+
+fn default_timeout() -> Duration {
+    DEFAULT_DRAIN_TIMEOUT
+}
+
 /// Submits an asynchronous leader-region drain.
 /// Rejects requests for a datanode already being drained.
 #[axum_macros::debug_handler]
@@ -61,16 +109,7 @@ pub(crate) async fn drain(
         util::ensure_leader(&metasrv)?;
         let procedure_id = metasrv
             .drain_datanode_manager()
-            .submit_procedure(
-                ProcedureContext::default(),
-                DrainDatanodeProcedureTask {
-                    node_id: request.node_id,
-                    target_node_id: request.target_node_id,
-                    parallelism: DEFAULT_PARALLELISM,
-                    strategy: DrainDatanodeStrategy::default(),
-                    timeout: None,
-                },
-            )
+            .submit_procedure(ProcedureContext::default(), request.into())
             .await?;
         Ok::<_, crate::error::Error>(DrainDatanodeResponse {
             procedure_id: procedure_id.to_string(),
@@ -189,6 +228,131 @@ mod tests {
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[test]
+    fn test_drain_request_options() {
+        for (body, parallelism, strategy) in [
+            (json!({"node_id": 1}), 4, DrainDatanodeStrategy::TryAll),
+            (
+                json!({"node_id": 1, "parallelism": 8}),
+                8,
+                DrainDatanodeStrategy::TryAll,
+            ),
+            (
+                json!({"node_id": 1, "strategy": "fail_fast"}),
+                4,
+                DrainDatanodeStrategy::FailFast,
+            ),
+            (
+                json!({"node_id": 1, "parallelism": 1, "strategy": "fail_fast"}),
+                1,
+                DrainDatanodeStrategy::FailFast,
+            ),
+            (
+                json!({"node_id": 1, "parallelism": 32, "strategy": "try_all"}),
+                32,
+                DrainDatanodeStrategy::TryAll,
+            ),
+        ] {
+            let request: DrainDatanodeRequest = serde_json::from_value(body).unwrap();
+            let task: DrainDatanodeProcedureTask = request.into();
+            assert_eq!(parallelism, task.parallelism);
+            assert_eq!(strategy, task.strategy);
+            assert_eq!(1, task.node_id);
+            assert_eq!(None, task.target_node_id);
+            assert_eq!(Some(Duration::from_secs(20 * 60)), task.timeout);
+        }
+    }
+
+    #[test]
+    fn test_drain_request_timeout() {
+        for (value, expected) in [
+            (json!("30m"), Some(Duration::from_secs(1800))),
+            (json!("1h 30m"), Some(Duration::from_secs(5400))),
+            (json!("500ms"), Some(Duration::from_millis(500))),
+        ] {
+            let request: DrainDatanodeRequest =
+                serde_json::from_value(json!({"node_id": 1, "timeout": value})).unwrap();
+            let task: DrainDatanodeProcedureTask = request.into();
+            assert_eq!(expected, task.timeout);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_drain_rejects_invalid_options() {
+        let metasrv = Arc::new(MetasrvBuilder::new().build().await.unwrap());
+        metasrv.procedure_manager().start().await.unwrap();
+        let app = admin_axum_router(metasrv.clone());
+        for (options, expected) in [
+            (json!({"timeout": null}), StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                json!({"parallelism": null}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (json!({"strategy": null}), StatusCode::BAD_REQUEST),
+            (json!({"timeout": "0s"}), StatusCode::BAD_REQUEST),
+            (
+                json!({"timeout": "9223372036854775s"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                json!({"timeout": "9223372036854776s"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                json!({"timeout": "invalid"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (json!({"timeout": "-1s"}), StatusCode::UNPROCESSABLE_ENTITY),
+            (json!({"parallelism": 0}), StatusCode::BAD_REQUEST),
+            (json!({"parallelism": 33}), StatusCode::BAD_REQUEST),
+            (json!({"parallelism": -1}), StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                json!({"parallelism": 1.5}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                json!({"strategy": "unknown"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                json!({"strategy": "FailFast"}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let mut body = options;
+            body["node_id"] = json!(1);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/admin/datanode/drain")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(expected, response.status(), "{body}");
+        }
+        assert!(
+            metasrv
+                .procedure_manager()
+                .list_procedures()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            metasrv
+                .node_scheduling_manager()
+                .is_schedulable(NodeSchedulingRole::Datanode, 1)
+                .await
+                .unwrap()
+        );
+        metasrv.procedure_manager().stop().await.unwrap();
     }
 
     #[tokio::test]
